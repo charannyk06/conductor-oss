@@ -1,0 +1,97 @@
+name: Bug Report
+description: Something isn't working as expected
+title: "bug: "
+labels: ["bug", "needs-triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report! Please be as detailed as possible.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight Checklist
+      options:
+        - label: I am using the latest version of `conductor-oss`
+          required: true
+        - label: I searched [existing issues](https://github.com/charannyk06/conductor-oss/issues) and this is not a duplicate
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. What did you expect vs. what actually happened?
+      placeholder: "When I run `co start`, the dashboard fails to start..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Exact steps to reproduce the behavior
+      placeholder: |
+        1. Run `co init`
+        2. Edit conductor.yaml with...
+        3. Run `co start`
+        4. See error in terminal
+    validations:
+      required: true
+
+  - type: textarea
+    id: conductor-yaml
+    attributes:
+      label: conductor.yaml (redact repo URLs if private)
+      description: Paste your conductor.yaml configuration
+      render: yaml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Paste any relevant logs from `~/.conductor/` or terminal output
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Conductor Version
+      description: Output of `co --version`
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js Version
+      description: Output of `node --version`
+      placeholder: "v20.11.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Ubuntu / Debian
+        - Other Linux
+        - Windows (WSL)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent in use
+      options:
+        - claude-code
+        - codex
+        - gemini
+        - N/A

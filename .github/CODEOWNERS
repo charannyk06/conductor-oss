@@ -1,0 +1,20 @@
+# Global owners — review required on all PRs
+* @charannyk06
+
+# Core package
+/packages/core/ @charannyk06
+
+# CLI
+/packages/cli/ @charannyk06
+
+# Web dashboard
+/packages/web/ @charannyk06
+
+# Plugins
+/packages/plugins/ @charannyk06
+
+# CI/CD and security
+/.github/ @charannyk06
+
+# Security policy
+/SECURITY.md @charannyk06

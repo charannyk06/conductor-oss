@@ -1,0 +1,67 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+title: "feat: "
+labels: ["enhancement", "needs-triage"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make Conductor better? We'd love to hear it!
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight Checklist
+      options:
+        - label: I searched [existing issues](https://github.com/charannyk06/conductor-oss/issues) and this feature hasn't been requested yet
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem does this feature solve? What's the use case?
+      placeholder: "I'm frustrated when I have to manually... / It would help if Conductor could..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the feature you'd like. How should it work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative approaches you've thought of?
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component
+      options:
+        - CLI (`co` commands)
+        - Core (board watcher / session manager)
+        - Web Dashboard
+        - Plugin — Agent (claude-code / codex / gemini)
+        - Plugin — Runtime (tmux)
+        - Plugin — Workspace (worktree)
+        - Plugin — SCM (github)
+        - Plugin — Notifier (discord / desktop)
+        - Plugin — MCP Server
+        - Plugin — Webhook
+        - Plugin — New (I want to build one)
+        - Documentation
+        - Other
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any mockups, examples, or links that would help explain the request?
