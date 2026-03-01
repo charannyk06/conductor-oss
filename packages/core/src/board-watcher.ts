@@ -397,9 +397,12 @@ function autoDetectAgent(prompt: string): string {
   for (const kw of claudeKeywords) {
     if (lower.includes(kw)) return "claude-code";
   }
+  const geminiKeywords = ["gemini", "google", "vertex"];
+  for (const kw of geminiKeywords) {
+    if (lower.includes(kw)) return "gemini";
+  }
   return "codex";
 }
-
 /** Parse a kanban card into structured data. */
 function parseCard(cardText: string, workspacePath: string): ParsedCard {
   const tags = parseTags(cardText);

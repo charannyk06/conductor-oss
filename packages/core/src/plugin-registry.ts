@@ -29,6 +29,7 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
   // Agents
   { slot: "agent", name: "claude-code", pkg: "@conductor-oss/plugin-agent-claude-code" },
   { slot: "agent", name: "codex", pkg: "@conductor-oss/plugin-agent-codex" },
+  { slot: "agent", name: "gemini", pkg: "@conductor-oss/plugin-agent-gemini" },
   // Workspaces
   { slot: "workspace", name: "worktree", pkg: "@conductor-oss/plugin-workspace-worktree" },
   // Trackers
