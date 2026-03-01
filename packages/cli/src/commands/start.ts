@@ -208,6 +208,33 @@ export function registerStart(program: Command): void {
           }
         }
 
+        // ---- Start webhook server (if enabled in config) ----
+        if (config.webhook?.enabled) {
+          const webhookSpinner = ora("Starting webhook server").start();
+          try {
+            const { createWebhookServer } = await import(
+              "@conductor-oss/plugin-webhook"
+            );
+            const webhookServer = createWebhookServer(config, config.webhook);
+            await webhookServer.start();
+            webhookSpinner.succeed(
+              `Webhook server running on port ${config.webhook.port}`,
+            );
+
+            // Add to shutdown
+            const prevSIGINT2 = process.listeners("SIGINT");
+            process.removeAllListeners("SIGINT");
+            process.on("SIGINT", () => {
+              webhookServer.stop();
+              for (const listener of prevSIGINT2) {
+                (listener as () => void)();
+              }
+            });
+          } catch (err) {
+            webhookSpinner.warn(`Webhook server failed to start: ${err}`);
+          }
+        }
+
         // ---- Summary ----
         console.log();
         console.log(chalk.bold.green("Conductor is running."));
@@ -217,6 +244,13 @@ export function registerStart(program: Command): void {
         }
         if (opts.watcher !== false) {
           console.log(chalk.dim("  Watcher:   Obsidian CONDUCTOR.md boards"));
+        }
+        if (config.webhook?.enabled) {
+          console.log(
+            chalk.dim(
+              `  Webhook:   http://localhost:${config.webhook.port}/api/webhook`,
+            ),
+          );
         }
         console.log(chalk.dim("  Press Ctrl-C to stop.\n"));
 

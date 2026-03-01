@@ -28,7 +28,8 @@
     "commander": "^13.0.0",
     "ora": "^8.1.0",
     "@conductor-oss/plugin-agent-gemini": "workspace:*",
-    "@conductor-oss/plugin-mcp-server": "workspace:*"
+    "@conductor-oss/plugin-mcp-server": "workspace:*",
+    "@conductor-oss/plugin-webhook": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.0",

@@ -47,6 +47,9 @@ importers:
       '@conductor-oss/plugin-tracker-github':
         specifier: workspace:*
         version: link:../plugins/tracker-github
+      '@conductor-oss/plugin-webhook':
+        specifier: workspace:*
+        version: link:../plugins/webhook
       '@conductor-oss/plugin-workspace-worktree':
         specifier: workspace:*
         version: link:../plugins/workspace-worktree
@@ -207,6 +210,19 @@ importers:
         version: 5.9.3
 
   packages/plugins/tracker-github:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.13
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+
+  packages/plugins/webhook:
     dependencies:
       '@conductor-oss/core':
         specifier: workspace:*

@@ -403,6 +403,12 @@ export interface ReactionResult {
 
 // === CONFIGURATION ===
 
+export interface WebhookConfig {
+  enabled: boolean;
+  port: number;
+  secret?: string;
+}
+
 export interface OrchestratorConfig {
   configPath: string;
   port?: number;
@@ -415,6 +421,7 @@ export interface OrchestratorConfig {
   notifiers: Record<string, NotifierConfig>;
   notificationRouting: Record<EventPriority, string[]>;
   reactions: Record<string, ReactionConfig>;
+  webhook?: WebhookConfig;
 }
 
 export interface MCPServerConfig {
