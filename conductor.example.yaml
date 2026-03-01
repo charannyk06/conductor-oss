@@ -1,0 +1,38 @@
+# Conductor Configuration
+# Docs: https://github.com/charannyk06/conductor-oss
+
+port: 4747
+
+# URL shown in board card links (set this to your actual dashboard URL)
+# dashboardUrl: http://localhost:4747
+
+projects:
+  my-app:
+    path: ~/projects/my-app        # Path to your project (must be a git repo)
+    repo: your-org/my-app          # GitHub org/repo (for PR tracking)
+    agent: claude-code             # "claude-code", "codex", or "gemini"
+    agentConfig:
+      model: claude-sonnet-4-6     # claude-sonnet-4-6, claude-opus-4-6, o4-mini, etc.
+      permissions: skip            # "skip" = fully autonomous (no prompts)
+    workspace: worktree            # git worktree isolation per task
+    runtime: tmux                  # tmux session runner
+    scm: github                    # GitHub PR/CI integration
+
+  # Add more projects:
+  # backend:
+  #   path: ~/projects/backend
+  #   repo: your-org/backend
+  #   agent: codex
+  #   agentConfig:
+  #     model: o4-mini
+
+# Optional: Discord notifications
+# plugins:
+#   discord:
+#     channelId: "YOUR_CHANNEL_ID"
+#     tokenEnvVar: DISCORD_BOT_TOKEN
+
+# Optional: Desktop notifications (macOS/Linux)
+plugins:
+  desktop:
+    sound: true

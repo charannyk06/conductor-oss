@@ -1,0 +1,19 @@
+[build]
+  command = "pnpm install --frozen-lockfile && pnpm --filter @conductor-oss/core build && pnpm --filter @conductor-oss/web build"
+  publish = "packages/web/.next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  NPM_FLAGS = "--version"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/*"
+  to = "/index"
+  status = 200

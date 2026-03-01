@@ -1,0 +1,197 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+@theme {
+  --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+  --font-sans: "Inter", -apple-system, system-ui, sans-serif;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+/* ==========================================================================
+   Dark mode (default)
+   ========================================================================== */
+:root {
+  color-scheme: dark;
+
+  --color-bg-base:      #09090b;
+  --color-bg-surface:   #18181b;
+  --color-bg-elevated:  #27272a;
+  --color-bg-subtle:    #3f3f46;
+  --color-bg-secondary: #27272a;
+
+  --color-border-subtle:  rgba(39, 39, 42, 0.8);
+  --color-border-default: #3f3f46;
+  --color-border-strong:  #52525b;
+
+  --color-text-primary:   #fafafa;
+  --color-text-secondary: #a1a1aa;
+  --color-text-tertiary:  #71717a;
+  --color-text-muted:     #52525b;
+  --color-text-inverse:   #09090b;
+
+  --color-accent:         #3b82f6;
+  --color-accent-hover:   #60a5fa;
+  --color-accent-subtle:  rgba(59, 130, 246, 0.12);
+
+  --color-status-working:   #3b82f6;
+  --color-status-ready:     #22c55e;
+  --color-status-attention: #f59e0b;
+  --color-status-idle:      #52525b;
+  --color-status-done:      #3f3f46;
+  --color-status-error:     #ef4444;
+
+  --color-accent-blue:    #3b82f6;
+  --color-accent-green:   #22c55e;
+  --color-accent-yellow:  #f59e0b;
+  --color-accent-orange:  #d97706;
+  --color-accent-red:     #ef4444;
+  --color-accent-violet:  #8b5cf6;
+  --color-accent-cyan:    #06b6d4;
+
+  --color-card-bg:        #18181b;
+  --color-card-bg-hover:  #27272a;
+  --color-card-border:    #27272a;
+  --color-card-shadow:    rgba(0, 0, 0, 0.4);
+
+  --color-sidebar-bg:     #0f0f12;
+  --color-sidebar-border: #27272a;
+  --color-sidebar-hover:  rgba(255, 255, 255, 0.04);
+  --color-sidebar-active: rgba(59, 130, 246, 0.1);
+}
+
+/* ==========================================================================
+   Light mode
+   ========================================================================== */
+.light {
+  color-scheme: light;
+
+  --color-bg-base:      #ffffff;
+  --color-bg-surface:   #fafafa;
+  --color-bg-elevated:  #f4f4f5;
+  --color-bg-subtle:    #e4e4e7;
+  --color-bg-secondary: #f4f4f5;
+
+  --color-border-subtle:  #e4e4e7;
+  --color-border-default: #d4d4d8;
+  --color-border-strong:  #a1a1aa;
+
+  --color-text-primary:   #18181b;
+  --color-text-secondary: #52525b;
+  --color-text-tertiary:  #71717a;
+  --color-text-muted:     #a1a1aa;
+  --color-text-inverse:   #fafafa;
+
+  --color-accent:         #2563eb;
+  --color-accent-hover:   #3b82f6;
+  --color-accent-subtle:  rgba(37, 99, 235, 0.08);
+
+  --color-status-working:   #2563eb;
+  --color-status-ready:     #16a34a;
+  --color-status-attention: #d97706;
+  --color-status-idle:      #a1a1aa;
+  --color-status-done:      #d4d4d8;
+  --color-status-error:     #dc2626;
+
+  --color-accent-blue:    #2563eb;
+  --color-accent-green:   #16a34a;
+  --color-accent-yellow:  #d97706;
+  --color-accent-orange:  #c2410c;
+  --color-accent-red:     #dc2626;
+  --color-accent-violet:  #7c3aed;
+  --color-accent-cyan:    #0891b2;
+
+  --color-card-bg:        #ffffff;
+  --color-card-bg-hover:  #fafafa;
+  --color-card-border:    #e4e4e7;
+  --color-card-shadow:    rgba(0, 0, 0, 0.06);
+
+  --color-sidebar-bg:     #f9f9fa;
+  --color-sidebar-border: #e4e4e7;
+  --color-sidebar-hover:  rgba(0, 0, 0, 0.04);
+  --color-sidebar-active: rgba(37, 99, 235, 0.08);
+}
+
+/* ==========================================================================
+   Base styles
+   ========================================================================== */
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg-base);
+  color: var(--color-text-primary);
+  min-height: 100vh;
+}
+
+a { color: var(--color-accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ==========================================================================
+   Scrollbar
+   ========================================================================== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border-default); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-border-strong); }
+
+/* ==========================================================================
+   Animations
+   ========================================================================== */
+@keyframes activity-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
+  50%      { box-shadow: 0 0 0 4px rgba(59, 130, 246, 0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ==========================================================================
+   Session cards
+   ========================================================================== */
+.session-card {
+  background: var(--color-card-bg);
+  border: 1px solid var(--color-card-border);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px var(--color-card-shadow);
+  transition: all 0.15s ease;
+}
+.session-card:hover {
+  border-color: var(--color-border-strong);
+  box-shadow: 0 4px 12px var(--color-card-shadow);
+  transform: translateY(-1px);
+}
+
+/* ==========================================================================
+   xterm.js mobile
+   ========================================================================== */
+.xterm .xterm-viewport {
+  overflow-y: auto !important;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.xterm .xterm-screen { touch-action: pan-y !important; }
+@media (pointer: coarse) {
+  .xterm .xterm-screen,
+  .xterm .xterm-screen canvas { pointer-events: none !important; }
+  .xterm textarea.xterm-helper-textarea { pointer-events: none !important; opacity: 0 !important; }
+}
+.xterm { touch-action: pan-y; overscroll-behavior: contain; }
+
+/* ==========================================================================
+   Utilities
+   ========================================================================== */
+.scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
+/* Hide Clerk dev banner */
+.cl-internal-b3fm6y,
+div[data-clerk-component] + div[style*="position: fixed"][style*="bottom"],
+[class*="cl-internal"][class*="dev"] { display: none !important; }
+div#clerk-components ~ div:last-child { display: none !important; }

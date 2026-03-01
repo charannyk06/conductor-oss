@@ -1,0 +1,59 @@
+{
+  "name": "conductor-oss",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "conductor": "dist/index.js",
+    "co": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@conductor-oss/core": "workspace:*",
+    "@conductor-oss/plugin-runtime-tmux": "workspace:*",
+    "@conductor-oss/plugin-agent-claude-code": "workspace:*",
+    "@conductor-oss/plugin-agent-codex": "workspace:*",
+    "@conductor-oss/plugin-workspace-worktree": "workspace:*",
+    "@conductor-oss/plugin-tracker-github": "workspace:*",
+    "@conductor-oss/plugin-scm-github": "workspace:*",
+    "@conductor-oss/plugin-notifier-discord": "workspace:*",
+    "@conductor-oss/plugin-notifier-desktop": "workspace:*",
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "ora": "^8.1.0",
+    "@conductor-oss/plugin-agent-gemini": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "description": "Markdown-native AI agent orchestrator. Write tasks in a kanban board, agents do the work.",
+  "keywords": [
+    "ai",
+    "agent",
+    "orchestrator",
+    "kanban",
+    "claude",
+    "codex",
+    "automation",
+    "devtools"
+  ],
+  "homepage": "https://github.com/charannyk06/conductor-oss",
+  "bugs": {
+    "url": "https://github.com/charannyk06/conductor-oss/issues"
+  }
+}
