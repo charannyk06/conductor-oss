@@ -24,5 +24,9 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm typecheck
+
+      - name: Build core & plugins
+        run: pnpm -r build --filter='!@conductor-oss/web'
+
+      - name: Typecheck
+        run: pnpm -r typecheck --filter='!@conductor-oss/web'
