@@ -592,6 +592,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       attachments: spawnConfig.attachments,
     });
 
+    // Merge default MCP servers with project-specific ones (project overrides defaults)
+    const mergedMcpServers = {
+      ...config.defaults.mcpServers,
+      ...project.mcpServers,
+    };
+    const resolvedMcpServers =
+      Object.keys(mergedMcpServers).length > 0 ? mergedMcpServers : undefined;
+
     // Get agent launch config and create runtime -- clean up workspace on failure
     // When agent is overridden via #agent/ tag, don't leak the project's model
     // to the wrong CLI (e.g. passing claude-opus-4-6 to codex would crash).
@@ -604,10 +612,22 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       permissions: project.agentConfig?.permissions,
       model: spawnConfig.model ?? (agentOverridden ? undefined : project.agentConfig?.model),
       attachments: spawnConfig.attachments,
+      mcpServers: resolvedMcpServers,
+      workspacePath,
     };
 
     let handle: RuntimeHandle;
     try {
+      // Set up workspace hooks (writes MCP config files, shell wrappers, etc.)
+      // Must run before getLaunchCommand so MCP config files exist when referenced.
+      if (plugins.agent.setupWorkspaceHooks) {
+        await plugins.agent.setupWorkspaceHooks(workspacePath, {
+          dataDir: sessionsDir,
+          sessionId,
+          mcpServers: resolvedMcpServers,
+        });
+      }
+
       const launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
       const environment = plugins.agent.getEnvironment(agentLaunchConfig);
 
@@ -1120,13 +1140,31 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
     // 7. Get launch command -- try restore command first, fall back to fresh launch
     let launchCommand: string;
+    const restoreMergedMcp = {
+      ...config.defaults.mcpServers,
+      ...project.mcpServers,
+    };
+    const restoreMcpServers =
+      Object.keys(restoreMergedMcp).length > 0 ? restoreMergedMcp : undefined;
+
     const agentLaunchConfig = {
       sessionId,
       projectConfig: project,
       issueId: session.issueId ?? undefined,
       permissions: project.agentConfig?.permissions,
       model: project.agentConfig?.model,
+      mcpServers: restoreMcpServers,
+      workspacePath,
     };
+
+    // Set up workspace hooks (re-writes MCP config and shell wrappers on restore)
+    if (plugins.agent.setupWorkspaceHooks) {
+      await plugins.agent.setupWorkspaceHooks(workspacePath, {
+        dataDir: sessionsDir,
+        sessionId,
+        mcpServers: restoreMcpServers,
+      });
+    }
 
     if (plugins.agent.getRestoreCommand) {
       const restoreCmd = await plugins.agent.getRestoreCommand(session, project);

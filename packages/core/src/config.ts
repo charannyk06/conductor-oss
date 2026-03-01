@@ -22,6 +22,14 @@ import { generateSessionPrefix } from "./paths.js";
 // ZOD SCHEMAS
 // =============================================================================
 
+const MCPServerConfigSchema = z.object({
+  command: z.string(),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string()).optional(),
+  cwd: z.string().optional(),
+  enabled: z.boolean().optional(),
+});
+
 const ReactionConfigSchema = z.object({
   auto: z.boolean().default(true),
   action: z.enum(["send-to-agent", "notify", "auto-merge"]).default("notify"),
@@ -77,6 +85,7 @@ const ProjectConfigSchema = z.object({
   reactions: z.record(ReactionConfigSchema.partial()).optional(),
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
+  mcpServers: z.record(MCPServerConfigSchema).optional(),
 });
 
 const DefaultPluginsSchema = z.object({
@@ -84,6 +93,7 @@ const DefaultPluginsSchema = z.object({
   agent: z.string().default("claude-code"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default(["desktop"]),
+  mcpServers: z.record(MCPServerConfigSchema).optional(),
 });
 
 const ConductorConfigSchema = z.object({

@@ -333,8 +333,22 @@ function createGeminiAgent(): Agent {
       return parts.join(" ");
     },
 
-    async setupWorkspaceHooks(workspacePath: string, _config: WorkspaceHooksConfig): Promise<void> {
+    async setupWorkspaceHooks(workspacePath: string, config: WorkspaceHooksConfig): Promise<void> {
       await setupGeminiWorkspace(workspacePath);
+
+      // Write MCP config to .gemini/settings.json if servers are provided
+      if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+        const geminiDir = join(workspacePath, ".gemini");
+        await mkdir(geminiDir, { recursive: true });
+        const settingsPath = join(geminiDir, "settings.json");
+        let existingSettings: Record<string, unknown> = {};
+        try {
+          const content = await readFile(settingsPath, "utf-8");
+          existingSettings = JSON.parse(content) as Record<string, unknown>;
+        } catch { /* start fresh if missing or invalid */ }
+        existingSettings["mcpServers"] = config.mcpServers;
+        await writeFile(settingsPath, JSON.stringify(existingSettings, null, 2), "utf-8");
+      }
     },
 
     async postLaunchSetup(session: Session): Promise<void> {

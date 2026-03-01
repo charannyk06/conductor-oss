@@ -648,6 +648,12 @@ function createClaudeCodeAgent(): Agent {
         parts.push("--append-system-prompt", shellEscape(config.systemPrompt));
       }
 
+      // MCP config file written by setupWorkspaceHooks before this is called
+      if (config.workspacePath && config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+        const mcpConfigPath = join(config.workspacePath, ".claude", "mcp.json");
+        parts.push("--mcp-config", shellEscape(mcpConfigPath));
+      }
+
       // NOTE: prompt is NOT included here — it's delivered post-launch via
       // runtime.sendMessage() to keep Claude in interactive mode.
 
@@ -789,10 +795,18 @@ function createClaudeCodeAgent(): Agent {
       return parts.join(" ");
     },
 
-    async setupWorkspaceHooks(workspacePath: string, _config: WorkspaceHooksConfig): Promise<void> {
+    async setupWorkspaceHooks(workspacePath: string, config: WorkspaceHooksConfig): Promise<void> {
       await ensureClaudeConfig(workspacePath);
       const hookScriptPath = join(workspacePath, ".claude", "metadata-updater.sh");
       await setupHookInWorkspace(workspacePath, hookScriptPath);
+
+      // Write MCP config file if servers are provided
+      if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+        const claudeDir = join(workspacePath, ".claude");
+        await mkdir(claudeDir, { recursive: true });
+        const mcpConfig = { mcpServers: config.mcpServers };
+        await writeFile(join(claudeDir, "mcp.json"), JSON.stringify(mcpConfig, null, 2), "utf-8");
+      }
     },
 
     async postLaunchSetup(session: Session): Promise<void> {

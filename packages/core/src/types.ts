@@ -197,11 +197,17 @@ export interface AgentLaunchConfig {
   systemPromptFile?: string;
   /** Image/file attachments from the task card. */
   attachments?: TaskAttachment[];
+  /** MCP servers to configure for this session */
+  mcpServers?: Record<string, MCPServerConfig>;
+  /** Resolved workspace path for this session */
+  workspacePath?: string;
 }
 
 export interface WorkspaceHooksConfig {
   dataDir: string;
   sessionId?: string;
+  /** MCP servers to configure for this session */
+  mcpServers?: Record<string, MCPServerConfig>;
 }
 
 export interface AgentSessionInfo {
@@ -411,11 +417,20 @@ export interface OrchestratorConfig {
   reactions: Record<string, ReactionConfig>;
 }
 
+export interface MCPServerConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  enabled?: boolean;
+}
+
 export interface DefaultPlugins {
   runtime: string;
   agent: string;
   workspace: string;
   notifiers: string[];
+  mcpServers?: Record<string, MCPServerConfig>;
 }
 
 export interface ProjectConfig {
@@ -437,6 +452,8 @@ export interface ProjectConfig {
   reactions?: Record<string, Partial<ReactionConfig>>;
   agentRules?: string;
   agentRulesFile?: string;
+  /** MCP servers available to agents in this project */
+  mcpServers?: Record<string, MCPServerConfig>;
 }
 
 export interface TrackerConfig {

@@ -809,8 +809,16 @@ function createCodexAgent(): Agent {
       return parts.join(" ");
     },
 
-    async setupWorkspaceHooks(workspacePath: string, _config: WorkspaceHooksConfig): Promise<void> {
+    async setupWorkspaceHooks(workspacePath: string, config: WorkspaceHooksConfig): Promise<void> {
       await setupCodexWorkspace(workspacePath);
+
+      // Write MCP config file if servers are provided
+      if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+        const codexDir = join(workspacePath, ".codex");
+        await mkdir(codexDir, { recursive: true });
+        const mcpConfig = { mcpServers: config.mcpServers };
+        await writeFile(join(codexDir, "mcp.json"), JSON.stringify(mcpConfig, null, 2), "utf-8");
+      }
     },
 
     async postLaunchSetup(session: Session): Promise<void> {

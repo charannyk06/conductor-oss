@@ -6,6 +6,18 @@ port: 4747
 # URL shown in board card links (set this to your actual dashboard URL)
 # dashboardUrl: http://localhost:4747
 
+# Optional: MCP servers available to all projects by default
+# defaults:
+#   mcpServers:
+#     filesystem:
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/"]
+#     github:
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-github"]
+#       env:
+#         GITHUB_TOKEN: "${GITHUB_TOKEN}"
+
 projects:
   my-app:
     path: ~/projects/my-app        # Path to your project (must be a git repo)
@@ -17,6 +29,13 @@ projects:
     workspace: worktree            # git worktree isolation per task
     runtime: tmux                  # tmux session runner
     scm: github                    # GitHub PR/CI integration
+    # Optional: MCP servers for this project (merged with defaults, project wins)
+    # mcpServers:
+    #   postgres:
+    #     command: npx
+    #     args: ["-y", "@modelcontextprotocol/server-postgres"]
+    #     env:
+    #       DATABASE_URL: "postgresql://localhost/my_app_dev"
 
   # Add more projects:
   # backend:
