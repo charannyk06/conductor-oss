@@ -17,6 +17,38 @@ Write a task → agent spawns → PR opens → CI runs → board updates. Automa
 
 ---
 
+
+## Demo
+
+> 5-minute end-to-end demo: task → agent → PR → board update (recorded on iPhone via Obsidian + Safari)
+
+### 1. Add a task in Obsidian Kanban
+Type a task in the Inbox column → Conductor auto-tags it with agent/project/type.
+
+<img src="docs/demo/01-add-task.gif" width="300" alt="Add task to Inbox">
+
+### 2. Agent dispatches and works autonomously
+Drag to "Ready to Dispatch" → agent spawns in isolated git worktree → card moves to In Progress.
+
+<img src="docs/demo/02-auto-dispatch.gif" width="300" alt="Auto dispatch">
+
+### 3. Live terminal streaming
+Watch the agent work in real-time through the web dashboard.
+
+<img src="docs/demo/03-live-terminal.gif" width="300" alt="Live terminal">
+
+### 4. Dashboard overview
+Track all sessions across projects — active, completed, cost estimates.
+
+<img src="docs/demo/04-dashboard.gif" width="300" alt="Dashboard">
+
+### 5. Agent creates PR on GitHub
+Agent commits, pushes, opens a PR — board card updates with PR link.
+
+<img src="docs/demo/05-pr-creation.gif" width="300" alt="PR creation">
+
+📹 [Full demo video (5 min)](docs/demo/full-demo.mp4)
+
 ## Install
 
 ```bash
