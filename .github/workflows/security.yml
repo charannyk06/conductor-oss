@@ -5,8 +5,6 @@ on:
     - cron: '0 8 * * 1'  # Every Monday at 08:00 UTC
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,15 +16,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - name: Install dependencies
@@ -39,24 +37,22 @@ jobs:
   secret-scan:
     name: Secret Scanning
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: TruffleHog OSS
         uses: trufflesecurity/trufflehog@main
         with:
-          path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
           extra_args: --only-verified
 
   scorecard:
     name: OSSF Scorecard
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
+    if: github.event_name == 'schedule'
     permissions:
       security-events: write
       id-token: write
@@ -64,7 +60,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -76,7 +72,7 @@ jobs:
           publish_results: true
 
       - name: Upload Scorecard results
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: scorecard.sarif
           category: ossf-scorecard
