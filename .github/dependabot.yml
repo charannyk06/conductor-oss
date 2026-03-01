@@ -1,7 +1,7 @@
 version: 2
 
 updates:
-  # Root package
+  # Root monorepo (pnpm workspace)
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -14,30 +14,13 @@ updates:
         patterns:
           - "typescript"
           - "@types/*"
-      testing:
-        patterns:
-          - "vitest"
-          - "jest"
-          - "@vitest/*"
     ignore:
+      # Zod v4 has breaking changes — pin to v3
+      - dependency-name: "zod"
+        versions: [">=4.0.0"]
+      # Skip patch bumps to reduce noise
       - dependency-name: "*"
         update-types: ["version-update:semver-patch"]
-
-  # CLI package
-  - package-ecosystem: npm
-    directory: /packages/cli
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
-
-  # Core package
-  - package-ecosystem: npm
-    directory: /packages/core
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 5
 
   # GitHub Actions
   - package-ecosystem: github-actions
