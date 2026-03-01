@@ -20,6 +20,7 @@ import { registerDashboard } from "./commands/dashboard.js";
 import { registerStart } from "./commands/start.js";
 import { registerWatch } from "./commands/watch.js";
 import { registerInit } from "./commands/init.js";
+import { registerMcpServer } from "./commands/mcp-server.js";
 
 const program = new Command();
 
@@ -40,5 +41,6 @@ registerDashboard(program);
 registerStart(program);
 registerWatch(program);
 registerInit(program);
+registerMcpServer(program);
 
 program.parse();
