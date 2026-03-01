@@ -96,6 +96,12 @@ const DefaultPluginsSchema = z.object({
   mcpServers: z.record(MCPServerConfigSchema).optional(),
 });
 
+const WebhookConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  port: z.number().default(4748),
+  secret: z.string().optional(),
+});
+
 const ConductorConfigSchema = z.object({
   port: z.number().default(4747),
   terminalPort: z.number().optional(),
@@ -112,6 +118,7 @@ const ConductorConfigSchema = z.object({
     info: ["desktop"],
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
+  webhook: WebhookConfigSchema.optional(),
 });
 
 // =============================================================================
