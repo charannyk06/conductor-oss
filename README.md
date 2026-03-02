@@ -104,7 +104,16 @@ Agent commits, pushes, opens a PR — board card updates with PR link.
 
 📹 Full demo (5 min)
 
+<<<<<<< HEAD
 [Watch full demo (5 min)](docs/demo/full-demo.mp4)
+=======
+<p align="center">
+  <video controls playsinline width="200" style="width: 200px; max-width: 100%; height: auto;" preload="metadata">
+    <source src="docs/demo/full-demo.mp4" type="video/mp4" />
+    Your browser does not support the video tag.
+  </video>
+</p>
+>>>>>>> origin/main
 
 
 </details>
