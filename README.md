@@ -102,7 +102,14 @@ Agent commits, pushes, opens a PR — board card updates with PR link.
   <img src="docs/demo/05-pr-creation.gif" width="100%" style="max-width: 800px;" alt="PR creation" />
 </p>
 
-📹 [Full demo video (5 min)](docs/demo/full-demo.mp4)
+📹 Full demo (5 min)
+
+<p align="center">
+  <video controls width="100%" style="max-width: 800px;" preload="metadata">
+    <source src="docs/demo/full-demo.mp4" type="video/mp4" />
+    Your browser does not support the video tag.
+  </video>
+</p>
 
 </details>
 
