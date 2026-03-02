@@ -70,29 +70,44 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 ### 1. Add a task in Obsidian Kanban
 Type a task in the Inbox column → Conductor auto-tags it with agent/project/type.
 
-![Add task to Inbox](docs/demo/01-add-task.gif)
+<p align="center">
+  <img src="docs/demo/01-add-task.gif" width="100%" style="max-width: 800px;" alt="Add task to Inbox" />
+</p>
 
 ### 2. Agent dispatches and works autonomously
 Drag to "Ready to Dispatch" → agent spawns in isolated git worktree → card moves to In Progress.
 
-![Auto dispatch](docs/demo/02-auto-dispatch.gif)
+<p align="center">
+  <img src="docs/demo/02-auto-dispatch.gif" width="100%" style="max-width: 800px;" alt="Auto dispatch" />
+</p>
 
 ### 3. Live terminal streaming
 Watch the agent work in real-time through the web dashboard.
 
-![Live terminal streaming](docs/demo/03-live-terminal.gif)
+<p align="center">
+  <img src="docs/demo/03-live-terminal.gif" width="100%" style="max-width: 800px;" alt="Live terminal streaming" />
+</p>
 
 ### 4. Dashboard overview
 Track all sessions across projects — active, completed, cost estimates.
 
-![Dashboard overview](docs/demo/04-dashboard.gif)
+<p align="center">
+  <img src="docs/demo/04-dashboard.gif" width="100%" style="max-width: 800px;" alt="Dashboard overview" />
+</p>
 
 ### 5. Agent creates PR on GitHub
 Agent commits, pushes, opens a PR — board card updates with PR link.
 
-![PR creation](docs/demo/05-pr-creation.gif)
+<p align="center">
+  <img src="docs/demo/05-pr-creation.gif" width="100%" style="max-width: 800px;" alt="PR creation" />
+</p>
 
-📹 [Full demo video (5 min)](docs/demo/full-demo.mp4)
+📹 Full demo (5 min)
+
+<video controls width="100%" style="width: 100%;" preload="metadata">
+  <source src="docs/demo/full-demo.mp4" type="video/mp4" />
+  Your browser does not support the video tag.
+</video>
 
 </details>
 
