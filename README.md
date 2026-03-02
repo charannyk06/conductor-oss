@@ -27,6 +27,14 @@ Write tasks in a kanban board — Conductor dispatches agents, manages git workt
 - [Dashboard overview](docs/demo/04-dashboard.gif)
 - [PR creation](docs/demo/05-pr-creation.gif)
 
+## Repository Links
+
+- GitHub Repository: https://github.com/charannyk06/conductor-oss
+- Issues: https://github.com/charannyk06/conductor-oss/issues
+- Pull Requests: https://github.com/charannyk06/conductor-oss/pulls
+- CI: https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml
+- NPM Package: https://www.npmjs.com/package/conductor-oss
+
 ---
 
 ## What is Conductor?
