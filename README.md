@@ -105,8 +105,8 @@ Agent commits, pushes, opens a PR — board card updates with PR link.
 📹 Full demo (5 min)
 
 <p align="center">
-  <video controls width="200" style="max-width: 100%; height: auto;" preload="metadata">
-    <source src="https://github.com/charannyk06/conductor-oss/raw/main/docs/demo/full-demo.mp4" type="video/mp4" />
+  <video controls width="640" style="width: 100%; max-width: 640px; height: auto;" preload="metadata">
+    <source src="docs/demo/full-demo.mp4" type="video/mp4" />
     Your browser does not support the video tag.
   </video>
 </p>
