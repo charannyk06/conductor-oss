@@ -62,27 +62,27 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 ### 1. Add a task in Obsidian Kanban
 Type a task in the Inbox column → Conductor auto-tags it with agent/project/type.
 
-<img src="docs/demo/01-add-task.gif" width="600" alt="Add task to Inbox">
+![Add task to Inbox](docs/demo/01-add-task.gif)
 
 ### 2. Agent dispatches and works autonomously
 Drag to "Ready to Dispatch" → agent spawns in isolated git worktree → card moves to In Progress.
 
-<img src="docs/demo/02-auto-dispatch.gif" width="600" alt="Auto dispatch">
+![Auto dispatch](docs/demo/02-auto-dispatch.gif)
 
 ### 3. Live terminal streaming
 Watch the agent work in real-time through the web dashboard.
 
-<img src="docs/demo/03-live-terminal.gif" width="600" alt="Live terminal">
+![Live terminal streaming](docs/demo/03-live-terminal.gif)
 
 ### 4. Dashboard overview
 Track all sessions across projects — active, completed, cost estimates.
 
-<img src="docs/demo/04-dashboard.gif" width="600" alt="Dashboard">
+![Dashboard overview](docs/demo/04-dashboard.gif)
 
 ### 5. Agent creates PR on GitHub
 Agent commits, pushes, opens a PR — board card updates with PR link.
 
-<img src="docs/demo/05-pr-creation.gif" width="600" alt="PR creation">
+![PR creation](docs/demo/05-pr-creation.gif)
 
 📹 [Full demo video (5 min)](docs/demo/full-demo.mp4)
 
