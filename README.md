@@ -71,41 +71,41 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 Type a task in the Inbox column → Conductor auto-tags it with agent/project/type.
 
 <p align="center">
-  <img src="docs/demo/01-add-task.gif" width="100%" style="max-width: 320px;" alt="Add task to Inbox" />
+  <img src="docs/demo/01-add-task.gif" width="200" style="max-width: 200px; height: auto;" alt="Add task to Inbox" />
 </p>
 
 ### 2. Agent dispatches and works autonomously
 Drag to "Ready to Dispatch" → agent spawns in isolated git worktree → card moves to In Progress.
 
 <p align="center">
-  <img src="docs/demo/02-auto-dispatch.gif" width="100%" style="max-width: 320px;" alt="Auto dispatch" />
+  <img src="docs/demo/02-auto-dispatch.gif" width="200" style="max-width: 200px; height: auto;" alt="Auto dispatch" />
 </p>
 
 ### 3. Live terminal streaming
 Watch the agent work in real-time through the web dashboard.
 
 <p align="center">
-  <img src="docs/demo/03-live-terminal.gif" width="100%" style="max-width: 320px;" alt="Live terminal streaming" />
+  <img src="docs/demo/03-live-terminal.gif" width="200" style="max-width: 200px; height: auto;" alt="Live terminal streaming" />
 </p>
 
 ### 4. Dashboard overview
 Track all sessions across projects — active, completed, cost estimates.
 
 <p align="center">
-  <img src="docs/demo/04-dashboard.gif" width="100%" style="max-width: 320px;" alt="Dashboard overview" />
+  <img src="docs/demo/04-dashboard.gif" width="200" style="max-width: 200px; height: auto;" alt="Dashboard overview" />
 </p>
 
 ### 5. Agent creates PR on GitHub
 Agent commits, pushes, opens a PR — board card updates with PR link.
 
 <p align="center">
-  <img src="docs/demo/05-pr-creation.gif" width="100%" style="max-width: 320px;" alt="PR creation" />
+  <img src="docs/demo/05-pr-creation.gif" width="200" style="max-width: 200px; height: auto;" alt="PR creation" />
 </p>
 
 📹 Full demo (5 min)
 
 <p align="center">
-  <video controls playsinline width="320" style="width: 320px; max-width: 100%; height: auto;" preload="metadata">
+  <video controls playsinline width="200" style="width: 200px; max-width: 100%; height: auto;" preload="metadata">
     <source src="docs/demo/full-demo.mp4" type="video/mp4" />
     Your browser does not support the video tag.
   </video>
