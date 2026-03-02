@@ -62,7 +62,7 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 
 ## Demo
 
-<details>
+<details open>
 <summary><strong>Watch the 5-minute end-to-end demo</strong> — task → agent → PR → board update</summary>
 
 <br>
