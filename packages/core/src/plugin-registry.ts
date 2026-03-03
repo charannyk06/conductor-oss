@@ -30,6 +30,13 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
   { slot: "agent", name: "claude-code", pkg: "@conductor-oss/plugin-agent-claude-code" },
   { slot: "agent", name: "codex", pkg: "@conductor-oss/plugin-agent-codex" },
   { slot: "agent", name: "gemini", pkg: "@conductor-oss/plugin-agent-gemini" },
+  { slot: "agent", name: "amp", pkg: "@conductor-oss/plugin-agent-amp" },
+  { slot: "agent", name: "cursor-cli", pkg: "@conductor-oss/plugin-agent-cursor-cli" },
+  { slot: "agent", name: "opencode", pkg: "@conductor-oss/plugin-agent-opencode" },
+  { slot: "agent", name: "droid", pkg: "@conductor-oss/plugin-agent-droid" },
+  { slot: "agent", name: "qwen-code", pkg: "@conductor-oss/plugin-agent-qwen-code" },
+  { slot: "agent", name: "ccr", pkg: "@conductor-oss/plugin-agent-ccr" },
+  { slot: "agent", name: "github-copilot", pkg: "@conductor-oss/plugin-agent-github-copilot" },
   // Workspaces
   { slot: "workspace", name: "worktree", pkg: "@conductor-oss/plugin-workspace-worktree" },
   // Trackers

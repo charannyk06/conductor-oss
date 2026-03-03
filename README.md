@@ -34,7 +34,7 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 | Task format | Jira / Linear ticket | Proprietary UI | **Plain markdown** |
 | Where tasks live | Cloud app | Cloud app | **Your own files** |
 | Agent execution | Manual | Managed cloud | **Local — your machine, your keys** |
-| Multiple agents | Clipboard juggling | Vendor lock-in | **Claude Code, Codex, Gemini — pick any** |
+| Multiple agents | Clipboard juggling | Vendor lock-in | **Claude Code, Codex, Gemini, Amp, Cursor CLI, OpenCode, Droid, Qwen Code, CCR, GitHub Copilot — pick any** |
 | Context isolation | Manual branches | Varies | **Git worktree per task** |
 | PR lifecycle | Manual | Partial | **Full: open → CI → review → merge** |
 | Database required | — | Often | **Never — flat files only** |
@@ -86,36 +86,6 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
   <img src="docs/demo/05-pr-creation.gif" alt="PR creation (GIF)" />
 </p>
 
-<details open>
-<summary><strong>Live flow capture</strong> — task → launch → terminal → review/merge controls</summary>
-
-<br>
-
-### 1) Dashboard overview
-
-![Dashboard overview](docs/screenshots/01-dashboard-overview.png)
-
-### 2) Chat queue and manual responses
-
-![Chat queue](docs/screenshots/02-dashboard-chat.png)
-
-### 3) Review and PR triage
-
-![Review queue](docs/screenshots/03-dashboard-review.png)
-
-### 4) Agents health and install state
-
-![Agents tab](docs/screenshots/04-dashboard-agents.png)
-
-### 5) Launching a new session
-
-![Launch flow](docs/screenshots/05-launch-session.png)
-
-### 6) Command palette + quick actions
-
-![Command palette](docs/screenshots/06-command-palette.png)
-
-</details>
 
 ---
 
@@ -168,7 +138,8 @@ CONDUCTOR_WORKSPACE=/path/to/workspace CO_CONFIG_PATH=./conductor.yaml co start 
 
 The dashboard UI runs on:
 
-- `http://localhost:4747` by default when launched with `co start`
+- `co start`: `http://localhost:<port>` from `conductor.yaml` (default `4747` when using generated config)
+- `co dashboard`: `--port` if provided, otherwise `conductor.yaml` `port`, otherwise `3000`
 
 If a workspace has multiple projects, the dashboard loads all linked boards from that workspace and keeps project links scoped to the correct board files.
 
@@ -186,12 +157,17 @@ If you edit `conductor.yaml` while the dashboard is already running:
 | GitHub CLI | any | `brew install gh` then `gh auth login` |
 | An AI agent | — | See below |
 
-**Pick one agent (or all three):**
+**Pick one agent (or all supported):**
 
 ```bash
-npm install -g @anthropic-ai/claude-code   # Claude Code
-npm install -g @openai/codex-cli           # OpenAI Codex
-npm install -g @google/gemini-cli          # Gemini CLI
+npm install -g @anthropic-ai/claude-code     # Claude Code
+npm install -g @openai/codex-cli             # OpenAI Codex
+npm install -g @google/gemini-cli            # Gemini CLI
+
+# Optional / alternate agent CLIs (install as available in your environment)
+# amp, cursor-cli (or cursor), opencode, droid, qwen-code, ccr, github-copilot
+# You can also point each plugin at a custom binary using:
+# AMP_BIN, CURSOR_CLI_BIN, OPEN_CODE_BIN, DROID_BIN, QWEN_CODE_BIN, CCR_BIN, GITHUB_COPILOT_BIN
 ```
 
 ---
@@ -216,7 +192,7 @@ npm install -g @google/gemini-cli          # Gemini CLI
                 │
                 ▼
  ┌──────────────────────────┐
- │  Agent Process           │  Claude Code / Codex / Gemini
+│  Agent Process           │  Configured agent CLI (Claude, Codex, Gemini, etc.)
  │  (isolated worktree)     │  writes code, commits, opens PR
  └──────────────┬───────────┘
                 │
@@ -251,13 +227,28 @@ npm install -g @google/gemini-cli          # Gemini CLI
 
 Or just drop raw text in **Inbox** — Conductor auto-formats it.
 
+Conductor accepts both native plugin IDs and common CLI aliases, each resolved to the matching dedicated plugin (no generic fallback launcher):
+
+- `claude-code` (`claude`, `cc`, `claude-code`, `claude-cli`, `claude-code-cli`, `claude_code_cli`)
+- `codex` (`openai`, `open-ai`, `openai-codex`, `openai-codex-cli`, `codex`, `codex-cli`, `codexcli`)
+- `gemini` (`google-gemini`, `google-gemini-cli`, `gm`, `gemini-cli`)
+- `amp` (`amp`, `amp-cli`)
+- `cursor-cli` (`cursor`, `cursor-agent`, `cursor-agent-cli`, `cursor_agent`, `cursoragent`, `cursor-cli`)
+- `opencode` (`open-code`, `open_code`, `open code`, `open-code-cli`, `opencode`)
+- `droid` (`droid`)
+- `qwen-code` (`qwen`, `qwen_code`, `qwen code`, `qwen-code`, `qwen-code-cli`)
+- `ccr` (`claude-code-router`, `claude_code_router`, `ccr`, `ccr-cli`)
+- `github-copilot` (`copilot`, `copilot-cli`, `gh-copilot`)
+
+Aliases are normalized and resolved to the dedicated native plugin ID before dispatch.
+
 ---
 
 ## Features
 
 | Feature | Status |
 |---------|--------|
-| 3 frontier agents — Claude Code, Codex, Gemini CLI | ✅ |
+| 10 built-in agents — Claude Code (`claude-code`), Codex (`codex`), Gemini (`gemini`), Amp (`amp`), Cursor CLI (`cursor-cli`), Opencode (`opencode`), Droid (`droid`), Qwen Code (`qwen-code`), CCR (`ccr`), GitHub Copilot (`github-copilot`) | ✅ |
 | MCP server (use Conductor from Cursor / Claude Desktop) | ✅ |
 | Webhook triggers — GitHub events → kanban tasks | ✅ |
 | Per-project MCP server configuration | ✅ |
@@ -303,7 +294,7 @@ projects:
   my-app:
     path: ~/projects/my-app       # path to your git repo
     repo: your-org/my-app         # GitHub org/repo
-    agent: claude-code            # "claude-code" | "codex" | "gemini"
+    agent: claude-code            # "claude-code" | "codex" | "gemini" | "amp" | "cursor-cli" | "opencode" | "droid" | "qwen-code" | "ccr" | "github-copilot"
     agentConfig:
       model: claude-sonnet-4-6    # any model the agent supports
       permissions: skip           # fully autonomous (no prompts)
@@ -364,10 +355,11 @@ Use Conductor as an MCP tool from **Cursor**, **Claude Desktop**, or any MCP-com
 ```
 
 Available tools exposed via MCP:
-- `spawn_task` — create and dispatch a new agent task
-- `list_sessions` — list active sessions and their status
-- `get_session` — get details and terminal output for a session
-- `kill_session` — terminate a running session
+- `conductor_dispatch` — create and dispatch a new agent task
+- `conductor_list_sessions` — list active sessions and their status
+- `conductor_session_status` — get details and terminal output for a session
+- `conductor_list_projects` — list configured projects
+- `conductor_kill_session` — terminate a running session
 
 ---
 
@@ -377,41 +369,69 @@ Trigger tasks programmatically via HTTP or GitHub webhooks:
 
 ```bash
 # Trigger a task via HTTP
-curl -X POST http://localhost:4747/webhook/http \
+curl -X POST http://localhost:4747/api/webhook/task \
   -H "Content-Type: application/json" \
   -d '{"task": "fix the auth bug", "project": "my-app", "agent": "claude-code"}'
 
 # Configure GitHub to send PR/issue events → auto-create tasks
 # In your GitHub repo: Settings → Webhooks → Add webhook
-# Payload URL: http://your-host:4747/webhook/github
+# Payload URL: http://your-host:4747/api/webhook/github
 # Secret: your-webhook-secret (set WEBHOOK_SECRET env var)
 ```
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/webhook/http` | POST | Trigger a task directly |
-| `/webhook/github` | POST | GitHub events → tasks (HMAC-verified) |
+| `/api/webhook/task` | POST | Trigger a task directly |
+| `/api/webhook/github` | POST | GitHub events → tasks (HMAC-verified) |
+| `/api/webhook/status` | GET | Health check for webhook subsystem |
+| `/api/webhook/health` | GET | Health check endpoint |
+
+When running the standalone webhook command, the listener defaults to port `4748` unless overridden with `--port`.
+
+## Dashboard API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/config` | GET | Active config + runtime settings |
+| `/api/events` | GET | Recent watcher/lifecycle events |
+| `/api/agents` | GET | Agent inventory |
+| `/api/health/boards` | GET | Monitored board status |
 | `/api/sessions` | GET | List all sessions |
-| `/api/sessions/:id` | GET | Session detail + terminal output |
+| `/api/sessions/:id` | GET | Session detail |
+| `/api/sessions/:id/output` | GET | Session output stream |
+| `/api/sessions/:id/diff` | GET | Session diff payload |
+| `/api/sessions/:id/checks` | GET | PR/CI checks |
+| `/api/sessions/:id/send` | POST | Send message to a session |
+| `/api/sessions/:id/feedback` | POST | Send review feedback |
+| `/api/sessions/:id/kill` | POST | Kill a session |
+| `/api/sessions/:id/restore` | POST | Restore a session |
+| `/api/sessions/:id/keys` | POST | Refresh session keys |
+| `/api/spawn` | POST | Spawn a session |
 
 ---
 
 ## CLI Reference
 
 ```bash
-co init                          # Scaffold CONDUCTOR.md + conductor.yaml
-co start                         # Start orchestrator + dashboard
-co watch                         # Run board watcher only
-co doctor                        # Diagnose board parsing/dispatch issues
-co list                          # List all active sessions
-co spawn <project> "<task>"      # Manually dispatch a session
-co retry <session|task>          # Start a new attempt for an existing task
-co task show <task-id>           # Show task parent/children/attempts
-co feedback <session> "<msg>"    # Send review feedback and requeue task
-co status                        # Status overview
-co attach <session-id>           # Attach to tmux session
-co kill <session-id>             # Kill a session
-co dashboard                     # Open web dashboard in browser
+co init                                # Scaffold CONDUCTOR.md + conductor.yaml
+co start [--no-dashboard] [--no-watcher] [--port <port>] [--workspace <path>] # Start orchestrator
+co watch                               # Run board watcher only
+co doctor                              # Diagnose board parsing/dispatch issues
+co list [--all] [--json] [project]     # List all sessions
+co spawn <project> "<task>"            # Manually dispatch a session
+co send <session-id> "<msg>"           # Send message to an active session
+co restore <session-id>                # Restore completed session output
+co retry <session-id|task-id>          # Start a new attempt
+co task show <task-id>                 # Show task parent/children/attempts
+co feedback <session-id> "<msg>"       # Send review feedback and requeue task
+co status [project]                    # Status overview
+co attach <session-id>                 # Attach to tmux session
+co cleanup [project]                   # Cleanup dead/inactive sessions
+co kill <session-id>                   # Kill a session
+co dashboard [--port]                  # Open web dashboard in browser
+co webhook [--port]                    # Start webhook server only
+co mcp-server                          # Start MCP server (stdio)
+```
 
 ## Local Troubleshooting (Common)
 
@@ -437,6 +457,14 @@ curl -s http://localhost:4747/api/agents | jq '.agents[] | {name, description, v
 which codex
 which claude
 which gemini
+which amp
+which cursor
+which cursor-cli
+which opencode
+which droid
+which qwen-code
+which ccr
+which github-copilot
 ```
 
 - If you use an alternate binary name (for example `openai-codex`), it is now detected by the refreshed route. Restart `co start` after adding it to PATH so `/api/agents` refreshes.
@@ -459,9 +487,6 @@ curl -X POST http://localhost:4747/api/sessions/<session-id>/kill
 - `GET /api/sessions` should return `{ sessions: [...] }`.
 - `GET /api/health/boards` should list configured board files and watch state.
 
-co mcp                           # Start MCP server (stdio)
-```
-
 ---
 
 ## Plugin Architecture
@@ -470,7 +495,7 @@ Every component is a swappable plugin. Conductor ships with batteries included, 
 
 | Slot | Built-in | Interface |
 |------|----------|-----------|
-| **Agent** | `claude-code`, `codex`, `gemini` | `AgentPlugin` |
+| **Agent** | `claude-code`, `codex`, `gemini`, `amp`, `cursor-cli`, `opencode`, `droid`, `qwen-code`, `ccr`, `github-copilot` | `AgentPlugin` |
 | **Runtime** | `tmux` | `RuntimePlugin` |
 | **Workspace** | `worktree` | `WorkspacePlugin` |
 | **SCM** | `github` | `ScmPlugin` |
@@ -499,7 +524,7 @@ See [SECURITY.md](SECURITY.md) for the full security policy and responsible disc
 
 ## Architecture
 
-This is a **15-package pnpm monorepo**:
+This is a **20-package pnpm monorepo**:
 
 ```
 conductor-oss/
@@ -511,6 +536,13 @@ conductor-oss/
 │       ├── agent-claude-code/     # Claude Code agent
 │       ├── agent-codex/           # OpenAI Codex agent
 │       ├── agent-gemini/          # Google Gemini CLI agent
+│       ├── agent-amp/             # Amp CLI agent
+│       ├── agent-cursor-cli/      # Cursor CLI agent
+│       ├── agent-opencode/        # OpenCode CLI agent
+│       ├── agent-droid/           # Factory Droid CLI agent
+│       ├── agent-qwen-code/       # Qwen Code CLI agent
+│       ├── agent-ccr/             # Claude Code Router
+│       ├── agent-github-copilot/  # GitHub Copilot CLI
 │       ├── mcp-server/            # MCP server (stdio)
 │       ├── runtime-tmux/          # tmux session runner
 │       ├── workspace-worktree/    # Git worktree isolation

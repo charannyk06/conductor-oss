@@ -13,7 +13,7 @@ import type { Command } from "commander";
 const CONDUCTOR_MD = `# My Project
 
 > 🤖 Conductor — AI agent orchestrator. Write tasks here, agents do the work.
-> Tags: \`#agent/claude-code\` or \`#agent/codex\` · \`#project/my-app\` · \`#type/feature\` · \`#priority/high\`
+> Tags: \`#agent/claude-code\` · \`#agent/codex\` · \`#agent/gemini\` · \`#agent/amp\` · \`#agent/cursor-cli\` · \`#agent/opencode\` · \`#agent/droid\` · \`#agent/qwen-code\` · \`#agent/ccr\` · \`#agent/github-copilot\` · \`#project/my-app\` · \`#type/feature\` · \`#priority/high\`
 
 ## Inbox
 
@@ -45,7 +45,7 @@ projects:
   my-app:
     path: ~/projects/my-app        # Path to your project
     repo: your-org/my-app          # GitHub org/repo for PR tracking
-    agent: claude-code             # "claude-code", "codex", or "gemini"
+    agent: claude-code             # "claude-code", "codex", "gemini", "amp", "cursor-cli", "opencode", "droid", "qwen-code", "ccr", or "github-copilot"
     agentConfig:
       model: claude-sonnet-4-6
       permissions: skip            # Fully autonomous (no prompts)

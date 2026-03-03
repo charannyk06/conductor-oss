@@ -43,7 +43,7 @@ projects:
   my-app:
     path: ~/projects/my-app        # Path to your project (must be a git repo)
     repo: your-org/my-app          # GitHub org/repo (for PR tracking)
-    agent: claude-code             # "claude-code", "codex", or "gemini"
+    agent: claude-code             # "claude-code", "codex", "gemini", "amp", "cursor-cli", "opencode", "droid", "qwen-code", "ccr", or "github-copilot"
     agentConfig:
       model: claude-sonnet-4-6     # claude-sonnet-4-6, claude-opus-4-6, o4-mini, etc.
       permissions: skip            # "skip" = fully autonomous (no prompts)

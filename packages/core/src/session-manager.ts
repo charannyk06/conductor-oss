@@ -59,6 +59,7 @@ import {
   generateTmuxName,
   validateAndStoreOrigin,
 } from "./paths.js";
+import { normalizeAgentName } from "./agent-names.js";
 
 const execFileP = promisify(execFile);
 
@@ -336,7 +337,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   } {
     const profileName = spawnConfig.profile ?? project.defaultProfile;
     const profile = profileName ? project.agentProfiles?.[profileName] : undefined;
-    const agentName = spawnConfig.agent ?? profile?.agent ?? project.agent ?? config.defaults.agent;
+    const agentName = normalizeAgentName(
+      spawnConfig.agent ?? profile?.agent ?? project.agent ?? config.defaults.agent,
+    );
     const model = spawnConfig.model
       ?? (!spawnConfig.agent ? profile?.model : undefined)
       ?? project.agentConfig?.model;
@@ -401,7 +404,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   /** Resolve which plugins to use for a project. */
   function resolvePlugins(project: ProjectConfig, agentOverride?: string) {
     const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
-    const agent = registry.get<Agent>("agent", agentOverride ?? project.agent ?? config.defaults.agent);
+    const requestedAgent = normalizeAgentName(agentOverride ?? project.agent ?? config.defaults.agent);
+    const agent = registry.get<Agent>("agent", requestedAgent);
     const workspace = registry.get<Workspace>(
       "workspace",
       project.workspace ?? config.defaults.workspace,
