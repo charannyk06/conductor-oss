@@ -87,8 +87,6 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 
 ## Demo videos & GIFs
 
-### Legacy demo captures
-
 ![Session add task (GIF)](docs/demo/01-add-task.gif)
 ![Auto dispatch (GIF)](docs/demo/02-auto-dispatch.gif)
 ![Live terminal (GIF)](docs/demo/03-live-terminal.gif)
