@@ -97,29 +97,6 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 - [Dashboard (MP4)](docs/demo/04-dashboard.mp4)
 - [PR creation (MP4)](docs/demo/06-pr-creation.mp4)
 
-### New cropped walkthrough (5:13 recording from March 01, 2026)
-
-### **01) Flow overview + task orchestration**
-  <p align="center">
-    <img src="docs/demo/flow-overview.gif" alt="Flow overview (GIF)" />
-  </p>
-  - [Flow overview (MP4)](docs/demo/flow-overview.mp4) (0:00-0:50)
-### **02) Live terminal execution**
-  <p align="center">
-    <img src="docs/demo/session-terminal.gif" alt="Terminal session (GIF)" />
-  </p>
-  - [Terminal session (MP4)](docs/demo/session-terminal.mp4) (0:50-2:50)
-### **03) Session PR generation + completion**
-  <p align="center">
-    <img src="docs/demo/session-pr-review.gif" alt="PR generation (GIF)" />
-  </p>
-  - [PR generation (MP4)](docs/demo/session-pr-review.mp4) (2:50-4:10)
-### **04) GitHub PR review + merge controls**
-  <p align="center">
-    <img src="docs/demo/github-pr-review.gif" alt="GitHub review (GIF)" />
-  </p>
-  - [GitHub review (MP4)](docs/demo/github-pr-review.mp4) (4:10-5:13)
-
 <details open>
 <summary><strong>Live flow capture</strong> — task → launch → terminal → review/merge controls</summary>
 
