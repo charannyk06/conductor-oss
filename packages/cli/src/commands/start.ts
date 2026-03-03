@@ -30,6 +30,9 @@ export function registerStart(program: Command): void {
         // Mutable ref — set after boardWatcher is created, used by lifecycle callback
         let boardWatcherRef: { updateNow(): void } | null = null;
         const port = opts.port ? parseInt(opts.port, 10) : (config.port ?? 3000);
+        const workspacePath = opts.workspace
+          ?? process.env["CONDUCTOR_WORKSPACE"]
+          ?? `${process.env["HOME"]}/.conductor/workspace`;
         const shutdownTasks: Array<() => void | Promise<void>> = [];
         let isShuttingDown = false;
 
@@ -89,9 +92,6 @@ export function registerStart(program: Command): void {
         if (opts.watcher !== false) {
           const watchSpinner = ora("Starting board watcher").start();
           try {
-            const workspacePath = opts.workspace
-              ?? process.env["CONDUCTOR_WORKSPACE"]
-              ?? `${process.env["HOME"]}/.conductor/workspace`;
             const boardPatternsOrConfig = config.boards?.length ? config.boards : config;
             const boards = core.discoverBoards(workspacePath, boardPatternsOrConfig);
             if (boards.length === 0) {
@@ -219,6 +219,8 @@ export function registerStart(program: Command): void {
                 ...process.env,
                 PORT: String(port),
                 HOSTNAME: "0.0.0.0",
+                CONDUCTOR_WORKSPACE: workspacePath,
+                CO_CONFIG_PATH: config.configPath,
               },
             });
 

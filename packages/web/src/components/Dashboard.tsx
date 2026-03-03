@@ -12,7 +12,14 @@ import { SessionCard } from "./SessionCard";
 import { EmptyState } from "./EmptyState";
 import { useTheme } from "./ThemeProvider";
 
-type ConfigProject = { id: string; boardDir: string; repo: string | null; description: string | null; agent: string };
+type ConfigProject = {
+  id: string;
+  boardDir: string;
+  boardFile?: string;
+  repo: string | null;
+  description: string | null;
+  agent: string;
+};
 type AttentionGroup = "respond" | "review" | "merge" | "pending" | "working" | "done";
 type StatusFilter = "all" | "active" | "terminal" | "attention";
 type SortMode = "recent" | "oldest" | "cost" | "attention";
@@ -204,7 +211,13 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     const allIds = new Set([...configProjects.map((p) => p.id), ...counts.keys()]);
     return [...allIds].sort().map((id) => {
       const cfg = configProjects.find((p) => p.id === id);
-      return { id, count: counts.get(id) ?? 0, boardDir: cfg?.boardDir ?? id, repo: cfg?.repo ?? null };
+      return {
+        id,
+        count: counts.get(id) ?? 0,
+        boardDir: cfg?.boardDir ?? id,
+        boardFile: cfg?.boardFile,
+        repo: cfg?.repo ?? null,
+      };
     });
   }, [sessions, configProjects]);
 
@@ -543,9 +556,13 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
 
           {/* Project list */}
           {projects.map((project) => {
-            const obsidianFile = project.boardDir.endsWith(".md")
-              ? `projects/${project.boardDir}`
-              : `projects/${project.boardDir}/CONDUCTOR.md`;
+            const boardDirHasPath = project.boardDir.includes("/");
+            const inferredBoardFile = project.boardDir.endsWith(".md")
+              ? (boardDirHasPath ? project.boardDir : `projects/${project.boardDir}`)
+              : (boardDirHasPath
+                ? `${project.boardDir}/CONDUCTOR.md`
+                : `projects/${project.boardDir}/CONDUCTOR.md`);
+            const obsidianFile = project.boardFile ?? inferredBoardFile;
             const obsidianUrl = `obsidian://open?vault=workspace&file=${encodeURIComponent(obsidianFile)}`;
             const githubUrl = project.repo ? `https://github.com/${project.repo}` : null;
             return (
