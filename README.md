@@ -43,7 +43,6 @@ pnpm ui:screenshots -- --base-url=http://localhost:4747
 - [Agents tab + installed/discovered status](docs/screenshots/04-dashboard-agents.png)
 - [Launch flow](docs/screenshots/05-launch-session.png)
 - [Command palette + cleanup flow](docs/screenshots/06-command-palette.png)
-- [Session detail / 404 fallback](docs/screenshots/07-session-detail.png)
 
 To get complete visual parity after each UI change, capture screenshots immediately after restarting or redeploying the dashboard on `4747`.
 
@@ -111,11 +110,48 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 
 ![Command palette](docs/screenshots/06-command-palette.png)
 
-### 7) Session detail path
-
-![Session detail](docs/screenshots/07-session-detail.png)
-
 </details>
+
+## Demo videos & GIFs
+
+### Legacy demo captures
+
+![Session add task (GIF)](docs/demo/01-add-task.gif)
+![Auto dispatch (GIF)](docs/demo/02-auto-dispatch.gif)
+![Live terminal (GIF)](docs/demo/03-live-terminal.gif)
+![Dashboard review (GIF)](docs/demo/04-dashboard.gif)
+![PR creation (GIF)](docs/demo/05-pr-creation.gif)
+
+Full-length captures:
+
+- [Full demo (GIF)](docs/demo/full-demo.gif)
+- [Full demo (MP4)](docs/demo/full-demo.mp4)
+- [Task + PR flow (MP4)](docs/demo/05-pr-and-board.mp4)
+- [Task creation + dispatch (MP4)](docs/demo/01-add-task.mp4)
+- [Auto dispatch terminal (MP4)](docs/demo/02-auto-dispatch.mp4)
+- [Live terminal (MP4)](docs/demo/03-live-terminal.mp4)
+- [Dashboard (MP4)](docs/demo/04-dashboard.mp4)
+- [PR creation (MP4)](docs/demo/06-pr-creation.mp4)
+
+### New cropped walkthrough (5:13 recording from March 01, 2026)
+
+- **01) Flow overview + task orchestration**
+  - [Flow overview (GIF)](docs/demo/flow-overview.gif) (0:00-0:50)
+  - [Flow overview (MP4)](docs/demo/flow-overview.mp4) (0:00-0:50)
+- **02) Live terminal execution**
+  - [Terminal session (GIF)](docs/demo/session-terminal.gif) (0:50-2:50)
+  - [Terminal session (MP4)](docs/demo/session-terminal.mp4) (0:50-2:50)
+- **03) Session PR generation + completion**
+  - [PR generation (GIF)](docs/demo/session-pr-review.gif) (2:50-4:10)
+  - [PR generation (MP4)](docs/demo/session-pr-review.mp4) (2:50-4:10)
+- **04) GitHub PR review + merge controls**
+  - [GitHub review (GIF)](docs/demo/github-pr-review.gif) (4:10-5:13)
+  - [GitHub review (MP4)](docs/demo/github-pr-review.mp4) (4:10-5:13)
+
+Full capture (from the same source recording):
+
+- [Mar 01 full walkthrough (GIF)](docs/demo/full-demo.gif)
+- [Mar 01 full walkthrough (MP4)](docs/demo/full-demo.mp4)
 
 ---
 
