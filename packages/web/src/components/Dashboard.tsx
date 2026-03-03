@@ -25,6 +25,8 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const [connected, setConnected] = useState(false);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [busySessionId, setBusySessionId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const { theme, toggleTheme } = useTheme();
 
@@ -209,24 +211,54 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   };
 
   const handleKill = async (sessionId: string) => {
+    if (busySessionId) return;
     if (!confirm(`Kill / clean up session ${sessionId}?`)) return;
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/kill`, {
-      method: "POST",
-    });
-    if (!res.ok) {
-      console.error(`Failed to kill ${sessionId}:`, await res.text());
-    } else {
-      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setBusySessionId(sessionId);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/kill`, {
+        method: "POST",
+      });
+      if (!res.ok && res.status !== 404) {
+        const detail = await res.text();
+        const reason = detail || `Request failed with ${res.status}`;
+        setActionError(`Unable to clean up session ${sessionId}: ${reason}`);
+        console.error(`Failed to kill ${sessionId}:`, detail);
+      } else {
+        setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+        setActionError(null);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      setActionError(`Unable to clean up session ${sessionId}: ${msg}`);
+      console.error(`Failed to kill ${sessionId}:`, err);
+    } finally {
+      setBusySessionId((current) => (current === sessionId ? null : current));
     }
   };
 
   const handleRestore = async (sessionId: string) => {
+    if (busySessionId) return;
+    if (busySessionId === sessionId) return;
     if (!confirm(`Restore session ${sessionId}?`)) return;
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, {
-      method: "POST",
-    });
-    if (!res.ok) {
-      console.error(`Failed to restore ${sessionId}:`, await res.text());
+    setBusySessionId(sessionId);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        const reason = detail || `Request failed with ${res.status}`;
+        setActionError(`Unable to restore session ${sessionId}: ${reason}`);
+        console.error(`Failed to restore ${sessionId}:`, detail);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      setActionError(`Unable to restore session ${sessionId}: ${msg}`);
+      console.error(`Failed to restore ${sessionId}:`, err);
+    } finally {
+      setBusySessionId((current) => (current === sessionId ? null : current));
     }
   };
 
@@ -389,6 +421,11 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
             )}
           </button>
         </header>
+        {actionError && (
+          <div className="mx-6 mt-3 rounded-md border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.12)] px-3 py-2 text-[11px] text-[var(--color-status-error)]">
+            {actionError}
+          </div>
+        )}
 
         {/* Content */}
         <main className="flex-1 overflow-y-auto p-6">
@@ -403,6 +440,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                   onSend={handleSend}
                   onKill={handleKill}
                   onRestore={handleRestore}
+                  actionBusy={busySessionId === session.id}
                 />
               ))}
             </div>

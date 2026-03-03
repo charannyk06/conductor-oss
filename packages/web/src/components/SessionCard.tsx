@@ -12,6 +12,7 @@ interface SessionCardProps {
   onSend?: (sessionId: string, message: string) => void;
   onKill?: (sessionId: string) => void;
   onRestore?: (sessionId: string) => void;
+  actionBusy?: boolean;
 }
 
 const PROJECT_PALETTE = [
@@ -81,7 +82,7 @@ function parseCost(meta: Record<string, string>): CostInfo | null {
   }
 }
 
-export function SessionCard({ session, onSend, onKill, onRestore }: SessionCardProps) {
+export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = false }: SessionCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [messageInput, setMessageInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -304,9 +305,14 @@ export function SessionCard({ session, onSend, onKill, onRestore }: SessionCardP
                 e.stopPropagation();
                 onKill?.(session.id);
               }}
-              className="rounded-md border border-[rgba(239,68,68,0.3)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)]"
+              disabled={actionBusy}
+              className={`rounded-md border border-[rgba(239,68,68,0.3)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)] ${
+                actionBusy
+                  ? "cursor-wait opacity-50 hover:bg-transparent"
+                  : ""
+              }`}
             >
-              {isTerminal ? "Cleanup" : "Kill"}
+              {actionBusy ? (isTerminal ? "Cleaning..." : "Killing...") : isTerminal ? "Cleanup" : "Kill"}
             </button>
           </div>
         </div>
