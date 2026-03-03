@@ -25,6 +25,7 @@ type ConfigProject = {
   boardDir: string;
   boardFile?: string;
   repo: string | null;
+  iconUrl?: string | null;
   description: string | null;
   agent: string;
 };
@@ -109,6 +110,7 @@ interface SessionChecksState {
 
 type LogoIconProps = {
   className?: string;
+  fillColor?: string;
 };
 
 interface ReviewDiffState {
@@ -146,6 +148,115 @@ function normalizeAgentName(value: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function resolveRepoUrl(repo?: string | null): string | null {
+  if (!repo) return null;
+  const trimmed = repo.trim();
+  if (!trimmed) return null;
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith("github.com/") || trimmed.startsWith("www.github.com/")) {
+    return `https://${trimmed}`;
+  }
+
+  if (trimmed.includes("/")) {
+    return `https://github.com/${trimmed}`;
+  }
+
+  return null;
+}
+
+function parseGithubRepo(repo: string | null): { owner: string; name: string } | null {
+  const resolved = resolveRepoUrl(repo);
+  if (!resolved) return null;
+  try {
+    const url = new URL(resolved);
+    const isGithub =
+      url.hostname === "github.com" ||
+      url.hostname === "www.github.com" ||
+      url.hostname.endsWith(".github.com");
+    if (!isGithub) return null;
+
+    const parts = url.pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+
+    return {
+      owner: parts[0],
+      name: parts[1],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getProjectFaviconUrls(repo?: string | null, iconUrl?: string | null): string[] {
+  if (iconUrl) {
+    const normalized = iconUrl.trim();
+    if (!normalized) return [];
+    if (!/^https?:\/\//i.test(normalized)) return [];
+    return [iconUrl.trim()];
+  }
+
+  const resolved = resolveRepoUrl(repo);
+  try {
+    if (!resolved) return [];
+    const url = new URL(resolved);
+    const github = parseGithubRepo(repo);
+    if (github) {
+      const owner = encodeURIComponent(github.owner);
+      const project = encodeURIComponent(github.name);
+      const repoIconFiles = [
+        "favicon.ico",
+        "public/favicon.ico",
+        "assets/favicon.ico",
+        ".github/favicon.ico",
+        "static/favicon.ico",
+        "logo.png",
+        "public/logo.png",
+        "assets/logo.png",
+        ".github/logo.png",
+      ];
+      const repoAssetUrls = repoIconFiles.map((file) => `https://raw.githubusercontent.com/${owner}/${project}/HEAD/${file}`);
+      return [...new Set([...repoAssetUrls, `https://opengraph.githubassets.com/1/${owner}/${project}`])];
+    }
+
+    return [
+      `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(url.toString())}`,
+      `https://icons.duckduckgo.com/ip3/${encodeURIComponent(url.hostname)}.ico`,
+      `https://api.faviconkit.com/${encodeURIComponent(url.hostname)}/64`,
+    ];
+  } catch {
+    return [];
+  }
+}
+
+function getProjectAbbrev(projectId: string): string {
+  const parts = projectId.split(/[-_\s/]+/).filter(Boolean);
+  if (parts.length === 1) {
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+}
+
+function DefaultProjectIcon({ projectId, color }: { projectId: string; color: string }) {
+  const fallback = getProjectAbbrev(projectId);
+  return (
+    <span
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-[10px] font-semibold text-white"
+      style={{ backgroundColor: color }}
+      aria-hidden="true"
+    >
+      {fallback}
+    </span>
+  );
 }
 
 const KNOWN_AGENTS: KnownAgent[] = [
@@ -1619,7 +1730,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       {/* Sidebar */}
       <aside
         className={`shrink-0 border-r border-[var(--color-sidebar-border)] bg-[var(--color-sidebar-bg)] flex flex-col transition-all duration-200 ${
-          sidebarOpen ? "w-60" : "w-0 overflow-hidden border-r-0"
+          sidebarOpen ? "w-72" : "w-0 overflow-hidden border-r-0"
         }`}
       >
         {/* Sidebar header */}
@@ -1665,32 +1776,66 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
             const obsidianUrl = `obsidian://open?vault=workspace&file=${encodeURIComponent(obsidianFile)}`;
             const githubUrl = project.repo ? `https://github.com/${project.repo}` : null;
             return (
-              <div key={project.id} className="group relative">
+              <div key={project.id} className="group relative flex w-full items-center">
                 <button
                   onClick={() => setActiveProject(activeProject === project.id ? null : project.id)}
-                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-[13px] transition-colors ${
+                  className={`mr-2 flex flex-1 items-center gap-2 rounded-lg px-3 py-2 text-[13px] transition-colors ${
                     activeProject === project.id
                       ? "bg-[var(--color-sidebar-active)] text-[var(--color-accent)] font-medium"
                       : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-hover)]"
                   }`}
                 >
-                  <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]" />
+                  <ProjectFavicon
+                    projectId={project.id}
+                    repo={project.repo}
+                    iconUrl={project.iconUrl}
+                  />
                   <span className="truncate">{project.id}</span>
                   <span className="ml-auto text-[11px] text-[var(--color-text-muted)] tabular-nums">
                     {project.count}
                   </span>
                 </button>
                 {/* Quick-action icons — always visible */}
-                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                  <a href={obsidianUrl} title="Open board in Obsidian" onClick={(e) => e.stopPropagation()}
-                     className="inline-flex items-center justify-center rounded-md p-1 text-[#7C3AED] transition-colors hover:bg-[rgba(124,58,237,0.15)]">
-                    <ObsidianLogo className="h-[18px] w-[18px]" />
-                  </a>
+                <div className="project-action-icons mr-2 flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    title="Open board in Obsidian"
+                    style={{
+                      color: "var(--color-accent-violet)",
+                      background: "transparent",
+                      outline: "none",
+                      boxShadow: "none",
+                      border: "none",
+                      padding: 0,
+                    }}
+                    onClick={() => {
+                      window.location.href = obsidianUrl;
+                    }}
+                    className="project-action-icon inline-flex cursor-pointer items-center justify-center p-1"
+                    aria-label="Open board in Obsidian"
+                  >
+                    <ObsidianLogo className="h-[18px] w-[18px]" fillColor="var(--color-accent-violet)" />
+                  </button>
                   {githubUrl && (
-                    <a href={githubUrl} target="_blank" rel="noopener noreferrer" title="Open repo on GitHub" onClick={(e) => e.stopPropagation()}
-                       className="inline-flex items-center justify-center rounded-md p-1 text-[#181717] dark:text-[#e6edf3] transition-colors hover:bg-[rgba(0,0,0,0.1)] dark:hover:bg-[rgba(255,255,255,0.1)]">
-                      <GitHubLogo className="h-[18px] w-[18px]" />
-                    </a>
+                    <button
+                      type="button"
+                      title="Open repo on GitHub"
+                      style={{
+                        color: "var(--color-text-muted)",
+                        background: "transparent",
+                        outline: "none",
+                        boxShadow: "none",
+                        border: "none",
+                        padding: 0,
+                      }}
+                      onClick={() => {
+                        window.open(githubUrl, "_blank", "noopener,noreferrer");
+                      }}
+                      className="project-action-icon inline-flex cursor-pointer items-center justify-center p-1"
+                      aria-label="Open repo on GitHub"
+                    >
+                      <GitHubLogo className="h-[18px] w-[18px]" fillColor="var(--color-text-muted)" />
+                    </button>
                   )}
                 </div>
               </div>
@@ -2811,34 +2956,102 @@ function formatGeneratedAt(generatedAt: string): string {
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
 }
 
-function GitHubLogo({ className = "h-4 w-4" }: LogoIconProps) {
+function ProjectFavicon({ projectId, repo, iconUrl }: { projectId: string; repo: string | null; iconUrl?: string | null }) {
+  const [iconErrorIndex, setIconErrorIndex] = useState(0);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const faviconUrls = useMemo(() => getProjectFaviconUrls(repo, iconUrl), [repo, iconUrl]);
+  useEffect(() => {
+    setIconErrorIndex(0);
+    setIsLoaded(false);
+  }, [repo, iconUrl]);
+  useEffect(() => setIsLoaded(false), [iconErrorIndex]);
+  const FALLBACK_COLORS = useMemo(
+    () => [
+      "#14b8a6",
+      "#22c55e",
+      "#84cc16",
+      "#eab308",
+      "#f97316",
+      "#f43f5e",
+      "#a855f7",
+      "#ec4899",
+      "#06b6d4",
+      "#0ea5e9",
+    ],
+    [],
+  );
+
+  const accent = useMemo(() => {
+    let hash = 0;
+    for (let i = 0; i < projectId.length; i += 1) {
+      hash = (hash * 31 + projectId.charCodeAt(i)) % 360;
+    }
+    return FALLBACK_COLORS[hash % FALLBACK_COLORS.length] ?? "#6b7280";
+  }, [projectId]);
+
+  const onImageError = () => {
+    setIsLoaded(false);
+    setIconErrorIndex((current) => current + 1);
+  };
+
+  const shouldUseFallback =
+    !faviconUrls.length || iconErrorIndex >= faviconUrls.length || !faviconUrls[iconErrorIndex];
+
+  if (shouldUseFallback) {
+    return <DefaultProjectIcon projectId={projectId} color={accent} />;
+  }
+
+  return (
+    <span className="relative inline-flex h-5 w-5 shrink-0">
+      {!isLoaded && <DefaultProjectIcon projectId={projectId} color={accent} />}
+      <img
+        src={faviconUrls[iconErrorIndex]}
+        alt={`${projectId} favicon`}
+        className={`h-5 w-5 shrink-0 rounded-sm border border-[var(--color-border-subtle)] bg-white object-cover ${isLoaded ? "inline-flex" : "hidden"}`}
+        onError={onImageError}
+        onLoad={() => setIsLoaded(true)}
+        loading="lazy"
+      />
+    </span>
+  );
+}
+
+function GitHubLogo({ className = "h-4 w-4", fillColor }: LogoIconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
-      fill="currentColor"
+      fill="none"
       role="img"
       aria-hidden="true"
       xmlns="http://www.w3.org/2000/svg"
       className={className}
+      style={fillColor ? { color: fillColor } : undefined}
     >
       <title>GitHub</title>
-      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+      <path
+        d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
+        fill={fillColor || "currentColor"}
+      />
     </svg>
   );
 }
 
-function ObsidianLogo({ className = "h-4 w-4" }: LogoIconProps) {
+function ObsidianLogo({ className = "h-4 w-4", fillColor }: LogoIconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
-      fill="currentColor"
+      fill="none"
       role="img"
       aria-hidden="true"
       xmlns="http://www.w3.org/2000/svg"
       className={className}
+      style={fillColor ? { color: fillColor } : undefined}
     >
       <title>Obsidian</title>
-      <path d="M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z" />
+      <path
+        d="M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z"
+        fill={fillColor || "currentColor"}
+      />
     </svg>
   );
 }

@@ -35,7 +35,14 @@ export default async function Home() {
     needsAttention: 0,
   };
 
-  type ConfigProject = { id: string; boardDir: string; repo: string | null; description: string | null; agent: string };
+  type ConfigProject = {
+    id: string;
+    boardDir: string;
+    repo: string | null;
+    iconUrl?: string | null;
+    description: string | null;
+    agent: string;
+  };
   let configProjects: ConfigProject[] = [];
 
   try {
@@ -48,6 +55,7 @@ export default async function Home() {
       return {
         id,
         repo: (p["repo"] as string | undefined) ?? null,
+        iconUrl: (p["iconUrl"] as string | undefined) ?? null,
         boardDir: (p["boardDir"] as string | undefined) ?? id,
         description: (p["description"] as string | undefined) ?? null,
         agent: (p["agent"] as string | undefined) ?? "claude-code",

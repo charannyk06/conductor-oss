@@ -57,6 +57,7 @@ export async function GET() {
       return {
         id,
         repo: (project as { repo?: string }).repo ?? null,
+        iconUrl: (project as { iconUrl?: string }).iconUrl ?? null,
         boardDir,
         boardFile: resolveBoardFile(
           workspacePath,
