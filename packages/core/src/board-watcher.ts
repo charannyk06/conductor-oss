@@ -1656,7 +1656,36 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
 // ---------------------------------------------------------------------------
 
 /** Find all CONDUCTOR.md boards in the workspace. */
-export function discoverBoards(workspacePath: string): string[] {
+export function discoverBoards(
+  workspacePath: string,
+  boardPaths?: readonly string[],
+): string[] {
+  const boards = new Set<string>();
+
+  if (!boardPaths || boardPaths.length === 0) {
+    const legacyBoards = discoverBoardsLegacy(workspacePath);
+    for (const board of legacyBoards) {
+      boards.add(board);
+    }
+    return [...boards];
+  }
+
+  for (const boardPatternRaw of boardPaths) {
+    const boardPattern = boardPatternRaw.trim();
+    if (!boardPattern) continue;
+
+    const resolvedPattern = resolveBoardPattern(boardPattern);
+    const matches = resolveBoardPatternToFiles(resolvedPattern, workspacePath, isAbsolutePath(resolvedPattern));
+    for (const match of matches) {
+      boards.add(match);
+    }
+  }
+
+  return [...boards];
+}
+
+/** Legacy behavior: discover workspace CONDUCTOR.md + projects/*/CONDUCTOR.md. */
+function discoverBoardsLegacy(workspacePath: string): string[] {
   const boards: string[] = [];
 
   // Workspace-level board
@@ -1679,6 +1708,156 @@ export function discoverBoards(workspacePath: string): string[] {
   }
 
   return boards;
+}
+
+/** Expand ~ to home directory. */
+function expandHome(filepath: string): string {
+  if (!filepath.startsWith("~/")) {
+    return filepath;
+  }
+
+  const home = process.env["HOME"] ?? process.env["USERPROFILE"];
+  if (!home) {
+    return filepath;
+  }
+
+  return join(home, filepath.slice(2));
+}
+
+/** Convert a workspace-relative or explicit board path into a normalized pattern path. */
+function resolveBoardPattern(boardPattern: string): string {
+  const expanded = expandHome(boardPattern);
+  if (isAbsolutePath(expanded)) {
+    return expanded;
+  }
+
+  return expanded;
+}
+
+function isAbsolutePath(pathname: string): boolean {
+  return (
+    pathname.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(pathname)
+  );
+}
+
+function isGlobPattern(pathname: string): boolean {
+  return pathname.includes("*") || pathname.includes("?") || pathname.includes("[");
+}
+
+function segmentToRegex(segment: string): RegExp {
+  if (!segment.includes("*") && !segment.includes("?") && !segment.includes("[")) {
+    return new RegExp(`^${segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+  }
+
+  const escaped = segment
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, "[^/\\\\]*")
+    .replace(/\?/g, "[^/\\\\]");
+  return new RegExp(`^${escaped}$`);
+}
+
+function walkGlob(
+  currentDir: string,
+  segments: readonly string[],
+  index: number,
+  hits: Set<string>,
+): void {
+  if (index >= segments.length) {
+    if (existsSync(currentDir)) {
+      hits.add(currentDir);
+    }
+    return;
+  }
+
+  const segment = segments[index];
+  if (segment === "**") {
+    walkGlob(currentDir, segments, index + 1, hits);
+
+    let entries: { name: string; isDirectory: boolean }[] = [];
+    try {
+      entries = readdirSync(currentDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({ name: entry.name, isDirectory: true }));
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      walkGlob(join(currentDir, entry.name), segments, index, hits);
+    }
+    return;
+  }
+
+  let dirEntries: { name: string; isDirectory: boolean; isFile: boolean }[] = [];
+  try {
+    dirEntries = readdirSync(currentDir, { withFileTypes: true })
+      .map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory(), isFile: entry.isFile() }));
+  } catch {
+    return;
+  }
+
+  const matcher = segmentToRegex(segment);
+  const isFinalSegment = index === segments.length - 1;
+
+  for (const entry of dirEntries) {
+    if (!matcher.test(entry.name)) continue;
+    const candidate = join(currentDir, entry.name);
+
+    if (isFinalSegment) {
+      if (!entry.isDirectory) {
+        hits.add(candidate);
+      }
+      continue;
+    }
+
+    if (entry.isDirectory) {
+      walkGlob(candidate, segments, index + 1, hits);
+    }
+  }
+}
+
+function resolveBoardPatternToFiles(
+  patternPath: string,
+  workspacePath: string,
+  isAbsolute = false,
+): string[] {
+  const absolutePattern = isAbsolute
+    ? patternPath
+    : join(workspacePath, patternPath);
+
+  if (!isGlobPattern(absolutePattern)) {
+    if (existsSync(absolutePattern) && statSync(absolutePattern).isFile()) {
+      return [absolutePattern];
+    }
+    return [];
+  }
+
+  const parts = isAbsolute
+    ? splitAbsolutePattern(absolutePattern).parts
+    : patternPath.replace(/\\/g, "/").split("/").filter(Boolean);
+  const rootDir = isAbsolute ? splitAbsolutePattern(absolutePattern).root : workspacePath;
+
+  if (!existsSync(rootDir) || !statSync(rootDir).isDirectory()) {
+    return [];
+  }
+
+  const hits = new Set<string>();
+  walkGlob(rootDir, parts, 0, hits);
+
+  return [...hits];
+}
+
+function splitAbsolutePattern(patternPath: string): { root: string; parts: string[] } {
+  if (/^[A-Za-z]:\//.test(patternPath)) {
+    return { root: patternPath.slice(0, 3), parts: patternPath.slice(3).split("/").filter(Boolean) };
+  }
+
+  if (patternPath.startsWith("/")) {
+    return { root: "/", parts: patternPath.slice(1).split("/").filter(Boolean) };
+  }
+
+  return { root: "", parts: patternPath.split("/").filter(Boolean) };
 }
 
 /** Build the board-to-project mapping for a config. */
