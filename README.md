@@ -19,33 +19,6 @@ Write tasks in a kanban board — Conductor dispatches agents, manages git workt
 
 </div>
 
-## Visual Dashboard Guide (Puppeteer capture)
-
-These are full end-to-end dashboard screenshots captured from a running `http://localhost:4747` dashboard using `pnpm ui:screenshots`.
-
-Update them at any time:
-
-Option 1: via environment variable
-
-```bash
-UI_BASE_URL=http://localhost:4747 pnpm ui:screenshots
-``` 
-
-Option 2: via CLI flag
-
-```bash
-pnpm ui:screenshots -- --base-url=http://localhost:4747
-```
-
-- [Dashboard overview + lane board](docs/screenshots/01-dashboard-overview.png)
-- [Chat queue + quick actions](docs/screenshots/02-dashboard-chat.png)
-- [Review queue + diff + CI states](docs/screenshots/03-dashboard-review.png)
-- [Agents tab + installed/discovered status](docs/screenshots/04-dashboard-agents.png)
-- [Launch flow](docs/screenshots/05-launch-session.png)
-- [Command palette + cleanup flow](docs/screenshots/06-command-palette.png)
-
-To get complete visual parity after each UI change, capture screenshots immediately after restarting or redeploying the dashboard on `4747`.
-
 ## Repository Links
 
 - GitHub Repository: https://github.com/charannyk06/conductor-oss
