@@ -130,11 +130,15 @@ export function resolveColumnsFromBoard(
 }
 
 function isChecklistLine(line: string): { checked: boolean; text: string } | null {
-  const match = line.match(/^\s*(?:>\s*)?-\s\[([ xX])\]\s+(.+)$/);
+  const match = line.match(/^\s*(?:>\s*)?-\s\[([ xX])\]\s+/);
   if (!match) return null;
+
+  const text = line.slice(match[0].length).trim();
+  if (!text) return null;
+
   return {
     checked: (match[1] ?? " ").toLowerCase() === "x",
-    text: (match[2] ?? "").trim(),
+    text,
   };
 }
 
