@@ -106,6 +106,7 @@ const ConductorConfigSchema = z.object({
   port: z.number().default(4747),
   terminalPort: z.number().optional(),
   dashboardUrl: z.string().optional(),
+  boards: z.array(z.string()).optional(),
   readyThresholdMs: z.number().nonnegative().default(300_000),
   maxSessionsPerProject: z.number().positive().default(5),
   defaults: DefaultPluginsSchema.default({}),
@@ -137,6 +138,9 @@ function expandHome(filepath: string): string {
 function expandPaths(config: OrchestratorConfig): OrchestratorConfig {
   for (const project of Object.values(config.projects)) {
     project.path = expandHome(project.path);
+  }
+  if (config.boards) {
+    config.boards = config.boards.map((boardPath) => expandHome(boardPath));
   }
   return config;
 }

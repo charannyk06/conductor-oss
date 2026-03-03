@@ -414,6 +414,7 @@ export interface OrchestratorConfig {
   port?: number;
   terminalPort?: number;
   dashboardUrl?: string;
+  boards?: string[];
   readyThresholdMs: number;
   maxSessionsPerProject: number;
   defaults: DefaultPlugins;

@@ -29,7 +29,7 @@ export function registerWatch(program: Command): void {
         const core = await import("@conductor-oss/core");
 
         const spinner = ora("Discovering boards").start();
-        const boards = core.discoverBoards(opts.workspace, config);
+        const boards = core.discoverBoards(opts.workspace, config.boards);
 
         if (boards.length === 0) {
           spinner.fail("No CONDUCTOR.md boards found");

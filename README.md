@@ -235,6 +235,12 @@ Or just drop raw text in **Inbox** — Conductor auto-formats it.
 
 ```yaml
 port: 4747
+boards:
+  - CONDUCTOR.md
+  # glob (workspace-relative)
+  - projects/*/CONDUCTOR.md
+  # absolute or relative custom boards
+  - /path/to/extra/boards/*.md
 
 projects:
   my-app:
