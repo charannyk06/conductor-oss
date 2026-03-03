@@ -340,7 +340,7 @@ export function createWebhookServer(
         sendJson(res, 404, { ok: false, error: "Not found" });
       } catch (err) {
         console.error("[webhook] Unhandled error:", err);
-        sendJson(res, 500, { ok: false, error: String(err) });
+        sendJson(res, 500, { ok: false, error: "Internal server error" });
       }
     },
   );
