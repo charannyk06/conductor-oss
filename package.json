@@ -15,10 +15,12 @@
     "dev": "pnpm --filter @conductor-oss/web dev",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm --filter @conductor-oss/core test",
-    "clean": "pnpm -r clean"
+    "clean": "pnpm -r clean",
+    "ui:screenshots": "node scripts/capture-dashboard-screenshots.mjs"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
+    "puppeteer": "^24.37.5",
     "typescript": "^5.9.3"
   },
   "homepage": "https://github.com/charannyk06/conductor-oss",

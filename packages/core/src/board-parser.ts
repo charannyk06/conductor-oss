@@ -101,7 +101,7 @@ export function getSectionByHeading(content: string, heading: string): BoardSect
   return null;
 }
 
-export function getSectionsByAliases(content: string, aliases: string[]): BoardSection[] {
+export function getSectionsByAliases(content: string, aliases: readonly string[]): BoardSection[] {
   const normalized = new Set(aliases.map((alias) => normalizeHeading(alias)));
   return parseBoardSections(content).filter((section) => normalized.has(normalizeHeading(section.heading)));
 }

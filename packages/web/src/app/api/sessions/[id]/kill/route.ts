@@ -1,38 +1,38 @@
-import { type NextRequest, NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 
-/** POST /api/sessions/:id/kill -- Kill a running session. */
+export const dynamic = "force-dynamic";
+
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
+  context: { params: { id: string } },
 ) {
   const denied = await guardApiAccess();
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;
 
-  const { id } = await params;
-
-  if (!id || id.trim().length === 0) {
-    return NextResponse.json({ error: "Session ID is required" }, { status: 400 });
-  }
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
-    return NextResponse.json({ error: "Invalid session ID" }, { status: 400 });
+  const sessionId = decodeURIComponent(context.params.id ?? "").trim();
+  if (!sessionId) {
+    return NextResponse.json({ error: "Session id is required" }, { status: 400 });
   }
 
   try {
     const { sessionManager } = await getServices();
-    await sessionManager.kill(id);
-    return NextResponse.json({ ok: true, sessionId: id });
+    await sessionManager.kill(sessionId);
+    return NextResponse.json({ ok: true });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Failed to kill session";
-    const lower = msg.toLowerCase();
-    const isNotFoundError =
-      lower.includes("not found") ||
-      lower.includes("enoent") ||
-      lower.includes("no such file or directory");
-    const status = isNotFoundError ? 404 : 500;
-    return NextResponse.json({ error: msg }, { status });
+    if (
+      err instanceof Error &&
+      err.message.toLowerCase().includes("not found")
+    ) {
+      return NextResponse.json({ error: err instanceof Error ? err.message : "Session not found" }, { status: 404 });
+    }
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to kill session" },
+      { status: 500 },
+    );
   }
 }

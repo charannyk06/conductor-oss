@@ -23,9 +23,11 @@ export function registerStart(program: Command): void {
     .option("--no-watcher", "Skip starting the board watcher")
     .option("-p, --port <port>", "Dashboard port override")
     .option("-w, --workspace <path>", "Obsidian workspace path")
-    .action(async (opts: { dashboard?: boolean; watcher?: boolean; port?: string; workspace?: string }) => {
+      .action(async (opts: { dashboard?: boolean; watcher?: boolean; port?: string; workspace?: string }) => {
       try {
         const config = await loadConfig();
+        const { sessionManager, registry } = await createServices(config);
+        const supportedAgents = registry.list("agent").map((agent) => agent.name);
 
         // Mutable ref — set after boardWatcher is created, used by lifecycle callback
         let boardWatcherRef: { updateNow(): void } | null = null;
@@ -68,7 +70,6 @@ export function registerStart(program: Command): void {
         if (typeof core.createLifecycleManager !== "function") {
           spinner.warn("Lifecycle manager not yet implemented in @conductor-oss/core");
         } else {
-          const { sessionManager } = await createServices(config);
           const lifecycle = core.createLifecycleManager({
             config,
             sessionManager,
@@ -91,19 +92,17 @@ export function registerStart(program: Command): void {
         // ---- Start board watcher ----
         if (opts.watcher !== false) {
           const watchSpinner = ora("Starting board watcher").start();
-          try {
+              try {
             const boardPatternsOrConfig = config.boards?.length ? config.boards : config;
             const boards = core.discoverBoards(workspacePath, boardPatternsOrConfig);
             if (boards.length === 0) {
               watchSpinner.warn("No CONDUCTOR.md boards found");
             } else {
-              // Need sessionManager for the watcher
-              const { sessionManager: sm } = await createServices(config);
-
               const boardProjectMap = core.buildBoardProjectMap(boards, config);
               const boardWatcher = core.createBoardWatcher({
                 config,
-                sessionManager: sm,
+                sessionManager,
+                agentNames: supportedAgents,
                 boardPaths: boards,
                 boardProjectMap,
                 pollIntervalMs: 5000,

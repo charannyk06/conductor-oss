@@ -58,12 +58,7 @@ export async function GET(request: Request): Promise<Response> {
         lastActivityAt: s.lastActivityAt,
         metadata: s.metadata,
         summary: s.summary,
-        pr: s.pr ? {
-          ciStatus: s.pr.ciStatus,
-          reviewDecision: s.pr.reviewDecision,
-          state: s.pr.state,
-          mergeable: s.pr.mergeability.mergeable,
-        } : null,
+        pr: s.pr,
       })),
     };
     return `data: ${JSON.stringify(event)}\n\n`;

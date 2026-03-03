@@ -115,13 +115,24 @@ export function createMcpServer(): McpServer {
     {
       task: z.string().describe("The task prompt or description for the agent"),
       project: z.string().optional().describe("Project ID from conductor config"),
-      agent: z
-        .enum(["claude-code", "codex", "gemini"])
-        .optional()
-        .describe("Agent to use (claude-code | codex | gemini)"),
+      agent: z.string().optional().describe("Agent to use"),
+      model: z.string().optional().describe("Model override for this session"),
+      profile: z.string().optional().describe("Named agent profile"),
+      branch: z.string().optional().describe("Target branch"),
+      baseBranch: z.string().optional().describe("Optional base branch"),
+      prompt: z.string().optional().describe("Prompt override"),
       priority: z.string().optional().describe("Priority hint (informational, not enforced)"),
     },
-    async ({ task, project, agent }) => {
+    async ({
+      task,
+      project,
+      agent,
+      model,
+      profile,
+      branch,
+      baseBranch,
+      prompt,
+    }) => {
       try {
         const { config, sessionManager } = await getServices();
 
@@ -149,8 +160,12 @@ export function createMcpServer(): McpServer {
 
         const session = await sessionManager.spawn({
           projectId,
-          prompt: task,
+          prompt: prompt ?? task,
           agent,
+          model,
+          profile,
+          branch,
+          baseBranch,
         });
 
         return {

@@ -7,6 +7,46 @@ import { getAttentionLevel } from "@/lib/types";
 import { TerminalView } from "@/components/TerminalView";
 import { useTheme } from "@/components/ThemeProvider";
 
+type DiffLineKind = "meta" | "hunk" | "context" | "add" | "remove" | "info";
+
+interface DiffLine {
+  kind: DiffLineKind;
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+}
+
+interface DiffFile {
+  path: string;
+  status: "modified" | "added" | "deleted" | "renamed" | "copy" | "binary" | "unknown";
+  additions: number;
+  deletions: number;
+  lines: DiffLine[];
+}
+
+interface DiffPayload {
+  hasDiff: boolean;
+  generatedAt: string;
+  source: "working-tree" | "not-found";
+  truncated: boolean;
+  files: DiffFile[];
+  untracked: string[];
+  error?: string;
+}
+
+interface DiffUIState {
+  files: DiffFile[];
+  untracked: string[];
+  loading: boolean;
+  error: string | null;
+  hasDiff: boolean;
+  generatedAt: string;
+  selectedFilePath: string | null;
+  search: string;
+  wrapLines: boolean;
+  activePanel: "overview" | "diff";
+}
+
 export default function SessionDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -18,10 +58,23 @@ export default function SessionDetailPage() {
   const [messageInput, setMessageInput] = useState("");
   const [sending, setSending] = useState(false);
   const [sentFeedback, setSentFeedback] = useState<string | null>(null);
+  const [reviewDraft, setReviewDraft] = useState("");
+  const [reviewSending, setReviewSending] = useState(false);
   const [killInProgress, setKillInProgress] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [metaSheetOpen, setMetaSheetOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [diffState, setDiffState] = useState<DiffUIState>({
+    files: [],
+    untracked: [],
+    loading: true,
+    error: null,
+    hasDiff: false,
+    generatedAt: "",
+    selectedFilePath: null,
+    search: "",
+    wrapLines: false,
+    activePanel: "overview",
+  });
 
   const fetchSession = useCallback(async () => {
     try {
@@ -36,11 +89,59 @@ export default function SessionDetailPage() {
     }
   }, [sessionId]);
 
+  const setDiffError = (error: string | null) =>
+    setDiffState((prev) => ({ ...prev, error, loading: false, hasDiff: false }));
+
+  const fetchDiff = useCallback(async () => {
+    setDiffState((prev) => ({ ...prev, loading: true, error: null }));
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/diff`);
+      if (!res.ok) {
+        const msg = `Unable to load diff (${res.status})`;
+        setDiffError(msg);
+        return;
+      }
+
+      const payload = (await res.json()) as DiffPayload;
+      if (payload.error) {
+        setDiffError(payload.error);
+        return;
+      }
+
+      setDiffState((prev) => {
+        const nextSelected =
+          prev.selectedFilePath && payload.files.some((file) => file.path === prev.selectedFilePath)
+            ? prev.selectedFilePath
+            : payload.files[0]?.path ?? null;
+
+        return {
+          files: payload.files,
+          untracked: payload.untracked,
+          hasDiff: payload.hasDiff,
+          loading: false,
+          error: null,
+          generatedAt: payload.generatedAt,
+          selectedFilePath: nextSelected,
+          search: prev.search,
+          wrapLines: prev.wrapLines,
+          activePanel: prev.activePanel,
+        };
+      });
+    } catch {
+      setDiffError("Failed to load diff");
+    }
+  }, [sessionId]);
+
   useEffect(() => {
     void fetchSession();
+    void fetchDiff();
     const interval = setInterval(() => void fetchSession(), 3000);
-    return () => clearInterval(interval);
-  }, [fetchSession]);
+    const diffInterval = setInterval(() => void fetchDiff(), 8000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(diffInterval);
+    };
+  }, [fetchSession, fetchDiff]);
 
   const handleSend = async () => {
     const msg = messageInput.trim();
@@ -59,6 +160,34 @@ export default function SessionDetailPage() {
       // ignore
     }
     setTimeout(() => setSending(false), 500);
+  };
+
+  const handleSendReview = async () => {
+    const draft = reviewDraft.trim();
+    if (!draft || !session) return;
+    setReviewSending(true);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: draft,
+        }),
+      });
+      if (!res.ok) {
+        setSentFeedback("Failed to send review notes");
+        setTimeout(() => setSentFeedback(null), 2500);
+        return;
+      }
+      setReviewDraft("");
+      setSentFeedback("Sent review notes");
+      setTimeout(() => setSentFeedback(null), 2500);
+    } catch {
+      setSentFeedback("Failed to send review notes");
+      setTimeout(() => setSentFeedback(null), 2500);
+    } finally {
+      setReviewSending(false);
+    }
   };
 
   const handleSpecialKey = async (key: string) => {
@@ -136,6 +265,11 @@ export default function SessionDetailPage() {
 
   const attentionLevel = session ? getAttentionLevel(session) : "working";
   const meta = session?.metadata ?? {};
+  const diffSearch = diffState.search.trim().toLowerCase();
+  const diffFiles = diffState.files.filter((file) => file.path.toLowerCase().includes(diffSearch));
+  const activeDiffFile = diffState.selectedFilePath
+    ? diffFiles.find((file) => file.path === diffState.selectedFilePath) ?? diffFiles[0] ?? null
+    : diffFiles[0] ?? null;
 
   // Parse cost from metadata
   interface CostInfo {
@@ -158,22 +292,22 @@ export default function SessionDetailPage() {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-[var(--color-bg-base)]">
       {/* Header bar */}
-      <header className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-3 py-2.5 min-w-0">
+      <header className="flex items-center gap-3 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-2.5">
         <button
           onClick={() => router.push("/")}
-          className="shrink-0 rounded-md p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"
+          className="rounded-md p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)] transition-colors"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
             <path d="M7.78 12.53a.75.75 0 01-1.06 0L2.47 8.28a.75.75 0 010-1.06l4.25-4.25a.75.75 0 011.06 1.06L4.81 7h7.44a.75.75 0 010 1.5H4.81l2.97 2.97a.75.75 0 010 1.06z" />
           </svg>
         </button>
 
-        <span className="font-mono text-[13px] font-semibold text-[var(--color-text-primary)] truncate min-w-0">
+        <span className="font-mono text-[13px] font-semibold text-[var(--color-text-primary)]">
           {sessionId}
         </span>
 
         {session?.metadata?.agent && (
-          <span className="hidden sm:inline shrink-0 rounded bg-[var(--color-accent-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
+          <span className="rounded bg-[var(--color-accent-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
             {session.metadata.agent}
           </span>
         )}
@@ -185,7 +319,7 @@ export default function SessionDetailPage() {
             href={session.pr.url}
             target="_blank"
             rel="noopener noreferrer"
-            className="hidden sm:block shrink-0 text-[11px] text-[var(--color-accent)] hover:underline"
+            className="text-[11px] text-[var(--color-accent)] hover:underline"
           >
             PR #{session.pr.number}
           </a>
@@ -193,21 +327,9 @@ export default function SessionDetailPage() {
 
         <div className="flex-1" />
 
-        {session && (
-          <button
-            onClick={() => setMetaSheetOpen((v) => !v)}
-            className="shrink-0 rounded-md border border-[var(--color-border-default)] p-1.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)] lg:hidden"
-            title="Session details"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M0 1.75A.75.75 0 01.75 1h14.5a.75.75 0 010 1.5H.75A.75.75 0 010 1.75zm0 5A.75.75 0 01.75 6h14.5a.75.75 0 010 1.5H.75A.75.75 0 010 6.75zm0 5a.75.75 0 01.75-.75h7a.75.75 0 010 1.5h-7a.75.75 0 01-.75-.75z"/>
-            </svg>
-          </button>
-        )}
-
         <button
           onClick={toggleTheme}
-          className="shrink-0 rounded-md border border-[var(--color-border-default)] p-1.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)]"
+          className="rounded-md border border-[var(--color-border-default)] p-1.5 text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)]"
           title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
         >
           {theme === "dark" ? (
@@ -224,7 +346,7 @@ export default function SessionDetailPage() {
         <button
           onClick={() => void handleKill()}
           disabled={killInProgress}
-          className={`shrink-0 rounded-md border border-[rgba(239,68,68,0.3)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)] ${
+          className={`rounded-md border border-[rgba(239,68,68,0.3)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)] ${
             killInProgress ? "cursor-wait opacity-50" : ""
           }`}
           title={actionError ?? `${action} this session`}
@@ -239,39 +361,6 @@ export default function SessionDetailPage() {
         </div>
       )}
 
-      {/* Mobile metadata bottom sheet */}
-      {session && metaSheetOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-40 bg-black/40 lg:hidden"
-            onClick={() => setMetaSheetOpen(false)}
-          />
-          <div className="fixed inset-x-0 bottom-0 z-50 max-h-[75dvh] overflow-y-auto rounded-t-2xl border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] lg:hidden">
-            <div className="sticky top-0 flex items-center justify-between border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-3">
-              <span className="text-[13px] font-semibold text-[var(--color-text-primary)]">Session Details</span>
-              <button
-                onClick={() => setMetaSheetOpen(false)}
-                className="rounded-md p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)]"
-              >
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 01-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z" />
-                </svg>
-              </button>
-            </div>
-            <MetaSidebarContent
-              session={session}
-              attentionLevel={attentionLevel}
-              meta={meta}
-              cost={cost}
-              createdDate={createdDate}
-              lastActivityDate={lastActivityDate}
-              durationMs={durationMs}
-              isTerminal={isTerminal}
-            />
-          </div>
-        </>
-      )}
-
       {/* Main content: Terminal + Metadata sidebar */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Terminal area */}
@@ -279,20 +368,390 @@ export default function SessionDetailPage() {
           <TerminalView sessionId={sessionId} />
         </div>
 
-        {/* Metadata sidebar — desktop only */}
+        {/* Metadata sidebar */}
         {session && (
-          <aside className="hidden w-72 shrink-0 border-l border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] overflow-y-auto lg:block">
-            <MetaSidebarContent
-              session={session}
-              attentionLevel={attentionLevel}
-              meta={meta}
-              cost={cost}
-              createdDate={createdDate}
-              lastActivityDate={lastActivityDate}
-              durationMs={durationMs}
-              isTerminal={isTerminal}
-            />
-          </aside>
+        <aside className="w-full border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] overflow-hidden flex flex-col lg:w-72 lg:shrink-0 lg:border-t-0 lg:border-l">
+          <div className="flex items-center justify-between border-b border-[var(--color-border-subtle)] px-4 py-2">
+            <div className="flex items-center gap-1 rounded-md bg-[var(--color-bg-base)] p-0.5">
+              <button
+                onClick={() =>
+                  setDiffState((prev) => ({ ...prev, activePanel: "overview" }))
+                }
+                className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${diffState.activePanel === "overview" ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]" : "text-[var(--color-text-muted)]"}`}
+              >
+                Overview
+              </button>
+              <button
+                onClick={() =>
+                  setDiffState((prev) => ({ ...prev, activePanel: "diff" }))
+                }
+                className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${diffState.activePanel === "diff" ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]" : "text-[var(--color-text-muted)]"}`}
+              >
+                Diff
+              </button>
+            </div>
+            <button
+              onClick={() => void fetchDiff()}
+              disabled={diffState.loading}
+              className="rounded-md border border-[var(--color-border-default)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] disabled:opacity-50"
+            >
+              {diffState.loading ? "Refreshing..." : "Refresh diff"}
+            </button>
+          </div>
+
+          <div className="px-4 py-2 text-[10px] text-[var(--color-text-muted)]">
+            {diffState.loading && "Pulling latest code changes..."}
+            {diffState.generatedAt && !diffState.loading ? `Updated ${formatTimestamp(new Date(diffState.generatedAt))}` : ""}
+          </div>
+
+          <div className="px-4 py-2 pb-4 overflow-auto">
+            {diffState.activePanel === "overview" ? (
+              <div className="space-y-5">
+                {/* Summary */}
+                {session.summary && (
+                  <MetaSection label="Summary">
+                    <p className="text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
+                      {session.summary}
+                    </p>
+                  </MetaSection>
+                )}
+
+                {/* Prompt */}
+                {meta["prompt"] && (
+                  <MetaSection label="Prompt">
+                    <p className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--color-text-secondary)] font-mono">
+                      {meta["prompt"]}
+                    </p>
+                  </MetaSection>
+                )}
+
+                {/* Status */}
+                <MetaSection label="Status">
+                  <div className="space-y-2">
+                    <MetaRow label="Status" value={session.status.replace(/_/g, " ")} />
+                    <MetaRow label="Activity" value={session.activity ?? "-"} />
+                    <MetaRow label="Attention" value={attentionLevel} />
+                  </div>
+                </MetaSection>
+
+                {/* Agent */}
+                <MetaSection label="Agent">
+                  <MetaRow label="Type" value={meta["agent"] ?? "-"} />
+                  {meta["model"] && <MetaRow label="Model" value={meta["model"]} />}
+                  {meta["permissions"] && <MetaRow label="Permissions" value={meta["permissions"]} />}
+                </MetaSection>
+
+                {/* Git */}
+                {(session.branch || meta["worktree"]) && (
+                  <MetaSection label="Git">
+                    {session.branch && (
+                      <div className="text-[11px] font-mono text-[var(--color-text-secondary)] break-all">
+                        {session.branch}
+                        {session.pr ? ` ← ${session.pr.baseBranch || "main"}` : ""}
+                      </div>
+                    )}
+                    {meta["baseBranch"] && (
+                      <div className="text-[11px] font-mono text-[var(--color-text-muted)] mt-1">
+                        Base: {meta["baseBranch"]}
+                      </div>
+                    )}
+                    {meta["worktree"] && (
+                      <div className="text-[11px] font-mono text-[var(--color-text-muted)] truncate mt-1">
+                        {meta["worktree"]}
+                      </div>
+                    )}
+                  </MetaSection>
+                )}
+
+                {/* PR */}
+                {session.pr && (
+                  <MetaSection label="Pull Request">
+                    <a
+                      href={session.pr.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[12px] font-medium text-[var(--color-accent)] hover:underline block mb-2"
+                    >
+                      #{session.pr.number} — {session.pr.title}
+                    </a>
+                    <div className="space-y-1.5">
+                      <MetaRow label="State" value={session.pr.state} />
+                      <ColoredMetaRow
+                        label="CI"
+                        value={session.pr.ciStatus}
+                        status={session.pr.ciStatus === "passing" ? "green" : session.pr.ciStatus === "failing" ? "red" : "amber"}
+                      />
+                      <ColoredMetaRow
+                        label="Review"
+                        value={session.pr.reviewDecision.replace(/_/g, " ")}
+                        status={session.pr.reviewDecision === "approved" ? "green" : session.pr.reviewDecision === "changes_requested" ? "red" : "amber"}
+                      />
+                      <MetaRow
+                        label="Mergeable"
+                        value={session.pr.mergeability.mergeable ? "Yes" : "No"}
+                      />
+                    </div>
+
+                    {/* Links */}
+                    <div className="mt-2 space-y-1">
+                      {session.pr.previewUrl && (
+                        <a
+                          href={session.pr.previewUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 text-[11px] text-[var(--color-accent)] hover:underline"
+                        >
+                          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                          Preview Deploy
+                        </a>
+                      )}
+                      <a
+                        href={`${session.pr.url}/checks`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] hover:underline hover:text-[var(--color-text-primary)]"
+                      >
+                        View CI Checks ↗
+                      </a>
+                      <a
+                        href={`${session.pr.url}#pullrequestreview`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] hover:underline hover:text-[var(--color-text-primary)]"
+                      >
+                        View Reviews ↗
+                      </a>
+                    </div>
+
+                    {session.pr.mergeability.blockers.length > 0 && (
+                      <div className="mt-2 rounded-md bg-[rgba(239,68,68,0.06)] border border-[rgba(239,68,68,0.15)] p-2">
+                        <div className="text-[10px] font-semibold text-[var(--color-status-error)] mb-1">Blockers</div>
+                        {session.pr.mergeability.blockers.map((b, i) => (
+                          <div key={i} className="text-[11px] text-[var(--color-text-secondary)]">
+                            {b}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </MetaSection>
+                )}
+
+                {/* Cost */}
+                {cost && (
+                  <MetaSection label="Cost">
+                    <div className="space-y-1.5">
+                      {(cost.estimatedCostUsd ?? cost.totalUSD) != null && (
+                        <MetaRow
+                          label="Total"
+                          value={`$${((cost.estimatedCostUsd ?? cost.totalUSD) as number).toFixed(4)}`}
+                        />
+                      )}
+                      {cost.inputTokens != null && (
+                        <MetaRow label="Input" value={cost.inputTokens.toLocaleString()} />
+                      )}
+                      {cost.outputTokens != null && (
+                        <MetaRow label="Output" value={cost.outputTokens.toLocaleString()} />
+                      )}
+                    </div>
+                  </MetaSection>
+                )}
+
+                {/* Timing */}
+                <MetaSection label="Timing">
+                  <div className="space-y-1.5">
+                    <MetaRow label="Created" value={formatTimestamp(createdDate)} />
+                    <MetaRow label="Last Active" value={formatTimestamp(lastActivityDate)} />
+                    <MetaRow label="Duration" value={formatDuration(durationMs)} />
+                  </div>
+                </MetaSection>
+
+                {/* Timeline */}
+                <MetaSection label="Timeline">
+                  <div className="relative pl-4 border-l border-[var(--color-border-default)]">
+                    <TimelineEvent
+                      label="Created"
+                      time={formatTimestamp(createdDate)}
+                      color="var(--color-accent)"
+                    />
+                    {session.pr && (
+                      <TimelineEvent
+                        label="PR opened"
+                        time={`#${session.pr.number}`}
+                        color="var(--color-accent-violet)"
+                      />
+                    )}
+                    <TimelineEvent
+                      label={session.status.replace(/_/g, " ")}
+                      time={formatTimestamp(lastActivityDate)}
+                      color={
+                        isTerminal
+                          ? "var(--color-text-muted)"
+                          : "var(--color-status-working)"
+                      }
+                      active={!isTerminal}
+                    />
+                  </div>
+                </MetaSection>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="relative">
+                  <input
+                    value={diffState.search}
+                    onChange={(e) =>
+                      setDiffState((prev) => ({
+                        ...prev,
+                        search: e.target.value,
+                        selectedFilePath: prev.selectedFilePath && diffFiles.find((file) => file.path === prev.selectedFilePath)
+                          ? prev.selectedFilePath
+                          : diffFiles[0]?.path ?? null,
+                      }))
+                    }
+                    placeholder="Filter files..."
+                    className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-1.5 pr-16 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                  />
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-[var(--color-text-muted)]">
+                    {diffFiles.length} files
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() =>
+                      setDiffState((prev) => ({ ...prev, wrapLines: !prev.wrapLines }))
+                    }
+                    className="rounded-md border border-[var(--color-border-default)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                  >
+                    {diffState.wrapLines ? "No wrap" : "Wrap lines"}
+                  </button>
+                  <div className="text-[10px] text-[var(--color-text-muted)]">
+                    {diffState.hasDiff || diffState.untracked.length > 0 ? "Live diff" : "No local changes"}
+                  </div>
+                </div>
+
+                {diffState.error && (
+                  <div className="rounded-md border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.12)] px-2.5 py-1.5 text-[10px] text-[var(--color-status-error)]">
+                    {diffState.error}
+                  </div>
+                )}
+
+                <div className="grid gap-2">
+                  {diffFiles.length > 0 ? (
+                    diffFiles.map((file) => {
+                      const selected = file.path === activeDiffFile?.path;
+                      const statusColor =
+                        file.status === "added"
+                          ? "rgba(34,197,94,0.16)"
+                          : file.status === "deleted"
+                            ? "rgba(239,68,68,0.16)"
+                            : file.status === "renamed" || file.status === "copy"
+                              ? "rgba(59,130,246,0.16)"
+                              : file.status === "binary"
+                                ? "rgba(217,119,6,0.16)"
+                                : "rgba(63,63,70,0.25)";
+                      return (
+                        <button
+                          key={file.path}
+                          onClick={() =>
+                            setDiffState((prev) => ({ ...prev, selectedFilePath: file.path }))
+                          }
+                          className={`rounded-md border px-2 py-1.5 text-left transition-colors ${
+                            selected
+                              ? "border-[var(--color-accent)] bg-[rgba(59,130,246,0.12)]"
+                              : "border-[var(--color-border-subtle)] bg-[var(--color-bg-base)]"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] text-[var(--color-text-secondary)] truncate">
+                              {file.path}
+                            </div>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full" style={{ background: statusColor }}>
+                              {file.status}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+                            +{file.additions} -{file.deletions}
+                          </div>
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
+                      {diffState.hasDiff || diffState.untracked.length > 0
+                        ? "Diff computed, but no file hunks were returned."
+                        : "No changes yet"}
+                    </div>
+                  )}
+                </div>
+
+                {activeDiffFile && (
+                  <div className="overflow-hidden border border-[var(--color-border-subtle)] rounded-md">
+                    <div className="px-2 py-1.5 text-[10px] text-[var(--color-text-muted)] border-b border-[var(--color-border-subtle)] truncate">
+                      {activeDiffFile.path}
+                    </div>
+                    <div className="overflow-auto max-h-72">
+                      <div className="text-[11px] leading-5 font-mono">
+                        {activeDiffFile.lines.map((line, idx) => (
+                          <DiffLineRow
+                            key={`${activeDiffFile.path}-${idx}`}
+                            line={line}
+                            wrapLines={diffState.wrapLines}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2">
+                  <textarea
+                    value={reviewDraft}
+                    onChange={(event) => setReviewDraft(event.target.value)}
+                    placeholder="Send review notes to this agent..."
+                    className="w-full rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] min-h-[72px]"
+                    rows={3}
+                  />
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      onClick={() => void handleSendReview()}
+                      disabled={reviewSending || !reviewDraft.trim()}
+                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[10px] font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {reviewSending ? "Sending..." : "Send review notes"}
+                    </button>
+                    <button
+                      onClick={() => setDiffState((prev) => ({ ...prev, selectedFilePath: null }))}
+                      className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]"
+                    >
+                      Clear selection
+                    </button>
+                  </div>
+                </div>
+
+                {diffState.untracked.length > 0 && (
+                  <div className="rounded-md border border-[var(--color-border-subtle)] px-2 py-2">
+                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)] mb-1">
+                      Untracked files
+                    </div>
+                    <ul className="space-y-1">
+                      {diffState.untracked.map((file) => (
+                        <li key={file} className="text-[10px] text-[var(--color-text-secondary)] font-mono break-all">
+                          {file}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {diffState.truncated && (
+                  <div className="rounded-md border border-[rgba(245,158,11,0.35)] bg-[rgba(245,158,11,0.1)] px-2 py-1.5 text-[10px] text-[var(--color-accent-orange)]">
+                    Diff output truncated for display.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </aside>
         )}
       </div>
 
@@ -378,189 +837,45 @@ export default function SessionDetailPage() {
   );
 }
 
-interface MetaSidebarContentProps {
-  session: DashboardSession;
-  attentionLevel: string;
-  meta: Record<string, string>;
-  cost: { inputTokens?: number; outputTokens?: number; estimatedCostUsd?: number; totalUSD?: number } | null;
-  createdDate: Date;
-  lastActivityDate: Date;
-  durationMs: number;
-  isTerminal: boolean;
-}
+function DiffLineRow({ line, wrapLines }: { line: DiffLine; wrapLines: boolean }) {
+  const lineClassByKind: Record<DiffLineKind, string> = {
+    hunk: "text-[var(--color-text-secondary)]",
+    meta: "text-[var(--color-text-muted)]",
+    add: "bg-[rgba(34,197,94,0.12)] text-[var(--color-status-ready)]",
+    remove: "bg-[rgba(239,68,68,0.12)] text-[var(--color-status-error)]",
+    context: "text-[var(--color-text-secondary)]",
+    info: "text-[var(--color-text-muted)] italic",
+  };
 
-function MetaSidebarContent({ session, attentionLevel, meta, cost, createdDate, lastActivityDate, durationMs, isTerminal }: MetaSidebarContentProps) {
+  const prefix =
+    line.kind === "add"
+      ? "+"
+      : line.kind === "remove"
+        ? "-"
+        : line.kind === "hunk"
+          ? "@"
+          : line.kind === "context"
+            ? " "
+            : line.kind === "meta"
+              ? "•"
+              : " ";
+
   return (
-    <div className="p-4 space-y-5">
-      {/* Summary */}
-      {session.summary && (
-        <MetaSection label="Summary">
-          <p className="text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
-            {session.summary}
-          </p>
-        </MetaSection>
-      )}
-
-      {/* Status */}
-      <MetaSection label="Status">
-        <div className="space-y-2">
-          <MetaRow label="Status" value={session.status.replace(/_/g, " ")} />
-          <MetaRow label="Activity" value={session.activity ?? "-"} />
-          <MetaRow label="Attention" value={attentionLevel} />
-        </div>
-      </MetaSection>
-
-      {/* Agent */}
-      <MetaSection label="Agent">
-        <MetaRow label="Type" value={meta["agent"] ?? "-"} />
-        {meta["model"] && <MetaRow label="Model" value={meta["model"]} />}
-      </MetaSection>
-
-      {/* Git */}
-      {(session.branch || meta["worktree"]) && (
-        <MetaSection label="Git">
-          {session.branch && (
-            <div className="text-[11px] font-mono text-[var(--color-text-secondary)] break-all">
-              {session.branch}
-            </div>
-          )}
-          {meta["worktree"] && (
-            <div className="text-[11px] font-mono text-[var(--color-text-muted)] truncate mt-1">
-              {meta["worktree"]}
-            </div>
-          )}
-        </MetaSection>
-      )}
-
-      {/* PR */}
-      {session.pr && (
-        <MetaSection label="Pull Request">
-          <a
-            href={session.pr.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-[12px] font-medium text-[var(--color-accent)] hover:underline block mb-2"
-          >
-            #{session.pr.number} — {session.pr.title}
-          </a>
-          <div className="space-y-1.5">
-            <MetaRow label="State" value={session.pr.state} />
-            <ColoredMetaRow
-              label="CI"
-              value={session.pr.ciStatus}
-              status={session.pr.ciStatus === "passing" ? "green" : session.pr.ciStatus === "failing" ? "red" : "amber"}
-            />
-            <ColoredMetaRow
-              label="Review"
-              value={session.pr.reviewDecision.replace(/_/g, " ")}
-              status={session.pr.reviewDecision === "approved" ? "green" : session.pr.reviewDecision === "changes_requested" ? "red" : "amber"}
-            />
-            <MetaRow
-              label="Mergeable"
-              value={session.pr.mergeability.mergeable ? "Yes" : "No"}
-            />
-          </div>
-
-          {/* Links */}
-          <div className="mt-2 space-y-1">
-            {session.pr.previewUrl && (
-              <a
-                href={session.pr.previewUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1 text-[11px] text-[var(--color-accent)] hover:underline"
-              >
-                <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-                Preview Deploy
-              </a>
-            )}
-            <a
-              href={`${session.pr.url}/checks`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] hover:underline hover:text-[var(--color-text-primary)]"
-            >
-              View CI Checks ↗
-            </a>
-            <a
-              href={`${session.pr.url}#pullrequestreview`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] hover:underline hover:text-[var(--color-text-primary)]"
-            >
-              View Reviews ↗
-            </a>
-          </div>
-
-          {session.pr.mergeability.blockers.length > 0 && (
-            <div className="mt-2 rounded-md bg-[rgba(239,68,68,0.06)] border border-[rgba(239,68,68,0.15)] p-2">
-              <div className="text-[10px] font-semibold text-[var(--color-status-error)] mb-1">Blockers</div>
-              {session.pr.mergeability.blockers.map((b: string, i: number) => (
-                <div key={i} className="text-[11px] text-[var(--color-text-secondary)]">
-                  {b}
-                </div>
-              ))}
-            </div>
-          )}
-        </MetaSection>
-      )}
-
-      {/* Cost */}
-      {cost && (
-        <MetaSection label="Cost">
-          <div className="space-y-1.5">
-            {(cost.estimatedCostUsd ?? cost.totalUSD) != null && (
-              <MetaRow
-                label="Total"
-                value={`$${((cost.estimatedCostUsd ?? cost.totalUSD) as number).toFixed(4)}`}
-              />
-            )}
-            {cost.inputTokens != null && (
-              <MetaRow label="Input" value={cost.inputTokens.toLocaleString()} />
-            )}
-            {cost.outputTokens != null && (
-              <MetaRow label="Output" value={cost.outputTokens.toLocaleString()} />
-            )}
-          </div>
-        </MetaSection>
-      )}
-
-      {/* Timing */}
-      <MetaSection label="Timing">
-        <div className="space-y-1.5">
-          <MetaRow label="Created" value={formatTimestamp(createdDate)} />
-          <MetaRow label="Last Active" value={formatTimestamp(lastActivityDate)} />
-          <MetaRow label="Duration" value={formatDuration(durationMs)} />
-        </div>
-      </MetaSection>
-
-      {/* Timeline */}
-      <MetaSection label="Timeline">
-        <div className="relative pl-4 border-l border-[var(--color-border-default)]">
-          <TimelineEvent
-            label="Created"
-            time={formatTimestamp(createdDate)}
-            color="var(--color-accent)"
-          />
-          {session.pr && (
-            <TimelineEvent
-              label="PR opened"
-              time={`#${session.pr.number}`}
-              color="var(--color-accent-violet)"
-            />
-          )}
-          <TimelineEvent
-            label={session.status.replace(/_/g, " ")}
-            time={formatTimestamp(lastActivityDate)}
-            color={
-              isTerminal
-                ? "var(--color-text-muted)"
-                : "var(--color-status-working)"
-            }
-            active={!isTerminal}
-          />
-        </div>
-      </MetaSection>
+    <div
+      className={`flex items-start gap-2 px-2 py-0.5 text-[11px] ${lineClassByKind[line.kind]} ${
+        wrapLines ? "whitespace-pre-wrap" : "whitespace-pre"
+      }`}
+    >
+      <span className="w-12 shrink-0 text-right text-[9px] text-[var(--color-text-muted)] tabular-nums">
+        {line.oldLine ?? ""}
+      </span>
+      <span className="w-12 shrink-0 text-right text-[9px] text-[var(--color-text-muted)] tabular-nums">
+        {line.newLine ?? ""}
+      </span>
+      <span className="w-3 shrink-0 font-semibold text-[var(--color-text-primary)]">{prefix}</span>
+      <pre className="m-0 min-w-0 flex-1">
+        <span>{line.text === "" ? "\u00A0" : line.text}</span>
+      </pre>
     </div>
   );
 }
