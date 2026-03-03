@@ -16,25 +16,25 @@
   },
   "dependencies": {
     "@conductor-oss/core": "workspace:*",
-    "@conductor-oss/plugin-runtime-tmux": "workspace:*",
     "@conductor-oss/plugin-agent-claude-code": "workspace:*",
     "@conductor-oss/plugin-agent-codex": "workspace:*",
-    "@conductor-oss/plugin-workspace-worktree": "workspace:*",
-    "@conductor-oss/plugin-tracker-github": "workspace:*",
-    "@conductor-oss/plugin-scm-github": "workspace:*",
-    "@conductor-oss/plugin-notifier-discord": "workspace:*",
-    "@conductor-oss/plugin-notifier-desktop": "workspace:*",
-    "chalk": "^5.4.0",
-    "commander": "^13.0.0",
-    "ora": "^9.3.0",
     "@conductor-oss/plugin-agent-gemini": "workspace:*",
     "@conductor-oss/plugin-mcp-server": "workspace:*",
-    "@conductor-oss/plugin-webhook": "workspace:*"
+    "@conductor-oss/plugin-notifier-desktop": "workspace:*",
+    "@conductor-oss/plugin-notifier-discord": "workspace:*",
+    "@conductor-oss/plugin-runtime-tmux": "workspace:*",
+    "@conductor-oss/plugin-scm-github": "workspace:*",
+    "@conductor-oss/plugin-tracker-github": "workspace:*",
+    "@conductor-oss/plugin-webhook": "workspace:*",
+    "@conductor-oss/plugin-workspace-worktree": "workspace:*",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.3",
+    "ora": "^9.3.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
     "@types/node": "^25.3.3",
-    "tsx": "^4.19.0"
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   },
   "files": [
     "dist/",

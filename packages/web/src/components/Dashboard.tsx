@@ -1,16 +1,29 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from "react";
 import type {
   DashboardSession,
   DashboardStats,
   SSESnapshotEvent,
 } from "@/lib/types";
+import { getAttentionLevel } from "@/lib/types";
+import { TERMINAL_STATUSES } from "@conductor-oss/core/types";
 import { SessionCard } from "./SessionCard";
 import { EmptyState } from "./EmptyState";
 import { useTheme } from "./ThemeProvider";
 
-type ConfigProject = { id: string; boardDir: string; repo: string | null; description: string | null; agent: string };
+type ConfigProject = {
+  id: string;
+  boardDir: string;
+  boardFile?: string;
+  repo: string | null;
+  description: string | null;
+  agent: string;
+};
+type AttentionGroup = "respond" | "review" | "merge" | "pending" | "working" | "done";
+type StatusFilter = "all" | "active" | "terminal" | "attention";
+type SortMode = "recent" | "oldest" | "cost" | "attention";
+type ViewMode = "grid" | "lanes";
 
 interface DashboardProps {
   sessions: DashboardSession[];
@@ -26,8 +39,19 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [agentFilter, setAgentFilter] = useState<string>("all");
+  const [sortMode, setSortMode] = useState<SortMode>("recent");
+  const [attentionOnly, setAttentionOnly] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("grid");
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
   const eventSourceRef = useRef<EventSource | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const commandInputRef = useRef<HTMLInputElement | null>(null);
   const { theme, toggleTheme } = useTheme();
 
   // SSE connection for live updates
@@ -187,17 +211,111 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     const allIds = new Set([...configProjects.map((p) => p.id), ...counts.keys()]);
     return [...allIds].sort().map((id) => {
       const cfg = configProjects.find((p) => p.id === id);
-      return { id, count: counts.get(id) ?? 0, boardDir: cfg?.boardDir ?? id, repo: cfg?.repo ?? null };
+      return {
+        id,
+        count: counts.get(id) ?? 0,
+        boardDir: cfg?.boardDir ?? id,
+        boardFile: cfg?.boardFile,
+        repo: cfg?.repo ?? null,
+      };
     });
   }, [sessions, configProjects]);
 
-  // Filtered sessions
+  const agentOptions = useMemo(() => {
+    const unique = new Set<string>();
+    for (const session of sessions) {
+      const agent = session.metadata["agent"]?.trim();
+      if (agent) unique.add(agent);
+    }
+    return [...unique].sort((a, b) => a.localeCompare(b));
+  }, [sessions]);
+
+  // Filtered + sorted sessions
   const filteredSessions = useMemo(() => {
-    if (!activeProject) return sessions;
-    return sessions.filter(
-      (s) => (s.projectId || "default") === activeProject
-    );
-  }, [sessions, activeProject]);
+    let next = sessions;
+
+    if (activeProject) {
+      next = next.filter((s) => (s.projectId || "default") === activeProject);
+    }
+
+    if (statusFilter === "active") {
+      next = next.filter((s) => !TERMINAL_STATUSES.has(s.status));
+    } else if (statusFilter === "terminal") {
+      next = next.filter((s) => TERMINAL_STATUSES.has(s.status));
+    } else if (statusFilter === "attention") {
+      next = next.filter((s) => {
+        const level = getAttentionLevel(s);
+        return level === "respond" || level === "review" || level === "merge";
+      });
+    }
+
+    if (attentionOnly) {
+      next = next.filter((s) => {
+        const level = getAttentionLevel(s);
+        return level === "respond" || level === "review" || level === "merge";
+      });
+    }
+
+    if (agentFilter !== "all") {
+      next = next.filter((s) => (s.metadata["agent"] ?? "") === agentFilter);
+    }
+
+    const query = search.trim().toLowerCase();
+    if (query.length > 0) {
+      next = next.filter((s) => {
+        const haystack = [
+          s.id,
+          s.projectId,
+          s.issueId ?? "",
+          s.branch ?? "",
+          s.summary ?? "",
+          s.status,
+          s.activity ?? "",
+          s.metadata["agent"] ?? "",
+          s.pr?.title ?? "",
+          s.pr?.url ?? "",
+        ].join("\n").toLowerCase();
+        return haystack.includes(query);
+      });
+    }
+
+    const ranked = [...next];
+    ranked.sort((a, b) => {
+      if (sortMode === "oldest") {
+        return new Date(a.lastActivityAt).getTime() - new Date(b.lastActivityAt).getTime();
+      }
+      if (sortMode === "cost") {
+        return parseEstimatedCost(b) - parseEstimatedCost(a);
+      }
+      if (sortMode === "attention") {
+        return attentionRank(a) - attentionRank(b);
+      }
+      return new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime();
+    });
+
+    return ranked;
+  }, [sessions, activeProject, statusFilter, attentionOnly, agentFilter, search, sortMode]);
+
+  const sessionsByLane = useMemo(() => {
+    const grouped: Record<AttentionGroup, DashboardSession[]> = {
+      respond: [],
+      review: [],
+      merge: [],
+      pending: [],
+      working: [],
+      done: [],
+    };
+    for (const session of filteredSessions) {
+      const lane = getAttentionLevel(session) as AttentionGroup;
+      grouped[lane].push(session);
+    }
+    return grouped;
+  }, [filteredSessions]);
+
+  const cleanupCandidates = useMemo(
+    () => filteredSessions.filter((s) => TERMINAL_STATUSES.has(s.status)),
+    [filteredSessions],
+  );
 
   const handleSend = async (sessionId: string, message: string) => {
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
@@ -210,35 +328,70 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     }
   };
 
-  const handleKill = async (sessionId: string) => {
-    if (busySessionId) return;
-    if (!confirm(`Kill / clean up session ${sessionId}?`)) return;
+  const executeKill = useCallback(async (sessionId: string): Promise<{ ok: boolean; reason?: string }> => {
     setBusySessionId(sessionId);
-    setActionError(null);
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/kill`, {
         method: "POST",
       });
       if (!res.ok && res.status !== 404) {
         const detail = await res.text();
-        const reason = detail || `Request failed with ${res.status}`;
-        setActionError(`Unable to clean up session ${sessionId}: ${reason}`);
-        console.error(`Failed to kill ${sessionId}:`, detail);
-      } else {
-        setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-        setActionError(null);
+        return {
+          ok: false,
+          reason: detail || `Request failed with ${res.status}`,
+        };
       }
+
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      return { ok: true };
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Network error";
-      setActionError(`Unable to clean up session ${sessionId}: ${msg}`);
-      console.error(`Failed to kill ${sessionId}:`, err);
+      return { ok: false, reason: msg };
     } finally {
       setBusySessionId((current) => (current === sessionId ? null : current));
     }
+  }, []);
+
+  const handleKill = async (sessionId: string) => {
+    if (busySessionId || bulkBusy) return;
+    if (!confirm(`Kill / clean up session ${sessionId}?`)) return;
+    setActionError(null);
+    const result = await executeKill(sessionId);
+    if (!result.ok) {
+      const reason = result.reason ?? "Unknown error";
+      setActionError(`Unable to clean up session ${sessionId}: ${reason}`);
+      console.error(`Failed to kill ${sessionId}:`, reason);
+    }
+  };
+
+  const handleCleanupTerminal = async () => {
+    if (busySessionId || bulkBusy) return;
+    if (cleanupCandidates.length === 0) return;
+
+    const ids = [...new Set(cleanupCandidates.map((s) => s.id))];
+    const noun = ids.length === 1 ? "session" : "sessions";
+    if (!confirm(`Clean up ${ids.length} terminal ${noun} in current view?`)) return;
+
+    setActionError(null);
+    setBulkBusy(true);
+    const failures: string[] = [];
+    for (const sessionId of ids) {
+      const result = await executeKill(sessionId);
+      if (!result.ok) {
+        failures.push(`${sessionId}: ${result.reason ?? "Unknown error"}`);
+      }
+    }
+    setBulkBusy(false);
+
+    if (failures.length > 0) {
+      setActionError(`Cleanup completed with ${failures.length} failure(s). ${failures[0]}`);
+      return;
+    }
+    setActionError(null);
   };
 
   const handleRestore = async (sessionId: string) => {
-    if (busySessionId) return;
+    if (busySessionId || bulkBusy) return;
     if (busySessionId === sessionId) return;
     if (!confirm(`Restore session ${sessionId}?`)) return;
     setBusySessionId(sessionId);
@@ -261,6 +414,106 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       setBusySessionId((current) => (current === sessionId ? null : current));
     }
   };
+
+  useEffect(() => {
+    if (!commandOpen) return;
+    const id = window.setTimeout(() => {
+      commandInputRef.current?.focus();
+    }, 20);
+    return () => window.clearTimeout(id);
+  }, [commandOpen]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isTypingTarget = Boolean(
+        target &&
+          (target.closest("input, textarea, select") ||
+            target.isContentEditable),
+      );
+
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen(true);
+        setCommandQuery("");
+        return;
+      }
+
+      if (event.key === "Escape" && commandOpen) {
+        event.preventDefault();
+        setCommandOpen(false);
+        return;
+      }
+
+      if (!isTypingTarget && event.key === "/") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [commandOpen]);
+
+  type CommandAction = { id: string; label: string; hint?: string; run: () => void };
+  const commandActions: CommandAction[] = useMemo(() => {
+    return [
+      {
+        id: "toggle-theme",
+        label: `Switch to ${theme === "dark" ? "light" : "dark"} theme`,
+        hint: "Appearance",
+        run: () => toggleTheme(),
+      },
+      {
+        id: "toggle-view",
+        label: viewMode === "grid" ? "Switch to lane view" : "Switch to grid view",
+        hint: "Layout",
+        run: () => setViewMode((v) => (v === "grid" ? "lanes" : "grid")),
+      },
+      {
+        id: "refresh",
+        label: "Refresh sessions now",
+        hint: "Live data",
+        run: () => {
+          void pollSessions();
+        },
+      },
+      {
+        id: "focus-attention",
+        label: attentionOnly ? "Show all sessions" : "Focus needs attention",
+        hint: "Filtering",
+        run: () => setAttentionOnly((v) => !v),
+      },
+      {
+        id: "clear-filters",
+        label: "Clear filters",
+        hint: "Filtering",
+        run: () => {
+          setSearch("");
+          setStatusFilter("all");
+          setAgentFilter("all");
+          setAttentionOnly(false);
+          setSortMode("recent");
+        },
+      },
+      {
+        id: "cleanup",
+        label: `Cleanup terminal sessions (${cleanupCandidates.length})`,
+        hint: "Agent control",
+        run: () => {
+          void handleCleanupTerminal();
+        },
+      },
+    ];
+  }, [theme, toggleTheme, viewMode, pollSessions, attentionOnly, cleanupCandidates.length, handleCleanupTerminal]);
+
+  const visibleCommandActions = useMemo(() => {
+    const query = commandQuery.trim().toLowerCase();
+    if (query.length === 0) return commandActions;
+    return commandActions.filter((action) => {
+      const text = `${action.label} ${action.hint ?? ""}`.toLowerCase();
+      return text.includes(query);
+    });
+  }, [commandActions, commandQuery]);
 
   return (
     <div className="flex h-dvh overflow-hidden">
@@ -303,9 +556,13 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
 
           {/* Project list */}
           {projects.map((project) => {
-            const obsidianFile = project.boardDir.endsWith(".md")
-              ? `projects/${project.boardDir}`
-              : `projects/${project.boardDir}/CONDUCTOR.md`;
+            const boardDirHasPath = project.boardDir.includes("/");
+            const inferredBoardFile = project.boardDir.endsWith(".md")
+              ? (boardDirHasPath ? project.boardDir : `projects/${project.boardDir}`)
+              : (boardDirHasPath
+                ? `${project.boardDir}/CONDUCTOR.md`
+                : `projects/${project.boardDir}/CONDUCTOR.md`);
+            const obsidianFile = project.boardFile ?? inferredBoardFile;
             const obsidianUrl = `obsidian://open?vault=workspace&file=${encodeURIComponent(obsidianFile)}`;
             const githubUrl = project.repo ? `https://github.com/${project.repo}` : null;
             return (
@@ -404,6 +661,20 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
             )}
           </div>
 
+          <button
+            onClick={() => {
+              setCommandOpen(true);
+              setCommandQuery("");
+            }}
+            className="hidden items-center gap-2 rounded-md border border-[var(--color-border-default)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)] sm:flex"
+            title="Open command bar"
+          >
+            <span>Command</span>
+            <kbd className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-subtle)] px-1 py-0.5 font-mono text-[10px] text-[var(--color-text-muted)]">
+              Ctrl/Cmd+K
+            </kbd>
+          </button>
+
           {/* Theme toggle */}
           <button
             onClick={toggleTheme}
@@ -427,10 +698,122 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
           </div>
         )}
 
+        <section className="border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-6 py-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search sessions, issues, branches, agents..."
+                className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-[12px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={statusFilter}
+                onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
+                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
+              >
+                <option value="all">All statuses</option>
+                <option value="active">Active only</option>
+                <option value="terminal">Terminal only</option>
+                <option value="attention">Needs attention</option>
+              </select>
+
+              <select
+                value={agentFilter}
+                onChange={(event) => setAgentFilter(event.target.value)}
+                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
+              >
+                <option value="all">All agents</option>
+                {agentOptions.map((agent) => (
+                  <option key={agent} value={agent}>{agent}</option>
+                ))}
+              </select>
+
+              <select
+                value={sortMode}
+                onChange={(event) => setSortMode(event.target.value as SortMode)}
+                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
+              >
+                <option value="recent">Recent activity</option>
+                <option value="oldest">Oldest activity</option>
+                <option value="attention">Attention priority</option>
+                <option value="cost">Cost high to low</option>
+              </select>
+
+              <button
+                onClick={() => setAttentionOnly((v) => !v)}
+                className={`rounded-md border px-2.5 py-2 text-[11px] font-medium transition-colors ${
+                  attentionOnly
+                    ? "border-[var(--color-accent)] bg-[var(--color-accent-subtle)] text-[var(--color-accent)]"
+                    : "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
+                }`}
+              >
+                Attention only
+              </button>
+
+              <button
+                onClick={() => setViewMode((v) => (v === "grid" ? "lanes" : "grid"))}
+                className="rounded-md border border-[var(--color-border-default)] px-2.5 py-2 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-strong)]"
+              >
+                {viewMode === "grid" ? "Lane View" : "Grid View"}
+              </button>
+
+              <button
+                onClick={() => void handleCleanupTerminal()}
+                disabled={cleanupCandidates.length === 0 || bulkBusy || busySessionId !== null}
+                className="rounded-md border border-[rgba(239,68,68,0.28)] px-2.5 py-2 text-[11px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)] disabled:cursor-not-allowed disabled:opacity-40"
+                title={cleanupCandidates.length === 0 ? "No terminal sessions in current view" : "Clean up terminal sessions in current view"}
+              >
+                {bulkBusy ? "Cleaning..." : `Cleanup (${cleanupCandidates.length})`}
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-2 text-[11px] text-[var(--color-text-muted)]">
+            Showing {filteredSessions.length} of {sessions.length} sessions
+            {activeProject ? ` in ${activeProject}` : ""}.
+          </div>
+        </section>
+
         {/* Content */}
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-auto p-6">
           {filteredSessions.length === 0 ? (
             <EmptyState />
+          ) : viewMode === "lanes" ? (
+            <div className="flex min-w-max gap-4">
+              {LANE_META.map((lane) => (
+                <LaneColumn
+                  key={lane.id}
+                  title={lane.title}
+                  color={lane.color}
+                  count={sessionsByLane[lane.id].length}
+                >
+                  {sessionsByLane[lane.id].length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-3 py-4 text-[11px] text-[var(--color-text-muted)]">
+                      No sessions
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {sessionsByLane[lane.id].map((session) => (
+                        <SessionCard
+                          key={session.id}
+                          session={session}
+                          onSend={handleSend}
+                          onKill={handleKill}
+                          onRestore={handleRestore}
+                          actionBusy={busySessionId === session.id || bulkBusy}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </LaneColumn>
+              ))}
+            </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {filteredSessions.map((session) => (
@@ -440,12 +823,54 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                   onSend={handleSend}
                   onKill={handleKill}
                   onRestore={handleRestore}
-                  actionBusy={busySessionId === session.id}
+                  actionBusy={busySessionId === session.id || bulkBusy}
                 />
               ))}
             </div>
           )}
         </main>
+
+        {commandOpen && (
+          <div
+            className="fixed inset-0 z-50 flex items-start justify-center bg-[rgba(9,11,16,0.58)] p-4 pt-24 backdrop-blur-[1.5px]"
+            onClick={() => setCommandOpen(false)}
+          >
+            <div
+              className="w-full max-w-xl overflow-hidden rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] shadow-[0_20px_70px_rgba(0,0,0,0.35)]"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="border-b border-[var(--color-border-subtle)] px-4 py-3">
+                <input
+                  ref={commandInputRef}
+                  type="text"
+                  value={commandQuery}
+                  onChange={(event) => setCommandQuery(event.target.value)}
+                  placeholder="Run command..."
+                  className="w-full bg-transparent text-[13px] text-[var(--color-text-primary)] outline-none placeholder-[var(--color-text-muted)]"
+                />
+              </div>
+              <div className="max-h-[60vh] overflow-y-auto p-2">
+                {visibleCommandActions.length === 0 ? (
+                  <div className="px-3 py-2 text-[12px] text-[var(--color-text-muted)]">No commands found.</div>
+                ) : (
+                  visibleCommandActions.map((action) => (
+                    <button
+                      key={action.id}
+                      onClick={() => {
+                        action.run();
+                        setCommandOpen(false);
+                      }}
+                      className="flex w-full items-center rounded-md px-3 py-2 text-left transition-colors hover:bg-[var(--color-bg-elevated)]"
+                    >
+                      <span className="text-[12px] text-[var(--color-text-primary)]">{action.label}</span>
+                      <span className="ml-auto text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">{action.hint ?? ""}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -485,5 +910,62 @@ function StatPill({
         {label}
       </span>
     </div>
+  );
+}
+
+const ATTENTION_RANK: Record<AttentionGroup, number> = {
+  respond: 0,
+  review: 1,
+  merge: 2,
+  pending: 3,
+  working: 4,
+  done: 5,
+};
+
+const LANE_META: Array<{ id: AttentionGroup; title: string; color: string }> = [
+  { id: "respond", title: "Respond", color: "var(--color-status-error)" },
+  { id: "review", title: "Review", color: "var(--color-accent-orange)" },
+  { id: "merge", title: "Merge", color: "var(--color-status-ready)" },
+  { id: "pending", title: "Pending", color: "var(--color-status-attention)" },
+  { id: "working", title: "Working", color: "var(--color-status-working)" },
+  { id: "done", title: "Done", color: "var(--color-text-muted)" },
+];
+
+function attentionRank(session: DashboardSession): number {
+  const level = getAttentionLevel(session) as AttentionGroup;
+  return ATTENTION_RANK[level] ?? 99;
+}
+
+function parseEstimatedCost(session: DashboardSession): number {
+  const raw = session.metadata["cost"];
+  if (!raw) return 0;
+  try {
+    const parsed = JSON.parse(raw) as { estimatedCostUsd?: number; totalUSD?: number };
+    return parsed.estimatedCostUsd ?? parsed.totalUSD ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+function LaneColumn({
+  title,
+  color,
+  count,
+  children,
+}: {
+  title: string;
+  color: string;
+  count: number;
+  children: ReactNode;
+}) {
+  return (
+    <section className="w-[360px] shrink-0 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+        <h2 className="text-[12px] font-semibold text-[var(--color-text-primary)]">{title}</h2>
+        <span className="ml-auto rounded-full bg-[var(--color-bg-subtle)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]">{count}</span>
+      </div>
+      {children}
+    </section>
   );
 }

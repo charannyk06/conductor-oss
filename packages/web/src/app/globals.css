@@ -26,9 +26,9 @@
   --color-border-strong:  #52525b;
 
   --color-text-primary:   #fafafa;
-  --color-text-secondary: #a1a1aa;
-  --color-text-tertiary:  #71717a;
-  --color-text-muted:     #52525b;
+  --color-text-secondary: #d4d4d8;
+  --color-text-tertiary:  #a1a1aa;
+  --color-text-muted:     #71717a;
   --color-text-inverse:   #09090b;
 
   --color-accent:         #3b82f6;
@@ -78,9 +78,9 @@
   --color-border-strong:  #a1a1aa;
 
   --color-text-primary:   #18181b;
-  --color-text-secondary: #52525b;
-  --color-text-tertiary:  #71717a;
-  --color-text-muted:     #a1a1aa;
+  --color-text-secondary: #27272a;
+  --color-text-tertiary:  #52525b;
+  --color-text-muted:     #3f3f46;
   --color-text-inverse:   #fafafa;
 
   --color-accent:         #2563eb;
@@ -118,6 +118,8 @@
    ========================================================================== */
 body {
   font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.35;
   background: var(--color-bg-base);
   color: var(--color-text-primary);
   min-height: 100vh;
@@ -167,6 +169,14 @@ a:hover { text-decoration: underline; }
   box-shadow: 0 4px 12px var(--color-card-shadow);
   transform: translateY(-1px);
 }
+
+/* Readability upgrades for small arbitrary sizes used throughout the dashboard. */
+.text-\[9px\] { font-size: 10px; line-height: 1.4; }
+.text-\[10px\] { font-size: 11px; line-height: 1.45; }
+.text-\[11px\] { font-size: 12px; line-height: 1.45; }
+.text-\[12px\] { font-size: 13px; line-height: 1.45; }
+.text-\[13px\] { font-size: 14px; line-height: 1.45; }
+.text-\[14px\] { font-size: 15px; line-height: 1.45; }
 
 /* ==========================================================================
    xterm.js mobile

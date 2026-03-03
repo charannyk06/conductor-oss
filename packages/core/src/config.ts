@@ -25,7 +25,7 @@ import { generateSessionPrefix } from "./paths.js";
 const MCPServerConfigSchema = z.object({
   command: z.string(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
   enabled: z.boolean().optional(),
 });
@@ -71,6 +71,17 @@ const AgentProfileSchema = z
   })
   .passthrough();
 
+const DEFAULT_AGENT_CONFIG = {
+  permissions: "skip" as const,
+};
+
+const DEFAULT_PROJECT_PLUGINS = {
+  runtime: "tmux" as const,
+  agent: "claude-code" as const,
+  workspace: "worktree" as const,
+  notifiers: ["desktop"],
+};
+
 const DevServerConfigSchema = z.object({
   command: z.string(),
   cwd: z.string().optional(),
@@ -112,12 +123,12 @@ const ProjectConfigSchema = z.object({
   scm: SCMConfigSchema.optional(),
   symlinks: z.array(z.string()).optional(),
   postCreate: z.array(z.string()).optional(),
-  agentConfig: AgentSpecificConfigSchema.default({}),
-  reactions: z.record(ReactionConfigSchema.partial()).optional(),
+  agentConfig: AgentSpecificConfigSchema.default(DEFAULT_AGENT_CONFIG),
+  reactions: z.record(z.string(), ReactionConfigSchema.partial()).optional(),
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
-  mcpServers: z.record(MCPServerConfigSchema).optional(),
-  agentProfiles: z.record(AgentProfileSchema).optional(),
+  mcpServers: z.record(z.string(), MCPServerConfigSchema).optional(),
+  agentProfiles: z.record(z.string(), AgentProfileSchema).optional(),
   defaultProfile: z.string().optional(),
   devServer: DevServerConfigSchema.optional(),
 });
@@ -127,7 +138,7 @@ const DefaultPluginsSchema = z.object({
   agent: z.string().default("claude-code"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default(["desktop"]),
-  mcpServers: z.record(MCPServerConfigSchema).optional(),
+  mcpServers: z.record(z.string(), MCPServerConfigSchema).optional(),
 });
 
 const WebhookConfigSchema = z.object({
@@ -144,16 +155,16 @@ const ConductorConfigSchema = z.object({
   columnAliases: ColumnAliasesSchema.optional(),
   readyThresholdMs: z.number().nonnegative().default(300_000),
   maxSessionsPerProject: z.number().positive().default(5),
-  defaults: DefaultPluginsSchema.default({}),
-  projects: z.record(ProjectConfigSchema),
-  notifiers: z.record(NotifierConfigSchema).default({}),
-  notificationRouting: z.record(z.array(z.string())).default({
+  defaults: DefaultPluginsSchema.default(DEFAULT_PROJECT_PLUGINS),
+  projects: z.record(z.string(), ProjectConfigSchema),
+  notifiers: z.record(z.string(), NotifierConfigSchema).default({}),
+  notificationRouting: z.record(z.string(), z.array(z.string())).default({
     urgent: ["desktop"],
     action: ["desktop"],
     warning: ["desktop"],
     info: ["desktop"],
   }),
-  reactions: z.record(ReactionConfigSchema).default({}),
+  reactions: z.record(z.string(), ReactionConfigSchema).default({}),
   webhook: WebhookConfigSchema.optional(),
 });
 

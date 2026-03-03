@@ -7,7 +7,7 @@
     "type": "git",
     "url": "https://github.com/charannyk06/conductor-oss.git"
   },
-  "description": "Markdown-native AI agent orchestrator \u2014 dispatch coding tasks from a kanban board",
+  "description": "Markdown-native AI agent orchestrator — dispatch coding tasks from a kanban board",
   "packageManager": "pnpm@9.15.4",
   "type": "module",
   "scripts": {
@@ -19,7 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
-    "typescript": "^5.7.0"
+    "typescript": "^5.9.3"
   },
   "homepage": "https://github.com/charannyk06/conductor-oss",
   "keywords": [

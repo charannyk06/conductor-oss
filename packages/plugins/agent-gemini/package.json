@@ -14,6 +14,6 @@
     "@conductor-oss/core": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.3"
   }
 }
