@@ -200,6 +200,94 @@ a:hover { text-decoration: underline; }
 .scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
 .scrollbar-none::-webkit-scrollbar { display: none; }
 
+.project-action-icons {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.project-action-icons button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.project-action-icon {
+  all: unset;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  background: transparent !important;
+  color: var(--color-text-muted);
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: none !important;
+  transition: none !important;
+}
+
+.project-action-icon:hover,
+.project-action-icon:focus,
+.project-action-icon:active,
+.project-action-icon:focus-visible {
+  background: transparent !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.project-action-icon > svg,
+.project-action-icon > svg path {
+  fill: var(--color-text-muted) !important;
+  color: var(--color-text-muted) !important;
+}
+
+.project-action-icon[title="Open board in Obsidian"],
+.project-action-icon[data-action="obsidian"],
+.project-action-icon.obsidian-action {
+  color: var(--color-accent-violet) !important;
+}
+
+.project-action-icon[title="Open board in Obsidian"] > svg,
+.project-action-icon[title="Open board in Obsidian"] > svg *,
+.project-action-icon[data-action="obsidian"] > svg,
+.project-action-icon[data-action="obsidian"] > svg *,
+.project-action-icon.obsidian-action > svg,
+.project-action-icon.obsidian-action > svg * {
+  fill: var(--color-accent-violet) !important;
+  color: var(--color-accent-violet) !important;
+}
+
+/* Legacy fallback when the old Dashboard bundle is still cached */
+.group.relative a[title="Open board in Obsidian"],
+.group.relative a[title="Open repo on GitHub"] {
+  background: transparent !important;
+  color: var(--color-text-muted) !important;
+  outline: none !important;
+  box-shadow: none !important;
+  transition: none !important;
+}
+
+.group.relative a[title="Open board in Obsidian"] {
+  color: var(--color-accent-violet) !important;
+}
+
+.group.relative a[title="Open board in Obsidian"] svg,
+.group.relative a[title="Open board in Obsidian"] svg *,
+.group.relative a[title="Open repo on GitHub"] svg,
+.group.relative a[title="Open repo on GitHub"] svg * {
+  color: var(--color-text-muted) !important;
+  fill: var(--color-text-muted) !important;
+}
+
+.group.relative a[title="Open board in Obsidian"] svg,
+.group.relative a[title="Open board in Obsidian"] svg path,
+.group.relative a[title="Open repo on GitHub"] svg,
+.group.relative a[title="Open repo on GitHub"] svg path {
+  fill: var(--color-text-muted) !important;
+  color: var(--color-text-muted) !important;
+}
+
+.group.relative a[title="Open board in Obsidian"] svg,
+.group.relative a[title="Open board in Obsidian"] svg *,
+.group.relative a[title="Open board in Obsidian"] svg path {
+  fill: var(--color-accent-violet) !important;
+  color: var(--color-accent-violet) !important;
+}
+
 /* Hide Clerk dev banner */
 .cl-internal-b3fm6y,
 div[data-clerk-component] + div[style*="position: fixed"][style*="bottom"],

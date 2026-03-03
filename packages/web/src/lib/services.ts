@@ -52,6 +52,90 @@ function resolveWorkspaceConfigPath(workspacePath: string): string | undefined {
   return undefined;
 }
 
+function findConfigFromConductorMetadata(): string | undefined {
+  const conductorDir = resolve(homedir(), ".conductor");
+  if (!existsSync(conductorDir)) {
+    return undefined;
+  }
+
+  let best: {
+    path: string;
+    activeSessionCount: number;
+    latestSessionChange: number;
+  } | null = null;
+
+  try {
+    for (const entry of readdirSync(conductorDir)) {
+      const baseDir = join(conductorDir, entry);
+      const originPath = join(baseDir, ".origin");
+      if (!existsSync(originPath)) continue;
+
+      let resolvedOrigin = "";
+      try {
+        resolvedOrigin = resolve(readFileSync(originPath, "utf8").trim());
+      } catch {
+        continue;
+      }
+      if (!resolvedOrigin) continue;
+
+      let configPath = resolveWorkspaceConfigPath(resolvedOrigin);
+      if (!configPath && [".yaml", ".yml"].some((ext) => resolvedOrigin.endsWith(ext))) {
+        try {
+          if (statSync(resolvedOrigin).isFile()) {
+            configPath = resolvedOrigin;
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      if (!configPath) continue;
+
+      const sessionsDir = join(baseDir, "sessions");
+      let activeSessionCount = 0;
+      let latestSessionChange = 0;
+
+      if (existsSync(sessionsDir)) {
+        try {
+          for (const item of readdirSync(sessionsDir)) {
+            if (item === "archive" || item.startsWith(".")) continue;
+
+            const itemPath = join(sessionsDir, item);
+            const stats = statSync(itemPath);
+            if (!stats.isFile()) continue;
+
+            activeSessionCount += 1;
+            if (stats.mtimeMs > latestSessionChange) {
+              latestSessionChange = stats.mtimeMs;
+            }
+          }
+        } catch {
+          // Ignore broken session snapshots.
+        }
+      }
+
+      const candidate = {
+        path: configPath,
+        activeSessionCount,
+        latestSessionChange,
+      };
+
+      if (
+        !best ||
+        candidate.activeSessionCount > best.activeSessionCount ||
+        (candidate.activeSessionCount === best.activeSessionCount &&
+          candidate.latestSessionChange > best.latestSessionChange)
+      ) {
+        best = candidate;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+
+  return best?.path;
+}
+
 function findConfigFromWorkspace(workspace?: string): string | undefined {
   if (!workspace) return undefined;
 
@@ -104,9 +188,13 @@ function findConfigFromWorkspace(workspace?: string): string | undefined {
 function getConfigStateFromEnv(): { path: string | undefined } {
   const envConfigPath = normalizeConfigPath(process.env["CO_CONFIG_PATH"]);
   const workspaceConfigPath = findConfigFromWorkspace(process.env["CONDUCTOR_WORKSPACE"]);
+  const homeWorkspaceConfig = normalizeConfigPath(`${homedir()}/.openclaw/workspace/conductor.yaml`);
 
   return {
-    path: envConfigPath || workspaceConfigPath,
+    path: envConfigPath ||
+      workspaceConfigPath ||
+      homeWorkspaceConfig ||
+      findConfigFromConductorMetadata(),
   };
 }
 
