@@ -37,7 +37,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const [configProjects, setConfigProjects] = useState<ConfigProject[]>(initialConfigProjects);
   const [connected, setConnected] = useState(false);
   const [activeProject, setActiveProject] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -53,6 +53,13 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const { theme, toggleTheme } = useTheme();
+
+  // Open sidebar by default on desktop after mount (avoids SSR hydration mismatch)
+  useEffect(() => {
+    if (window.innerWidth >= 768) {
+      setSidebarOpen(true);
+    }
+  }, []);
 
   // SSE connection for live updates
   // Fetch all configured projects for sidebar (even with 0 sessions)
@@ -517,9 +524,17 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
 
   return (
     <div className="flex h-dvh overflow-hidden">
-      {/* Sidebar */}
+      {/* Mobile sidebar backdrop */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar — overlay on mobile, push on desktop */}
       <aside
-        className={`shrink-0 border-r border-[var(--color-sidebar-border)] bg-[var(--color-sidebar-bg)] flex flex-col transition-all duration-200 ${
+        className={`flex flex-col border-r border-[var(--color-sidebar-border)] bg-[var(--color-sidebar-bg)] transition-all duration-200 z-40 max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:h-full md:shrink-0 ${
           sidebarOpen ? "w-60" : "w-0 overflow-hidden border-r-0"
         }`}
       >
@@ -603,7 +618,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       {/* Main content */}
       <div className="flex flex-1 flex-col min-w-0">
         {/* Header */}
-        <header className="flex items-center gap-4 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-6 py-3">
+        <header className="flex items-center gap-2 md:gap-4 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-3 md:px-6 py-3">
           {/* Sidebar toggle */}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -693,12 +708,12 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
           </button>
         </header>
         {actionError && (
-          <div className="mx-6 mt-3 rounded-md border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.12)] px-3 py-2 text-[11px] text-[var(--color-status-error)]">
+          <div className="mx-3 md:mx-6 mt-3 rounded-md border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.12)] px-3 py-2 text-[11px] text-[var(--color-status-error)]">
             {actionError}
           </div>
         )}
 
-        <section className="border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-6 py-3">
+        <section className="border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-3 md:px-6 py-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <input
@@ -711,7 +726,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
               />
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-2 overflow-x-auto scrollbar-none flex-nowrap pb-0.5">
               <select
                 value={statusFilter}
                 onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
@@ -781,7 +796,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
         </section>
 
         {/* Content */}
-        <main className="flex-1 overflow-auto p-6">
+        <main className="flex-1 overflow-auto p-3 md:p-6">
           {filteredSessions.length === 0 ? (
             <EmptyState />
           ) : viewMode === "lanes" ? (
