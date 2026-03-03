@@ -36,6 +36,7 @@ import {
   moveUncheckedTask,
   replaceLine,
   resolveColumnsFromBoard,
+  parseChecklistPrefix,
 } from "./board-parser.js";
 import { recordWatcherAction, resolveBoardAliasesForPath } from "./board-diagnostics.js";
 
@@ -193,61 +194,12 @@ function getInboxEntries(content: string, intakeAliases: string[]): InboxEntry[]
   return entries;
 }
 
-interface ChecklistMatch {
-  checked: boolean;
-  textStart: number;
-}
-
-function parseChecklistPrefix(line: string): ChecklistMatch | null {
-  let index = 0;
-  const len = line.length;
-
-  while (index < len && isInlineWhitespace(line.charCodeAt(index))) {
-    index += 1;
-  }
-
-  if (line[index] === ">") {
-    index += 1;
-    while (index < len && isInlineWhitespace(line.charCodeAt(index))) {
-      index += 1;
-    }
-  }
-
-  const bullet = line.charCodeAt(index);
-  if (bullet !== 0x2d && bullet !== 0x2a && bullet !== 0x2b) {
-    return null;
-  }
-  index += 1;
-
-  if (!isInlineWhitespace(line.charCodeAt(index))) return null;
-  while (isInlineWhitespace(line.charCodeAt(index))) {
-    index += 1;
-  }
-
-  if (line.charCodeAt(index) !== 0x5b) return null;
-  const mark = line.charCodeAt(index + 1);
-  if (mark !== 0x20 && mark !== 0x78 && mark !== 0x58) return null;
-  if (line.charCodeAt(index + 2) !== 0x5d) return null;
-  index += 3;
-
-  if (!isInlineWhitespace(line.charCodeAt(index))) return null;
-  while (isInlineWhitespace(line.charCodeAt(index))) {
-    index += 1;
-  }
-
-  return { checked: mark !== 0x20, textStart: index };
-}
-
 function parseChecklistMatch(line: string): string | null {
   const match = parseChecklistPrefix(line);
   if (!match) return null;
   const text = line.slice(match.textStart);
   if (!text) return null;
   return text;
-}
-
-function isInlineWhitespace(code: number): boolean {
-  return code === 0x20 || code === 0x09;
 }
 
 /** Check if a task already has required orchestration tags. */

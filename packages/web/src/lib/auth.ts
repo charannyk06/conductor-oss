@@ -103,6 +103,17 @@ function guardActionOrigin(request: NextRequest): NextResponse | null {
   const expectedHost = request.nextUrl.host;
   if (!expectedHost) return null;
 
+  const secFetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
+  if (secFetchSite && secFetchSite !== "none" && secFetchSite !== "same-origin" && secFetchSite !== "same-site") {
+    return NextResponse.json(
+      {
+        error: "Invalid request context",
+        reason: "Cross-site requests are not allowed for agent-control actions.",
+      },
+      { status: 403 },
+    );
+  }
+
   const origin = request.headers.get("origin");
   if (origin && !matchesHost(origin, expectedHost)) {
     return NextResponse.json(

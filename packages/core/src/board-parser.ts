@@ -200,13 +200,13 @@ export function getTrackedCardLines(content: string, headings: string[]): Array<
   return out;
 }
 
-interface ChecklistMatch {
+export interface ChecklistPrefixMatch {
   checked: boolean;
   textStart: number;
 }
 
 /** Parse and normalize a checklist line prefix without regex backtracking risk. */
-function parseChecklistPrefix(line: string): ChecklistMatch | null {
+export function parseChecklistPrefix(line: string): ChecklistPrefixMatch | null {
   let index = 0;
   const len = line.length;
 
@@ -249,7 +249,7 @@ function parseChecklistPrefix(line: string): ChecklistMatch | null {
   };
 }
 
-function isInlineWhitespace(code: number): boolean {
+export function isInlineWhitespace(code: number): boolean {
   return code === 0x20 || code === 0x09;
 }
 
