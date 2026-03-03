@@ -19,43 +19,6 @@ Write tasks in a kanban board — Conductor dispatches agents, manages git workt
 
 </div>
 
-## Visual Dashboard Guide (Puppeteer capture)
-
-These are full end-to-end dashboard screenshots captured from a running `http://localhost:4747` dashboard using `pnpm ui:screenshots`.
-
-Update them at any time:
-
-Option 1: via environment variable
-
-```bash
-UI_BASE_URL=http://localhost:4747 pnpm ui:screenshots
-``` 
-
-Option 2: via CLI flag
-
-```bash
-pnpm ui:screenshots -- --base-url=http://localhost:4747
-```
-
-- [Dashboard overview + lane board](docs/screenshots/01-dashboard-overview.png)
-- [Chat queue + quick actions](docs/screenshots/02-dashboard-chat.png)
-- [Review queue + diff + CI states](docs/screenshots/03-dashboard-review.png)
-- [Agents tab + installed/discovered status](docs/screenshots/04-dashboard-agents.png)
-- [Launch flow](docs/screenshots/05-launch-session.png)
-- [Command palette + cleanup flow](docs/screenshots/06-command-palette.png)
-
-To get complete visual parity after each UI change, capture screenshots immediately after restarting or redeploying the dashboard on `4747`.
-
-## Repository Links
-
-- GitHub Repository: https://github.com/charannyk06/conductor-oss
-- Issues: https://github.com/charannyk06/conductor-oss/issues
-- Pull Requests: https://github.com/charannyk06/conductor-oss/pulls
-- CI: https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml
-- NPM Package: https://www.npmjs.com/package/conductor-oss
-
----
-
 ## What is Conductor?
 
 Conductor turns your markdown kanban board into a fully autonomous AI development pipeline. Write a task in plain English, tag it with an agent and project, drag it to **Ready to Dispatch** — and Conductor handles everything else: spawning the agent in an isolated git worktree, streaming live output to a web dashboard, opening a pull request, watching CI, and updating your board card with the result.
@@ -76,6 +39,16 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 | PR lifecycle | Manual | Partial | **Full: open → CI → review → merge** |
 | Database required | — | Often | **Never — flat files only** |
 | Cost | Subscription | Subscription | **Free + your API keys** |
+
+---
+
+## Repository Links
+
+- GitHub Repository: https://github.com/charannyk06/conductor-oss
+- Issues: https://github.com/charannyk06/conductor-oss/issues
+- Pull Requests: https://github.com/charannyk06/conductor-oss/pulls
+- CI: https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml
+- NPM Package: https://www.npmjs.com/package/conductor-oss
 
 ---
 
