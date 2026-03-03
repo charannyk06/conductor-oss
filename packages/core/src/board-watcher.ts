@@ -74,7 +74,7 @@ const AGENT_ALIASES: Record<string, string> = {
   gem: "gemini",
 };
 
-function normalizeAgentName(agent: string, supportedAgents: string[]): string {
+function normalizeAgentName(agent: string, supportedAgents: readonly string[]): string {
   const requested = agent.trim().toLowerCase();
   if (!requested) return "";
   const alias = AGENT_ALIASES[requested];
@@ -169,7 +169,7 @@ interface InboxEntry {
 }
 
 /** Parse intake entries. Supports checkbox cards and plain text lines. */
-function getInboxEntries(content: string, intakeAliases: string[]): InboxEntry[] {
+function getInboxEntries(content: string, intakeAliases: readonly string[]): InboxEntry[] {
   const sections = getSectionsByAliases(content, intakeAliases);
   if (sections.length === 0) return [];
 
@@ -276,7 +276,7 @@ function inferProject(text: string, boardProjectId: string | undefined, boardPro
   return boardProjects[0] ?? "my-app";
 }
 
-function inferAgent(text: string, supportedAgents: string[]): string {
+function inferAgent(text: string, supportedAgents: readonly string[]): string {
   const tagged = parseTags(text)["agent"];
   if (tagged) return normalizeAgent(tagged, supportedAgents);
   const lower = text.toLowerCase();
@@ -312,7 +312,7 @@ function enhanceTaskHeuristically(
   rawTask: string,
   boardProjectId: string | undefined,
   boardProjects: string[],
-  supportedAgents: string[],
+  supportedAgents: readonly string[],
 ): string | null {
   const normalized = stripTags(rawTask).replace(/^\s*[\-*•]\s*/, "").replace(/^\s*\[\s?\]\s*/, "").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
@@ -514,12 +514,12 @@ function detectIssue(text: string): string | undefined {
 }
 
 /** Normalize agent shorthand aliases to canonical plugin names. */
-function normalizeAgent(agent: string, supportedAgents: string[]): string {
+function normalizeAgent(agent: string, supportedAgents: readonly string[]): string {
   return normalizeAgentName(agent, supportedAgents);
 }
 
 /** Auto-detect agent from task description if no #agent/ tag. */
-function autoDetectAgent(prompt: string, supportedAgents: string[]): string {
+function autoDetectAgent(prompt: string, supportedAgents: readonly string[]): string {
   const lower = prompt.toLowerCase();
   const claudeKeywords = ["design", "architect", "plan", "feature", "build new", "refactor", "complex"];
   for (const kw of claudeKeywords) {
@@ -1334,11 +1334,11 @@ function syncTagsFile(config: OrchestratorConfig, agentNames: readonly string[] 
 export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatcher {
   const { config, sessionManager, boardPaths, onDispatch, onError } = watcherConfig;
   const dashboardUrl = watcherConfig.dashboardUrl ?? config.dashboardUrl;
-  const supportedAgents = uniqueAgents(
-    (watcherConfig.agentNames?.length ?? 0) > 0
-      ? watcherConfig.agentNames
-      : FALLBACK_WATCHER_AGENTS,
-  );
+  let configuredAgentNames: readonly string[] = FALLBACK_WATCHER_AGENTS;
+  if (watcherConfig.agentNames && watcherConfig.agentNames.length > 0) {
+    configuredAgentNames = watcherConfig.agentNames;
+  }
+  const supportedAgents = uniqueAgents(configuredAgentNames);
   const workspacePath = watcherConfig.workspacePath
     ?? process.env["CONDUCTOR_WORKSPACE"]
     ?? `${process.env["HOME"]}/.conductor/workspace`;
