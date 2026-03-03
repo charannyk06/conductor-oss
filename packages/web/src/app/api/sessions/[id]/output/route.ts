@@ -7,12 +7,19 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   request: NextRequest,
-  context: { params: { id: string } },
+  context: { params: Promise<{ id: string }> },
 ) {
   const denied = await guardApiAccess();
   if (denied) return denied;
 
-  const sessionId = decodeURIComponent(context.params.id ?? "").trim();
+  const params = await context.params;
+  const rawId = params?.id ?? "";
+  let sessionId: string;
+  try {
+    sessionId = decodeURIComponent(rawId).trim();
+  } catch {
+    return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+  }
   if (!sessionId) {
     return NextResponse.json({ error: "Session id is required" }, { status: 400 });
   }
@@ -28,7 +35,7 @@ export async function GET(
     return NextResponse.json({ output });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to load output";
-    const status = message.includes("not found") ? 404 : 500;
+    const status = message.toLowerCase().includes("not found") ? 404 : 500;
     return NextResponse.json({ error: message }, { status });
   }
 }

@@ -16,8 +16,9 @@ export async function GET(request: NextRequest) {
 
     const searchParams = new URL(request.url).searchParams;
     const projectId = searchParams.get("project");
-    const sessions = projectId
-      ? await sessionManager.list(projectId)
+    const normalizedProjectId = projectId?.trim() ?? "";
+    const sessions = normalizedProjectId
+      ? await sessionManager.list(normalizedProjectId)
       : await sessionManager.list();
     const dashboardSessions = sessions.map((session) => sessionToDashboard(session));
     return NextResponse.json({

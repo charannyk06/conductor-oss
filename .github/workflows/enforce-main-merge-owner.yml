@@ -1,0 +1,20 @@
+name: Enforce main PR ownership
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  block-non-owner-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR author is allowed to target main
+        run: |
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          ALLOWED_AUTHOR="charannyk06"
+
+          if [ "$PR_AUTHOR" != "$ALLOWED_AUTHOR" ]; then
+            echo "::error::Only @$ALLOWED_AUTHOR can target main branch PRs. PR author is @$PR_AUTHOR."
+            exit 1
+          fi

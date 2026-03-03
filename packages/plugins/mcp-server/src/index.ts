@@ -158,9 +158,10 @@ export function createMcpServer(): McpServer {
           };
         }
 
+        const resolvedPrompt = prompt?.trim() ? prompt : task;
         const session = await sessionManager.spawn({
           projectId,
-          prompt: prompt ?? task,
+          prompt: resolvedPrompt,
           agent,
           model,
           profile,

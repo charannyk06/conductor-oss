@@ -41,6 +41,7 @@ interface DiffUIState {
   error: string | null;
   hasDiff: boolean;
   generatedAt: string;
+  truncated: boolean;
   selectedFilePath: string | null;
   search: string;
   wrapLines: boolean;
@@ -70,6 +71,7 @@ export default function SessionDetailPage() {
     error: null,
     hasDiff: false,
     generatedAt: "",
+    truncated: false,
     selectedFilePath: null,
     search: "",
     wrapLines: false,
@@ -110,7 +112,9 @@ export default function SessionDetailPage() {
 
       setDiffState((prev) => {
         const nextSelected =
-          prev.selectedFilePath && payload.files.some((file) => file.path === prev.selectedFilePath)
+          prev.selectedFilePath === null
+            ? null
+            : prev.selectedFilePath && payload.files.some((file) => file.path === prev.selectedFilePath)
             ? prev.selectedFilePath
             : payload.files[0]?.path ?? null;
 
@@ -118,6 +122,7 @@ export default function SessionDetailPage() {
           files: payload.files,
           untracked: payload.untracked,
           hasDiff: payload.hasDiff,
+          truncated: payload.truncated,
           loading: false,
           error: null,
           generatedAt: payload.generatedAt,
@@ -267,9 +272,11 @@ export default function SessionDetailPage() {
   const meta = session?.metadata ?? {};
   const diffSearch = diffState.search.trim().toLowerCase();
   const diffFiles = diffState.files.filter((file) => file.path.toLowerCase().includes(diffSearch));
-  const activeDiffFile = diffState.selectedFilePath
-    ? diffFiles.find((file) => file.path === diffState.selectedFilePath) ?? diffFiles[0] ?? null
-    : diffFiles[0] ?? null;
+  const activeDiffFile = diffState.selectedFilePath === null
+    ? null
+    : diffState.selectedFilePath
+      ? diffFiles.find((file) => file.path === diffState.selectedFilePath) ?? diffFiles[0] ?? null
+      : diffFiles[0] ?? null;
 
   // Parse cost from metadata
   interface CostInfo {
@@ -602,9 +609,15 @@ export default function SessionDetailPage() {
                       setDiffState((prev) => ({
                         ...prev,
                         search: e.target.value,
-                        selectedFilePath: prev.selectedFilePath && diffFiles.find((file) => file.path === prev.selectedFilePath)
-                          ? prev.selectedFilePath
-                          : diffFiles[0]?.path ?? null,
+                        selectedFilePath: (() => {
+                          const filteredFiles = prev.files.filter((file) =>
+                            file.path.toLowerCase().includes(e.target.value.trim().toLowerCase()),
+                          );
+
+                          return prev.selectedFilePath && filteredFiles.find((file) => file.path === prev.selectedFilePath)
+                            ? prev.selectedFilePath
+                            : filteredFiles[0]?.path ?? null;
+                        })(),
                       }))
                     }
                     placeholder="Filter files..."

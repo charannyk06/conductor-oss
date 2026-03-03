@@ -9,20 +9,35 @@ type SendBody = { message?: string };
 
 export async function POST(
   request: NextRequest,
-  context: { params: { id: string } },
+  context: { params: Promise<{ id: string }> },
 ) {
   const denied = await guardApiAccess();
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;
 
-  const sessionId = decodeURIComponent(context.params.id ?? "").trim();
+  const params = await context.params;
+  const rawId = params?.id ?? "";
+  let sessionId: string;
+  try {
+    sessionId = decodeURIComponent(rawId).trim();
+  } catch {
+    return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+  }
   if (!sessionId) {
     return NextResponse.json({ error: "Session id is required" }, { status: 400 });
   }
 
   const body = (await request.json().catch(() => null)) as SendBody | null;
-  const message = body?.message?.trim();
+  if (typeof body?.message !== "string") {
+    return NextResponse.json(
+      { error: "message is required and must be non-empty" },
+      { status: 400 },
+    );
+  }
+
+  const messageStr = body.message;
+  const message = messageStr.trim();
   if (!message) {
     return NextResponse.json(
       { error: "message is required and must be non-empty" },

@@ -31,9 +31,9 @@
   },
   "include": [
     "next-env.d.ts",
+    "custom-types.d.ts",
     "src",
-    ".next/types/**/*.ts",
-    ".next/dev/types/**/*.ts"
+    ".next/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

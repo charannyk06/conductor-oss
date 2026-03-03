@@ -25,8 +25,15 @@ These are full end-to-end dashboard screenshots captured from a running `http://
 
 Update them at any time:
 
+Option 1: via environment variable
+
 ```bash
 UI_BASE_URL=http://localhost:4747 pnpm ui:screenshots
+``` 
+
+Option 2: via CLI flag
+
+```bash
 pnpm ui:screenshots -- --base-url=http://localhost:4747
 ```
 
