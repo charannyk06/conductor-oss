@@ -86,17 +86,6 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
   <img src="docs/demo/05-pr-creation.gif" alt="PR creation (GIF)" />
 </p>
 
-### Full-length captures
-
-- [Full demo (GIF)](docs/demo/full-demo.gif)
-- [Full demo (MP4)](docs/demo/full-demo.mp4)
-- [Task + PR flow (MP4)](docs/demo/05-pr-and-board.mp4)
-- [Task creation + dispatch (MP4)](docs/demo/01-add-task.mp4)
-- [Auto dispatch terminal (MP4)](docs/demo/02-auto-dispatch.mp4)
-- [Live terminal (MP4)](docs/demo/03-live-terminal.mp4)
-- [Dashboard (MP4)](docs/demo/04-dashboard.mp4)
-- [PR creation (MP4)](docs/demo/06-pr-creation.mp4)
-
 <details open>
 <summary><strong>Live flow capture</strong> — task → launch → terminal → review/merge controls</summary>
 
