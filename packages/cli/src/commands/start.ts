@@ -92,7 +92,8 @@ export function registerStart(program: Command): void {
             const workspacePath = opts.workspace
               ?? process.env["CONDUCTOR_WORKSPACE"]
               ?? `${process.env["HOME"]}/.conductor/workspace`;
-            const boards = core.discoverBoards(workspacePath, config.boards);
+            const boardPatternsOrConfig = config.boards?.length ? config.boards : config;
+            const boards = core.discoverBoards(workspacePath, boardPatternsOrConfig);
             if (boards.length === 0) {
               watchSpinner.warn("No CONDUCTOR.md boards found");
             } else {
