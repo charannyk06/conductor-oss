@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 const clerkConfigured = Boolean(
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
@@ -88,4 +88,52 @@ export async function guardApiAccess(): Promise<NextResponse | null> {
     },
     { status: 403 },
   );
+}
+
+function matchesHost(value: string, expectedHost: string): boolean {
+  try {
+    const parsed = new URL(value, `https://${expectedHost}`);
+    return parsed.host === expectedHost;
+  } catch {
+    return false;
+  }
+}
+
+function guardActionOrigin(request: NextRequest): NextResponse | null {
+  const expectedHost = request.nextUrl.host;
+  if (!expectedHost) return null;
+
+  const origin = request.headers.get("origin");
+  if (origin && !matchesHost(origin, expectedHost)) {
+    return NextResponse.json(
+      {
+        error: "Invalid request origin",
+        reason: "Cross-origin requests are not allowed for agent-control actions.",
+      },
+      { status: 403 },
+    );
+  }
+
+  const referer = request.headers.get("referer") ?? request.headers.get("referrer");
+  if (!origin && referer && !matchesHost(referer, expectedHost)) {
+    return NextResponse.json(
+      {
+        error: "Invalid request origin",
+        reason: "Cross-site requests are not allowed for agent-control actions.",
+      },
+      { status: 403 },
+    );
+  }
+
+  return null;
+}
+
+/**
+ * Guard mutating dashboard actions against simple CSRF-style origin/referer abuse.
+ *
+ * We keep this header-based check intentionally conservative: allow requests with
+ * missing origin/referer headers (API clients), but block obvious cross-site calls.
+ */
+export function guardApiActionAccess(request: NextRequest): NextResponse | null {
+  return guardActionOrigin(request);
 }

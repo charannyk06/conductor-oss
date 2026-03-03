@@ -151,14 +151,15 @@ function getInboxEntries(content: string, intakeAliases: string[]): InboxEntry[]
         line = unquoted;
       }
 
-      const checkboxMatch = line.match(/^\s*-\s\[\s\]\s+(.+)$/);
-      if (checkboxMatch) {
+      const isChecklistStart = (value: string): boolean => parseChecklistPrefix(value) !== null;
+      const checkboxText = parseChecklistMatch(line);
+      if (checkboxText) {
         const blockLines = [rawLine];
-        let text = checkboxMatch[1] ?? "";
+        let text = checkboxText;
         while (
           i + 1 < lines.length
           && /^[\t ]/.test(lines[i + 1] ?? "")
-          && !(lines[i + 1] ?? "").trimStart().startsWith("- ")
+          && !isChecklistStart((lines[i + 1] ?? "").trimStart())
         ) {
           i++;
           const contRaw = lines[i] ?? "";
@@ -176,7 +177,7 @@ function getInboxEntries(content: string, intakeAliases: string[]): InboxEntry[]
         while (
           i + 1 < lines.length
           && /^[\t ]/.test(lines[i + 1] ?? "")
-          && !(lines[i + 1] ?? "").trimStart().startsWith("- ")
+          && !isChecklistStart((lines[i + 1] ?? "").trimStart())
         ) {
           i++;
           const contRaw = lines[i] ?? "";
@@ -190,6 +191,63 @@ function getInboxEntries(content: string, intakeAliases: string[]): InboxEntry[]
   }
 
   return entries;
+}
+
+interface ChecklistMatch {
+  checked: boolean;
+  textStart: number;
+}
+
+function parseChecklistPrefix(line: string): ChecklistMatch | null {
+  let index = 0;
+  const len = line.length;
+
+  while (index < len && isInlineWhitespace(line.charCodeAt(index))) {
+    index += 1;
+  }
+
+  if (line[index] === ">") {
+    index += 1;
+    while (index < len && isInlineWhitespace(line.charCodeAt(index))) {
+      index += 1;
+    }
+  }
+
+  const bullet = line.charCodeAt(index);
+  if (bullet !== 0x2d && bullet !== 0x2a && bullet !== 0x2b) {
+    return null;
+  }
+  index += 1;
+
+  if (!isInlineWhitespace(line.charCodeAt(index))) return null;
+  while (isInlineWhitespace(line.charCodeAt(index))) {
+    index += 1;
+  }
+
+  if (line.charCodeAt(index) !== 0x5b) return null;
+  const mark = line.charCodeAt(index + 1);
+  if (mark !== 0x20 && mark !== 0x78 && mark !== 0x58) return null;
+  if (line.charCodeAt(index + 2) !== 0x5d) return null;
+  index += 3;
+
+  if (!isInlineWhitespace(line.charCodeAt(index))) return null;
+  while (isInlineWhitespace(line.charCodeAt(index))) {
+    index += 1;
+  }
+
+  return { checked: mark !== 0x20, textStart: index };
+}
+
+function parseChecklistMatch(line: string): string | null {
+  const match = parseChecklistPrefix(line);
+  if (!match) return null;
+  const text = line.slice(match.textStart);
+  if (!text) return null;
+  return text;
+}
+
+function isInlineWhitespace(code: number): boolean {
+  return code === 0x20 || code === 0x09;
 }
 
 /** Check if a task already has required orchestration tags. */
@@ -1853,23 +1911,55 @@ function discoverBoardsLegacy(workspacePath: string, config?: OrchestratorConfig
     if (!existsSync(path)) return false;
     try {
       const content = readFileSync(path, "utf-8");
-      return /kanban-plugin:\s*board/i.test(content);
+      return /(?:^|\n)\s*kanban-plugin:\s*board\s*(?:$|\n)/i.test(content);
     } catch {
       return false;
     }
   };
 
-  // Project-level boards under workspace/projects/*/CONDUCTOR.md
+  const collectKanbanMarkdown = (rootDir: string, maxDepth: number): void => {
+    const walk = (dir: string, depth: number): void => {
+      if (depth > maxDepth) return;
+      let entries: string[] = [];
+      try {
+        entries = readdirSync(dir, { encoding: "utf-8" });
+      } catch {
+        return;
+      }
+
+      for (const entry of entries) {
+        if (entry.startsWith(".")) continue;
+        const full = join(dir, entry);
+        try {
+          const st = statSync(full);
+          if (st.isDirectory()) {
+            walk(full, depth + 1);
+            continue;
+          }
+          if (!st.isFile()) continue;
+          if (!entry.toLowerCase().endsWith(".md")) continue;
+          if (isKanbanBoardFile(full)) addBoard(full);
+        } catch {
+          // Ignore transient entries
+        }
+      }
+    };
+
+    walk(rootDir, 0);
+  };
+
+  // Project-level boards under workspace/projects
   const projectsDir = join(workspacePath, "projects");
   if (existsSync(projectsDir)) {
     try {
       for (const entry of readdirSync(projectsDir)) {
         const full = join(projectsDir, entry);
         try {
-          const stat = statSync(full);
-          if (stat.isDirectory()) {
+          const st = statSync(full);
+          if (st.isDirectory()) {
             addBoard(join(full, "CONDUCTOR.md"));
-          } else if (stat.isFile() && entry.toLowerCase().endsWith(".md") && isKanbanBoardFile(full)) {
+            collectKanbanMarkdown(full, 2);
+          } else if (st.isFile() && entry.toLowerCase().endsWith(".md") && isKanbanBoardFile(full)) {
             addBoard(full);
           }
         } catch {
@@ -1882,27 +1972,18 @@ function discoverBoardsLegacy(workspacePath: string, config?: OrchestratorConfig
   }
 
   // Also watch repo-local boards from configured project.path values.
-  // This covers cases where users edit <repo>/CONDUCTOR.md directly.
+  // This covers cases where users edit nested board files in project repos.
   if (config) {
     for (const project of Object.values(config.projects)) {
       const projectRoot = expandHome(project.path);
       addBoard(join(projectRoot, "CONDUCTOR.md"));
-
-      // Include additional kanban markdown boards in the project root.
-      try {
-        for (const entry of readdirSync(projectRoot)) {
-          if (!entry.toLowerCase().endsWith(".md")) continue;
-          const candidate = join(projectRoot, entry);
-          if (isKanbanBoardFile(candidate)) addBoard(candidate);
-        }
-      } catch {
-        // Ignore unreadable project roots
-      }
+      collectKanbanMarkdown(projectRoot, 2);
     }
   }
 
   return boards;
 }
+
 
 /** Expand ~ to home directory. */
 function expandHome(filepath: string): string {

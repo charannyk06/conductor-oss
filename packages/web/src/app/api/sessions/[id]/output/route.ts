@@ -1,4 +1,4 @@
-import { guardApiAccess } from "@/lib/auth";
+import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { type NextRequest, NextResponse } from "next/server";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -111,6 +111,8 @@ export async function GET(
 ) {
   const denied = await guardApiAccess();
   if (denied) return denied;
+  const deniedAction = guardApiActionAccess(request);
+  if (deniedAction) return deniedAction;
   const { id } = await params;
 
   if (!id || id.trim().length === 0) {
@@ -121,7 +123,8 @@ export async function GET(
   }
 
   const url = new URL(request.url);
-  const lines = parseInt(url.searchParams.get("lines") ?? "500", 10);
+  const rawLines = parseInt(url.searchParams.get("lines") ?? "500", 10);
+  const lines = Number.isFinite(rawLines) ? Math.min(1000, Math.max(1, rawLines)) : 500;
 
   const tmuxName = resolveTmuxName(id);
   if (!tmuxName) {
@@ -139,6 +142,9 @@ export async function POST(
 ) {
   const denied = await guardApiAccess();
   if (denied) return denied;
+  const deniedAction = guardApiActionAccess(request);
+  if (deniedAction) return deniedAction;
+
   const { id } = await params;
 
   if (!id || id.trim().length === 0) {

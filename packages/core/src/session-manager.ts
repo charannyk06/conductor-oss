@@ -834,7 +834,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // rather than using a fixed delay, since agent startup time varies.
     if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
       try {
-        const maxWaitMs = 30_000;
+        const maxWaitMs = 90_000;
         const pollIntervalMs = 1_000;
         const startTime = Date.now();
         let ready = false;

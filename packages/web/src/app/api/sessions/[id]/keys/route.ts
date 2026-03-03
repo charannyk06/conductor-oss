@@ -1,4 +1,4 @@
-import { guardApiAccess } from "@/lib/auth";
+import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { type NextRequest, NextResponse } from "next/server";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -91,6 +91,9 @@ export async function POST(
 ): Promise<NextResponse> {
   const denied = await guardApiAccess();
   if (denied) return denied;
+  const deniedAction = guardApiActionAccess(request);
+  if (deniedAction) return deniedAction;
+
   const { id } = await params;
 
   if (!id || id.trim().length === 0) {

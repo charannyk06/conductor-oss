@@ -32,6 +32,18 @@ test("indented checkboxes are parsed as unchecked tasks", () => {
   assert.deepEqual(ready, ["indented task one", "indented task two"]);
 });
 
+test("multiple checklist markers (+, *) are parsed", () => {
+  const content = [
+    "## Inbox",
+    "- [ ] alpha task",
+    "* [x] beta task",
+    "+ [ ] gamma task",
+    "",
+  ].join("\n");
+  const ready = getUncheckedTasks(content, "Inbox");
+  assert.deepEqual(ready, ["alpha task", "gamma task"]);
+});
+
 test("custom columns resolve with aliases", () => {
   const content = fixture("custom-columns.md");
   const aliases = resolveColumnAliases(undefined, {
