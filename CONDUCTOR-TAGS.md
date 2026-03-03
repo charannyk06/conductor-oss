@@ -84,15 +84,15 @@ Type `#` in Obsidian for autocomplete. Type `ctask` in VS Code for a full task s
 
 ## Example Task Formats
 
-```
+```text
 Fix login button tooltip #project/aba-copilot #agent/claude-code #type/fix #priority/high
 
 Add analytics dashboard #project/aba-copilot-ios #agent/codex #type/feature
 ```
 
----
-
+```text
 #project/aba-copilot #project/aba-copilot-ios #project/alpha-mesh #project/carevm #project/certify-institution-portal #project/chainreview #project/clawcloud #project/conductor-oss #project/patient-portal #project/shadower #project/techwealth-engine
 #agent/codex #agent/claude-code
 #type/feature #type/fix #type/review #type/chore #type/docs
 #priority/high #priority/medium #priority/low
+```

@@ -8,14 +8,21 @@ export const dynamic = "force-dynamic";
 
 export async function POST(
   request: NextRequest,
-  context: { params: { id: string } },
+  context: { params: Promise<{ id: string }> },
 ) {
   const denied = await guardApiAccess();
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;
 
-  const sessionId = decodeURIComponent(context.params.id ?? "").trim();
+  const params = await context.params;
+  const rawId = params?.id ?? "";
+  let sessionId: string;
+  try {
+    sessionId = decodeURIComponent(rawId).trim();
+  } catch {
+    return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
+  }
   if (!sessionId) {
     return NextResponse.json({ error: "Session id is required" }, { status: 400 });
   }

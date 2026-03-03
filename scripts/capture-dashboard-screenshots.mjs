@@ -6,9 +6,8 @@ import puppeteer from "puppeteer";
 
 const cliBaseUrlArg = process.argv.find((arg) => arg.startsWith("--base-url="));
 const envBaseUrl = process.env.UI_BASE_URL ?? process.env.NEXT_PUBLIC_BASE_URL;
-const BASE_URL = cliBaseUrlArg
-  ? cliBaseUrlArg.split("=")[1] ?? "http://localhost:4747"
-  : (envBaseUrl ?? "http://localhost:4747").replace(/\/+$/, "");
+const cliBaseUrl = cliBaseUrlArg?.split("=")[1];
+const BASE_URL = (cliBaseUrl ?? envBaseUrl ?? "http://localhost:4747").replace(/\/+$/, "");
 
 const OUTPUT_DIR = path.resolve(process.cwd(), "docs", "screenshots");
 const VIEWPORT = { width: 1680, height: 1200 };
@@ -87,7 +86,7 @@ async function openTab(page, tabName) {
   await sleep(450);
 }
 
-async function openCommandPalette(page) {
+async function openCommandPalette(page, fileName = "06-command-palette.png") {
   await clearOverlays(page);
   const button = await page.$('button[title="Open command bar"]');
   if (button) {
@@ -105,38 +104,38 @@ async function openCommandPalette(page) {
   if (!input) {
     throw new Error("Unable to open command palette");
   }
-  await snapshot(page, "06-command-palette.png", "command-palette");
+  await snapshot(page, fileName, "command-palette");
 }
 
-async function captureDashboard(page) {
+async function captureDashboard(page, fileName = "01-dashboard-overview.png") {
   await safeGoto(page, "/");
   await waitForDashboardReady(page);
-  await snapshot(page, "01-dashboard-overview.png", "overview");
+  await snapshot(page, fileName, "overview");
 }
 
-async function openChatTab(page) {
+async function openChatTab(page, fileName = "02-dashboard-chat.png") {
   await openTab(page, "Chat");
-  await snapshot(page, "02-dashboard-chat.png", "chat");
+  await snapshot(page, fileName, "chat");
 }
 
-async function openReviewTab(page) {
+async function openReviewTab(page, fileName = "03-dashboard-review.png") {
   await openTab(page, "Review");
-  await snapshot(page, "03-dashboard-review.png", "review");
+  await snapshot(page, fileName, "review");
 }
 
-async function openAgentsTab(page) {
+async function openAgentsTab(page, fileName = "04-dashboard-agents.png") {
   await openTab(page, "Agents");
-  await snapshot(page, "04-dashboard-agents.png", "agents");
+  await snapshot(page, fileName, "agents");
 }
 
-async function openLaunchFlow(page) {
+async function openLaunchFlow(page, fileName = "05-launch-session.png") {
   await openTab(page, "Overview");
   await clickByText(page, "Launch Session");
   await sleep(450);
-  await snapshot(page, "05-launch-session.png", "launch");
+  await snapshot(page, fileName, "launch");
 }
 
-async function openSessionDetail(page) {
+async function openSessionDetail(page, fileName = "07-session-detail.png") {
   const sessionId = await getSampleSessionId(BASE_URL);
   const pathname = sessionId
     ? `/sessions/${encodeURIComponent(sessionId)}`
@@ -144,7 +143,7 @@ async function openSessionDetail(page) {
 
   await clearOverlays(page);
   await safeGoto(page, pathname);
-  await snapshot(page, "07-session-detail.png", sessionId ? "session-detail" : "session-not-found");
+  await snapshot(page, fileName, sessionId ? "session-detail" : "session-not-found");
 }
 
 async function run() {
@@ -159,13 +158,10 @@ async function run() {
   await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
   await page.setBypassCSP(true);
 
-  await safeGoto(page, "/");
-  await waitForDashboardReady(page);
-
   let success = 0;
   for (const step of STEPS) {
     try {
-      await step.run(page);
+      await step.run(page, step.file);
       success += 1;
     } catch (error) {
       console.warn(`  skipped: ${step.file} -> ${error instanceof Error ? error.message : String(error)}`);

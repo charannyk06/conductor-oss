@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { accessSync, constants, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { delimiter, isAbsolute } from "node:path";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -8,6 +9,8 @@ import { getServices } from "@/lib/services";
 import { guardApiAccess } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
+
+const execFileAsync = promisify(execFile);
 
 type AgentInfo = {
   name: string;
@@ -217,19 +220,16 @@ function resolveHintEntries(value: string): Array<{ command: string; name: strin
   });
 }
 
-function detectVersion(command: string): string | null {
+async function detectVersion(command: string): Promise<string | null> {
   try {
-    const result = spawnSync(command, ["--version"], {
+    const result = await execFileAsync(command, ["--version"], {
       encoding: "utf8",
       timeout: 900,
-      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-    });
+      maxBuffer: 32_768,
+    }) as { stdout: string; stderr: string };
 
-    const output = [
-      result.stdout?.toString() ?? "",
-      result.stderr?.toString() ?? "",
-    ]
+    const output = [result.stdout ?? "", result.stderr ?? ""]
       .join("\n")
       .trim();
 
@@ -255,7 +255,7 @@ function collectConfiguredAgents(config: { projects: Record<string, { agent?: st
   return [...names];
 }
 
-function collectBinaryAgents(candidates: string[]): AgentInfo[] {
+async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
   const discovered = new Map<string, AgentInfo>();
   const bindings = new Map<string, { displayNames: Set<string>; descriptions: Set<string> }>();
 
@@ -289,9 +289,20 @@ function collectBinaryAgents(candidates: string[]): AgentInfo[] {
     }
   }
 
-  for (const [command, info] of bindings) {
-    if (!findInPath(command)) continue;
-    const version = detectVersion(command);
+  const discoveredEntries = await Promise.all(
+    [...bindings].map(async ([command, info]) => {
+      const resolved = findInPath(command);
+      if (!resolved) return null;
+
+      const version = await detectVersion(resolved);
+      return { command, resolved, info, version };
+    }),
+  );
+
+  for (const entry of discoveredEntries) {
+    if (!entry) continue;
+
+    const { info, version } = entry;
     const description = [...info.descriptions][0] ?? null;
 
     for (const displayName of info.displayNames) {
@@ -358,7 +369,8 @@ export async function GET() {
       ...dedupe.keys(),
     ]);
 
-    for (const discovered of collectBinaryAgents([...binaryCandidates])) {
+    const discoveredBinaryAgents = await collectBinaryAgents([...binaryCandidates]);
+    for (const discovered of discoveredBinaryAgents) {
       const key = normalizeAgentName(discovered.name);
       if (!key) continue;
       const existing = dedupe.get(key);

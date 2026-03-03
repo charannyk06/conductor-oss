@@ -35,12 +35,31 @@ function expandHomePath(value: string): string {
   return value;
 }
 
+function normalizeConfigPath(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const expanded = expandHomePath(value.trim());
+  return expanded ? resolve(expanded) : undefined;
+}
+
+function resolveWorkspaceConfigPath(workspacePath: string): string | undefined {
+  const configFileNames = ["conductor.yaml", "conductor.yml"] as const;
+  for (const configFile of configFileNames) {
+    const directConfigPath = resolve(workspacePath, configFile);
+    if (existsSync(directConfigPath)) {
+      return directConfigPath;
+    }
+  }
+  return undefined;
+}
+
 function findConfigFromWorkspace(workspace?: string): string | undefined {
   if (!workspace) return undefined;
 
-  const workspacePath = expandHomePath(workspace);
-  const directConfigPath = resolve(workspacePath, "conductor.yaml");
-  if (existsSync(directConfigPath)) {
+  const workspacePath = normalizeConfigPath(workspace);
+  if (!workspacePath) return undefined;
+
+  const directConfigPath = resolveWorkspaceConfigPath(workspacePath);
+  if (directConfigPath) {
     return directConfigPath;
   }
 
@@ -60,14 +79,9 @@ function findConfigFromWorkspace(workspace?: string): string | undefined {
       const resolvedOrigin = resolve(readFileSync(originPath, "utf8").trim());
       if (resolvedOrigin !== workspacePath) continue;
 
-      const originConfigYaml = `${resolvedOrigin}/conductor.yaml`;
-      if (existsSync(originConfigYaml)) {
-        return originConfigYaml;
-      }
-
-      const originConfigYml = `${resolvedOrigin}/conductor.yml`;
-      if (existsSync(originConfigYml)) {
-        return originConfigYml;
+      const originWorkspaceConfig = resolveWorkspaceConfigPath(resolvedOrigin);
+      if (originWorkspaceConfig) {
+        return originWorkspaceConfig;
       }
 
       if (
@@ -88,7 +102,7 @@ function findConfigFromWorkspace(workspace?: string): string | undefined {
 }
 
 function getConfigStateFromEnv(): { path: string | undefined } {
-  const envConfigPath = process.env["CO_CONFIG_PATH"];
+  const envConfigPath = normalizeConfigPath(process.env["CO_CONFIG_PATH"]);
   const workspaceConfigPath = findConfigFromWorkspace(process.env["CONDUCTOR_WORKSPACE"]);
 
   return {
@@ -117,14 +131,14 @@ function clearCachedServices(reason = "stale config"): void {
 /** Get (or lazily initialize) the core services singleton. */
 export function getServices(): Promise<Services> {
   const configState = getConfigStateFromEnv();
-  const configPath = configState.path;
-  const configMtimeMs = getConfigMtimeMs(configPath);
+  const normalizedConfigPath = configState.path ? normalizeConfigPath(configState.path) : undefined;
+  const configMtimeMs = getConfigMtimeMs(normalizedConfigPath);
 
   if (globalForServices._conductorServices) {
-    if (configPath !== globalForServices._conductorServicesConfigPath) {
+    if (normalizedConfigPath !== globalForServices._conductorServicesConfigPath) {
       clearCachedServices("configuration path changed");
     } else if (
-      configPath &&
+      normalizedConfigPath &&
       configMtimeMs !== undefined &&
       globalForServices._conductorServicesConfigMtimeMs !== undefined &&
       configMtimeMs !== globalForServices._conductorServicesConfigMtimeMs
@@ -166,7 +180,7 @@ async function initServices(): Promise<Services> {
   }
 
   const envConfig = getConfigStateFromEnv();
-  const configPath = envConfig.path;
+  const configPath = envConfig.path ? normalizeConfigPath(envConfig.path) : undefined;
   const config = configPath ? loadConfig(configPath) : loadConfig();
   const registry = createPluginRegistry();
 
@@ -179,7 +193,8 @@ async function initServices(): Promise<Services> {
 
   const services: Services = { config, registry, sessionManager };
   globalForServices._conductorServices = services;
-  globalForServices._conductorServicesConfigPath = config.configPath;
-  globalForServices._conductorServicesConfigMtimeMs = getConfigMtimeMs(config.configPath);
+  const loadedConfigPath = normalizeConfigPath(config.configPath);
+  globalForServices._conductorServicesConfigPath = loadedConfigPath ?? config.configPath;
+  globalForServices._conductorServicesConfigMtimeMs = getConfigMtimeMs(loadedConfigPath);
   return services;
 }
