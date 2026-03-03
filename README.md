@@ -43,7 +43,6 @@ pnpm ui:screenshots -- --base-url=http://localhost:4747
 - [Agents tab + installed/discovered status](docs/screenshots/04-dashboard-agents.png)
 - [Launch flow](docs/screenshots/05-launch-session.png)
 - [Command palette + cleanup flow](docs/screenshots/06-command-palette.png)
-- [Session detail / 404 fallback](docs/screenshots/07-session-detail.png)
 
 To get complete visual parity after each UI change, capture screenshots immediately after restarting or redeploying the dashboard on `4747`.
 
@@ -111,11 +110,27 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 
 ![Command palette](docs/screenshots/06-command-palette.png)
 
-### 7) Session detail path
-
-![Session detail](docs/screenshots/07-session-detail.png)
-
 </details>
+
+## Demo videos & GIFs
+
+![Session add task (GIF)](docs/demo/01-add-task.gif)
+![Auto dispatch (GIF)](docs/demo/02-auto-dispatch.gif)
+![Live terminal (GIF)](docs/demo/03-live-terminal.gif)
+![Dashboard review (GIF)](docs/demo/04-dashboard.gif)
+![PR creation (GIF)](docs/demo/05-pr-creation.gif)
+
+Full-length captures:
+
+- [Full demo (GIF)](docs/demo/full-demo.gif)
+- [Full demo (MP4)](docs/demo/full-demo.mp4)
+- [Task + PR flow (MP4)](docs/demo/05-pr-and-board.mp4)
+- [Task creation + dispatch (MP4)](docs/demo/01-add-task.mp4)
+- [Auto dispatch terminal (MP4)](docs/demo/02-auto-dispatch.mp4)
+- [Live terminal (MP4)](docs/demo/03-live-terminal.mp4)
+- [Dashboard (MP4)](docs/demo/04-dashboard.mp4)
+- [Session detail / board path (MP4)](docs/demo/05-session-detail.mp4)
+- [PR creation (MP4)](docs/demo/06-pr-creation.mp4)
 
 ---
 
