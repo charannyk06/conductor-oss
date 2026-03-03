@@ -130,9 +130,21 @@ co init
 
 # 4. Start the orchestrator
 co start
+
+# 4b. Optional: run against an explicit workspace/config path
+cd /path/to/workspace
+CO_CONFIG_PATH=./conductor.yaml co start --workspace . --port 4747
 ```
 
 Open `CONDUCTOR.md` in your editor (or Obsidian), write a task in **Ready to Dispatch**, save — done.
+
+### Running on localhost
+
+The dashboard UI runs on:
+
+- `http://localhost:4747` by default when launched with `co start`
+
+If a workspace has multiple projects, the dashboard loads all linked boards from that workspace and keeps project links scoped to the correct board files.
 
 ### Prerequisites
 
@@ -369,6 +381,34 @@ co status                        # Status overview
 co attach <session-id>           # Attach to tmux session
 co kill <session-id>             # Kill a session
 co dashboard                     # Open web dashboard in browser
+
+## Local Troubleshooting (Common)
+
+### Wrong board links or missing board actions
+- Restart `co start` with the workspace and config path that contains your projects:
+
+```bash
+CO_CONFIG_PATH=/path/to/workspace/conductor.yaml co start --workspace /path/to/workspace --port 4747
+```
+
+- Confirm `/api/config` returns all expected projects in the dashboard.
+
+### “Invalid request origin” on cleanup/session actions
+- Make sure actions are triggered from the same origin as the running dashboard (`http://localhost:4747` is default).
+- If you use `127.0.0.1`, use the same host/port consistently in your browser and API calls.
+
+### Bulk clean up sessions
+- Use **`Ctrl/Cmd + K`** then run **“Cleanup all sessions”**.
+- Or call kill directly for a session:
+
+```bash
+curl -X POST http://localhost:4747/api/sessions/<session-id>/kill
+```
+
+### Session and board sanity checks
+- `GET /api/sessions` should return `{ sessions: [...] }`.
+- `GET /api/health/boards` should list configured board files and watch state.
+
 co mcp                           # Start MCP server (stdio)
 ```
 
