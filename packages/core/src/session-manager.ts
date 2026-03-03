@@ -453,33 +453,62 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     plugins: ReturnType<typeof resolvePlugins>,
     handleFromMetadata: boolean,
   ): Promise<void> {
+    const project = config.projects[session.projectId];
     if (TERMINAL_SESSION_STATUSES.has(session.status)) {
-      session.activity = "exited";
-      // Still fetch session info (summary, cost) for done sessions — the
-      // JSONL files persist on disk and may contain real summaries even
-      // after the agent process has exited.
-      if (plugins.agent) {
+      if (
+        session.status === "done" &&
+        handleFromMetadata &&
+        session.runtimeHandle &&
+        plugins.runtime &&
+        session.metadata["attemptStatus"] !== "archived"
+      ) {
         try {
-          const info = await plugins.agent.getSessionInfo(session);
-          if (info) {
-            session.agentInfo = info;
-            // Persist to metadata if the summary is a real one (not a fallback)
-            if (info.summary && !info.summaryIsFallback) {
-              const project = config.projects[session.projectId];
-              if (project) {
-                const sessionsDir = getProjectSessionsDir(project);
-                const fields: Record<string, string> = {};
-                fields["summary"] = info.summary;
-                if (info.cost) fields["cost"] = JSON.stringify(info.cost);
-                updateMetadata(sessionsDir, session.id, fields);
-              }
+          const alive = await plugins.runtime.isAlive(session.runtimeHandle);
+          if (alive) {
+            session.status = "working";
+            if (project) {
+              const sessionsDir = getProjectSessionsDir(project);
+              updateMetadata(sessionsDir, session.id, { status: "working" });
             }
+          } else {
+            session.activity = "exited";
+            return;
           }
         } catch {
-          // Can't get session info — use metadata fallback
+          session.activity = "exited";
+          return;
         }
+      } else {
+        session.activity = "exited";
+        // Still fetch session info (summary, cost) for done sessions — the
+        // JSONL files persist on disk and may contain real summaries even
+        // after the agent process has exited.
+        if (plugins.agent) {
+          try {
+            const info = await plugins.agent.getSessionInfo(session);
+            if (info) {
+              session.agentInfo = info;
+              // Persist to metadata if the summary is a real one (not a fallback)
+              if (info.summary && !info.summaryIsFallback) {
+                if (project) {
+                  const sessionsDir = getProjectSessionsDir(project);
+                  const fields: Record<string, string> = {};
+                  fields["summary"] = info.summary;
+                  if (info.cost) fields["cost"] = JSON.stringify(info.cost);
+                  updateMetadata(sessionsDir, session.id, fields);
+                }
+              }
+            }
+          } catch {
+            // Can't get session info — use metadata fallback
+          }
+        }
+        return;
       }
-      return;
+
+      if (session.status !== "working") {
+        return;
+      }
     }
 
     // Check runtime liveness only if handle came from metadata

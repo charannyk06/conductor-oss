@@ -26,6 +26,7 @@ import type {
   ProjectConfig,
   Notifier,
   SCM,
+  Runtime,
   PluginRegistry,
   OrchestratorEvent,
   EventType,
@@ -179,6 +180,21 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   function getSCM(project: ProjectConfig): SCM | null {
     if (!registry || !project.scm) return null;
     return registry.get<SCM>("scm", project.scm.plugin);
+  }
+
+  function getRuntime(project: ProjectConfig): Runtime | null {
+    if (!registry) return null;
+    return registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
+  }
+
+  async function isRuntimeAlive(session: Session, project: ProjectConfig): Promise<boolean> {
+    const runtime = getRuntime(project);
+    if (!runtime || !session.runtimeHandle) return false;
+    try {
+      return await runtime.isAlive(session.runtimeHandle);
+    } catch {
+      return false;
+    }
   }
 
   async function hydratePRInfo(
@@ -468,6 +484,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       !SKIP_STATUSES.has(previousStatus) &&
       previousStatus !== "spawning"
     ) {
+      const isAlive = await isRuntimeAlive(session, project);
+      if (isAlive) return;
+
       // Attempt PR detection before deciding terminal status —
       // the agent may have created a PR on its final action.
       if (scm && session.branch) {
@@ -768,6 +787,22 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           createEvent("session.working", "info", session, `Session ${session.id} is working`),
         );
       } else if (session.activity === "ready") {
+        const isAlive = await isRuntimeAlive(session, project);
+        if (isAlive) {
+          updateSessionStatus(session, "working");
+          state.lastStatus = "working";
+          await emit(
+            createEvent("session.working", "info", session, `Session ${session.id} is working`),
+          );
+          return;
+        }
+
+        // Avoid misclassifying sessions as complete during initial prompt/setup.
+        // Some agents emit a ready/idle prompt immediately after spawn.
+        if (effectiveAge < 120_000) {
+          return;
+        }
+
         // Agent went from spawning straight to ready (summary emitted) — lifecycle
         // missed the active window entirely (e.g. daemon wasn't running). The session
         // clearly worked and completed. Attempt PR detection before deciding status.

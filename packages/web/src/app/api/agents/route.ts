@@ -16,14 +16,27 @@ type AgentInfo = {
   name: string;
   description: string | null;
   version: string | null;
+  homepage: string | null;
+  iconUrl: string | null;
 };
 
-const PATH_AGENT_HINTS: Array<{ name: string; commands: string[]; aliases?: string[]; description: string }> = [
+type AgentHint = {
+  name: string;
+  commands: string[];
+  aliases?: string[];
+  description: string;
+  homepage: string;
+  iconUrl?: string;
+};
+
+const PATH_AGENT_HINTS: AgentHint[] = [
   {
     name: "claude-code",
     commands: ["claude", "claude-code", "claude-cli", "cc", "claude-code-cli"],
     aliases: ["cc", "claude", "claude_code", "claude code", "claude code cli", "claude_code_cli", "claude-cli"],
     description: "Claude Code CLI",
+    homepage: "https://www.anthropic.com/claude",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
   },
   {
     name: "codex",
@@ -39,6 +52,8 @@ const PATH_AGENT_HINTS: Array<{ name: string; commands: string[]; aliases?: stri
       "codex",
     ],
     description: "OpenAI Codex CLI",
+    homepage: "https://github.com/openai/codex",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
   },
   {
     name: "gemini",
@@ -51,12 +66,16 @@ const PATH_AGENT_HINTS: Array<{ name: string; commands: string[]; aliases?: stri
       "gemini cli",
     ],
     description: "Google Gemini CLI",
+    homepage: "https://ai.google.dev/gemini-api/docs",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/googlegemini.svg",
   },
   {
     name: "amp",
     commands: ["amp", "amp-cli"],
     aliases: ["amp-cli", "amp cli"],
     description: "Amp Code CLI",
+    homepage: "https://www.ampcode.com",
+    iconUrl: "https://ampcode.com/amp-mark-color.svg",
   },
   {
     name: "cursor-cli",
@@ -69,38 +88,54 @@ const PATH_AGENT_HINTS: Array<{ name: string; commands: string[]; aliases?: stri
       "cursoragent",
     ],
     description: "Cursor Agent CLI",
+    homepage: "https://www.cursor.com",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/cursor.svg",
   },
   {
     name: "opencode",
     commands: ["opencode", "open-code"],
     aliases: ["open code", "open-code", "open_code", "open-code-cli", "opencode"],
     description: "OpenCode CLI",
+    homepage: "https://opencode.ai",
   },
   {
     name: "droid",
     commands: ["droid"],
     aliases: ["factory-droid", "factory_droid"],
     description: "Factory Droid CLI",
+    homepage: "https://github.com/Factory-AI/factory",
+    iconUrl: "https://raw.githubusercontent.com/Factory-AI/factory/main/docs/images/droid_logo_cli.png",
   },
   {
     name: "qwen-code",
     commands: ["qwen-code"],
     aliases: ["qwen", "qwen code", "qwen-code-cli", "qwen_code", "qwen-code"],
     description: "Qwen Code CLI",
+    homepage: "https://qwenlm.github.io/announcements/",
   },
   {
     name: "ccr",
     commands: ["ccr"],
     aliases: ["claude-code-router", "claude_code_router", "ccr", "ccr-cli"],
     description: "Claude Code Router",
+    homepage: "https://github.com/mckaywrigley/claude-code-router",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
   },
   {
     name: "github-copilot",
     commands: ["github-copilot", "copilot", "gh-copilot"],
     aliases: ["copilot-cli", "github-copilot-cli", "gh-copilot", "github copilot"],
     description: "GitHub Copilot CLI",
+    homepage: "https://github.com/github/copilot-cli",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
   },
 ];
+
+function getAgentHintByName(value: string): AgentHint | undefined {
+  const normalized = normalizeAgentName(value);
+  if (!normalized) return undefined;
+  return PATH_AGENT_HINTS.find((hint) => normalizeAgentName(hint.name) === normalized);
+}
 
 function normalizeAgentName(value: string): string {
   return value
@@ -230,21 +265,43 @@ function findInPath(command: string): string | undefined {
   return undefined;
 }
 
+type HintBinding = {
+  displayNames: Set<string>;
+  descriptions: Set<string>;
+  homepage: string | null;
+  iconUrl: string | null;
+};
+
 function addHintCommands(
-  bindings: Map<string, { displayNames: Set<string>; descriptions: Set<string> }>,
+  bindings: Map<string, HintBinding>,
   command: string,
   displayName: string,
   description: string,
+  homepage: string | null,
+  iconUrl: string | null,
 ) {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) return;
-  const target = bindings.get(trimmedCommand) ?? { displayNames: new Set(), descriptions: new Set() };
+  const target = bindings.get(trimmedCommand) ?? {
+    displayNames: new Set(),
+    descriptions: new Set(),
+    homepage: null,
+    iconUrl: null,
+  };
   target.displayNames.add(displayName);
   target.descriptions.add(description);
+  if (!target.homepage && homepage) target.homepage = homepage;
+  if (!target.iconUrl && iconUrl) target.iconUrl = iconUrl;
   bindings.set(trimmedCommand, target);
 }
 
-function resolveHintEntries(value: string): Array<{ command: string; name: string; description: string }> {
+function resolveHintEntries(value: string): Array<{
+  command: string;
+  name: string;
+  description: string;
+  homepage: string;
+  iconUrl: string | null;
+}> {
   const normalized = normalizeAgentName(value);
   if (!normalized) return [];
 
@@ -256,7 +313,13 @@ function resolveHintEntries(value: string): Array<{ command: string; name: strin
     ];
 
     if (!normalizedMatches.includes(normalized)) return [];
-    return hint.commands.map((command) => ({ command, name: hint.name, description: hint.description }));
+    return hint.commands.map((command) => ({
+      command,
+      name: hint.name,
+      description: hint.description,
+      homepage: hint.homepage,
+      iconUrl: hint.iconUrl ?? null,
+    }));
   });
 }
 
@@ -297,7 +360,7 @@ function collectConfiguredAgents(config: { projects: Record<string, { agent?: st
 
 async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
   const discovered = new Map<string, AgentInfo>();
-  const bindings = new Map<string, { displayNames: Set<string>; descriptions: Set<string> }>();
+  const bindings = new Map<string, HintBinding>();
 
   for (const candidate of candidates) {
     const trimmedCandidate = candidate.trim();
@@ -311,6 +374,8 @@ async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
           hintBinding.command,
           hintBinding.name,
           hintBinding.description,
+          hintBinding.homepage,
+          hintBinding.iconUrl,
         );
       }
       continue;
@@ -325,7 +390,7 @@ async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
     ]);
 
     for (const command of candidateVariants) {
-      addHintCommands(bindings, command, trimmedCandidate, `Detected binary: ${trimmedCandidate}`);
+      addHintCommands(bindings, command, trimmedCandidate, `Detected binary: ${trimmedCandidate}`, null, null);
     }
   }
 
@@ -355,6 +420,8 @@ async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
           name: displayName,
           description: description ?? `Detected binary: ${displayName}`,
           version,
+          homepage: info.homepage,
+          iconUrl: info.iconUrl,
         });
         continue;
       }
@@ -364,6 +431,12 @@ async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
       }
       if (!existing.description && description) {
         existing.description = description;
+      }
+      if (!existing.homepage && info.homepage) {
+        existing.homepage = info.homepage;
+      }
+      if (!existing.iconUrl && info.iconUrl) {
+        existing.iconUrl = info.iconUrl;
       }
     }
   }
@@ -382,10 +455,13 @@ export async function GET() {
     for (const manifest of registry.list("agent")) {
       const key = normalizeAgentName(manifest.name);
       if (!key) continue;
+      const hint = getAgentHintByName(key);
       dedupe.set(key, {
         name: manifest.name,
-        description: manifest.description ?? null,
+        description: manifest.description ?? hint?.description ?? null,
         version: manifest.version ?? null,
+        homepage: hint?.homepage ?? null,
+        iconUrl: hint?.iconUrl ?? null,
       });
     }
 
@@ -394,12 +470,29 @@ export async function GET() {
     for (const agentName of configuredAgentNames) {
       const key = normalizeAgentName(agentName);
       if (!key) continue;
+
+      const hint = getAgentHintByName(key);
       if (!dedupe.has(key)) {
         dedupe.set(key, {
           name: agentName,
-          description: "Configured in conductor.yaml",
+          description: hint?.description ?? "Configured in conductor.yaml",
           version: null,
+          homepage: hint?.homepage ?? null,
+          iconUrl: hint?.iconUrl ?? null,
         });
+        continue;
+      }
+
+      const existing = dedupe.get(key);
+      if (!existing) continue;
+      if (!existing.description && hint?.description) {
+        existing.description = hint.description;
+      }
+      if (!existing.homepage && hint?.homepage) {
+        existing.homepage = hint.homepage;
+      }
+      if (!existing.iconUrl && hint?.iconUrl) {
+        existing.iconUrl = hint.iconUrl;
       }
     }
 
@@ -423,6 +516,12 @@ export async function GET() {
       }
       if (!existing.description && discovered.description) {
         existing.description = discovered.description;
+      }
+      if (!existing.homepage && discovered.homepage) {
+        existing.homepage = discovered.homepage;
+      }
+      if (!existing.iconUrl && discovered.iconUrl) {
+        existing.iconUrl = discovered.iconUrl;
       }
     }
 

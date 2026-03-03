@@ -6,6 +6,7 @@ import type { DashboardSession } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { TerminalView } from "@/components/TerminalView";
 import { useTheme } from "@/components/ThemeProvider";
+import { AgentTileIcon } from "@/components/AgentTileIcon";
 
 type DiffLineKind = "meta" | "hunk" | "context" | "add" | "remove" | "info";
 
@@ -48,6 +49,27 @@ interface DiffUIState {
   activePanel: "overview" | "diff";
 }
 
+type AgentCatalogEntry = {
+  name: string;
+  homepage: string | null;
+  iconUrl: string | null;
+};
+
+type AgentDirectory = Record<string, Omit<AgentCatalogEntry, "name">>;
+
+interface AgentsResponse {
+  agents?: AgentCatalogEntry[];
+}
+
+function normalizeAgentName(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/-+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+}
+
 export default function SessionDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -63,6 +85,7 @@ export default function SessionDetailPage() {
   const [reviewSending, setReviewSending] = useState(false);
   const [killInProgress, setKillInProgress] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [agentDirectory, setAgentDirectory] = useState<AgentDirectory>({});
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [diffState, setDiffState] = useState<DiffUIState>({
     files: [],
@@ -137,8 +160,31 @@ export default function SessionDetailPage() {
     }
   }, [sessionId]);
 
+  const fetchAgentDirectory = useCallback(async () => {
+    try {
+      const res = await fetch("/api/agents");
+      if (!res.ok) return;
+      const payload = (await res.json()) as AgentsResponse;
+      if (!Array.isArray(payload.agents)) return;
+
+      const nextDirectory: AgentDirectory = {};
+      for (const agent of payload.agents) {
+        const key = normalizeAgentName(agent.name);
+        if (!key) continue;
+        nextDirectory[key] = {
+          homepage: agent.homepage ?? null,
+          iconUrl: agent.iconUrl ?? null,
+        };
+      }
+      setAgentDirectory(nextDirectory);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   useEffect(() => {
     void fetchSession();
+    void fetchAgentDirectory();
     void fetchDiff();
     const interval = setInterval(() => void fetchSession(), 3000);
     const diffInterval = setInterval(() => void fetchDiff(), 8000);
@@ -146,7 +192,7 @@ export default function SessionDetailPage() {
       clearInterval(interval);
       clearInterval(diffInterval);
     };
-  }, [fetchSession, fetchDiff]);
+  }, [fetchSession, fetchAgentDirectory, fetchDiff]);
 
   const handleSend = async () => {
     const msg = messageInput.trim();
@@ -270,6 +316,32 @@ export default function SessionDetailPage() {
 
   const attentionLevel = session ? getAttentionLevel(session) : "working";
   const meta = session?.metadata ?? {};
+  const agentName = (meta["agent"] ?? "").trim();
+  const runtimeHandle = (meta["runtimeHandle"] ?? "").trim();
+  const agentDirectorySeed = (() => {
+    const candidates = [agentName, runtimeHandle].filter(Boolean);
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      const key = normalizeAgentName(candidate);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const info = agentDirectory[key];
+      if (info) {
+        return {
+          label: agentName || candidate,
+          homepage: info.homepage,
+          iconUrl: info.iconUrl,
+        };
+      }
+    }
+
+    return {
+      label: agentName || runtimeHandle || "agent",
+      iconUrl: null,
+      homepage: null,
+    };
+  })();
+
   const diffSearch = diffState.search.trim().toLowerCase();
   const diffFiles = diffState.files.filter((file) => file.path.toLowerCase().includes(diffSearch));
   const activeDiffFile = diffState.selectedFilePath === null
@@ -313,9 +385,17 @@ export default function SessionDetailPage() {
           {sessionId}
         </span>
 
-        {session?.metadata?.agent && (
-          <span className="rounded bg-[var(--color-accent-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
-            {session.metadata.agent}
+        {(agentName || runtimeHandle) && (
+          <span className="inline-flex items-center gap-1.5 rounded bg-[var(--color-accent-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
+            <AgentTileIcon
+              seed={{
+                label: agentDirectorySeed.label,
+                iconUrl: agentDirectorySeed.iconUrl,
+                homepage: agentDirectorySeed.homepage,
+              }}
+              className="h-3.5 w-3.5"
+            />
+            {agentDirectorySeed.label}
           </span>
         )}
 
@@ -443,6 +523,21 @@ export default function SessionDetailPage() {
 
                 {/* Agent */}
                 <MetaSection label="Agent">
+                  {(agentName || runtimeHandle || meta["agent"]) && (
+                    <div className="mb-2 flex items-center gap-2">
+                      <AgentTileIcon
+                        seed={{
+                          label: agentDirectorySeed.label,
+                          iconUrl: agentDirectorySeed.iconUrl,
+                          homepage: agentDirectorySeed.homepage,
+                        }}
+                        className="h-3.5 w-3.5"
+                      />
+                      <span className="text-[12px] text-[var(--color-text-secondary)]">
+                        {agentDirectorySeed.label}
+                      </span>
+                    </div>
+                  )}
                   <MetaRow label="Type" value={meta["agent"] ?? "-"} />
                   {meta["model"] && <MetaRow label="Model" value={meta["model"]} />}
                   {meta["permissions"] && <MetaRow label="Permissions" value={meta["permissions"]} />}

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
 import { guardApiAccess } from "@/lib/auth";
 import { existsSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +50,7 @@ export async function GET() {
     const { config } = await getServices();
     const workspacePath =
       process.env["CONDUCTOR_WORKSPACE"] ??
+      dirname(config.configPath) ??
       `${process.env["HOME"]}/.conductor/workspace`;
 
     const projects = Object.entries(config.projects).map(([id, project]) => {
@@ -57,6 +58,7 @@ export async function GET() {
       return {
         id,
         repo: (project as { repo?: string }).repo ?? null,
+        iconUrl: (project as { iconUrl?: string }).iconUrl ?? null,
         boardDir,
         boardFile: resolveBoardFile(
           workspacePath,

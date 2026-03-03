@@ -18,6 +18,7 @@ import { getAttentionLevel } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@conductor-oss/core/types";
 import { SessionCard } from "./SessionCard";
 import { EmptyState } from "./EmptyState";
+import { TerminalView } from "./TerminalView";
 import { useTheme } from "./ThemeProvider";
 
 type ConfigProject = {
@@ -25,6 +26,7 @@ type ConfigProject = {
   boardDir: string;
   boardFile?: string;
   repo: string | null;
+  iconUrl?: string | null;
   description: string | null;
   agent: string;
 };
@@ -32,9 +34,11 @@ type AgentInfo = {
   name: string;
   description: string | null;
   version: string | null;
+  homepage: string | null;
+  iconUrl: string | null;
 };
 
-type DashboardTab = "overview" | "chat" | "review" | "agents";
+type DashboardTab = "overview" | "chat" | "review" | "terminal" | "agents";
 type ReviewDiffSource = "working-tree" | "remote-pr" | "not-found";
 
 type AgentRoster = {
@@ -45,6 +49,8 @@ type AgentRoster = {
   installed: boolean;
   description: string | null;
   version: string | null;
+  homepage: string | null;
+  iconUrl: string | null;
   capabilities: string[];
   commandHint: string | null;
   totalSessions: number;
@@ -109,6 +115,7 @@ interface SessionChecksState {
 
 type LogoIconProps = {
   className?: string;
+  fillColor?: string;
 };
 
 interface ReviewDiffState {
@@ -134,10 +141,22 @@ type KnownAgent = {
   aliases?: string[];
   description: string;
   homepage?: string;
+  iconUrl?: string;
   installHint?: string;
   launchCommand?: string;
   capabilities?: string[];
 };
+
+type AgentIconSeed = {
+  label: string;
+  launchName: string;
+  iconUrl?: string | null;
+  homepage?: string | null;
+};
+
+function asSimpleIconSlug(value: string): string {
+  return normalizeAgentName(value);
+}
 
 function normalizeAgentName(value: string): string {
   return value
@@ -148,11 +167,252 @@ function normalizeAgentName(value: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
+function resolveRepoUrl(repo?: string | null): string | null {
+  if (!repo) return null;
+  const trimmed = repo.trim();
+  if (!trimmed) return null;
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith("github.com/") || trimmed.startsWith("www.github.com/")) {
+    return `https://${trimmed}`;
+  }
+
+  if (trimmed.includes("/")) {
+    return `https://github.com/${trimmed}`;
+  }
+
+  return null;
+}
+
+function parseGithubRepo(repo: string | null): { owner: string; name: string } | null {
+  const resolved = resolveRepoUrl(repo);
+  if (!resolved) return null;
+  try {
+    const url = new URL(resolved);
+    const isGithub =
+      url.hostname === "github.com" ||
+      url.hostname === "www.github.com" ||
+      url.hostname.endsWith(".github.com");
+    if (!isGithub) return null;
+
+    const parts = url.pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+    if (parts.length < 2) return null;
+
+    return {
+      owner: parts[0],
+      name: parts[1],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getProjectFaviconUrls(repo?: string | null, iconUrl?: string | null): string[] {
+  if (iconUrl) {
+    const normalized = iconUrl.trim();
+    if (!normalized) return [];
+    if (!/^https?:\/\//i.test(normalized)) return [];
+    return [iconUrl.trim()];
+  }
+
+  const resolved = resolveRepoUrl(repo);
+  try {
+    if (!resolved) return [];
+    const url = new URL(resolved);
+    const github = parseGithubRepo(repo);
+    if (github) {
+      const owner = encodeURIComponent(github.owner);
+      const project = encodeURIComponent(github.name);
+      const repoIconFiles = [
+        "favicon.ico",
+        "public/favicon.ico",
+        "assets/favicon.ico",
+        ".github/favicon.ico",
+        "static/favicon.ico",
+        "logo.png",
+        "public/logo.png",
+        "assets/logo.png",
+        ".github/logo.png",
+      ];
+      const repoAssetUrls = repoIconFiles.map((file) => `https://raw.githubusercontent.com/${owner}/${project}/HEAD/${file}`);
+      return [...new Set([...repoAssetUrls, `https://opengraph.githubassets.com/1/${owner}/${project}`])];
+    }
+
+    return [
+      `https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(url.toString())}`,
+      `https://icons.duckduckgo.com/ip3/${encodeURIComponent(url.hostname)}.ico`,
+      `https://api.faviconkit.com/${encodeURIComponent(url.hostname)}/64`,
+    ];
+  } catch {
+    return [];
+  }
+}
+
+function getAgentIconUrls(agent: AgentIconSeed): string[] {
+  const urls: string[] = [];
+
+  if (agent.iconUrl) {
+    const direct = agent.iconUrl.trim();
+    if (direct) {
+      urls.push(direct);
+    }
+  }
+
+  const simpleIconCandidates = [
+    asSimpleIconSlug(agent.label),
+    asSimpleIconSlug(agent.launchName),
+    asSimpleIconSlug(agent.launchName).replace(/-cli$/u, ""),
+  ].filter((slug) => slug.length > 0);
+  for (const slug of simpleIconCandidates) {
+    urls.push(`https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${slug}.svg`);
+  }
+
+  if (!agent.homepage) return urls;
+
+  try {
+    const homepageUrl = new URL(agent.homepage);
+    const homepageOrigin = `${homepageUrl.origin}`;
+    urls.push(`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(homepageOrigin)}`);
+    urls.push(`https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(homepageUrl.hostname)}`);
+    const gitHubRepo = parseGithubRepo(agent.homepage);
+    if (gitHubRepo) {
+      const owner = encodeURIComponent(gitHubRepo.owner);
+      const project = encodeURIComponent(gitHubRepo.name);
+      urls.push(`https://opengraph.githubassets.com/1/${owner}/${project}`);
+      const repoFiles = [
+        ".github/logo.png",
+        ".github/favicon.png",
+        ".github/logo.svg",
+        "assets/logo.png",
+        "assets/favicon.png",
+        "logo.png",
+        "favicon.png",
+        "logo.svg",
+      ];
+      urls.push(...repoFiles.map((file) => `https://raw.githubusercontent.com/${owner}/${project}/HEAD/${file}`));
+    }
+  } catch {
+    // Ignore malformed homepages.
+  }
+
+  return [...new Set(urls)];
+}
+
+function getProjectAbbrev(projectId: string): string {
+  const parts = projectId.split(/[-_\s/]+/).filter(Boolean);
+  if (parts.length === 1) {
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("")
+    .toUpperCase();
+}
+
+function DefaultProjectIcon({ projectId, color }: { projectId: string; color: string }) {
+  const fallback = getProjectAbbrev(projectId);
+  return (
+    <span
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-[10px] font-semibold text-white"
+      style={{ backgroundColor: color }}
+      aria-hidden="true"
+    >
+      {fallback}
+    </span>
+  );
+}
+
+function DefaultAgentIcon({
+  label,
+  color,
+  className = "h-5 w-5",
+}: {
+  label: string;
+  color: string;
+  className?: string;
+}) {
+  const fallback = getProjectAbbrev(label);
+  return (
+    <span
+      className={`flex ${className} shrink-0 items-center justify-center rounded-sm text-[10px] font-semibold text-white`}
+      style={{ backgroundColor: color }}
+      aria-hidden="true"
+    >
+      {fallback}
+    </span>
+  );
+}
+
+function getSeededColor(seed: string): string {
+  const FALLBACK_COLORS = [
+    "#14b8a6",
+    "#22c55e",
+    "#84cc16",
+    "#eab308",
+    "#f97316",
+    "#f43f5e",
+    "#a855f7",
+    "#ec4899",
+    "#06b6d4",
+    "#0ea5e9",
+  ];
+  let hash = 0;
+  for (let i = 0; i < seed.length; i += 1) {
+    hash = (hash * 31 + seed.charCodeAt(i)) % 360;
+  }
+  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length] ?? "#6b7280";
+}
+
+function AgentIcon({ agent, className = "h-5 w-5" }: { agent: AgentIconSeed; className?: string }) {
+  const [iconErrorIndex, setIconErrorIndex] = useState(0);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const iconUrls = useMemo(() => getAgentIconUrls(agent), [agent.iconUrl, agent.homepage, agent.label, agent.launchName]);
+  const color = useMemo(
+    () => getSeededColor(`${agent.label}-${agent.launchName}`),
+    [agent.label, agent.launchName],
+  );
+
+  useEffect(() => {
+    setIconErrorIndex(0);
+    setIsLoaded(false);
+  }, [iconUrls]);
+  useEffect(() => setIsLoaded(false), [iconErrorIndex]);
+
+  const shouldUseFallback =
+    !iconUrls.length || iconErrorIndex >= iconUrls.length || !iconUrls[iconErrorIndex];
+
+  if (shouldUseFallback) {
+    return <DefaultAgentIcon className={className} label={agent.label} color={color} />;
+  }
+
+  return (
+    <span className="relative inline-flex">
+      {!isLoaded && <DefaultAgentIcon className={className} label={agent.label} color={color} />}
+      <img
+        src={iconUrls[iconErrorIndex]}
+        alt={`${agent.label} icon`}
+        className={`${className} shrink-0 rounded-sm border border-[var(--color-border-subtle)] bg-white object-contain ${isLoaded ? "inline-flex" : "hidden"}`}
+        onError={() => {
+          setIconErrorIndex((current) => current + 1);
+          setIsLoaded(false);
+        }}
+        onLoad={() => setIsLoaded(true)}
+        loading="lazy"
+      />
+    </span>
+  );
+}
+
 const KNOWN_AGENTS: KnownAgent[] = [
   {
     id: "claude-code",
     label: "Claude Code",
     launchName: "claude-code",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
     aliases: [
       "claude code",
       "claude-code",
@@ -186,6 +446,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     ],
     description: "OpenAI Codex CLI",
     homepage: "https://github.com/openai/codex",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
     installHint: "npm install -g @openai/codex-cli",
     launchCommand: "codex",
     capabilities: ["chat", "review", "terminal"],
@@ -197,6 +458,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     aliases: ["github copilot", "github_copilot", "copilot", "copilot-cli", "gh-copilot"],
     description: "GitHub Copilot CLI",
     homepage: "https://github.com/github/copilot-cli",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
     installHint: "npm install -g @githubnext/github-copilot-cli",
     launchCommand: "github-copilot",
     capabilities: ["chat", "suggestions", "pairing"],
@@ -217,6 +479,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     ],
     description: "Google Gemini CLI",
     homepage: "https://ai.google.dev/gemini-api/docs",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/googlegemini.svg",
     installHint: "npm install -g @google/gemini-cli",
     launchCommand: "gemini",
     capabilities: ["chat", "review", "research", "analysis"],
@@ -228,6 +491,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     aliases: ["amp-cli", "amp cli", "amp"],
     description: "Amp Code",
     homepage: "https://www.ampcode.com",
+    iconUrl: "https://ampcode.com/amp-mark-color.svg",
     launchCommand: "amp",
     capabilities: ["chat", "automation", "code generation"],
   },
@@ -246,6 +510,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     ],
     description: "Cursor Agent CLI",
     homepage: "https://www.cursor.com",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/cursor.svg",
     launchCommand: "cursor-cli",
     capabilities: ["chat", "review", "multi-agent"],
   },
@@ -264,7 +529,8 @@ const KNOWN_AGENTS: KnownAgent[] = [
     label: "Droid CLI",
     launchName: "droid",
     description: "Factory Droid",
-    homepage: "https://github.com/factory/factory-droid",
+    iconUrl: "https://raw.githubusercontent.com/Factory-AI/factory/main/docs/images/droid_logo_cli.png",
+    homepage: "https://github.com/Factory-AI/factory",
     launchCommand: "droid",
     capabilities: ["chat", "automation", "terminal"],
   },
@@ -275,6 +541,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     aliases: ["claude-code-router", "claude_code_router", "ccr", "ccr-cli"],
     description: "Claude Code Router",
     homepage: "https://github.com/mckaywrigley/claude-code-router",
+    iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
     launchCommand: "ccr",
     capabilities: ["chat", "routing", "multi-provider"],
   },
@@ -322,6 +589,7 @@ const TAB_DEFINITIONS: Array<{ id: DashboardTab; label: string; subtitle: string
   { id: "overview", label: "Overview", subtitle: "All sessions and controls" },
   { id: "chat", label: "Chat", subtitle: "Respond to agents in need of action" },
   { id: "review", label: "Review", subtitle: "Send review feedback quickly" },
+  { id: "terminal", label: "Terminal", subtitle: "View and switch active terminal sessions" },
   { id: "agents", label: "Agents", subtitle: "Health and launch controls" },
 ];
 
@@ -413,6 +681,18 @@ type AttentionGroup = "respond" | "review" | "merge" | "pending" | "working" | "
 type StatusFilter = "all" | "active" | "terminal" | "attention";
 type SortMode = "recent" | "oldest" | "cost" | "attention";
 type ViewMode = "grid" | "lanes";
+type CleanupDialogKind = "single" | "terminal-bulk";
+type CleanupAction = "cleanup" | "kill" | "restore";
+
+type CleanupDialogState = {
+  open: boolean;
+  kind: CleanupDialogKind;
+  action: CleanupAction;
+  title: string;
+  message: string;
+  sessionIds: string[];
+  isTerminalSession: boolean;
+};
 
 const FALLBACK_MERGEABILITY = {
   mergeable: false,
@@ -508,13 +788,24 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const [bulkBusy, setBulkBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
+  const [cleanupDialog, setCleanupDialog] = useState<CleanupDialogState>({
+    open: false,
+    kind: "single",
+    action: "cleanup",
+    title: "",
+    message: "",
+    sessionIds: [],
+    isTerminalSession: false,
+  });
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [sortMode, setSortMode] = useState<SortMode>("recent");
   const [attentionOnly, setAttentionOnly] = useState(false);
+  const [activeTerminalSessionId, setActiveTerminalSessionId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [dashboardTab, setDashboardTab] = useState<DashboardTab>("overview");
+  const [isLaunchCollapsed, setIsLaunchCollapsed] = useState(true);
   const [commandOpen, setCommandOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [launchProjectId, setLaunchProjectId] = useState("");
@@ -584,6 +875,8 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
               name: agent.name,
               description: agent.description ?? null,
               version: agent.version ?? null,
+              homepage: agent.homepage ?? null,
+              iconUrl: agent.iconUrl ?? null,
             };
             dedupe.set(agent.name, next);
           }
@@ -914,7 +1207,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
 
     for (const known of KNOWN_AGENTS) {
       const launchName = KNOWN_AGENT_LAUNCH_BY_ID[known.id] ?? known.id;
-      const info = availableAgentMetadata.get(launchName);
+      const info = availableAgentMetadata.get(launchName) ?? availableAgentMetadata.get(known.id);
       map.set(known.id, {
         name: known.id,
         label: known.label,
@@ -923,6 +1216,8 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
         installed: discoveredAgentOptions.includes(launchName) || discoveredAgentOptions.includes(known.id),
         description: info?.description ?? known.description,
         version: info?.version ?? null,
+        homepage: info?.homepage ?? known.homepage ?? null,
+        iconUrl: info?.iconUrl ?? known.iconUrl ?? null,
         capabilities: known.capabilities ?? [],
         commandHint: known.launchCommand ?? null,
         totalSessions: 0,
@@ -935,14 +1230,17 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       const canonical = KNOWN_AGENT_ID_BY_LAUNCH[discovered] ?? discovered;
       if (map.has(canonical)) continue;
       const info = availableAgentMetadata.get(discovered);
+      const metadata = info ?? availableAgentMetadata.get(normalizeAgentName(canonical));
       map.set(canonical, {
         name: canonical,
         label: KNOWN_AGENT_BY_ID[canonical] ?? discovered,
         launchName: discovered,
         known: false,
         installed: discoveredAgentOptions.includes(discovered),
-        description: info?.description ?? "Agent plugin currently detected",
-        version: info?.version ?? null,
+        description: metadata?.description ?? "Agent plugin currently detected",
+        version: metadata?.version ?? null,
+        homepage: metadata?.homepage ?? null,
+        iconUrl: metadata?.iconUrl ?? null,
         capabilities: [],
         commandHint: null,
         totalSessions: 0,
@@ -966,6 +1264,8 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
           installed: discoveredAgentOptions.includes(agentName),
           description: metadata?.description ?? "Agent not currently discovered",
           version: metadata?.version ?? null,
+          homepage: metadata?.homepage ?? null,
+          iconUrl: metadata?.iconUrl ?? null,
           capabilities: [],
           commandHint: null,
           totalSessions: 1,
@@ -1332,15 +1632,94 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     }
   }, []);
 
-  const handleKill = async (sessionId: string) => {
-    if (busySessionId || bulkBusy) return;
-    if (!confirm(`Kill / clean up session ${sessionId}?`)) return;
-    setActionError(null);
-    const result = await executeKill(sessionId);
-    if (!result.ok) {
-      const reason = result.reason ?? "Unknown error";
-      setActionError(`Unable to clean up session ${sessionId}: ${reason}`);
-      console.error(`Failed to kill ${sessionId}:`, reason);
+  const executeRestore = useCallback(async (sessionId: string): Promise<{ ok: boolean; reason?: string }> => {
+    setBusySessionId(sessionId);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        return {
+          ok: false,
+          reason: detail || `Request failed with ${res.status}`,
+        };
+      }
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      return { ok: false, reason: msg };
+    } finally {
+      setBusySessionId((current) => (current === sessionId ? null : current));
+    }
+  }, []);
+
+  const openCleanupDialog = (
+    sessionIds: string[],
+    kind: CleanupDialogKind,
+    action: CleanupAction,
+    title: string,
+    message: string,
+    isTerminalSession = false,
+  ) => {
+    if (busySessionId || bulkBusy || cleanupDialog.open) return;
+    const uniqueIds = [...new Set(sessionIds.filter(Boolean))];
+    if (uniqueIds.length === 0) return;
+    setCleanupDialog({
+      open: true,
+      kind,
+      action,
+      title,
+      message,
+      sessionIds: uniqueIds,
+      isTerminalSession,
+    });
+  };
+
+  const closeCleanupDialog = () => {
+    setCleanupDialog((current) => ({ ...current, open: false }));
+  };
+
+  const confirmCleanup = async () => {
+    const current = cleanupDialog;
+    if (!current.open || current.sessionIds.length === 0) {
+      closeCleanupDialog();
+      return;
+    }
+    if (current.kind === "single") {
+      const sessionId = current.sessionIds[0]!;
+      if (!sessionId || busySessionId || bulkBusy) return;
+      setActionError(null);
+      const result = current.action === "restore"
+        ? await executeRestore(sessionId)
+        : await executeKill(sessionId);
+      if (!result.ok) {
+        const reason = result.reason ?? "Unknown error";
+        logActionError(sessionId, reason, current.action);
+      }
+      closeCleanupDialog();
+      return;
+    }
+
+    if (current.kind === "terminal-bulk") {
+      if (bulkBusy || busySessionId) return;
+      setActionError(null);
+      setBulkBusy(true);
+      const failures: string[] = [];
+      for (const sessionId of current.sessionIds) {
+        const result = await executeKill(sessionId);
+        if (!result.ok) {
+          failures.push(`${sessionId}: ${result.reason ?? "Unknown error"}`);
+        }
+      }
+      setBulkBusy(false);
+      setCleanupDialog((current) => ({ ...current, open: false }));
+
+      if (failures.length > 0) {
+        setActionError(`Cleanup completed with ${failures.length} failure(s). ${failures[0]}`);
+        return;
+      }
+      setActionError(null);
     }
   };
 
@@ -1350,51 +1729,52 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
 
     const ids = [...new Set(cleanupCandidates.map((s) => s.id))];
     const noun = ids.length === 1 ? "session" : "sessions";
-    if (!confirm(`Clean up ${ids.length} terminal ${noun} in current view?`)) return;
-
-    setActionError(null);
-    setBulkBusy(true);
-    const failures: string[] = [];
-    for (const sessionId of ids) {
-      const result = await executeKill(sessionId);
-      if (!result.ok) {
-        failures.push(`${sessionId}: ${result.reason ?? "Unknown error"}`);
-      }
-    }
-    setBulkBusy(false);
-
-    if (failures.length > 0) {
-      setActionError(`Cleanup completed with ${failures.length} failure(s). ${failures[0]}`);
-      return;
-    }
-    setActionError(null);
+    openCleanupDialog(
+      ids,
+      "terminal-bulk",
+      "cleanup",
+      `Clean up ${ids.length} terminal ${noun}`,
+      `Clean up all terminal sessions in the current view (${ids.length} ${noun}).`,
+    );
   };
 
-  const handleRestore = async (sessionId: string) => {
+  const handleKill = (sessionId: string, isTerminalSession = false) => {
     if (busySessionId || bulkBusy) return;
-    if (busySessionId === sessionId) return;
-    if (!confirm(`Restore session ${sessionId}?`)) return;
-    setBusySessionId(sessionId);
-    setActionError(null);
-    try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/restore`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const detail = await res.text();
-        const reason = detail || `Request failed with ${res.status}`;
-        setActionError(`Unable to restore session ${sessionId}: ${reason}`);
-        console.error(`Failed to restore ${sessionId}:`, detail);
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Network error";
-      setActionError(`Unable to restore session ${sessionId}: ${msg}`);
-      console.error(`Failed to restore ${sessionId}:`, err);
-    } finally {
-      setBusySessionId((current) => (current === sessionId ? null : current));
-    }
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId) return;
+    openCleanupDialog(
+      [normalizedSessionId],
+      "single",
+      isTerminalSession ? "cleanup" : "kill",
+      `${isTerminalSession ? "Cleanup" : "Kill"} session`,
+      `${isTerminalSession ? "Clean up" : "Kill"} ${normalizedSessionId}.`,
+      isTerminalSession,
+    );
   };
 
+  const handleRestore = (sessionId: string) => {
+    if (busySessionId || bulkBusy) return;
+    const normalizedSessionId = sessionId.trim();
+    if (!normalizedSessionId) return;
+    openCleanupDialog(
+      [normalizedSessionId],
+      "single",
+      "restore",
+      "Restore session",
+      `Restore ${normalizedSessionId}.`,
+      false,
+    );
+  };
+
+  const logActionError = (sessionId: string, reason: string, action: CleanupAction) => {
+    const actionLabel = action === "restore"
+      ? "restore"
+      : action === "kill"
+        ? "kill"
+        : "cleanup";
+    setActionError(`Unable to ${actionLabel} session ${sessionId}: ${reason}`);
+    console.error(`Failed to ${actionLabel} session ${sessionId}:`, reason);
+  };
   const handleLaunchSession = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLaunchMessage(null);
@@ -1502,6 +1882,12 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
         return;
       }
 
+      if (event.key === "Escape" && cleanupDialog.open) {
+        event.preventDefault();
+        closeCleanupDialog();
+        return;
+      }
+
       if (!isTypingTarget && event.key === "/") {
         event.preventDefault();
         searchInputRef.current?.focus();
@@ -1509,7 +1895,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [commandOpen]);
+  }, [commandOpen, cleanupDialog.open]);
 
   type CommandAction = { id: string; label: string; hint?: string; run: () => void };
   const commandActions: CommandAction[] = useMemo(() => {
@@ -1575,6 +1961,9 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const visibleTabSessions = useMemo(() => {
     if (dashboardTab === "chat") return chatSessions;
     if (dashboardTab === "review") return reviewSessions;
+    if (dashboardTab === "terminal") {
+      return filteredSessions.filter((session) => TERMINAL_STATUSES.has(session.status));
+    }
     return filteredSessions;
   }, [chatSessions, reviewSessions, filteredSessions, dashboardTab]);
 
@@ -1599,12 +1988,19 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     [visibleAgentRoster],
   );
 
+  const activeTerminalSession = useMemo(() => {
+    if (!activeTerminalSessionId) return null;
+    return sessions.find((session) => session.id === activeTerminalSessionId) ?? null;
+  }, [activeTerminalSessionId, sessions]);
+
   const searchPlaceholder = dashboardTab === "agents"
     ? "Search agents..."
     : dashboardTab === "chat"
       ? "Search sessions needing agent response..."
       : dashboardTab === "review"
         ? "Search sessions or changed files..."
+        : dashboardTab === "terminal"
+          ? "Search terminal sessions..."
         : "Search sessions, issues, branches, agents...";
 
   const totalAgentCatalogCount = Math.max(
@@ -1613,13 +2009,64 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     discoveredAgentOptions.length,
     KNOWN_AGENTS.length,
   );
+  const cleanupDialogLabel = cleanupDialog.kind === "terminal-bulk"
+    ? `Cleanup ${cleanupDialog.sessionIds.length} session${cleanupDialog.sessionIds.length === 1 ? "" : "s"}`
+    : cleanupDialog.action === "restore"
+      ? "Restore session"
+      : cleanupDialog.isTerminalSession
+        ? "Cleanup session"
+        : "Kill session";
+  const cleanupDialogBusy = cleanupDialog.kind === "terminal-bulk"
+    ? bulkBusy
+    : Boolean(busySessionId) || bulkBusy;
+
+  const handleOpenTerminal = useCallback((sessionId: string) => {
+    setActiveTerminalSessionId(sessionId);
+    setDashboardTab("terminal");
+  }, []);
+
+  useEffect(() => {
+    if (dashboardTab !== "chat" && dashboardTab !== "review") return;
+    if (statusFilter !== "all") {
+      setStatusFilter("all");
+    }
+    if (attentionOnly) {
+      setAttentionOnly(false);
+    }
+    if (agentFilter !== "all") {
+      setAgentFilter("all");
+    }
+    if (sortMode !== "recent") {
+      setSortMode("recent");
+    }
+  }, [agentFilter, attentionOnly, dashboardTab, sortMode, statusFilter]);
+
+  useEffect(() => {
+    if (dashboardTab === "terminal") return;
+    setActiveTerminalSessionId(null);
+  }, [dashboardTab]);
+
+  useEffect(() => {
+    if (!activeTerminalSession) return;
+    if (!TERMINAL_STATUSES.has(activeTerminalSession.status)) {
+      setActiveTerminalSessionId(null);
+    }
+  }, [activeTerminalSession]);
+
+  useEffect(() => {
+    if (!activeTerminalSessionId) return;
+    const stillExists = sessions.some((session) => session.id === activeTerminalSessionId);
+    if (!stillExists) {
+      setActiveTerminalSessionId(null);
+    }
+  }, [activeTerminalSessionId, sessions]);
 
   return (
     <div className="flex h-dvh overflow-hidden">
       {/* Sidebar */}
       <aside
         className={`shrink-0 border-r border-[var(--color-sidebar-border)] bg-[var(--color-sidebar-bg)] flex flex-col transition-all duration-200 ${
-          sidebarOpen ? "w-60" : "w-0 overflow-hidden border-r-0"
+          sidebarOpen ? "w-72" : "w-0 overflow-hidden border-r-0"
         }`}
       >
         {/* Sidebar header */}
@@ -1665,32 +2112,66 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
             const obsidianUrl = `obsidian://open?vault=workspace&file=${encodeURIComponent(obsidianFile)}`;
             const githubUrl = project.repo ? `https://github.com/${project.repo}` : null;
             return (
-              <div key={project.id} className="group relative">
+              <div key={project.id} className="group relative flex w-full items-center">
                 <button
                   onClick={() => setActiveProject(activeProject === project.id ? null : project.id)}
-                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-[13px] transition-colors ${
+                  className={`mr-2 flex flex-1 items-center gap-2 rounded-lg px-3 py-2 text-[13px] transition-colors ${
                     activeProject === project.id
                       ? "bg-[var(--color-sidebar-active)] text-[var(--color-accent)] font-medium"
                       : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-hover)]"
                   }`}
                 >
-                  <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]" />
+                  <ProjectFavicon
+                    projectId={project.id}
+                    repo={project.repo}
+                    iconUrl={project.iconUrl}
+                  />
                   <span className="truncate">{project.id}</span>
                   <span className="ml-auto text-[11px] text-[var(--color-text-muted)] tabular-nums">
                     {project.count}
                   </span>
                 </button>
                 {/* Quick-action icons — always visible */}
-                <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                  <a href={obsidianUrl} title="Open board in Obsidian" onClick={(e) => e.stopPropagation()}
-                     className="inline-flex items-center justify-center rounded-md p-1 text-[#7C3AED] transition-colors hover:bg-[rgba(124,58,237,0.15)]">
-                    <ObsidianLogo className="h-[18px] w-[18px]" />
-                  </a>
+                <div className="project-action-icons mr-2 flex shrink-0 items-center gap-1">
+                  <button
+                    type="button"
+                    title="Open board in Obsidian"
+                    style={{
+                      color: "var(--color-accent-violet)",
+                      background: "transparent",
+                      outline: "none",
+                      boxShadow: "none",
+                      border: "none",
+                      padding: 0,
+                    }}
+                    onClick={() => {
+                      window.location.href = obsidianUrl;
+                    }}
+                    className="project-action-icon inline-flex cursor-pointer items-center justify-center p-1"
+                    aria-label="Open board in Obsidian"
+                  >
+                    <ObsidianLogo className="h-[18px] w-[18px]" fillColor="var(--color-accent-violet)" />
+                  </button>
                   {githubUrl && (
-                    <a href={githubUrl} target="_blank" rel="noopener noreferrer" title="Open repo on GitHub" onClick={(e) => e.stopPropagation()}
-                       className="inline-flex items-center justify-center rounded-md p-1 text-[#181717] dark:text-[#e6edf3] transition-colors hover:bg-[rgba(0,0,0,0.1)] dark:hover:bg-[rgba(255,255,255,0.1)]">
-                      <GitHubLogo className="h-[18px] w-[18px]" />
-                    </a>
+                    <button
+                      type="button"
+                      title="Open repo on GitHub"
+                      style={{
+                        color: "var(--color-text-muted)",
+                        background: "transparent",
+                        outline: "none",
+                        boxShadow: "none",
+                        border: "none",
+                        padding: 0,
+                      }}
+                      onClick={() => {
+                        window.open(githubUrl, "_blank", "noopener,noreferrer");
+                      }}
+                      className="project-action-icon inline-flex cursor-pointer items-center justify-center p-1"
+                      aria-label="Open repo on GitHub"
+                    >
+                      <GitHubLogo className="h-[18px] w-[18px]" fillColor="var(--color-text-muted)" />
+                    </button>
                   )}
                 </div>
               </div>
@@ -1850,128 +2331,141 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
         )}
 
         <section className="border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-6 py-3">
-          <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-            Launch Session
-          </div>
-          <p className="mb-2 text-[10px] text-[var(--color-text-muted)]">
-            Session cap note: each project is limited by <code>maxSessionsPerProject</code> (default 5). If you hit the limit, kill/cleanup old sessions first or increase it in your Conductor config.
-          </p>
-          <form
-            className="space-y-2"
-            onSubmit={(event) => void handleLaunchSession(event)}
-          >
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              <select
-                value={launchProjectId}
-                onChange={(event) => setLaunchProjectId(event.target.value)}
-                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
-              >
-                {configProjects.length === 0 && <option value="">No projects</option>}
-                {configProjects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.id}
-                  </option>
-                ))}
-              </select>
-              <input
-                type="text"
-                value={launchIssueId}
-                onChange={(event) => setLaunchIssueId(event.target.value)}
-                placeholder="Issue ID (optional)"
-                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-              />
-              <select
-                value={launchAgent}
-                onChange={(event) => setLaunchAgent(event.target.value)}
-                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
-              >
-                <option value="auto">Auto (project default)</option>
-                {launchAgentOptions.map((agent) => (
-                  <option key={agent} value={agent}>
-                    {agent}
-                  </option>
-                ))}
-                <option value="custom">Custom agent</option>
-              </select>
-              <input
-                list="launch-agent-list"
-                type="text"
-                value={launchAgent}
-                onChange={(event) => setLaunchAgent(event.target.value)}
-                placeholder="or type a custom agent name"
-                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-              />
-              <datalist id="launch-agent-list">
-                <option value="auto" />
-                {launchAgentOptions.map((agent) => (
-                  <option key={`agent-list-${agent}`} value={agent} />
-                ))}
-              </datalist>
-            </div>
-            <div className="grid gap-2 sm:grid-cols-3">
-              <input
-                type="text"
-                value={launchModel}
-                onChange={(event) => setLaunchModel(event.target.value)}
-                placeholder="Model (optional)"
-                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-              />
-              <input
-                type="text"
-                value={launchProfile}
-                onChange={(event) => setLaunchProfile(event.target.value)}
-                placeholder="Profile (optional)"
-                className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-              />
-              <div className="grid gap-2 sm:grid-cols-2 sm:col-span-1">
-                <input
-                  type="text"
-                  value={launchBranch}
-                  onChange={(event) => setLaunchBranch(event.target.value)}
-                  placeholder="Branch (optional)"
-                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-                />
-                <input
-                  type="text"
-                  value={launchBaseBranch}
-                  onChange={(event) => setLaunchBaseBranch(event.target.value)}
-                  placeholder="Base branch (optional)"
-                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-                />
+          <div className="mb-2 flex items-start justify-between gap-2">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Launch Session
               </div>
+              <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+                Session cap note: each project is limited by <code>maxSessionsPerProject</code> (default 5). If you hit the limit, kill/cleanup old sessions first or increase it in your Conductor config.
+              </p>
             </div>
-            <textarea
-              value={launchPrompt}
-              onChange={(event) => setLaunchPrompt(event.target.value)}
-              rows={2}
-              placeholder="Prompt for this task"
-              className="min-h-[74px] w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-            />
-            <div className="flex items-center gap-2">
-              <button
-                type="submit"
-                disabled={launchLoading}
-                className="rounded-md border border-[var(--color-accent)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-subtle)] disabled:opacity-50"
-              >
-                {launchLoading ? "Launching..." : "Launch Session"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setLaunchPrompt("");
-                  setLaunchIssueId("");
-                  setLaunchModel("");
-                  setLaunchProfile("");
-                  setLaunchBranch("");
-                  setLaunchBaseBranch("");
-                  setLaunchMessage(null);
-                }}
-                className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)]"
-              >
-                Reset
-              </button>
-            </div>
-          </form>
+            <button
+              type="button"
+              onClick={() => setIsLaunchCollapsed((current) => !current)}
+              className="rounded-md border border-[var(--color-border-default)] px-2 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)]"
+            >
+              {isLaunchCollapsed ? "Expand" : "Collapse"}
+            </button>
+          </div>
+          {!isLaunchCollapsed && (
+            <form
+              className="space-y-2"
+              onSubmit={(event) => void handleLaunchSession(event)}
+            >
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                <select
+                  value={launchProjectId}
+                  onChange={(event) => setLaunchProjectId(event.target.value)}
+                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
+                >
+                  {configProjects.length === 0 && <option value="">No projects</option>}
+                  {configProjects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.id}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={launchIssueId}
+                  onChange={(event) => setLaunchIssueId(event.target.value)}
+                  placeholder="Issue ID (optional)"
+                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                />
+                <select
+                  value={launchAgent}
+                  onChange={(event) => setLaunchAgent(event.target.value)}
+                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)] outline-none focus:border-[var(--color-accent)]"
+                >
+                  <option value="auto">Auto (project default)</option>
+                  {launchAgentOptions.map((agent) => (
+                    <option key={agent} value={agent}>
+                      {agent}
+                    </option>
+                  ))}
+                  <option value="custom">Custom agent</option>
+                </select>
+                <input
+                  list="launch-agent-list"
+                  type="text"
+                  value={launchAgent}
+                  onChange={(event) => setLaunchAgent(event.target.value)}
+                  placeholder="or type a custom agent name"
+                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                />
+                <datalist id="launch-agent-list">
+                  <option value="auto" />
+                  {launchAgentOptions.map((agent) => (
+                    <option key={`agent-list-${agent}`} value={agent} />
+                  ))}
+                </datalist>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <input
+                  type="text"
+                  value={launchModel}
+                  onChange={(event) => setLaunchModel(event.target.value)}
+                  placeholder="Model (optional)"
+                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                />
+                <input
+                  type="text"
+                  value={launchProfile}
+                  onChange={(event) => setLaunchProfile(event.target.value)}
+                  placeholder="Profile (optional)"
+                  className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                />
+                <div className="grid gap-2 sm:grid-cols-2 sm:col-span-1">
+                  <input
+                    type="text"
+                    value={launchBranch}
+                    onChange={(event) => setLaunchBranch(event.target.value)}
+                    placeholder="Branch (optional)"
+                    className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                  />
+                  <input
+                    type="text"
+                    value={launchBaseBranch}
+                    onChange={(event) => setLaunchBaseBranch(event.target.value)}
+                    placeholder="Base branch (optional)"
+                    className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                  />
+                </div>
+              </div>
+              <textarea
+                value={launchPrompt}
+                onChange={(event) => setLaunchPrompt(event.target.value)}
+                rows={2}
+                placeholder="Prompt for this task"
+                className="min-h-[74px] w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={launchLoading}
+                  className="rounded-md border border-[var(--color-accent)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-subtle)] disabled:opacity-50"
+                >
+                  {launchLoading ? "Launching..." : "Launch Session"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLaunchPrompt("");
+                    setLaunchIssueId("");
+                    setLaunchModel("");
+                    setLaunchProfile("");
+                    setLaunchBranch("");
+                    setLaunchBaseBranch("");
+                    setLaunchMessage(null);
+                  }}
+                  className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)]"
+                >
+                  Reset
+                </button>
+              </div>
+            </form>
+          )}
         </section>
 
         <section className="border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-6 py-3">
@@ -2087,6 +2581,12 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                         {visibleKnownAgents.map((agent) => {
                           const known = getKnownAgent(agent.name) ?? getKnownAgent(agent.launchName);
+                          const agentIconSource: AgentIconSeed = {
+                            label: agent.label,
+                            launchName: agent.launchName,
+                            homepage: agent.homepage,
+                            iconUrl: agent.iconUrl,
+                          };
                           const capabilities = known?.capabilities ?? agent.capabilities ?? [];
                           return (
                             <article
@@ -2096,6 +2596,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                               <div className="mb-3 flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
                                   <div className="mb-1 flex items-center gap-2">
+                                    <AgentIcon agent={agentIconSource} className="h-4 w-4" />
                                     <h2 className="truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
                                       {agent.label}
                                     </h2>
@@ -2130,9 +2631,9 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                                   Install: <span className="font-mono text-[var(--color-text-secondary)]">{known.installHint}</span>
                                 </p>
                               )}
-                              {known?.homepage && (
+                              {agent.homepage && (
                                 <a
-                                  href={known.homepage}
+                                  href={agent.homepage}
                                   target="_blank"
                                   rel="noopener noreferrer"
                                   className="mb-3 inline-block text-[10px] text-[var(--color-accent)] hover:underline"
@@ -2192,23 +2693,33 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                         Discovered agents
                       </h3>
                       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {visibleDiscoveredAgents.map((agent) => (
+                        {visibleDiscoveredAgents.map((agent) => {
+                          const agentIconSource: AgentIconSeed = {
+                            label: agent.label,
+                            launchName: agent.launchName,
+                            homepage: agent.homepage,
+                            iconUrl: agent.iconUrl,
+                          };
+                          return (
                           <article
                             key={agent.name}
                             className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4"
                           >
                             <div className="mb-3 flex items-start justify-between gap-2">
                               <div className="min-w-0 flex-1">
-                                <h2 className="truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
+                                <div className="mb-1 flex items-center gap-2">
+                                  <AgentIcon agent={agentIconSource} className="h-4 w-4" />
+                                  <h2 className="truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
                                   {agent.label}
-                                </h2>
+                                  </h2>
+                                  <span className="rounded-full bg-[rgba(239,68,68,0.12)] px-2 py-0.5 text-[9px] text-[var(--color-status-error)]">
+                                    {agent.version ? `v${agent.version}` : "unknown"}
+                                  </span>
+                                </div>
                                 <p className="truncate text-[10px] text-[var(--color-text-muted)]">
                                   launch: {agent.launchName} · source: detected runtime
                                 </p>
                               </div>
-                              <span className="rounded-full bg-[rgba(239,68,68,0.12)] px-2 py-0.5 text-[9px] text-[var(--color-status-error)]">
-                                {agent.version ? `v${agent.version}` : "unknown"}
-                              </span>
                             </div>
                             <p className="text-[11px] text-[var(--color-text-muted)] mb-3">
                               {agent.description ?? "Agent plugin currently detected."}
@@ -2234,7 +2745,8 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                               Use this agent for next launch
                             </button>
                           </article>
-                        ))}
+                          );
+                        })}
                       </div>
                     </section>
                   )}
@@ -2243,7 +2755,59 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
             </div>
           )}
 
-          {dashboardTab !== "agents" && (
+          {dashboardTab === "terminal" ? (
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              <div className="rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
+                <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+                  Terminal sessions
+                </div>
+                {activeTerminalSession ? (
+                  <div className="mb-2 flex items-center gap-2 text-[11px] text-[var(--color-text-secondary)]">
+                    <span className="rounded-full bg-[var(--color-bg-subtle)] px-2 py-0.5">
+                      Active: {activeTerminalSession.id}
+                    </span>
+                    <div className="flex-1" />
+                    <button
+                      type="button"
+                      onClick={() => setActiveTerminalSessionId(null)}
+                      className="rounded-md border border-[var(--color-border-subtle)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-border-strong)]"
+                    >
+                      Close terminal
+                    </button>
+                  </div>
+                ) : null}
+                {visibleTabSessions.length === 0 ? (
+                  <EmptyState />
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {visibleTabSessions.map((session) => (
+                      <button
+                        key={session.id}
+                        onClick={() => setActiveTerminalSessionId(session.id)}
+                        className={`rounded-md border px-2 py-1 text-[10px] transition-colors ${
+                          activeTerminalSessionId === session.id
+                            ? "border-[var(--color-accent)] bg-[var(--color-accent-subtle)] text-[var(--color-accent)]"
+                            : "border-[var(--color-border-subtle)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
+                        }`}
+                      >
+                        <span className="font-mono text-[10px]">{session.id}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {activeTerminalSession ? (
+                <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)]">
+                  <TerminalView sessionId={activeTerminalSession.id} />
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-12 text-center text-[11px] text-[var(--color-text-muted)]">
+                  Select a terminal session above to open its live output.
+                </div>
+              )}
+            </div>
+          ) : (
             <>
               {visibleTabSessions.length === 0 ? (
                 <EmptyState />
@@ -2269,6 +2833,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                               onSend={handleSend}
                               onKill={handleKill}
                               onRestore={handleRestore}
+                              onOpenTerminal={handleOpenTerminal}
                               actionBusy={busySessionId === session.id || bulkBusy}
                             />
                           ))}
@@ -2286,6 +2851,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                       onSend={handleSend}
                       onKill={handleKill}
                       onRestore={handleRestore}
+                      onOpenTerminal={handleOpenTerminal}
                       actionBusy={busySessionId === session.id || bulkBusy}
                     />
                   ))}
@@ -2325,6 +2891,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                           onSend={handleSend}
                           onKill={handleKill}
                           onRestore={handleRestore}
+                          onOpenTerminal={handleOpenTerminal}
                           actionBusy={busySessionId === session.id || bulkBusy}
                         />
                         <div className="mt-3 space-y-3 border-t border-[var(--color-border-subtle)] pt-3">
@@ -2425,7 +2992,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                                 </span>
                                 {reviewDiff.loaded && reviewDiff.generatedAt && (
                                   <span className="ml-auto text-[10px] text-[var(--color-text-muted)]">
-                                    {new Date(reviewDiff.generatedAt).toLocaleTimeString()}
+                                    {formatUTCTime(reviewDiff.generatedAt)}
                                   </span>
                                 )}
                               </div>
@@ -2779,6 +3346,56 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
             </div>
           </div>
         )}
+
+        {cleanupDialog.open && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(9,11,16,0.58)] p-4 backdrop-blur-[1.5px]"
+            onClick={() => closeCleanupDialog()}
+          >
+            <div
+              className="w-full max-w-md overflow-hidden rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] shadow-[0_20px_70px_rgba(0,0,0,0.35)]"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="border-b border-[var(--color-border-subtle)] px-4 py-3">
+                <h2 className="text-[13px] font-semibold text-[var(--color-text-primary)]">
+                  {cleanupDialog.title}
+                </h2>
+              </div>
+              <div className="px-4 py-3 space-y-3">
+                <p className="text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                  {cleanupDialog.message}
+                </p>
+                <div className="max-h-28 overflow-y-auto rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[10px] font-mono text-[var(--color-text-muted)]">
+                  {cleanupDialog.sessionIds.map((sessionId) => (
+                    <div key={sessionId} className="truncate py-0.5">
+                      {sessionId}
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-1 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={closeCleanupDialog}
+                    disabled={cleanupDialogBusy}
+                    className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-strong)] disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void confirmCleanup();
+                    }}
+                    disabled={cleanupDialogBusy}
+                    className="rounded-md bg-[var(--color-status-error)] px-2.5 py-1.5 text-[11px] font-medium text-white transition-opacity disabled:opacity-50"
+                  >
+                    {cleanupDialogBusy ? "Cleaning..." : cleanupDialogLabel}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2804,41 +3421,122 @@ function formatDiffSource(source: ReviewDiffSource): string {
       : "No diff";
 }
 
-function formatGeneratedAt(generatedAt: string): string {
-  if (!generatedAt) return "—";
+function formatUTCDateTime(generatedAt: string): string {
   const date = new Date(generatedAt);
   if (Number.isNaN(date.getTime())) return "—";
-  return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
+
+  const pad = (value: number) => `${value}`.padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} UTC`;
 }
 
-function GitHubLogo({ className = "h-4 w-4" }: LogoIconProps) {
+function formatUTCTime(generatedAt: string): string {
+  const date = new Date(generatedAt);
+  if (Number.isNaN(date.getTime())) return "—";
+
+  const pad = (value: number) => `${value}`.padStart(2, "0");
+  return `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())} UTC`;
+}
+
+function formatGeneratedAt(generatedAt: string): string {
+  return formatUTCDateTime(generatedAt);
+}
+
+function ProjectFavicon({ projectId, repo, iconUrl }: { projectId: string; repo: string | null; iconUrl?: string | null }) {
+  const [iconErrorIndex, setIconErrorIndex] = useState(0);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const faviconUrls = useMemo(() => getProjectFaviconUrls(repo, iconUrl), [repo, iconUrl]);
+  useEffect(() => {
+    setIconErrorIndex(0);
+    setIsLoaded(false);
+  }, [repo, iconUrl]);
+  useEffect(() => setIsLoaded(false), [iconErrorIndex]);
+  const FALLBACK_COLORS = useMemo(
+    () => [
+      "#14b8a6",
+      "#22c55e",
+      "#84cc16",
+      "#eab308",
+      "#f97316",
+      "#f43f5e",
+      "#a855f7",
+      "#ec4899",
+      "#06b6d4",
+      "#0ea5e9",
+    ],
+    [],
+  );
+
+  const accent = useMemo(() => {
+    let hash = 0;
+    for (let i = 0; i < projectId.length; i += 1) {
+      hash = (hash * 31 + projectId.charCodeAt(i)) % 360;
+    }
+    return FALLBACK_COLORS[hash % FALLBACK_COLORS.length] ?? "#6b7280";
+  }, [projectId]);
+
+  const onImageError = () => {
+    setIsLoaded(false);
+    setIconErrorIndex((current) => current + 1);
+  };
+
+  const shouldUseFallback =
+    !faviconUrls.length || iconErrorIndex >= faviconUrls.length || !faviconUrls[iconErrorIndex];
+
+  if (shouldUseFallback) {
+    return <DefaultProjectIcon projectId={projectId} color={accent} />;
+  }
+
+  return (
+    <span className="relative inline-flex h-5 w-5 shrink-0">
+      {!isLoaded && <DefaultProjectIcon projectId={projectId} color={accent} />}
+      <img
+        src={faviconUrls[iconErrorIndex]}
+        alt={`${projectId} favicon`}
+        className={`h-5 w-5 shrink-0 rounded-sm border border-[var(--color-border-subtle)] bg-white object-cover ${isLoaded ? "inline-flex" : "hidden"}`}
+        onError={onImageError}
+        onLoad={() => setIsLoaded(true)}
+        loading="lazy"
+      />
+    </span>
+  );
+}
+
+function GitHubLogo({ className = "h-4 w-4", fillColor }: LogoIconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
-      fill="currentColor"
+      fill="none"
       role="img"
       aria-hidden="true"
       xmlns="http://www.w3.org/2000/svg"
       className={className}
+      style={fillColor ? { color: fillColor } : undefined}
     >
       <title>GitHub</title>
-      <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+      <path
+        d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
+        fill={fillColor || "currentColor"}
+      />
     </svg>
   );
 }
 
-function ObsidianLogo({ className = "h-4 w-4" }: LogoIconProps) {
+function ObsidianLogo({ className = "h-4 w-4", fillColor }: LogoIconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
-      fill="currentColor"
+      fill="none"
       role="img"
       aria-hidden="true"
       xmlns="http://www.w3.org/2000/svg"
       className={className}
+      style={fillColor ? { color: fillColor } : undefined}
     >
       <title>Obsidian</title>
-      <path d="M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z" />
+      <path
+        d="M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z"
+        fill={fillColor || "currentColor"}
+      />
     </svg>
   );
 }

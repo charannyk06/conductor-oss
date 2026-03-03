@@ -37,6 +37,7 @@ import {
   replaceLine,
   resolveColumnsFromBoard,
   parseChecklistPrefix,
+  type ResolvedBoardColumns,
 } from "./board-parser.js";
 import { recordWatcherAction, resolveBoardAliasesForPath } from "./board-diagnostics.js";
 import { isSupportedAgent, normalizeAgentName } from "./agent-names.js";
@@ -646,8 +647,8 @@ function moveCard(
   fromColumn: string,
   toColumn: string,
   newCardText?: string,
-): string {
-  return moveUncheckedTask(content, taskText, fromColumn, toColumn, newCardText).content;
+): { content: string; moved: boolean } {
+  return moveUncheckedTask(content, taskText, fromColumn, toColumn, newCardText);
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,6 +1183,71 @@ function generateEntityId(prefix: "t" | "a"): string {
   return `${prefix}-${randomBytes(3).toString("hex")}`;
 }
 
+function normalizeHeadingForMatch(heading: string): string {
+  return heading.trim().toLowerCase();
+}
+
+function resolveDispatchingColumn(
+  headings: Set<string>,
+  columns: ResolvedBoardColumns,
+): string {
+  const preferred = columns.columnsByRole.dispatching;
+  if (headings.has(normalizeHeadingForMatch(preferred))) return preferred;
+
+  const inProgress = columns.columnsByRole.inProgress;
+  if (headings.has(normalizeHeadingForMatch(inProgress))) return inProgress;
+
+  const review = columns.columnsByRole.review;
+  if (headings.has(normalizeHeadingForMatch(review))) return review;
+
+  const done = columns.columnsByRole.done;
+  if (headings.has(normalizeHeadingForMatch(done))) return done;
+
+  return preferred;
+}
+
+function resolveDoneColumn(
+  headings: Set<string>,
+  columns: ResolvedBoardColumns,
+): string {
+  const done = columns.columnsByRole.done;
+  if (headings.has(normalizeHeadingForMatch(done))) return done;
+  const review = columns.columnsByRole.review;
+  if (headings.has(normalizeHeadingForMatch(review))) return review;
+  const inProgress = columns.columnsByRole.inProgress;
+  if (headings.has(normalizeHeadingForMatch(inProgress))) return inProgress;
+  return columns.columnsByRole.ready;
+}
+
+function resolveTrackedColumns(
+  headings: Set<string>,
+  ...columns: string[]
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const column of columns) {
+    if (!headings.has(normalizeHeadingForMatch(column))) continue;
+    const normalized = normalizeHeadingForMatch(column);
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(column);
+  }
+  return out;
+}
+
+function buildDispatchDedupeKey(params: {
+  boardPath: string;
+  projectId?: string;
+  taskId?: string;
+  prompt: string;
+}): string {
+  if (params.taskId) {
+    return taskHash(`${params.taskId}|${params.prompt}`);
+  }
+  const scope = params.projectId ? `project:${params.projectId}` : `board:${params.boardPath}`;
+  return taskHash(`${scope}|${params.prompt}`);
+}
+
 function ensureCardIds(card: ParsedCard): { taskId: string; attemptId: string } {
   return {
     taskId: card.taskId ?? generateEntityId("t"),
@@ -1568,32 +1634,42 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
       const content = readFileSync(boardPath, "utf-8");
       const resolvedColumns = resolveBoardColumns(boardPath, content);
       const readyColumn = resolvedColumns.columnsByRole.ready;
-      const dispatchingColumn = resolvedColumns.columnsByRole.dispatching;
-      const trackedColumns = [
-        resolvedColumns.columnsByRole.dispatching,
+      const headingSet = new Set(resolvedColumns.headings.map(normalizeHeadingForMatch));
+      const dispatchingColumn = resolveDispatchingColumn(headingSet, resolvedColumns);
+      const trackedColumns = resolveTrackedColumns(
+        headingSet,
+        dispatchingColumn,
         resolvedColumns.columnsByRole.inProgress,
         resolvedColumns.columnsByRole.review,
         resolvedColumns.columnsByRole.blocked,
         resolvedColumns.columnsByRole.done,
-      ];
+      );
+      const trackedColumnsSeed = trackedColumns.length > 0 ? trackedColumns : [readyColumn];
+      const boardProjectId = projectFromBoardPath(boardPath, config);
       const tasks = getColumnTasks(content, readyColumn);
       trace(`Parse ${boardPath}: ready=${readyColumn} tasks=${tasks.length}`, boardPath);
       if (tasks.length === 0) return;
 
-      const boardProjectId = projectFromBoardPath(boardPath, config);
       let updatedContent = content;
       let anyDispatched = false;
 
       for (const taskText of tasks) {
         const card = parseCard(taskText, workspacePath);
         const { taskId, attemptId } = ensureCardIds(card);
-        const promptHash = taskHash(`${taskId}|${card.prompt}`);
+        const promptHash = buildDispatchDedupeKey({
+          boardPath,
+          projectId: boardProjectId,
+          taskId: card.taskId,
+          prompt: card.prompt,
+        });
         if (dispatched.has(promptHash)) continue;
 
-        // Restart-safe dedupe: if a tracked card with the same base prompt
-        // already exists (Dispatching/In Progress/Review/Done/Blocked), skip.
-        const existingTracked = getAllTrackedCards(updatedContent, trackedColumns).some(
-          (tracked) => (tracked.taskId ? tracked.taskId === taskId : tracked.basePrompt === card.prompt),
+        // Restart-safe dedupe: if a tracked card with the same task OR same base
+        // prompt already exists, skip re-dispatching.
+        const existingTracked = getAllTrackedCards(updatedContent, trackedColumnsSeed).some(
+          (tracked) => card.taskId
+            ? tracked.taskId === card.taskId
+            : tracked.basePrompt === card.prompt,
         );
         if (existingTracked) {
           dispatched.add(promptHash);
@@ -1615,8 +1691,9 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
           // Move card: Ready to Dispatch -> Dispatching (with session ID)
           const metadataSuffix = formatCardMetadataSuffix(card, result.taskId, result.attemptId);
           const newCardText = `${card.prompt} ${metadataSuffix} [${result.sessionId}]`;
-          updatedContent = moveCard(updatedContent, taskText, readyColumn, dispatchingColumn, newCardText);
-          anyDispatched = true;
+          const moved = moveCard(updatedContent, taskText, readyColumn, dispatchingColumn, newCardText);
+          updatedContent = moved.content;
+          anyDispatched = moved.moved;
         } else {
           // Failed to dispatch -- remove from dispatched set so it retries
           dispatched.delete(promptHash);
@@ -1661,14 +1738,17 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
     try {
       let content = readFileSync(boardPath, "utf-8");
       const resolvedColumns = resolveBoardColumns(boardPath, content);
-      const trackedColumns = [
+      const headingSet = new Set(resolvedColumns.headings.map(normalizeHeadingForMatch));
+      const trackedColumns = resolveTrackedColumns(
+        headingSet,
         resolvedColumns.columnsByRole.dispatching,
         resolvedColumns.columnsByRole.inProgress,
         resolvedColumns.columnsByRole.review,
         resolvedColumns.columnsByRole.blocked,
         resolvedColumns.columnsByRole.done,
-      ];
-      const doneColumn = resolvedColumns.columnsByRole.done;
+      );
+      const doneColumn = resolveDoneColumn(headingSet, resolvedColumns);
+      const boardProjectId = projectFromBoardPath(boardPath, config);
 
       // During guard window, ignore only our own just-written content.
       const guard = writeGuard.get(boardPath);
@@ -1754,9 +1834,12 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
             changed = true;
           }
           // Allow re-dispatch if user moves card back to Ready to Dispatch
-          const dedupeKey = card.taskId
-            ? taskHash(`${card.taskId}|${card.basePrompt}`)
-            : taskHash(card.basePrompt);
+          const dedupeKey = buildDispatchDedupeKey({
+            boardPath,
+            projectId: boardProjectId,
+            taskId: card.taskId ?? undefined,
+            prompt: card.basePrompt,
+          });
           dispatched.delete(dedupeKey);
           continue;
         }
@@ -1773,12 +1856,24 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         }
 
         const targetRole = statusToColumnRole(session.status);
-        const targetColumn = resolvedColumns.columnsByRole[targetRole];
+        const targetColumn = resolveTrackedColumns(
+          headingSet,
+          resolvedColumns.columnsByRole[targetRole],
+        )[0];
         const preview = previewUrls.get(card.sessionId) ?? null;
         const newLine = formatRichCardLine(card.basePrompt, card.sessionId, session, {
           previewUrl: preview,
           dashboardUrl,
         });
+
+        if (!targetColumn) {
+          // Column unavailable on this board layout — keep card text current in-place.
+          if (!DONE_STATUSES.has(session.status) && card.line !== newLine) {
+            updated = replaceCardLine(updated, card.line, newLine);
+            changed = true;
+          }
+          continue;
+        }
 
         if (targetColumn !== card.column) {
           // Move to correct column with updated text

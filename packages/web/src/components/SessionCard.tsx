@@ -1,17 +1,18 @@
 "use client";
 
-import { useState } from "react";
-import Link from "next/link";
+import { useEffect, useState } from "react";
 import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@conductor-oss/core/types";
 import { ActivityDot } from "./ActivityDot";
+import { AgentTileIcon } from "./AgentTileIcon";
 
 interface SessionCardProps {
   session: DashboardSession;
   onSend?: (sessionId: string, message: string) => void;
-  onKill?: (sessionId: string) => void;
+  onKill?: (sessionId: string, isTerminalSession: boolean) => void;
   onRestore?: (sessionId: string) => void;
+  onOpenTerminal?: (sessionId: string) => void;
   actionBusy?: boolean;
 }
 
@@ -43,8 +44,8 @@ const STATUS_DOT_COLORS: Record<AttentionLevel, string> = {
   done:    "var(--color-status-done)",
 };
 
-function formatAge(isoDate: string): string {
-  const diffMs = Date.now() - new Date(isoDate).getTime();
+function formatAge(isoDate: string, now = Date.now()): string {
+  const diffMs = now - new Date(isoDate).getTime();
   const minutes = Math.floor(diffMs / 60_000);
   if (minutes < 1) return "now";
   if (minutes < 60) return `${minutes}m`;
@@ -82,10 +83,19 @@ function parseCost(meta: Record<string, string>): CostInfo | null {
   }
 }
 
-export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = false }: SessionCardProps) {
+export function SessionCard({
+  session,
+  onSend,
+  onKill,
+  onRestore,
+  onOpenTerminal,
+  actionBusy = false,
+}: SessionCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [messageInput, setMessageInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [ageNow, setAgeNow] = useState(() => Date.now());
 
   const level = getAttentionLevel(session);
   const isTerminal = TERMINAL_STATUSES.has(session.status);
@@ -104,9 +114,22 @@ export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = f
     setTimeout(() => setSending(false), 1500);
   };
 
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    setAgeNow(Date.now());
+    const timer = window.setInterval(() => {
+      setAgeNow(Date.now());
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [isHydrated]);
+
   return (
     <div
-      className={`session-card cursor-pointer ${isTerminal ? "opacity-50" : ""}`}
+      className="session-card cursor-pointer"
       onClick={(e) => {
         if ((e.target as HTMLElement).closest("a, button, textarea, input")) return;
         setExpanded(!expanded);
@@ -125,7 +148,7 @@ export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = f
         </span>
         <div className="flex-1" />
         <span className="text-[10px] text-[var(--color-text-muted)]">
-          {formatAge(session.createdAt)}
+          {isHydrated ? formatAge(session.createdAt, ageNow) : "—"}
         </span>
       </div>
 
@@ -141,8 +164,9 @@ export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = f
           {session.status.replace(/_/g, " ")}
         </span>
         {session.metadata?.agent && (
-          <span className="rounded bg-[var(--color-accent-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
-            {session.metadata.agent}
+          <span className="inline-flex items-center gap-1.5 rounded bg-[var(--color-accent-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
+            <AgentTileIcon seed={{ label: session.metadata.agent }} className="h-3.5 w-3.5" />
+            <span>{session.metadata.agent}</span>
           </span>
         )}
       </div>
@@ -191,13 +215,6 @@ export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = f
           {formatDuration(session.createdAt, session.lastActivityAt)}
         </span>
         <div className="flex-1" />
-        <Link
-          href={`/sessions/${encodeURIComponent(session.id)}`}
-          onClick={(e) => e.stopPropagation()}
-          className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)] hover:no-underline"
-        >
-          View Details
-        </Link>
       </div>
 
       {/* Expanded panel */}
@@ -282,13 +299,24 @@ export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = f
 
           {/* Actions */}
           <div className="flex gap-2">
-            <Link
+            <a
               href={`/sessions/${encodeURIComponent(session.id)}`}
               onClick={(e) => e.stopPropagation()}
-              className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-subtle)] hover:no-underline"
+              className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)] hover:no-underline"
             >
-              Terminal
-            </Link>
+              View details
+            </a>
+            {isTerminal && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenTerminal?.(session.id);
+                }}
+                className="rounded-md border border-[var(--color-accent)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-subtle)]"
+              >
+                Open terminal
+              </button>
+            )}
             {isRestorable && (
               <button
                 onClick={(e) => {
@@ -303,7 +331,7 @@ export function SessionCard({ session, onSend, onKill, onRestore, actionBusy = f
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                onKill?.(session.id);
+                onKill?.(session.id, isTerminal);
               }}
               disabled={actionBusy}
               className={`rounded-md border border-[rgba(239,68,68,0.3)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)] ${
