@@ -27,7 +27,12 @@ export async function POST(
     return NextResponse.json({ ok: true, sessionId: id });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed to kill session";
-    const status = msg.includes("not found") ? 404 : 500;
+    const lower = msg.toLowerCase();
+    const isNotFoundError =
+      lower.includes("not found") ||
+      lower.includes("enoent") ||
+      lower.includes("no such file or directory");
+    const status = isNotFoundError ? 404 : 500;
     return NextResponse.json({ error: msg }, { status });
   }
 }

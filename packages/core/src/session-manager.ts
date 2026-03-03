@@ -1002,7 +1002,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     }
 
     // Archive metadata
-    deleteMetadata(sessionsDir, sessionId, true);
+    try {
+      deleteMetadata(sessionsDir, sessionId, true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.toLowerCase() : "";
+      const missingMetadata = msg.includes("not found") || msg.includes("enoent") || msg.includes("no such file or directory");
+      if (!missingMetadata) {
+        throw err;
+      }
+    }
   }
 
   async function cleanup(
