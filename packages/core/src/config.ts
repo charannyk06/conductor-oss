@@ -63,6 +63,37 @@ const AgentSpecificConfigSchema = z
   })
   .passthrough();
 
+const AgentProfileSchema = z
+  .object({
+    agent: z.string().optional(),
+    model: z.string().optional(),
+    permissions: z.enum(["skip", "default"]).optional(),
+  })
+  .passthrough();
+
+const DevServerConfigSchema = z.object({
+  command: z.string(),
+  cwd: z.string().optional(),
+});
+
+const ColumnAliasesSchema = z.object({
+  intake: z.array(z.string()).optional(),
+  ready: z.array(z.string()).optional(),
+  dispatching: z.array(z.string()).optional(),
+  inProgress: z.array(z.string()).optional(),
+  review: z.array(z.string()).optional(),
+  done: z.array(z.string()).optional(),
+  blocked: z.array(z.string()).optional(),
+});
+
+const BoardConfigEntrySchema = z.union([
+  z.string(),
+  z.object({
+    path: z.string(),
+    aliases: ColumnAliasesSchema.optional(),
+  }),
+]);
+
 const ProjectConfigSchema = z.object({
   name: z.string().optional(),
   repo: z.string(),
@@ -86,6 +117,9 @@ const ProjectConfigSchema = z.object({
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
   mcpServers: z.record(MCPServerConfigSchema).optional(),
+  agentProfiles: z.record(AgentProfileSchema).optional(),
+  defaultProfile: z.string().optional(),
+  devServer: DevServerConfigSchema.optional(),
 });
 
 const DefaultPluginsSchema = z.object({
@@ -106,7 +140,8 @@ const ConductorConfigSchema = z.object({
   port: z.number().default(4747),
   terminalPort: z.number().optional(),
   dashboardUrl: z.string().optional(),
-  boards: z.array(z.string()).optional(),
+  boards: z.array(BoardConfigEntrySchema).optional(),
+  columnAliases: ColumnAliasesSchema.optional(),
   readyThresholdMs: z.number().nonnegative().default(300_000),
   maxSessionsPerProject: z.number().positive().default(5),
   defaults: DefaultPluginsSchema.default({}),
@@ -138,9 +173,17 @@ function expandHome(filepath: string): string {
 function expandPaths(config: OrchestratorConfig): OrchestratorConfig {
   for (const project of Object.values(config.projects)) {
     project.path = expandHome(project.path);
+    if (project.devServer?.cwd) {
+      project.devServer.cwd = expandHome(project.devServer.cwd);
+    }
   }
   if (config.boards) {
-    config.boards = config.boards.map((boardPath) => expandHome(boardPath));
+    config.boards = config.boards.map((entry) => {
+      if (typeof entry === "string") {
+        return expandHome(entry);
+      }
+      return { ...entry, path: expandHome(entry.path) };
+    });
   }
   return config;
 }

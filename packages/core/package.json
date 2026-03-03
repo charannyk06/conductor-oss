@@ -13,6 +13,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/**/*.test.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "typescript": "^5.7.0",
-    "@types/node": "^25.3.3"
+    "@types/node": "^25.3.3",
+    "tsx": "^4.19.0"
   }
 }

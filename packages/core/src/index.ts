@@ -72,3 +72,27 @@ export {
   buildBoardProjectMap,
 } from "./board-watcher.js";
 export type { BoardWatcherConfig, BoardWatcher } from "./board-watcher.js";
+
+// Board diagnostics + doctor helpers
+export {
+  recordWatcherAction,
+  readRecentWatcherActions,
+  resolveBoardAliasesForPath,
+  parseBoardStatus,
+  boardEntriesToPaths,
+  defaultAliasMapping,
+} from "./board-diagnostics.js";
+export type {
+  WatcherAction,
+  BoardParseStatus,
+  DoctorReport,
+} from "./board-diagnostics.js";
+
+// Structured board parsing helpers
+export {
+  DEFAULT_COLUMN_ALIASES,
+  parseBoardSections,
+  resolveColumnsFromBoard,
+  parseChecklistItems,
+  getUncheckedTasks,
+} from "./board-parser.js";

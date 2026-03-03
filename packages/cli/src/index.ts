@@ -22,6 +22,10 @@ import { registerWatch } from "./commands/watch.js";
 import { registerInit } from "./commands/init.js";
 import { registerMcpServer } from "./commands/mcp-server.js";
 import { registerWebhook } from "./commands/webhook.js";
+import { registerDoctor } from "./commands/doctor.js";
+import { registerRetry } from "./commands/retry.js";
+import { registerTask } from "./commands/task.js";
+import { registerFeedback } from "./commands/feedback.js";
 
 const program = new Command();
 
@@ -44,5 +48,9 @@ registerWatch(program);
 registerInit(program);
 registerMcpServer(program);
 registerWebhook(program);
+registerDoctor(program);
+registerRetry(program);
+registerTask(program);
+registerFeedback(program);
 
 program.parse();

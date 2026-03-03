@@ -12,9 +12,9 @@
  * Enforces max 5 sessions per project.
  */
 
-import { statSync, existsSync, rmSync } from "node:fs";
+import { statSync, existsSync, rmSync, mkdirSync, createWriteStream } from "node:fs";
 import { join, basename, dirname } from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import {
@@ -30,6 +30,9 @@ import {
   type SessionSpawnConfig,
   type SessionStatus,
   type CleanupResult,
+  type RetryConfig,
+  type TaskGraph,
+  type AttemptSummary,
   type OrchestratorConfig,
   type ProjectConfig,
   type Runtime,
@@ -274,6 +277,104 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return results;
   }
 
+  interface SessionLocation {
+    sessionId: string;
+    projectId: string;
+    project: ProjectConfig;
+    sessionsDir: string;
+    raw: Record<string, string>;
+  }
+
+  function findSessionLocation(sessionId: string): SessionLocation | null {
+    for (const [projectId, project] of Object.entries(config.projects)) {
+      const sessionsDir = getProjectSessionsDir(project);
+      const raw = readMetadataRaw(sessionsDir, sessionId);
+      if (!raw) continue;
+      return { sessionId, projectId, project, sessionsDir, raw };
+    }
+    return null;
+  }
+
+  function listSessionLocations(projectIdFilter?: string): SessionLocation[] {
+    const out: SessionLocation[] = [];
+    for (const [projectId, project] of Object.entries(config.projects)) {
+      if (projectIdFilter && projectId !== projectIdFilter) continue;
+      const sessionsDir = getProjectSessionsDir(project);
+      if (!existsSync(sessionsDir)) continue;
+      for (const sessionName of listMetadata(sessionsDir)) {
+        const raw = readMetadataRaw(sessionsDir, sessionName);
+        if (!raw) continue;
+        out.push({ sessionId: sessionName, projectId, project, sessionsDir, raw });
+      }
+    }
+    return out;
+  }
+
+  function generateAttemptId(): string {
+    return `a-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function resolveParentBaseBranch(projectId: string, parentTaskId: string): string | undefined {
+    const locations = listSessionLocations(projectId)
+      .filter((loc) => loc.raw["taskId"] === parentTaskId && !!loc.raw["branch"])
+      .sort((a, b) => {
+        const aTs = Date.parse(a.raw["createdAt"] ?? "") || 0;
+        const bTs = Date.parse(b.raw["createdAt"] ?? "") || 0;
+        return bTs - aTs;
+      });
+    return locations[0]?.raw["branch"];
+  }
+
+  function resolveProfile(
+    project: ProjectConfig,
+    spawnConfig: SessionSpawnConfig,
+  ): {
+    profileName?: string;
+    agentName: string;
+    model?: string;
+    permissions: "skip" | "default";
+  } {
+    const profileName = spawnConfig.profile ?? project.defaultProfile;
+    const profile = profileName ? project.agentProfiles?.[profileName] : undefined;
+    const agentName = spawnConfig.agent ?? profile?.agent ?? project.agent ?? config.defaults.agent;
+    const model = spawnConfig.model
+      ?? (!spawnConfig.agent ? profile?.model : undefined)
+      ?? project.agentConfig?.model;
+    const permissions = profile?.permissions ?? project.agentConfig?.permissions ?? "skip";
+    return { profileName, agentName, model, permissions };
+  }
+
+  const devServerByProject = new Map<string, { process: ChildProcess; logPath: string }>();
+
+  function ensureDevServer(projectId: string, project: ProjectConfig): string | null {
+    const dev = project.devServer;
+    if (!dev?.command) return null;
+
+    const existing = devServerByProject.get(projectId);
+    if (existing && !existing.process.killed) {
+      return existing.logPath;
+    }
+
+    const logDir = join(homedir(), ".conductor", "dev-servers");
+    mkdirSync(logDir, { recursive: true });
+    const logPath = join(logDir, `${projectId}.log`);
+    const stream = createWriteStream(logPath, { flags: "a" });
+
+    const child = spawnProcess("sh", ["-lc", dev.command], {
+      cwd: dev.cwd ?? project.path,
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+
+    child.stdout?.pipe(stream);
+    child.stderr?.pipe(stream);
+    child.unref();
+
+    devServerByProject.set(projectId, { process: child, logPath });
+    return logPath;
+  }
+
   /** Count active (non-terminal) sessions for a project. */
   function countActiveSessions(projectId: string): number {
     const project = config.projects[projectId];
@@ -443,25 +544,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       );
     }
 
-    const plugins = resolvePlugins(project);
+    const profileSelection = resolveProfile(project, spawnConfig);
+    const plugins = resolvePlugins(project, profileSelection.agentName);
     if (!plugins.runtime) {
       throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
     }
 
-    // Allow --agent override to swap the agent plugin for this session
-    const agentOverridden = Boolean(
-      spawnConfig.agent && spawnConfig.agent !== (project.agent ?? config.defaults.agent),
-    );
-    if (spawnConfig.agent) {
-      const overrideAgent = registry.get<Agent>("agent", spawnConfig.agent);
-      if (!overrideAgent) {
-        throw new Error(`Agent plugin '${spawnConfig.agent}' not found`);
-      }
-      plugins.agent = overrideAgent;
-    }
-
     if (!plugins.agent) {
-      throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
+      throw new Error(`Agent plugin '${profileSelection.agentName}' not found`);
     }
 
     // Validate issue exists BEFORE creating any resources
@@ -513,6 +603,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       tmuxName = generateTmuxName(config.configPath, `${project.sessionPrefix}-${slug}`, num);
     }
 
+    const taskId = spawnConfig.taskId ?? `t-${sessionId}`;
+    const attemptId = spawnConfig.attemptId ?? `a-${sessionId}`;
+    const parentTaskId = spawnConfig.parentTaskId;
+    const baseBranch = spawnConfig.baseBranch
+      ?? (parentTaskId ? resolveParentBaseBranch(spawnConfig.projectId, parentTaskId) : undefined)
+      ?? project.defaultBranch;
+
     // Determine branch name
     let branch: string;
     if (spawnConfig.branch) {
@@ -532,7 +629,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             .replace(/^-+|-+$/g, "");
       branch = `feat/${slug || sessionId}`;
     } else {
-      branch = `session/${sessionId}`;
+      const taskSlug = taskId.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 40);
+      const attemptSlug = attemptId.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 20);
+      branch = `task/${taskSlug}-${attemptSlug}`;
     }
 
     // Create workspace (if workspace plugin is available)
@@ -544,6 +643,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           project,
           sessionId,
           branch,
+          baseBranch,
         });
         workspacePath = wsInfo.path;
 
@@ -609,8 +709,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       projectConfig: project,
       issueId: spawnConfig.issueId,
       prompt: composedPrompt ?? spawnConfig.prompt,
-      permissions: project.agentConfig?.permissions,
-      model: spawnConfig.model ?? (agentOverridden ? undefined : project.agentConfig?.model),
+      permissions: profileSelection.permissions,
+      model: profileSelection.model,
       attachments: spawnConfig.attachments,
       mcpServers: resolvedMcpServers,
       workspacePath,
@@ -676,6 +776,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       lastActivityAt: new Date(),
       metadata: {},
     };
+    const devServerLog = ensureDevServer(spawnConfig.projectId, project);
 
     try {
       writeMetadata(sessionsDir, sessionId, {
@@ -686,8 +787,21 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         issue: spawnConfig.issueId,
         project: spawnConfig.projectId,
         agent: plugins.agent.name,
+        model: profileSelection.model,
+        permissions: profileSelection.permissions,
+        profile: profileSelection.profileName,
+        taskId,
+        attemptId,
+        parentTaskId,
+        attemptStatus: "active",
+        retryOfSessionId: spawnConfig.retryOfSessionId,
+        baseBranch,
+        prompt: spawnConfig.prompt ?? composedPrompt ?? undefined,
         createdAt: new Date().toISOString(),
         runtimeHandle: JSON.stringify(handle),
+      });
+      updateMetadata(sessionsDir, sessionId, {
+        devServerLog: devServerLog ?? "",
       });
 
       if (plugins.agent.postLaunchSetup) {
@@ -1006,6 +1120,109 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     await runtimePlugin.sendMessage(handle, message);
   }
 
+  async function retry(target: string, options?: RetryConfig): Promise<Session> {
+    let source = await get(target);
+    if (!source) {
+      const sessions = await list();
+      const byTask = sessions
+        .filter((session) => session.metadata["taskId"] === target)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+      source = byTask[0] ?? null;
+    }
+
+    if (!source) {
+      throw new Error(`No session/task found for retry target: ${target}`);
+    }
+
+    const sourceLoc = findSessionLocation(source.id);
+    if (!sourceLoc) {
+      throw new Error(`Retry source session not found on disk: ${source.id}`);
+    }
+
+    const taskId = sourceLoc.raw["taskId"] ?? source.metadata["taskId"] ?? target;
+    const newAttemptId = generateAttemptId();
+    const prompt =
+      sourceLoc.raw["prompt"]
+      ?? source.metadata["prompt"]
+      ?? source.issueId
+      ?? source.metadata["summary"]
+      ?? "";
+    if (!prompt) {
+      throw new Error(
+        `Cannot retry ${source.id}: no prompt/issue context found in metadata`,
+      );
+    }
+
+    const session = await spawn({
+      projectId: source.projectId,
+      issueId: source.issueId ?? undefined,
+      prompt: source.issueId ? sourceLoc.raw["prompt"] ?? undefined : prompt,
+      agent: options?.agent ?? sourceLoc.raw["agent"] ?? undefined,
+      model: options?.model ?? sourceLoc.raw["model"] ?? undefined,
+      baseBranch: options?.baseBranch ?? sourceLoc.raw["branch"] ?? source.branch ?? undefined,
+      profile: options?.profile ?? sourceLoc.raw["profile"] ?? undefined,
+      taskId,
+      attemptId: newAttemptId,
+      parentTaskId: sourceLoc.raw["parentTaskId"] ?? undefined,
+      retryOfSessionId: source.id,
+    });
+
+    updateMetadata(sourceLoc.sessionsDir, source.id, {
+      attemptStatus: "archived",
+      supersededByAttemptId: newAttemptId,
+    });
+
+    return session;
+  }
+
+  async function taskGraph(taskId: string): Promise<TaskGraph | null> {
+    const sessions = await list();
+    const attempts = sessions
+      .filter((session) => session.metadata["taskId"] === taskId)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    if (attempts.length === 0) return null;
+
+    const children = new Set<string>();
+    for (const session of sessions) {
+      if (session.metadata["parentTaskId"] !== taskId) continue;
+      const childTaskId = session.metadata["taskId"];
+      if (childTaskId) children.add(childTaskId);
+    }
+
+    const attemptSummaries: AttemptSummary[] = attempts.map((session) => ({
+      attemptId: session.metadata["attemptId"] ?? `a-${session.id}`,
+      sessionId: session.id,
+      status: session.status,
+      agent: session.metadata["agent"],
+      model: session.metadata["model"],
+      branch: session.branch,
+      createdAt: session.createdAt,
+    }));
+
+    return {
+      taskId,
+      parentTaskId: attempts[0]?.metadata["parentTaskId"] ?? null,
+      childrenTaskIds: [...children],
+      attempts: attemptSummaries,
+    };
+  }
+
+  async function submitFeedback(sessionId: SessionId, feedback: string): Promise<void> {
+    const location = findSessionLocation(sessionId);
+    if (!location) throw new Error(`Session ${sessionId} not found`);
+
+    const instruction = [
+      "Reviewer feedback received. Apply the requested changes and continue.",
+      "",
+      feedback.trim(),
+    ].join("\n");
+    await send(sessionId, instruction);
+    updateMetadata(location.sessionsDir, sessionId, {
+      status: "working",
+      reviewDecision: "changes_requested",
+    });
+  }
+
   async function restore(sessionId: SessionId): Promise<Session> {
     // 1. Find session metadata across all projects (active first, then archive)
     let raw: Record<string, string> | null = null;
@@ -1070,6 +1287,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         prBaseRef: raw["prBaseRef"],
         prDraft: raw["prDraft"],
         cost: raw["cost"],
+        model: raw["model"],
+        permissions: raw["permissions"] as "skip" | "default" | undefined,
+        taskId: raw["taskId"],
+        attemptId: raw["attemptId"],
+        parentTaskId: raw["parentTaskId"],
+        attemptStatus: raw["attemptStatus"],
+        retryOfSessionId: raw["retryOfSessionId"],
+        supersededByAttemptId: raw["supersededByAttemptId"],
+        profile: raw["profile"],
+        baseBranch: raw["baseBranch"],
+        prompt: raw["prompt"],
+        devServerLog: raw["devServerLog"],
       });
     }
 
@@ -1151,8 +1380,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       sessionId,
       projectConfig: project,
       issueId: session.issueId ?? undefined,
-      permissions: project.agentConfig?.permissions,
-      model: project.agentConfig?.model,
+      permissions: (raw["permissions"] as "skip" | "default" | undefined)
+        ?? project.agentConfig?.permissions
+        ?? "skip",
+      model: raw["model"] ?? project.agentConfig?.model,
       mcpServers: restoreMcpServers,
       workspacePath,
     };
@@ -1256,5 +1487,17 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return runtimePlugin.getOutput(handle, lines);
   }
 
-  return { spawn, restore, list, get, kill, cleanup, send, getOutput };
+  return {
+    spawn,
+    retry,
+    taskGraph,
+    submitFeedback,
+    restore,
+    list,
+    get,
+    kill,
+    cleanup,
+    send,
+    getOutput,
+  };
 }

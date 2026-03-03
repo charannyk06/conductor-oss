@@ -130,10 +130,22 @@ export interface SessionSpawnConfig {
   projectId: string;
   issueId?: string;
   branch?: string;
+  /** Optional base branch to branch from when creating a new workspace branch. */
+  baseBranch?: string;
   prompt?: string;
   agent?: string;
   /** Override the model for this session (e.g. from #model/ card tag). */
   model?: string;
+  /** Logical task identifier shared across attempts. */
+  taskId?: string;
+  /** Attempt identifier for this specific run. */
+  attemptId?: string;
+  /** Optional parent task ID for subtask relationships. */
+  parentTaskId?: string;
+  /** Optional named profile (resolved from project agentProfiles). */
+  profile?: string;
+  /** Session that this spawn is retrying from. */
+  retryOfSessionId?: string;
   /** Image/file attachments from the task card. */
   attachments?: TaskAttachment[];
 }
@@ -240,6 +252,8 @@ export interface WorkspaceCreateConfig {
   project: ProjectConfig;
   sessionId: SessionId;
   branch: string;
+  /** Base branch/ref to create the new branch from. */
+  baseBranch?: string;
 }
 
 export interface WorkspaceInfo {
@@ -414,7 +428,9 @@ export interface OrchestratorConfig {
   port?: number;
   terminalPort?: number;
   dashboardUrl?: string;
-  boards?: string[];
+  boards?: BoardConfigEntry[];
+  /** Global fallback column alias mapping for kanban boards. */
+  columnAliases?: ColumnAliasesConfig;
   readyThresholdMs: number;
   maxSessionsPerProject: number;
   defaults: DefaultPlugins;
@@ -441,6 +457,34 @@ export interface DefaultPlugins {
   mcpServers?: Record<string, MCPServerConfig>;
 }
 
+export interface AgentProfile {
+  agent?: string;
+  model?: string;
+  permissions?: "skip" | "default";
+}
+
+export interface DevServerConfig {
+  command: string;
+  cwd?: string;
+}
+
+export interface ColumnAliasesConfig {
+  intake?: string[];
+  ready?: string[];
+  dispatching?: string[];
+  inProgress?: string[];
+  review?: string[];
+  done?: string[];
+  blocked?: string[];
+}
+
+export interface BoardConfigObject {
+  path: string;
+  aliases?: ColumnAliasesConfig;
+}
+
+export type BoardConfigEntry = string | BoardConfigObject;
+
 export interface ProjectConfig {
   name: string;
   repo: string;
@@ -462,6 +506,12 @@ export interface ProjectConfig {
   agentRulesFile?: string;
   /** MCP servers available to agents in this project */
   mcpServers?: Record<string, MCPServerConfig>;
+  /** Named profile presets (fast/deep/safe/auto etc.) for this project. */
+  agentProfiles?: Record<string, AgentProfile>;
+  /** Default profile used when a task does not specify #profile/<name>. */
+  defaultProfile?: string;
+  /** Optional dev server command for preview/test workflows. */
+  devServer?: DevServerConfig;
 }
 
 export interface TrackerConfig {
@@ -537,14 +587,65 @@ export interface SessionMetadata {
   prDraft?: string;
   /** JSON-serialized CostEstimate from agent plugin. */
   cost?: string;
+  /** Model used by the session's agent plugin. */
+  model?: string;
+  /** Agent execution permission mode. */
+  permissions?: "skip" | "default";
+  /** Logical task identifier shared across retries/attempts. */
+  taskId?: string;
+  /** Attempt identifier for this run. */
+  attemptId?: string;
+  /** Parent task ID for subtask lineage. */
+  parentTaskId?: string;
+  /** Attempt state marker (active/archived/superseded). */
+  attemptStatus?: string;
+  /** Previous session this attempt retried from. */
+  retryOfSessionId?: string;
+  /** Attempt ID superseding this attempt. */
+  supersededByAttemptId?: string;
+  /** Named profile used for this session. */
+  profile?: string;
+  /** Base branch used for branch creation. */
+  baseBranch?: string;
+  /** Persisted prompt text used at spawn time. */
+  prompt?: string;
+  /** Dev server log file associated with this session, if configured. */
+  devServerLog?: string;
 }
 
 // === SERVICE INTERFACES ===
+
+export interface RetryConfig {
+  agent?: string;
+  model?: string;
+  baseBranch?: string;
+  profile?: string;
+}
+
+export interface AttemptSummary {
+  attemptId: string;
+  sessionId: string;
+  status: SessionStatus;
+  agent?: string;
+  model?: string;
+  branch?: string | null;
+  createdAt: Date;
+}
+
+export interface TaskGraph {
+  taskId: string;
+  parentTaskId: string | null;
+  childrenTaskIds: string[];
+  attempts: AttemptSummary[];
+}
 
 export interface SessionManager {
   spawn(config: SessionSpawnConfig): Promise<Session>;
   list(projectId?: string): Promise<Session[]>;
   get(sessionId: SessionId): Promise<Session | null>;
+  retry(target: string, options?: RetryConfig): Promise<Session>;
+  taskGraph(taskId: string): Promise<TaskGraph | null>;
+  submitFeedback(sessionId: SessionId, feedback: string): Promise<void>;
   kill(sessionId: SessionId): Promise<void>;
   cleanup(projectId?: string, options?: { dryRun?: boolean }): Promise<CleanupResult>;
   send(sessionId: SessionId, message: string): Promise<void>;
