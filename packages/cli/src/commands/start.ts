@@ -194,7 +194,6 @@ export function registerStart(program: Command): void {
               args = [
                 "run",
                 "start",
-                "--",
                 "--hostname",
                 "0.0.0.0",
                 "--port",
@@ -205,7 +204,6 @@ export function registerStart(program: Command): void {
               args = [
                 "run",
                 "dev",
-                "--",
                 "--hostname",
                 "0.0.0.0",
                 "--port",

@@ -1,12 +1,15 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
-import { guardApiAccess } from "@/lib/auth";
+import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { sessionToDashboard } from "@/lib/serialize";
 
 /** POST /api/spawn -- Spawn a new agent session. */
 export async function POST(request: NextRequest) {
   const denied = await guardApiAccess();
   if (denied) return denied;
+  const deniedAction = guardApiActionAccess(request);
+  if (deniedAction) return deniedAction;
+
   const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });

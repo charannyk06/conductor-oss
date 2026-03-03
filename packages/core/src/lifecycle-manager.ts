@@ -391,14 +391,14 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
     // ------- Activity-based detection -------
 
-    // Grace period: don't mark sessions as exited during the first 30s
+    // Grace period: don't mark sessions as exited during the first 120s
     // (agent process may not have started yet — shell init, worktree setup, etc.)
     const createdMs = session.createdAt instanceof Date ? session.createdAt.getTime() : typeof session.createdAt === "number" ? session.createdAt : Date.now();
     const ageMs = Date.now() - createdMs;
     const rtCreated = Number(session.runtimeHandle?.data?.["createdAt"] ?? Date.now());
     const runtimeAge = Date.now() - rtCreated;
     const effectiveAge = Math.max(ageMs, runtimeAge);
-    if (session.activity === "exited" && session.status === "spawning" && effectiveAge < 30_000) {
+    if (session.activity === "exited" && session.status === "spawning" && effectiveAge < 120_000) {
       return; // Still in spawn grace period — skip
     }
 

@@ -18,6 +18,8 @@ export default function SessionDetailPage() {
   const [messageInput, setMessageInput] = useState("");
   const [sending, setSending] = useState(false);
   const [sentFeedback, setSentFeedback] = useState<string | null>(null);
+  const [killInProgress, setKillInProgress] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const fetchSession = useCallback(async () => {
@@ -78,17 +80,33 @@ export default function SessionDetailPage() {
     session?.status === "done" ||
     session?.status === "terminated" ||
     session?.status === "cleanup";
+  const action = isTerminal ? "Clean up" : "Kill";
 
   const handleKill = async () => {
-    const action = isTerminal ? "Clean up" : "Kill";
     if (!confirm(`${action} session ${sessionId}?`)) return;
-    await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/kill`, {
-      method: "POST",
-    });
-    if (isTerminal) {
-      router.push("/");
-    } else {
-      void fetchSession();
+    if (killInProgress) return;
+    setKillInProgress(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/kill`, {
+        method: "POST",
+      });
+      if (!res.ok && res.status !== 404) {
+        const detail = await res.text();
+        const reason = detail || `Request failed with ${res.status}`;
+        setActionError(`Unable to ${action.toLowerCase()} session ${sessionId}: ${reason}`);
+        return;
+      }
+      if (isTerminal) {
+        router.push("/");
+      } else {
+        void fetchSession();
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Network error";
+      setActionError(`Unable to ${action.toLowerCase()} session ${sessionId}: ${msg}`);
+    } finally {
+      setKillInProgress(false);
     }
   };
 
@@ -192,11 +210,21 @@ export default function SessionDetailPage() {
 
         <button
           onClick={() => void handleKill()}
-          className="rounded-md border border-[rgba(239,68,68,0.3)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)]"
+          disabled={killInProgress}
+          className={`rounded-md border border-[rgba(239,68,68,0.3)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)] ${
+            killInProgress ? "cursor-wait opacity-50" : ""
+          }`}
+          title={actionError ?? `${action} this session`}
         >
-          {isTerminal ? "Cleanup" : "Kill"}
+          {killInProgress ? `${isTerminal ? "Cleaning" : "Killing"}...` : isTerminal ? "Cleanup" : "Kill"}
         </button>
       </header>
+
+      {actionError && (
+        <div className="border-b border-[var(--color-border-subtle)] bg-[rgba(239,68,68,0.12)] px-4 py-2 text-[11px] text-[var(--color-status-error)]">
+          {actionError}
+        </div>
+      )}
 
       {/* Main content: Terminal + Metadata sidebar */}
       <div className="flex flex-1 min-h-0 overflow-hidden">

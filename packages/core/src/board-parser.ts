@@ -24,7 +24,7 @@ export interface ResolvedBoardColumns {
 }
 
 export const DEFAULT_COLUMN_ALIASES: Required<ColumnAliasesConfig> = {
-  intake: ["Inbox", "Backlog", "To do"],
+  intake: ["Inbox", "Backlog", "To do", "To Do", "Todo", "Ideas"],
   ready: ["Ready to Dispatch", "Ready"],
   dispatching: ["Dispatching"],
   inProgress: ["In Progress", "Doing", "In Development"],
@@ -130,14 +130,14 @@ export function resolveColumnsFromBoard(
 }
 
 function isChecklistLine(line: string): { checked: boolean; text: string } | null {
-  const match = line.match(/^\s*(?:>\s*)?-\s\[([ xX])\]\s+/);
+  const match = parseChecklistPrefix(line);
   if (!match) return null;
 
-  const text = line.slice(match[0].length).trim();
+  const text = line.slice(match.textStart).trim();
   if (!text) return null;
 
   return {
-    checked: (match[1] ?? " ").toLowerCase() === "x",
+    checked: match.checked,
     text,
   };
 }
@@ -145,7 +145,7 @@ function isChecklistLine(line: string): { checked: boolean; text: string } | nul
 function isContinuationLine(line: string): boolean {
   if (!line.trim()) return false;
   if (/^\s*##\s+/.test(line)) return false;
-  if (/^\s*(?:>\s*)?-\s\[[ xX]\]\s+/.test(line)) return false;
+  if (parseChecklistPrefix(line)) return false;
   return /^\s+/.test(line) || /^\s*>\s+/.test(line);
 }
 
@@ -192,12 +192,65 @@ export function getTrackedCardLines(content: string, headings: string[]): Array<
   for (const section of parseBoardSections(content)) {
     if (!normalized.has(normalizeHeading(section.heading))) continue;
     for (const line of section.lines) {
-      if (!line.startsWith("- [")) continue;
+      if (!parseChecklistPrefix(line)) continue;
       out.push({ line, column: section.heading });
     }
   }
 
   return out;
+}
+
+export interface ChecklistPrefixMatch {
+  checked: boolean;
+  textStart: number;
+}
+
+/** Parse and normalize a checklist line prefix without regex backtracking risk. */
+export function parseChecklistPrefix(line: string): ChecklistPrefixMatch | null {
+  let index = 0;
+  const len = line.length;
+
+  while (index < len && isInlineWhitespace(line.charCodeAt(index))) {
+    index += 1;
+  }
+
+  if (line[index] === ">") {
+    index += 1;
+    while (index < len && isInlineWhitespace(line.charCodeAt(index))) {
+      index += 1;
+    }
+  }
+
+  const bullet = line.charCodeAt(index);
+  if (bullet !== 0x2d && bullet !== 0x2a && bullet !== 0x2b) {
+    return null;
+  }
+  index += 1;
+
+  if (!isInlineWhitespace(line.charCodeAt(index))) return null;
+  while (isInlineWhitespace(line.charCodeAt(index))) {
+    index += 1;
+  }
+
+  if (line.charCodeAt(index) !== 0x5b) return null;
+  const mark = line.charCodeAt(index + 1);
+  if (mark !== 0x20 && mark !== 0x78 && mark !== 0x58) return null;
+  if (line.charCodeAt(index + 2) !== 0x5d) return null;
+  index += 3;
+
+  if (!isInlineWhitespace(line.charCodeAt(index))) return null;
+  while (isInlineWhitespace(line.charCodeAt(index))) {
+    index += 1;
+  }
+
+  return {
+    checked: mark !== 0x20,
+    textStart: index,
+  };
+}
+
+export function isInlineWhitespace(code: number): boolean {
+  return code === 0x20 || code === 0x09;
 }
 
 export function moveUncheckedTask(

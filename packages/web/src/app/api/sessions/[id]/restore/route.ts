@@ -1,19 +1,25 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
-import { guardApiAccess } from "@/lib/auth";
+import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { sessionToDashboard } from "@/lib/serialize";
 
 /** POST /api/sessions/:id/restore -- Restore a dead/killed session. */
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const denied = await guardApiAccess();
   if (denied) return denied;
+  const deniedAction = guardApiActionAccess(request);
+  if (deniedAction) return deniedAction;
+
   const { id } = await params;
 
   if (!id || id.trim().length === 0) {
     return NextResponse.json({ error: "Session ID is required" }, { status: 400 });
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    return NextResponse.json({ error: "Invalid session ID" }, { status: 400 });
   }
 
   try {
