@@ -153,7 +153,16 @@ const KNOWN_AGENTS: KnownAgent[] = [
     id: "claude-code",
     label: "Claude Code",
     launchName: "claude-code",
-    aliases: ["claude code", "claude_code", "cc", "claudecode", "claude"],
+    aliases: [
+      "claude code",
+      "claude-code",
+      "claude_code",
+      "claude-code-cli",
+      "cc",
+      "claude",
+      "claude-cli",
+      "claudecode",
+    ],
     description: "Claude Code CLI",
     homepage: "https://www.anthropic.com/claude",
     installHint: "npm install -g @anthropic-ai/claude-code",
@@ -161,10 +170,20 @@ const KNOWN_AGENTS: KnownAgent[] = [
     capabilities: ["chat", "review", "code review", "agentic"],
   },
   {
-    id: "openai-codex",
+    id: "codex",
     label: "OpenAI Codex",
     launchName: "codex",
-    aliases: ["openai-codex", "openai_codex", "openai codex", "openai", "codex"],
+    aliases: [
+      "openai-codex",
+      "openai_codex",
+      "openai codex",
+      "openai",
+      "open-ai",
+      "open ai",
+      "openai-codex-cli",
+      "codexcli",
+      "codex",
+    ],
     description: "OpenAI Codex CLI",
     homepage: "https://github.com/openai/codex",
     installHint: "npm install -g @openai/codex-cli",
@@ -175,7 +194,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     id: "github-copilot",
     label: "GitHub Copilot",
     launchName: "github-copilot",
-    aliases: ["github copilot", "github_copilot", "copilot"],
+    aliases: ["github copilot", "github_copilot", "copilot", "copilot-cli", "gh-copilot"],
     description: "GitHub Copilot CLI",
     homepage: "https://github.com/github/copilot-cli",
     installHint: "npm install -g @githubnext/github-copilot-cli",
@@ -183,10 +202,19 @@ const KNOWN_AGENTS: KnownAgent[] = [
     capabilities: ["chat", "suggestions", "pairing"],
   },
   {
-    id: "gemini-cli",
+    id: "gemini",
     label: "Gemini CLI",
     launchName: "gemini",
-    aliases: ["google-gemini", "google_gemini", "gemini-cli", "gemini_cli", "gemini"],
+    aliases: [
+      "google-gemini",
+      "google_gemini",
+      "google-gemini-cli",
+      "gemini-cli",
+      "gemini_cli",
+      "gemini",
+      "gm",
+      "gemini cli",
+    ],
     description: "Google Gemini CLI",
     homepage: "https://ai.google.dev/gemini-api/docs",
     installHint: "npm install -g @google/gemini-cli",
@@ -197,6 +225,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     id: "amp",
     label: "Amp",
     launchName: "amp",
+    aliases: ["amp-cli", "amp cli", "amp"],
     description: "Amp Code",
     homepage: "https://www.ampcode.com",
     launchCommand: "amp",
@@ -205,8 +234,16 @@ const KNOWN_AGENTS: KnownAgent[] = [
   {
     id: "cursor-cli",
     label: "Cursor",
-    launchName: "cursor",
-    aliases: ["cursor cli", "cursor_cli", "cursor-agent", "cursor_agent", "cursor"],
+    launchName: "cursor-cli",
+    aliases: [
+      "cursor cli",
+      "cursor_cli",
+      "cursoragent",
+      "cursor-agent",
+      "cursor-agent-cli",
+      "cursor_agent",
+      "cursor",
+    ],
     description: "Cursor Agent CLI",
     homepage: "https://www.cursor.com",
     launchCommand: "cursor-cli",
@@ -216,6 +253,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     id: "opencode",
     label: "OpenCode",
     launchName: "opencode",
+    aliases: ["open code", "open_code", "open-code", "open-code-cli", "opencode"],
     description: "SST OpenCode",
     homepage: "https://opencode.ai",
     launchCommand: "opencode",
@@ -234,7 +272,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     id: "ccr",
     label: "Claude Code Router",
     launchName: "ccr",
-    aliases: ["claude-code-router", "claude_code_router", "ccr"],
+    aliases: ["claude-code-router", "claude_code_router", "ccr", "ccr-cli"],
     description: "Claude Code Router",
     homepage: "https://github.com/mckaywrigley/claude-code-router",
     launchCommand: "ccr",
@@ -244,7 +282,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     id: "qwen-code",
     label: "Qwen Code",
     launchName: "qwen-code",
-    aliases: ["qwen code", "qwen_code", "qwen"],
+    aliases: ["qwen code", "qwen_code", "qwen", "qwen-code", "qwen-code-cli"],
     description: "Qwen Code CLI",
     homepage: "https://qwenlm.github.io/announcements/",
     launchCommand: "qwen-code",
@@ -786,6 +824,10 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const normalizeLaunchAgent = (rawAgent: string): string => {
     const normalized = normalizeAgentName(rawAgent);
     if (!normalized) return "";
+    const canonicalId = KNOWN_AGENT_ID_BY_LAUNCH[normalized];
+    if (canonicalId) {
+      return KNOWN_AGENT_LAUNCH_BY_ID[normalizeAgentName(canonicalId)] ?? normalized;
+    }
     return KNOWN_AGENT_LAUNCH_BY_ID[normalized] ?? normalized;
   };
 

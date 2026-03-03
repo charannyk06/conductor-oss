@@ -113,6 +113,76 @@ async function directWorktreeCleanup(
 /** Max sessions per project -- hard limit enforced at spawn time. */
 const MAX_SESSIONS_PER_PROJECT = 5;
 
+/**
+ * Canonicalize common external agent aliases to built-in plugin names.
+ * Keeps the user experience forgiving when users type alternate CLI names.
+ */
+const AGENT_NAME_ALIASES: Record<string, string> = {
+  cc: "claude-code",
+  claude: "claude-code",
+  "claude-code-cli": "claude-code",
+  "claude_code_cli": "claude-code",
+  "claude-code-router": "ccr",
+  "ccr-cli": "ccr",
+  "claude_code_router": "ccr",
+  "claude code router": "ccr",
+  cursor: "cursor-cli",
+  "cursor-agent": "cursor-cli",
+  "cursor-agent-cli": "cursor-cli",
+  "cursor_agent": "cursor-cli",
+  cursoragent: "cursor-cli",
+  "cursorcli": "cursor-cli",
+  "copilot": "github-copilot",
+  "copilot-cli": "github-copilot",
+  "copilot cli": "github-copilot",
+  "github-copilot-cli": "github-copilot",
+  "gh-copilot": "github-copilot",
+  "github-copilot": "github-copilot",
+  "google-gemini": "gemini",
+  "google-gemini-cli": "gemini",
+  "gm": "gemini",
+  "gem": "gemini",
+  "gemini-cli": "gemini",
+  "gemini": "gemini",
+  "amp-cli": "amp",
+  amp: "amp",
+  "open-code": "opencode",
+  "open-code-cli": "opencode",
+  "open code": "opencode",
+  "open_code": "opencode",
+  "openai": "codex",
+  "open-ai": "codex",
+  "openai-codex": "codex",
+  "open-ai-codex": "codex",
+  "openai-codex-cli": "codex",
+  "openai_codex": "codex",
+  "codex-cli": "codex",
+  "codexcli": "codex",
+  codex: "codex",
+  "qwen-code-cli": "qwen-code",
+  qwen: "qwen-code",
+  "qwen_code": "qwen-code",
+  "qwen code": "qwen-code",
+  "qwen-code": "qwen-code",
+  "factory-droid": "droid",
+  "factory_droid": "droid",
+  droid: "droid",
+};
+
+function normalizeAgentName(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  if (!normalized) return "";
+  return AGENT_NAME_ALIASES[normalized] ?? normalized;
+}
+
 /** Escape regex metacharacters in a string. */
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -336,7 +406,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   } {
     const profileName = spawnConfig.profile ?? project.defaultProfile;
     const profile = profileName ? project.agentProfiles?.[profileName] : undefined;
-    const agentName = spawnConfig.agent ?? profile?.agent ?? project.agent ?? config.defaults.agent;
+    const agentName = normalizeAgentName(
+      spawnConfig.agent ?? profile?.agent ?? project.agent ?? config.defaults.agent,
+    );
     const model = spawnConfig.model
       ?? (!spawnConfig.agent ? profile?.model : undefined)
       ?? project.agentConfig?.model;
@@ -401,7 +473,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   /** Resolve which plugins to use for a project. */
   function resolvePlugins(project: ProjectConfig, agentOverride?: string) {
     const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
-    const agent = registry.get<Agent>("agent", agentOverride ?? project.agent ?? config.defaults.agent);
+    const requestedAgent = normalizeAgentName(agentOverride ?? project.agent ?? config.defaults.agent);
+    const agent = registry.get<Agent>("agent", requestedAgent);
     const workspace = registry.get<Workspace>(
       "workspace",
       project.workspace ?? config.defaults.workspace,

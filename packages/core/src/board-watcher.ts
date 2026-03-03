@@ -64,18 +64,88 @@ export interface BoardWatcherConfig {
   onError?: (error: Error, context: string) => void;
 }
 
-const FALLBACK_WATCHER_AGENTS = ["codex", "claude-code", "gemini"] as const;
+const FALLBACK_WATCHER_AGENTS = [
+  "codex",
+  "claude-code",
+  "gemini",
+  "amp",
+  "cursor-cli",
+  "opencode",
+  "droid",
+  "qwen-code",
+  "ccr",
+  "github-copilot",
+] as const;
 
 const AGENT_ALIASES: Record<string, string> = {
   claude: "claude-code",
   cc: "claude-code",
+  "claude-code": "claude-code",
+  "claude-code-cli": "claude-code",
+  "claude code cli": "claude-code",
+  "claude code": "claude-code",
+  claude_code: "claude-code",
+  "claude-cli": "claude-code",
   cod: "codex",
+  codex: "codex",
+  "openai-codex": "codex",
+  "openai": "codex",
+  "open-ai": "codex",
+  "open ai": "codex",
+  "openai_codex": "codex",
+  "openai-codex-cli": "codex",
+  "codex-cli": "codex",
+  codexcli: "codex",
   gm: "gemini",
   gem: "gemini",
+  gemini: "gemini",
+  "google-gemini": "gemini",
+  "google-gemini-cli": "gemini",
+  "google_gemini": "gemini",
+  "gemini-cli": "gemini",
+  amp: "amp",
+  "amp-cli": "amp",
+  cursor: "cursor-cli",
+  "cursor-cli": "cursor-cli",
+  "cursor-agent": "cursor-cli",
+  "cursor-agent-cli": "cursor-cli",
+  "cursorcli": "cursor-cli",
+  "cursor cli": "cursor-cli",
+  "cursor_agent": "cursor-cli",
+  cursoragent: "cursor-cli",
+  copilot: "github-copilot",
+  "github-copilot": "github-copilot",
+  "copilot-cli": "github-copilot",
+  "github-copilot-cli": "github-copilot",
+  "copilot cli": "github-copilot",
+  "gh-copilot": "github-copilot",
+  qwen: "qwen-code",
+  "qwen-code": "qwen-code",
+  "qwen code": "qwen-code",
+  "qwen_code": "qwen-code",
+  "qwen-code-cli": "qwen-code",
+  ccr: "ccr",
+  "ccr-cli": "ccr",
+  "claude-code-router": "ccr",
+  claude_code_router: "ccr",
+  "claude code router": "ccr",
+  droid: "droid",
+  opencode: "opencode",
+  open_code: "opencode",
+  "open code": "opencode",
+  "open-code": "opencode",
+  "open-code-cli": "opencode",
 };
 
 function normalizeAgentName(agent: string, supportedAgents: readonly string[]): string {
-  const requested = agent.trim().toLowerCase();
+  const requested = agent
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
   if (!requested) return "";
   const alias = AGENT_ALIASES[requested];
   if (alias) {
@@ -88,6 +158,18 @@ function normalizeAgentName(agent: string, supportedAgents: readonly string[]): 
   const prefixed = supportedAgents.find((name) => name.toLowerCase().includes(requested));
   if (prefixed) return prefixed;
   return requested;
+}
+
+function isSupportedAgent(agent: string, supportedAgents: readonly string[]): boolean {
+  return supportedAgents.some((name) => name.toLowerCase() === agent.toLowerCase());
+}
+
+function resolveSupportedAgent(agent: string, supportedAgents: readonly string[]): string {
+  if (!agent) return supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
+  const normalized = normalizeAgentName(agent, supportedAgents);
+  return isSupportedAgent(normalized, supportedAgents)
+    ? normalized
+    : supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
 }
 
 function uniqueAgents(values: readonly string[]): string[] {
@@ -278,12 +360,24 @@ function inferProject(text: string, boardProjectId: string | undefined, boardPro
 
 function inferAgent(text: string, supportedAgents: readonly string[]): string {
   const tagged = parseTags(text)["agent"];
-  if (tagged) return normalizeAgent(tagged, supportedAgents);
+  if (tagged) return resolveSupportedAgent(tagged, supportedAgents);
   const lower = text.toLowerCase();
   const claudeKeywords = ["architecture", "refactor", "design", "figma", "complex", "plan", "review"];
-  if (claudeKeywords.some((k) => lower.includes(k))) return normalizeAgentName("claude-code", supportedAgents);
+  if (claudeKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("claude-code", supportedAgents);
   const geminiKeywords = ["gemini", "google", "vertex"];
-  if (geminiKeywords.some((k) => lower.includes(k))) return normalizeAgentName("gemini", supportedAgents);
+  if (geminiKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("gemini", supportedAgents);
+  const ampKeywords = ["amplify", "amp"];
+  if (ampKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("amp", supportedAgents);
+  const cursorKeywords = ["cursor"];
+  if (cursorKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("cursor-cli", supportedAgents);
+  const droidKeywords = ["robot", "agentic", "android", "droid"];
+  if (droidKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("droid", supportedAgents);
+  const qwenKeywords = ["qwen", "alibaba", "qwen-code", "qwen code"];
+  if (qwenKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("qwen-code", supportedAgents);
+  const copilotKeywords = ["copilot", "github copilot", "gh copilot"];
+  if (copilotKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("github-copilot", supportedAgents);
+  const ccrKeywords = ["ccr", "claude code router", "claude-code-router"];
+  if (ccrKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("ccr", supportedAgents);
   return supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
 }
 
@@ -319,6 +413,15 @@ function enhanceTaskHeuristically(
 
   if (hasProperTags(rawTask)) {
     // Already tagged — only reformat if not a proper checklist item
+    const agentFromTag = parseTags(rawTask)["agent"];
+    if (agentFromTag) {
+      const normalizedAgent = resolveSupportedAgent(agentFromTag, supportedAgents);
+      if (normalizeAgentName(agentFromTag, supportedAgents) !== normalizeAgentName(normalizedAgent, supportedAgents)) {
+        return rawTask.replace(`#agent/${agentFromTag}`, `#agent/${normalizedAgent}`);
+      }
+      if (rawTask.startsWith("- [ ] ")) return null;
+      return `- [ ] ${normalized} ${rawTask.match(/#[\w-]+\/[\w.\-]+/g)?.join(" ") ?? ""}`.trim();
+    }
     if (rawTask.startsWith("- [ ] ")) return null; // no change needed
     return `- [ ] ${normalized} ${rawTask.match(/#[\w-]+\/[\w.\-]+/g)?.join(" ") ?? ""}`.trim();
   }
@@ -515,7 +618,7 @@ function detectIssue(text: string): string | undefined {
 
 /** Normalize agent shorthand aliases to canonical plugin names. */
 function normalizeAgent(agent: string, supportedAgents: readonly string[]): string {
-  return normalizeAgentName(agent, supportedAgents);
+  return resolveSupportedAgent(agent, supportedAgents);
 }
 
 /** Auto-detect agent from task description if no #agent/ tag. */
@@ -523,11 +626,35 @@ function autoDetectAgent(prompt: string, supportedAgents: readonly string[]): st
   const lower = prompt.toLowerCase();
   const claudeKeywords = ["design", "architect", "plan", "feature", "build new", "refactor", "complex"];
   for (const kw of claudeKeywords) {
-    if (lower.includes(kw)) return normalizeAgentName("claude-code", supportedAgents);
+    if (lower.includes(kw)) return resolveSupportedAgent("claude-code", supportedAgents);
   }
   const geminiKeywords = ["gemini", "google", "vertex"];
   for (const kw of geminiKeywords) {
-    if (lower.includes(kw)) return normalizeAgentName("gemini", supportedAgents);
+    if (lower.includes(kw)) return resolveSupportedAgent("gemini", supportedAgents);
+  }
+  const ampKeywords = ["amplify", "amp"];
+  for (const kw of ampKeywords) {
+    if (lower.includes(kw)) return resolveSupportedAgent("amp", supportedAgents);
+  }
+  const cursorKeywords = ["cursor"];
+  for (const kw of cursorKeywords) {
+    if (lower.includes(kw)) return resolveSupportedAgent("cursor-cli", supportedAgents);
+  }
+  const droidKeywords = ["robot", "agentic", "android", "droid"];
+  for (const kw of droidKeywords) {
+    if (lower.includes(kw)) return resolveSupportedAgent("droid", supportedAgents);
+  }
+  const qwenKeywords = ["qwen", "qwen-code", "qwen code"];
+  for (const kw of qwenKeywords) {
+    if (lower.includes(kw)) return resolveSupportedAgent("qwen-code", supportedAgents);
+  }
+  const copilotKeywords = ["copilot", "github copilot", "gh copilot"];
+  for (const kw of copilotKeywords) {
+    if (lower.includes(kw)) return resolveSupportedAgent("github-copilot", supportedAgents);
+  }
+  const ccrKeywords = ["ccr", "claude code router", "claude-code-router"];
+  for (const kw of ccrKeywords) {
+    if (lower.includes(kw)) return resolveSupportedAgent("ccr", supportedAgents);
   }
   return supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
 }
@@ -1428,6 +1555,9 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
       card.agent ?? autoDetectAgent(card.prompt, supportedAgents),
       supportedAgents,
     );
+    if (card.agent && normalizeAgentName(card.agent, supportedAgents) !== normalizeAgentName(agent, supportedAgents)) {
+      log(`Normalized agent tag for dispatch: "${card.agent}" -> "${agent}"`, boardPath);
+    }
 
     // Build the prompt/issue
     if (card.attachments.length > 0) {

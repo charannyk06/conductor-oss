@@ -23,15 +23,36 @@ importers:
       '@conductor-oss/core':
         specifier: workspace:*
         version: link:../core
+      '@conductor-oss/plugin-agent-amp':
+        specifier: workspace:*
+        version: link:../plugins/agent-amp
+      '@conductor-oss/plugin-agent-ccr':
+        specifier: workspace:*
+        version: link:../plugins/agent-ccr
       '@conductor-oss/plugin-agent-claude-code':
         specifier: workspace:*
         version: link:../plugins/agent-claude-code
       '@conductor-oss/plugin-agent-codex':
         specifier: workspace:*
         version: link:../plugins/agent-codex
+      '@conductor-oss/plugin-agent-cursor-cli':
+        specifier: workspace:*
+        version: link:../plugins/agent-cursor-cli
+      '@conductor-oss/plugin-agent-droid':
+        specifier: workspace:*
+        version: link:../plugins/agent-droid
       '@conductor-oss/plugin-agent-gemini':
         specifier: workspace:*
         version: link:../plugins/agent-gemini
+      '@conductor-oss/plugin-agent-github-copilot':
+        specifier: workspace:*
+        version: link:../plugins/agent-github-copilot
+      '@conductor-oss/plugin-agent-opencode':
+        specifier: workspace:*
+        version: link:../plugins/agent-opencode
+      '@conductor-oss/plugin-agent-qwen-code':
+        specifier: workspace:*
+        version: link:../plugins/agent-qwen-code
       '@conductor-oss/plugin-mcp-server':
         specifier: workspace:*
         version: link:../plugins/mcp-server
@@ -95,6 +116,32 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/plugins/agent-amp:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/plugins/agent-ccr:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/plugins/agent-claude-code:
     dependencies:
       '@conductor-oss/core':
@@ -121,12 +168,77 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/plugins/agent-cursor-cli:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/plugins/agent-droid:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/plugins/agent-gemini:
     dependencies:
       '@conductor-oss/core':
         specifier: workspace:*
         version: link:../../core
     devDependencies:
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/plugins/agent-github-copilot:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/plugins/agent-opencode:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.3
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/plugins/agent-qwen-code:
+    dependencies:
+      '@conductor-oss/core':
+        specifier: workspace:*
+        version: link:../../core
+    devDependencies:
+      '@types/node':
+        specifier: ^25.3.3
+        version: 25.3.3
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

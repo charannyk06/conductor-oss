@@ -21,20 +21,35 @@ type AgentInfo = {
 const PATH_AGENT_HINTS: Array<{ name: string; commands: string[]; aliases?: string[]; description: string }> = [
   {
     name: "claude-code",
-    commands: ["claude", "claude-code", "claude-cli", "cc"],
-    aliases: ["cc", "claude", "claude_code", "claude code"],
+    commands: ["claude", "claude-code", "claude-cli", "cc", "claude-code-cli"],
+    aliases: ["cc", "claude", "claude_code", "claude code", "claude code cli", "claude_code_cli", "claude-cli"],
     description: "Claude Code CLI",
   },
   {
     name: "codex",
-    commands: ["codex", "openai-codex", "openai-codex-cli", "codex-cli"],
-    aliases: ["openai-codex", "openai_codex", "openai", "open ai", "openai-codex-cli"],
+    commands: ["codex", "openai-codex", "openai-codex-cli", "codex-cli", "codexcli"],
+    aliases: [
+      "openai-codex",
+      "openai_codex",
+      "openai",
+      "open-ai",
+      "open ai",
+      "codexcli",
+      "openai-codex-cli",
+      "codex",
+    ],
     description: "OpenAI Codex CLI",
   },
   {
     name: "gemini",
     commands: ["gemini", "gemini-cli", "google-gemini"],
-    aliases: ["google-gemini", "google_gemini", "gm", "gemini cli"],
+    aliases: [
+      "google-gemini",
+      "google_gemini",
+      "google-gemini-cli",
+      "gm",
+      "gemini cli",
+    ],
     description: "Google Gemini CLI",
   },
   {
@@ -45,14 +60,20 @@ const PATH_AGENT_HINTS: Array<{ name: string; commands: string[]; aliases?: stri
   },
   {
     name: "cursor-cli",
-    commands: ["cursor", "cursor-cli"],
-    aliases: ["cursor-agent", "cursor_agent", "cursor cli", "cursoragent"],
+    commands: ["cursor", "cursor-cli", "cursor-agent-cli"],
+    aliases: [
+      "cursor-agent",
+      "cursor-agent-cli",
+      "cursor_agent",
+      "cursor cli",
+      "cursoragent",
+    ],
     description: "Cursor Agent CLI",
   },
   {
     name: "opencode",
     commands: ["opencode", "open-code"],
-    aliases: ["open code", "open-code", "open_code", "open-code-cli"],
+    aliases: ["open code", "open-code", "open_code", "open-code-cli", "opencode"],
     description: "OpenCode CLI",
   },
   {
@@ -64,13 +85,13 @@ const PATH_AGENT_HINTS: Array<{ name: string; commands: string[]; aliases?: stri
   {
     name: "qwen-code",
     commands: ["qwen-code"],
-    aliases: ["qwen", "qwen code", "qwen-code-cli"],
+    aliases: ["qwen", "qwen code", "qwen-code-cli", "qwen_code", "qwen-code"],
     description: "Qwen Code CLI",
   },
   {
     name: "ccr",
     commands: ["ccr"],
-    aliases: ["claude-code-router", "ccr"],
+    aliases: ["claude-code-router", "claude_code_router", "ccr", "ccr-cli"],
     description: "Claude Code Router",
   },
   {
@@ -88,6 +109,25 @@ function normalizeAgentName(value: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function resolveCanonicalAgentName(rawAgent: string): string {
+  const normalized = normalizeAgentName(rawAgent);
+  if (!normalized) return "";
+
+  for (const hint of PATH_AGENT_HINTS) {
+    const matches = [
+      normalizeAgentName(hint.name),
+      ...(hint.aliases ?? []).map((alias) => normalizeAgentName(alias)),
+      ...hint.commands.map((command) => normalizeAgentName(command)),
+    ];
+
+    if (matches.includes(normalized)) {
+      return normalizeAgentName(hint.name);
+    }
+  }
+
+  return normalized;
 }
 
 function unique<T>(items: T[]): T[] {
@@ -247,7 +287,7 @@ function collectConfiguredAgents(config: { projects: Record<string, { agent?: st
   const names = new Set<string>();
   for (const project of Object.values(config.projects)) {
     if (!project?.agent) continue;
-    const normalized = normalizeAgentName(project.agent);
+    const normalized = resolveCanonicalAgentName(project.agent);
     if (normalized) {
       names.add(normalized);
     }

@@ -18,6 +18,13 @@ import type {
 import runtimeTmux from "@conductor-oss/plugin-runtime-tmux";
 import agentClaudeCode from "@conductor-oss/plugin-agent-claude-code";
 import agentCodex from "@conductor-oss/plugin-agent-codex";
+import agentAmp from "@conductor-oss/plugin-agent-amp";
+import agentCursorCli from "@conductor-oss/plugin-agent-cursor-cli";
+import agentOpencode from "@conductor-oss/plugin-agent-opencode";
+import agentDroid from "@conductor-oss/plugin-agent-droid";
+import agentQwenCode from "@conductor-oss/plugin-agent-qwen-code";
+import agentCcr from "@conductor-oss/plugin-agent-ccr";
+import agentGithubCopilot from "@conductor-oss/plugin-agent-github-copilot";
 import workspaceWorktree from "@conductor-oss/plugin-workspace-worktree";
 import trackerGithub from "@conductor-oss/plugin-tracker-github";
 import scmGithub from "@conductor-oss/plugin-scm-github";
@@ -34,6 +41,13 @@ const ALL_PLUGINS: PluginModule[] = [
   agentClaudeCode as PluginModule,
   agentCodex as PluginModule,
   agentGemini as PluginModule,
+  agentAmp as PluginModule,
+  agentCursorCli as PluginModule,
+  agentOpencode as PluginModule,
+  agentDroid as PluginModule,
+  agentQwenCode as PluginModule,
+  agentCcr as PluginModule,
+  agentGithubCopilot as PluginModule,
   workspaceWorktree as PluginModule,
   trackerGithub as PluginModule,
   scmGithub as PluginModule,

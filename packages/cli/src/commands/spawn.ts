@@ -24,7 +24,10 @@ export function registerSpawn(program: Command): void {
     .description("Spawn a new agent session for a project")
     .argument("<project>", "Project ID from conductor config")
     .argument("[issueOrPrompt]", "Issue identifier (#42, INT-123) or inline prompt")
-    .option("--agent <name>", "Override agent plugin (e.g. claude-code, codex)")
+    .option(
+      "--agent <name>",
+      "Override agent plugin (e.g. claude-code, codex, gemini, amp, cursor-cli, opencode, droid, qwen-code, ccr, github-copilot, openai-codex, google-gemini, open-code)",
+    )
     .option("--model <name>", "Override model (e.g. o4-mini, claude-opus-4-6)")
     .option("--branch <name>", "Override branch name")
     .option("--prompt <text>", "Explicit prompt (if issueOrPrompt is an issue)")

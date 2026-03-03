@@ -3,7 +3,7 @@
  *
  * 8 plugin slots + core services:
  *   1. Runtime    — where sessions execute (tmux)
- *   2. Agent      — AI coding tool (claude-code, codex)
+ *   2. Agent      — AI coding tool (claude-code, codex, gemini, amp, cursor-cli, opencode, droid, qwen-code, ccr, github-copilot)
  *   3. Workspace  — code isolation (worktree)
  *   4. Tracker    — issue tracking (github)
  *   5. SCM        — source platform + PR/CI/reviews (github)

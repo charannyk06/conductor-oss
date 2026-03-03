@@ -1,19 +1,17 @@
 ---
 tags:
   - conductor/reference
-  - project/aba-copilot
-  - project/aba-copilot-ios
-  - project/alpha-mesh
-  - project/carevm
-  - project/certify-institution-portal
-  - project/chainreview
-  - project/clawcloud
-  - project/conductor-oss
-  - project/patient-portal
-  - project/shadower
-  - project/techwealth-engine
-  - agent/codex
+  - project/my-app
   - agent/claude-code
+  - agent/codex
+  - agent/gemini
+  - agent/amp
+  - agent/cursor-cli
+  - agent/opencode
+  - agent/droid
+  - agent/qwen-code
+  - agent/ccr
+  - agent/github-copilot
   - type/feature
   - type/fix
   - type/review
@@ -37,17 +35,7 @@ Type `#` in Obsidian for autocomplete. Type `ctask` in VS Code for a full task s
 
 | Tag | Description |
 |-----|-------------|
-| `#project/aba-copilot` | aba-copilot |
-| `#project/aba-copilot-ios` | aba-copilot-ios |
-| `#project/alpha-mesh` | alpha-mesh |
-| `#project/carevm` | carevm |
-| `#project/certify-institution-portal` | certify-institution-portal |
-| `#project/chainreview` | chainreview |
-| `#project/clawcloud` | clawcloud |
-| `#project/conductor-oss` | conductor-oss |
-| `#project/patient-portal` | patient-portal |
-| `#project/shadower` | shadower |
-| `#project/techwealth-engine` | techwealth-engine |
+| `#project/my-app` | my-app |
 
 ---
 
@@ -55,8 +43,16 @@ Type `#` in Obsidian for autocomplete. Type `ctask` in VS Code for a full task s
 
 | Tag | Uses |
 |-----|------|
-| `#agent/codex` | Codex CLI — fast, parallel, `--yolo` mode |
-| `#agent/claude-code` | Claude Code — deep reasoning, complex tasks |
+| `#agent/claude-code` | claude-code agent plugin |
+| `#agent/codex` | codex agent plugin |
+| `#agent/gemini` | gemini agent plugin |
+| `#agent/amp` | amp agent plugin |
+| `#agent/cursor-cli` | cursor-cli agent plugin |
+| `#agent/opencode` | opencode agent plugin |
+| `#agent/droid` | droid agent plugin |
+| `#agent/qwen-code` | qwen-code agent plugin |
+| `#agent/ccr` | ccr agent plugin |
+| `#agent/github-copilot` | github-copilot agent plugin |
 
 ---
 
@@ -84,15 +80,15 @@ Type `#` in Obsidian for autocomplete. Type `ctask` in VS Code for a full task s
 
 ## Example Task Formats
 
-```text
-Fix login button tooltip #project/aba-copilot #agent/claude-code #type/fix #priority/high
+```
+Fix login button tooltip #project/my-app #agent/claude-code #type/fix #priority/high
 
-Add analytics dashboard #project/aba-copilot-ios #agent/codex #type/feature
+Add analytics dashboard #project/my-project #agent/codex #type/feature
 ```
 
-```text
-#project/aba-copilot #project/aba-copilot-ios #project/alpha-mesh #project/carevm #project/certify-institution-portal #project/chainreview #project/clawcloud #project/conductor-oss #project/patient-portal #project/shadower #project/techwealth-engine
-#agent/codex #agent/claude-code
+---
+
+#project/my-app
+#agent/claude-code #agent/codex #agent/gemini #agent/amp #agent/cursor-cli #agent/opencode #agent/droid #agent/qwen-code #agent/ccr #agent/github-copilot
 #type/feature #type/fix #type/review #type/chore #type/docs
 #priority/high #priority/medium #priority/low
-```
