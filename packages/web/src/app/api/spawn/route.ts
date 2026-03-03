@@ -31,11 +31,67 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const prompt = body.prompt;
+  if (prompt !== undefined && prompt !== null && typeof prompt !== "string") {
+    return NextResponse.json(
+      { error: "prompt must be a string if provided" },
+      { status: 400 },
+    );
+  }
+
+  const agent = body.agent;
+  if (agent !== undefined && agent !== null && typeof agent !== "string") {
+    return NextResponse.json(
+      { error: "agent must be a string if provided" },
+      { status: 400 },
+    );
+  }
+
+  const model = body.model;
+  if (model !== undefined && model !== null && typeof model !== "string") {
+    return NextResponse.json(
+      { error: "model must be a string if provided" },
+      { status: 400 },
+    );
+  }
+
+  const profile = body.profile;
+  if (profile !== undefined && profile !== null && typeof profile !== "string") {
+    return NextResponse.json(
+      { error: "profile must be a string if provided" },
+      { status: 400 },
+    );
+  }
+
+  const branch = body.branch;
+  if (branch !== undefined && branch !== null && typeof branch !== "string") {
+    return NextResponse.json(
+      { error: "branch must be a string if provided" },
+      { status: 400 },
+    );
+  }
+
+  const baseBranch = body.baseBranch;
+  if (baseBranch !== undefined && baseBranch !== null && typeof baseBranch !== "string") {
+    return NextResponse.json(
+      { error: "baseBranch must be a string if provided" },
+      { status: 400 },
+    );
+  }
+
   try {
     const { sessionManager } = await getServices();
     const session = await sessionManager.spawn({
       projectId: projectId.trim(),
       issueId: typeof issueId === "string" ? issueId.trim() : undefined,
+      prompt: typeof prompt === "string" && prompt.trim().length > 0 ? prompt.trim() : undefined,
+      agent: typeof agent === "string" && agent.trim().length > 0 ? agent.trim() : undefined,
+      model: typeof model === "string" && model.trim().length > 0 ? model.trim() : undefined,
+      profile: typeof profile === "string" && profile.trim().length > 0 ? profile.trim() : undefined,
+      branch: typeof branch === "string" && branch.trim().length > 0 ? branch.trim() : undefined,
+      baseBranch: typeof baseBranch === "string" && baseBranch.trim().length > 0
+        ? baseBranch.trim()
+        : undefined,
     });
 
     return NextResponse.json(

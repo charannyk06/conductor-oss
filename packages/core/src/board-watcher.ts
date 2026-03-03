@@ -52,6 +52,8 @@ export interface BoardWatcherConfig {
   boardPaths: string[];
   /** Project ID to board path mapping (derived from board location). */
   boardProjectMap: Map<string, string>;
+  /** Optional list of supported agent names. If omitted, inferred agents are discovered from manifests. */
+  agentNames?: string[];
   /** Polling interval in ms for fswatch fallback. Default: 3000. */
   pollIntervalMs?: number;
   /** Base URL of the dashboard for session links in cards. */
@@ -60,6 +62,46 @@ export interface BoardWatcherConfig {
   workspacePath?: string;
   onDispatch?: (projectId: string, sessionId: string, task: string) => void;
   onError?: (error: Error, context: string) => void;
+}
+
+const FALLBACK_WATCHER_AGENTS = ["codex", "claude-code", "gemini"] as const;
+
+const AGENT_ALIASES: Record<string, string> = {
+  claude: "claude-code",
+  cc: "claude-code",
+  cod: "codex",
+  gm: "gemini",
+  gem: "gemini",
+};
+
+function normalizeAgentName(agent: string, supportedAgents: string[]): string {
+  const requested = agent.trim().toLowerCase();
+  if (!requested) return "";
+  const alias = AGENT_ALIASES[requested];
+  if (alias) {
+    const canonical = supportedAgents.find((name) => name.toLowerCase() === alias);
+    if (canonical) return canonical;
+    return alias;
+  }
+  const exact = supportedAgents.find((name) => name.toLowerCase() === requested);
+  if (exact) return exact;
+  const prefixed = supportedAgents.find((name) => name.toLowerCase().includes(requested));
+  if (prefixed) return prefixed;
+  return requested;
+}
+
+function uniqueAgents(values: readonly string[]): string[] {
+  const set = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized) continue;
+    const lower = normalized.toLowerCase();
+    if (set.has(lower)) continue;
+    set.add(lower);
+    out.push(lower);
+  }
+  return out;
 }
 
 interface ParsedCard {
@@ -234,15 +276,15 @@ function inferProject(text: string, boardProjectId: string | undefined, boardPro
   return boardProjects[0] ?? "my-app";
 }
 
-function inferAgent(text: string): string {
+function inferAgent(text: string, supportedAgents: string[]): string {
   const tagged = parseTags(text)["agent"];
-  if (tagged) return normalizeAgent(tagged);
+  if (tagged) return normalizeAgent(tagged, supportedAgents);
   const lower = text.toLowerCase();
   const claudeKeywords = ["architecture", "refactor", "design", "figma", "complex", "plan", "review"];
-  if (claudeKeywords.some((k) => lower.includes(k))) return "claude-code";
+  if (claudeKeywords.some((k) => lower.includes(k))) return normalizeAgentName("claude-code", supportedAgents);
   const geminiKeywords = ["gemini", "google", "vertex"];
-  if (geminiKeywords.some((k) => lower.includes(k))) return "gemini";
-  return "codex";
+  if (geminiKeywords.some((k) => lower.includes(k))) return normalizeAgentName("gemini", supportedAgents);
+  return supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
 }
 
 function inferType(text: string): string {
@@ -270,6 +312,7 @@ function enhanceTaskHeuristically(
   rawTask: string,
   boardProjectId: string | undefined,
   boardProjects: string[],
+  supportedAgents: string[],
 ): string | null {
   const normalized = stripTags(rawTask).replace(/^\s*[\-*•]\s*/, "").replace(/^\s*\[\s?\]\s*/, "").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
@@ -281,7 +324,7 @@ function enhanceTaskHeuristically(
   }
 
   const project = inferProject(rawTask, boardProjectId, boardProjects);
-  const agent = inferAgent(rawTask);
+  const agent = inferAgent(rawTask, supportedAgents);
   const type = inferType(rawTask);
   const priority = inferPriority(rawTask);
 
@@ -319,7 +362,11 @@ function nudgeObsidian(boardPath: string): void {
 }
 
 
-async function enhanceInbox(boardPath: string, config: OrchestratorConfig): Promise<void> {
+async function enhanceInbox(
+  boardPath: string,
+  config: OrchestratorConfig,
+  supportedAgents: readonly string[],
+): Promise<void> {
   if (!existsSync(boardPath)) return;
   const content = readFileSync(boardPath, "utf-8");
 
@@ -352,7 +399,12 @@ async function enhanceInbox(boardPath: string, config: OrchestratorConfig): Prom
 
   for (const entry of entries) {
     if (hasProperTags(entry.text)) continue;
-    const enhanced = enhanceTaskHeuristically(entry.text, boardProjectId, boardProjects);
+    const enhanced = enhanceTaskHeuristically(
+      entry.text,
+      boardProjectId,
+      boardProjects,
+      supportedAgents,
+    );
     if (!enhanced) continue;
     if (updatedContent.includes(entry.block)) {
       updatedContent = updatedContent.replace(entry.block, enhanced);
@@ -462,29 +514,22 @@ function detectIssue(text: string): string | undefined {
 }
 
 /** Normalize agent shorthand aliases to canonical plugin names. */
-function normalizeAgent(agent: string): string {
-  const aliases: Record<string, string> = {
-    claude: "claude-code",
-    cc: "claude-code",
-    cod: "codex",
-    gm: "gemini",
-    gem: "gemini",
-  };
-  return aliases[agent] ?? agent;
+function normalizeAgent(agent: string, supportedAgents: string[]): string {
+  return normalizeAgentName(agent, supportedAgents);
 }
 
 /** Auto-detect agent from task description if no #agent/ tag. */
-function autoDetectAgent(prompt: string): string {
+function autoDetectAgent(prompt: string, supportedAgents: string[]): string {
   const lower = prompt.toLowerCase();
   const claudeKeywords = ["design", "architect", "plan", "feature", "build new", "refactor", "complex"];
   for (const kw of claudeKeywords) {
-    if (lower.includes(kw)) return "claude-code";
+    if (lower.includes(kw)) return normalizeAgentName("claude-code", supportedAgents);
   }
   const geminiKeywords = ["gemini", "google", "vertex"];
   for (const kw of geminiKeywords) {
-    if (lower.includes(kw)) return "gemini";
+    if (lower.includes(kw)) return normalizeAgentName("gemini", supportedAgents);
   }
-  return "codex";
+  return supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
 }
 /** Parse a kanban card into structured data. */
 function parseCard(cardText: string, workspacePath: string): ParsedCard {
@@ -1132,11 +1177,12 @@ export interface BoardWatcher {
  * Sync CONDUCTOR-TAGS.md and .vscode/conductor.code-snippets from current config.
  * Called on startup — auto-updates when projects are added to conductor.yaml.
  */
-function syncTagsFile(config: OrchestratorConfig): void {
+function syncTagsFile(config: OrchestratorConfig, agentNames: readonly string[] = FALLBACK_WATCHER_AGENTS): void {
   const workspace = process.env["CONDUCTOR_WORKSPACE"] ?? process.cwd();
   const projectIds = Object.keys(config.projects).sort();
-  const agents = ["codex", "claude-code"];
+  const agents = uniqueAgents(agentNames.length > 0 ? agentNames : FALLBACK_WATCHER_AGENTS);
   const projectChoices = projectIds.join(",");
+  const agentChoices = agents.join(",");
 
   // Build the markdown tag lines (one tag per project)
   const projectTagSeeds = projectIds.map((id) => "#project/" + id).join(" ");
@@ -1149,8 +1195,14 @@ function syncTagsFile(config: OrchestratorConfig): void {
     return "| `#project/" + id + "` | " + desc + " |";
   }).join("\n");
 
+  const agentTableRows = agents
+    .map((id) => `| \`#agent/${id}\` | ${id} agent plugin |`)
+    .join("\n");
+
   const firstProject = projectIds[0] ?? "my-project";
   const secondProject = projectIds[1] ?? "my-project";
+  const firstAgent = agents[0] ?? "codex";
+  const secondAgent = agents[1] ?? "claude-code";
 
   const allTagsFrontmatter = [
     "  - conductor/reference",
@@ -1187,8 +1239,7 @@ function syncTagsFile(config: OrchestratorConfig): void {
     "",
     "| Tag | Uses |",
     "|-----|------|",
-    "| `#agent/codex` | Codex CLI — fast, parallel, `--yolo` mode |",
-    "| `#agent/claude-code` | Claude Code — deep reasoning, complex tasks |",
+    ...agentTableRows.split("\n"),
     "",
     "---",
     "",
@@ -1217,9 +1268,9 @@ function syncTagsFile(config: OrchestratorConfig): void {
     "## Example Task Formats",
     "",
     "```",
-    "Fix login button tooltip #project/" + firstProject + " #agent/claude-code #type/fix #priority/high",
+    "Fix login button tooltip #project/" + firstProject + " #agent/" + firstAgent + " #type/fix #priority/high",
     "",
-    "Add analytics dashboard #project/" + secondProject + " #agent/codex #type/feature",
+    "Add analytics dashboard #project/" + secondProject + " #agent/" + secondAgent + " #type/feature",
     "```",
     "",
     "---",
@@ -1248,7 +1299,7 @@ function syncTagsFile(config: OrchestratorConfig): void {
     },
     "Conductor Agent Tag": {
       prefix: "#agent",
-      body: ["#agent/${1|" + agents.join(",") + "|}"],
+      body: ["#agent/${1|" + agentChoices + "|}"],
       description: "Assign task to a specific agent",
     },
     "Conductor Type Tag": {
@@ -1261,13 +1312,13 @@ function syncTagsFile(config: OrchestratorConfig): void {
       body: ["#priority/${1|high,medium,low|}"],
       description: "Set task priority",
     },
-    "Conductor Full Task": {
-      prefix: "ctask",
-      body: [
-        "- [ ] ${1:Task description} #project/${2|" + projectChoices + "|} #agent/${3|" + agents.join(",") + "|} #type/${4|feature,fix,review,chore|} #priority/${5|high,medium,low|}",
-      ],
-      description: "Full Conductor task with all tags",
-    },
+      "Conductor Full Task": {
+        prefix: "ctask",
+        body: [
+          "- [ ] ${1:Task description} #project/${2|" + projectChoices + "|} #agent/${3|" + agentChoices + "|} #type/${4|feature,fix,review,chore|} #priority/${5|high,medium,low|}",
+        ],
+        description: "Full Conductor task with all tags",
+      },
   };
 
   const vscodeDir = join(workspace, ".vscode");
@@ -1283,6 +1334,11 @@ function syncTagsFile(config: OrchestratorConfig): void {
 export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatcher {
   const { config, sessionManager, boardPaths, onDispatch, onError } = watcherConfig;
   const dashboardUrl = watcherConfig.dashboardUrl ?? config.dashboardUrl;
+  const supportedAgents = uniqueAgents(
+    (watcherConfig.agentNames?.length ?? 0) > 0
+      ? watcherConfig.agentNames
+      : FALLBACK_WATCHER_AGENTS,
+  );
   const workspacePath = watcherConfig.workspacePath
     ?? process.env["CONDUCTOR_WORKSPACE"]
     ?? `${process.env["HOME"]}/.conductor/workspace`;
@@ -1368,7 +1424,10 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
     }
 
     // Determine agent (normalize aliases: #agent/claude -> claude-code)
-    const agent = normalizeAgent(card.agent ?? autoDetectAgent(card.prompt));
+    const agent = normalizeAgent(
+      card.agent ?? autoDetectAgent(card.prompt, supportedAgents),
+      supportedAgents,
+    );
 
     // Build the prompt/issue
     if (card.attachments.length > 0) {
@@ -1701,7 +1760,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
             if (eventType === "change") {
               // Debounce: wait 2s for Obsidian to finish its write cycle
               setTimeout(() => {
-                void enhanceInbox(boardPath, config);
+      void enhanceInbox(boardPath, config, supportedAgents);
                 void checkBoard(boardPath);
               }, 2000);
             }
@@ -1718,14 +1777,14 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
       }
 
       // Sync tags file on startup (auto-updates CONDUCTOR-TAGS.md + VS Code snippets)
-      syncTagsFile(config);
+      syncTagsFile(config, supportedAgents);
 
       // Sync tags file on startup (CONDUCTOR-TAGS.md + VS Code snippets)
 
       // Run initial inbox enhancement 3s after startup
       setTimeout(() => {
         for (const boardPath of boardPaths) {
-          void enhanceInbox(boardPath, config);
+          void enhanceInbox(boardPath, config, supportedAgents);
         }
       }, 3_000);
 
@@ -1744,7 +1803,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
       pollInterval = setInterval(() => {
         for (const boardPath of boardPaths) {
           if (!existsSync(boardPath)) continue;
-          void enhanceInbox(boardPath, config);
+          void enhanceInbox(boardPath, config, supportedAgents);
           void checkBoard(boardPath);
         }
       }, pollMs);

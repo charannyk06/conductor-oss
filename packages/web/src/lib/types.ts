@@ -94,12 +94,7 @@ export interface SSESnapshotEvent {
     lastActivityAt: string;
     metadata: Record<string, string>;
     summary?: string | null;
-    pr?: {
-      ciStatus: CIStatus;
-      reviewDecision: ReviewDecision;
-      state: PRState;
-      mergeable: boolean;
-    } | null;
+    pr?: DashboardPR | null;
   }>;
 }
 

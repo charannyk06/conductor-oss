@@ -19,13 +19,26 @@ Write tasks in a kanban board — Conductor dispatches agents, manages git workt
 
 </div>
 
-## Demo GIF Links
+## Visual Dashboard Guide (Puppeteer capture)
 
-- [Add task in Obsidian Kanban](docs/demo/01-add-task.gif)
-- [Auto-dispatch flow](docs/demo/02-auto-dispatch.gif)
-- [Live terminal streaming](docs/demo/03-live-terminal.gif)
-- [Dashboard overview](docs/demo/04-dashboard.gif)
-- [PR creation](docs/demo/05-pr-creation.gif)
+These are full end-to-end dashboard screenshots captured from a running `http://localhost:4747` dashboard using `pnpm ui:screenshots`.
+
+Update them at any time:
+
+```bash
+UI_BASE_URL=http://localhost:4747 pnpm ui:screenshots
+pnpm ui:screenshots -- --base-url=http://localhost:4747
+```
+
+- [Dashboard overview + lane board](docs/screenshots/01-dashboard-overview.png)
+- [Chat queue + quick actions](docs/screenshots/02-dashboard-chat.png)
+- [Review queue + diff + CI states](docs/screenshots/03-dashboard-review.png)
+- [Agents tab + installed/discovered status](docs/screenshots/04-dashboard-agents.png)
+- [Launch flow](docs/screenshots/05-launch-session.png)
+- [Command palette + cleanup flow](docs/screenshots/06-command-palette.png)
+- [Session detail / 404 fallback](docs/screenshots/07-session-detail.png)
+
+To get complete visual parity after each UI change, capture screenshots immediately after restarting or redeploying the dashboard on `4747`.
 
 ## Repository Links
 
@@ -63,52 +76,37 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 ## Demo
 
 <details open>
-<summary><strong>Watch the 5-minute end-to-end demo</strong> — task → agent → PR → board update</summary>
+<summary><strong>Live flow capture</strong> — task → launch → terminal → review/merge controls</summary>
 
 <br>
 
-### 1. Add a task in Obsidian Kanban
-Type a task in the Inbox column → Conductor auto-tags it with agent/project/type.
+### 1) Dashboard overview
 
-<p align="center">
-  <img src="docs/demo/01-add-task.gif" width="200" style="max-width: 200px; height: auto;" alt="Add task to Inbox" />
-</p>
+![Dashboard overview](docs/screenshots/01-dashboard-overview.png)
 
-### 2. Agent dispatches and works autonomously
-Drag to "Ready to Dispatch" → agent spawns in isolated git worktree → card moves to In Progress.
+### 2) Chat queue and manual responses
 
-<p align="center">
-  <img src="docs/demo/02-auto-dispatch.gif" width="200" style="max-width: 200px; height: auto;" alt="Auto dispatch" />
-</p>
+![Chat queue](docs/screenshots/02-dashboard-chat.png)
 
-### 3. Live terminal streaming
-Watch the agent work in real-time through the web dashboard.
+### 3) Review and PR triage
 
-<p align="center">
-  <img src="docs/demo/03-live-terminal.gif" width="200" style="max-width: 200px; height: auto;" alt="Live terminal streaming" />
-</p>
+![Review queue](docs/screenshots/03-dashboard-review.png)
 
-### 4. Dashboard overview
-Track all sessions across projects — active, completed, cost estimates.
+### 4) Agents health and install state
 
-<p align="center">
-  <img src="docs/demo/04-dashboard.gif" width="200" style="max-width: 200px; height: auto;" alt="Dashboard overview" />
-</p>
+![Agents tab](docs/screenshots/04-dashboard-agents.png)
 
-### 5. Agent creates PR on GitHub
-Agent commits, pushes, opens a PR — board card updates with PR link.
+### 5) Launching a new session
 
-<p align="center">
-  <img src="docs/demo/05-pr-creation.gif" width="200" style="max-width: 200px; height: auto;" alt="PR creation" />
-</p>
+![Launch flow](docs/screenshots/05-launch-session.png)
 
-📹 Full demo (5 min)
+### 6) Command palette + quick actions
 
-<p align="center">
-  <img src="docs/demo/full-demo.gif" width="220" alt="Full demo overview" />
-</p>
+![Command palette](docs/screenshots/06-command-palette.png)
 
+### 7) Session detail path
 
+![Session detail](docs/screenshots/07-session-detail.png)
 
 </details>
 
@@ -138,6 +136,27 @@ CO_CONFIG_PATH=./conductor.yaml co start --workspace . --port 4747
 
 Open `CONDUCTOR.md` in your editor (or Obsidian), write a task in **Ready to Dispatch**, save — done.
 
+To keep visual docs accurate after each UI change, regenerate gallery screenshots:
+
+```bash
+pnpm ui:screenshots
+```
+
+If the dashboard appears stale after edits, restart the running `co start` process so port `4747` rebuilds from disk:
+
+```bash
+# from your workspace root
+pkill -f "next dev -p 4747" || true
+CO_CONFIG_PATH=./conductor.yaml co start --workspace . --port 4747
+```
+
+Or, from any working directory:
+
+```bash
+cd /path/to/workspace
+CONDUCTOR_WORKSPACE=/path/to/workspace CO_CONFIG_PATH=./conductor.yaml co start --port 4747
+```
+
 ### Running on localhost
 
 The dashboard UI runs on:
@@ -145,6 +164,11 @@ The dashboard UI runs on:
 - `http://localhost:4747` by default when launched with `co start`
 
 If a workspace has multiple projects, the dashboard loads all linked boards from that workspace and keeps project links scoped to the correct board files.
+
+If you edit `conductor.yaml` while the dashboard is already running:
+
+- Projects are now refreshed from `/api/config` every few seconds on the dashboard page, so new/updated projects appear without restarting.
+- If project IDs still look stale, restart the web process as above to clear app-level state.
 
 ### Prerequisites
 
@@ -159,7 +183,7 @@ If a workspace has multiple projects, the dashboard loads all linked boards from
 
 ```bash
 npm install -g @anthropic-ai/claude-code   # Claude Code
-npm install -g @openai/codex               # OpenAI Codex
+npm install -g @openai/codex-cli           # OpenAI Codex
 npm install -g @google/gemini-cli          # Gemini CLI
 ```
 
@@ -392,6 +416,25 @@ CO_CONFIG_PATH=/path/to/workspace/conductor.yaml co start --workspace /path/to/w
 ```
 
 - Confirm `/api/config` returns all expected projects in the dashboard.
+
+### Known agents not detected locally
+- Open a local-only check:
+
+```bash
+curl -s http://localhost:4747/api/agents | jq '.agents[] | {name, description, version}'
+```
+
+- If a binary is installed but not shown, confirm it appears in PATH and retry after restart:
+
+```bash
+which codex
+which claude
+which gemini
+```
+
+- If you use an alternate binary name (for example `openai-codex`), it is now detected by the refreshed route. Restart `co start` after adding it to PATH so `/api/agents` refreshes.
+
+- If you are launching `co start` from a process manager and agents are installed for your shell user only, restart in a fresh shell so PATH is inherited.
 
 ### “Invalid request origin” on cleanup/session actions
 - Make sure actions are triggered from the same origin as the running dashboard (`http://localhost:4747` is default).

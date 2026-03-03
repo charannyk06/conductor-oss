@@ -22,10 +22,10 @@ export function registerWatch(program: Command): void {
     .description("Watch Obsidian CONDUCTOR.md boards and auto-dispatch tasks")
     .option("-w, --workspace <path>", "Obsidian workspace path", WORKSPACE)
     .option("--poll <ms>", "Polling interval in milliseconds", "5000")
-    .action(async (opts: { workspace: string; poll: string }) => {
+      .action(async (opts: { workspace: string; poll: string }) => {
       try {
         const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
+        const { sessionManager, registry } = await createServices(config);
         const core = await import("@conductor-oss/core");
 
         const spinner = ora("Discovering boards").start();
@@ -56,6 +56,7 @@ export function registerWatch(program: Command): void {
           config,
           sessionManager,
           boardPaths: boards,
+          agentNames: registry.list("agent").map((agent) => agent.name),
           boardProjectMap,
           pollIntervalMs: parseInt(opts.poll, 10),
           onDispatch: (projectId, sessionId, task) => {

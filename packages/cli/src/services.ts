@@ -75,6 +75,12 @@ export async function createRegistry(config?: OrchestratorConfig): Promise<Plugi
   return registry;
 }
 
+export interface Services {
+  config: OrchestratorConfig;
+  registry: PluginRegistry;
+  sessionManager: SessionManager;
+}
+
 /**
  * Create a fully-wired SessionManager.
  *
@@ -83,7 +89,7 @@ export async function createRegistry(config?: OrchestratorConfig): Promise<Plugi
  */
 export async function createServices(
   existingConfig?: OrchestratorConfig,
-): Promise<{ config: OrchestratorConfig; sessionManager: SessionManager }> {
+): Promise<Services> {
   const config = existingConfig ?? (await loadConfig());
   const registry = await createRegistry(config);
   const core = await import("@conductor-oss/core");
@@ -97,5 +103,5 @@ export async function createServices(
     registry,
   });
 
-  return { config, sessionManager };
+  return { config, registry, sessionManager };
 }
