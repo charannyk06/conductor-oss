@@ -14,6 +14,7 @@
     "build": "pnpm -r build",
     "dev": "pnpm --filter @conductor-oss/web dev",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @conductor-oss/core test",
     "clean": "pnpm -r clean"
   },
   "devDependencies": {

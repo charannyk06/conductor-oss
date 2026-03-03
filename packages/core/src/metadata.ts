@@ -133,6 +133,18 @@ export function writeMetadata(
   if (metadata.prBaseRef) data["prBaseRef"] = metadata.prBaseRef;
   if (metadata.prDraft) data["prDraft"] = metadata.prDraft;
   if (metadata.cost) data["cost"] = metadata.cost;
+  if (metadata.model) data["model"] = metadata.model;
+  if (metadata.permissions) data["permissions"] = metadata.permissions;
+  if (metadata.taskId) data["taskId"] = metadata.taskId;
+  if (metadata.attemptId) data["attemptId"] = metadata.attemptId;
+  if (metadata.parentTaskId) data["parentTaskId"] = metadata.parentTaskId;
+  if (metadata.attemptStatus) data["attemptStatus"] = metadata.attemptStatus;
+  if (metadata.retryOfSessionId) data["retryOfSessionId"] = metadata.retryOfSessionId;
+  if (metadata.supersededByAttemptId) data["supersededByAttemptId"] = metadata.supersededByAttemptId;
+  if (metadata.profile) data["profile"] = metadata.profile;
+  if (metadata.baseBranch) data["baseBranch"] = metadata.baseBranch;
+  if (metadata.prompt) data["prompt"] = metadata.prompt;
+  if (metadata.devServerLog) data["devServerLog"] = metadata.devServerLog;
 
   writeFileSync(path, serializeMetadata(data), "utf-8");
 }

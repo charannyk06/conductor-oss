@@ -239,8 +239,22 @@ boards:
   - CONDUCTOR.md
   # glob (workspace-relative)
   - projects/*/CONDUCTOR.md
+  # per-pattern alias override
+  - path: projects/*/*.md
+    aliases:
+      intake: ["Inbox", "Backlog", "To do"]
+      ready: ["Ready to Dispatch", "Ready"]
+      review: ["Review", "In Review"]
+      done: ["Done"]
   # absolute or relative custom boards
   - /path/to/extra/boards/*.md
+
+# global fallback aliases
+columnAliases:
+  intake: ["Inbox", "Backlog", "To do"]
+  ready: ["Ready to Dispatch", "Ready"]
+  review: ["Review", "In Review"]
+  done: ["Done"]
 
 projects:
   my-app:
@@ -250,6 +264,17 @@ projects:
     agentConfig:
       model: claude-sonnet-4-6    # any model the agent supports
       permissions: skip           # fully autonomous (no prompts)
+    defaultProfile: fast
+    agentProfiles:
+      fast:
+        agent: codex
+        model: gpt-5.3-codex-spark
+      deep:
+        agent: claude-code
+        model: claude-opus-4-6
+    devServer:
+      command: pnpm dev
+      cwd: ~/projects/my-app
     workspace: worktree           # git worktree per task
     runtime: tmux                 # tmux session runner
     scm: github                   # GitHub PR + CI integration
@@ -333,8 +358,13 @@ curl -X POST http://localhost:4747/webhook/http \
 ```bash
 co init                          # Scaffold CONDUCTOR.md + conductor.yaml
 co start                         # Start orchestrator + dashboard
+co watch                         # Run board watcher only
+co doctor                        # Diagnose board parsing/dispatch issues
 co list                          # List all active sessions
 co spawn <project> "<task>"      # Manually dispatch a session
+co retry <session|task>          # Start a new attempt for an existing task
+co task show <task-id>           # Show task parent/children/attempts
+co feedback <session> "<msg>"    # Send review feedback and requeue task
 co status                        # Status overview
 co attach <session-id>           # Attach to tmux session
 co kill <session-id>             # Kill a session

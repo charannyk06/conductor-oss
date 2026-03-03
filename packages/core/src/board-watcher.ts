@@ -17,16 +17,27 @@
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, statSync, readdirSync, mkdirSync, watch as fsWatch } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type {
+  BoardConfigEntry,
   OrchestratorConfig,
   SessionManager,
   Session,
   PRInfo,
   TaskAttachment,
 } from "./types.js";
+import {
+  getSectionsByAliases,
+  getTrackedCardLines,
+  getUncheckedTasks,
+  moveCardLine,
+  moveUncheckedTask,
+  replaceLine,
+  resolveColumnsFromBoard,
+} from "./board-parser.js";
+import { recordWatcherAction, resolveBoardAliasesForPath } from "./board-diagnostics.js";
 
 const execFileP = promisify(execFile);
 
@@ -55,10 +66,14 @@ interface ParsedCard {
   prompt: string;
   agent: string | undefined;
   model: string | undefined;
+  profile: string | undefined;
   project: string | undefined;
   issueId: string | undefined;
   taskType: string | undefined;
   priority: string | undefined;
+  taskId: string | undefined;
+  attemptId: string | undefined;
+  parentTaskId: string | undefined;
   /** Image/file attachments referenced in the card. */
   attachments: TaskAttachment[];
 }
@@ -82,8 +97,21 @@ function stripTags(text: string): string {
     .replace(/#[\w-]+\/[\w.\-]+/g, "")           // #agent/codex etc.
     .replace(/!\[\[([^\]]+)\]\]/g, "")             // ![[image.png]]
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, "")      // ![alt](path)
+    .replace(/\[(task|attempt|parent):[^\]]+\]/g, "") // [task:t-001] style metadata
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function parseInlineMetadata(text: string): Record<string, string> {
+  const meta: Record<string, string> = {};
+  for (const match of text.matchAll(/\[(task|attempt|parent):([^\]]+)\]/g)) {
+    const key = match[1];
+    const value = (match[2] ?? "").trim();
+    if (key && value) {
+      meta[key] = value;
+    }
+  }
+  return meta;
 }
 
 // =============================================================================
@@ -97,24 +125,20 @@ interface InboxEntry {
   text: string;
 }
 
-/** Parse Inbox entries. Supports checkbox cards and plain text lines. */
-function getInboxEntries(content: string): InboxEntry[] {
-  const sectionPattern = new RegExp(`## (Inbox|Backlog)\n(.*?)(?=\n## |\n%%|$)`, "gs");
-  const sections = [...content.matchAll(sectionPattern)];
+/** Parse intake entries. Supports checkbox cards and plain text lines. */
+function getInboxEntries(content: string, intakeAliases: string[]): InboxEntry[] {
+  const sections = getSectionsByAliases(content, intakeAliases);
   if (sections.length === 0) return [];
 
   const entries: InboxEntry[] = [];
 
   for (const section of sections) {
-    const lines = (section[2] ?? "").split("\n");
-
+    const lines = section.lines;
     for (let i = 0; i < lines.length; i++) {
       const rawLine = lines[i] ?? "";
       if (!rawLine.trim()) continue;
 
       let line = rawLine;
-      // Allow quoted task lines (common when typing below a quoted hint block),
-      // but skip known instructional quote text.
       if (rawLine.trimStart().startsWith(">")) {
         const unquoted = rawLine.trimStart().replace(/^>\s?/, "");
         const lower = unquoted.trim().toLowerCase();
@@ -295,7 +319,9 @@ async function enhanceInbox(boardPath: string, config: OrchestratorConfig): Prom
   if (guard && Date.now() - guard.at < WRITE_GUARD_MS && content === guard.content) {
     return;
   }
-  const entries = getInboxEntries(content);
+  const workspacePath = process.env["CONDUCTOR_WORKSPACE"] ?? process.cwd();
+  const aliases = resolveBoardAliasesForPath(config, workspacePath, boardPath);
+  const entries = getInboxEntries(content, aliases.intake);
   if (entries.length === 0) return;
 
   const boardProjectId = projectFromBoardPath(boardPath, config);
@@ -322,6 +348,11 @@ async function enhanceInbox(boardPath: string, config: OrchestratorConfig): Prom
       updatedContent = updatedContent.replace(entry.block, enhanced);
       anyChanged = true;
       console.log(`[board-watcher] Inbox enhanced: "${entry.text.substring(0, 60)}"`);
+      recordWatcherAction(workspacePath, {
+        level: "info",
+        action: `Inbox enhanced: ${entry.text.substring(0, 60)}`,
+        boardPath,
+      });
     }
   }
 
@@ -329,6 +360,11 @@ async function enhanceInbox(boardPath: string, config: OrchestratorConfig): Prom
     writeFileSync(boardPath, updatedContent, "utf-8");
     writeGuard.set(boardPath, { content: updatedContent, at: Date.now() });
     console.log(`[board-watcher] Inbox enhancement written: ${boardPath}`);
+    recordWatcherAction(workspacePath, {
+      level: "info",
+      action: "Inbox enhancement written",
+      boardPath,
+    });
 
     nudgeObsidian(boardPath);
   }
@@ -443,6 +479,7 @@ function autoDetectAgent(prompt: string): string {
 /** Parse a kanban card into structured data. */
 function parseCard(cardText: string, workspacePath: string): ParsedCard {
   const tags = parseTags(cardText);
+  const metadata = parseInlineMetadata(cardText);
   const prompt = stripTags(cardText);
   const issueFromTag = tags["issue"];
   const issueFromText = detectIssue(cardText);
@@ -453,10 +490,14 @@ function parseCard(cardText: string, workspacePath: string): ParsedCard {
     prompt,
     agent: tags["agent"],
     model: tags["model"],
+    profile: tags["profile"],
     project: tags["project"],
     issueId: issueFromTag ?? issueFromText,
     taskType: tags["type"],
     priority: tags["priority"],
+    taskId: metadata["task"],
+    attemptId: metadata["attempt"],
+    parentTaskId: metadata["parent"],
     attachments,
   };
 }
@@ -465,34 +506,9 @@ function parseCard(cardText: string, workspacePath: string): ParsedCard {
 // Board Parsing / Editing
 // ---------------------------------------------------------------------------
 
-/** Column names in the kanban board. */
-const COLUMNS = [
-  "Inbox",
-  "Ready to Dispatch",
-  "Dispatching",
-  "In Progress",
-  "Review",
-  "Done",
-  "Blocked",
-];
-
 /** Extract tasks from a specific column. Returns unchecked items only. */
 function getColumnTasks(content: string, column: string): string[] {
-  const pattern = new RegExp(
-    `## ${column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n(.*?)(?=\\n## |\\n%%|$)`,
-    "s",
-  );
-  const match = content.match(pattern);
-  if (!match) return [];
-
-  const tasks: string[] = [];
-  for (const line of match[1].split("\n")) {
-    const taskMatch = line.match(/^- \[ \] (.+)$/);
-    if (taskMatch) {
-      tasks.push(taskMatch[1]);
-    }
-  }
-  return tasks;
+  return getUncheckedTasks(content, column);
 }
 
 /** Move a task from one column to another. Updates the card text if needed. */
@@ -503,24 +519,7 @@ function moveCard(
   toColumn: string,
   newCardText?: string,
 ): string {
-  const cardLine = `- [ ] ${taskText}`;
-  const newLine = newCardText ? `- [x] ${newCardText}` : `- [x] ${taskText}`;
-
-  // Remove from source column
-  let updated = content.replace(cardLine + "\n", "");
-  // Also try without trailing newline (last item in column)
-  if (updated === content) {
-    updated = content.replace(cardLine, "");
-  }
-
-  // Add to target column header
-  const headerPattern = new RegExp(`(## ${toColumn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n)`);
-  const headerMatch = updated.match(headerPattern);
-  if (headerMatch) {
-    updated = updated.replace(headerMatch[1], `${headerMatch[1]}${newLine}\n`);
-  }
-
-  return updated;
+  return moveUncheckedTask(content, taskText, fromColumn, toColumn, newCardText).content;
 }
 
 // ---------------------------------------------------------------------------
@@ -572,32 +571,43 @@ function formatCost(costUsd: number): string {
   return `$${costUsd.toFixed(2)}`;
 }
 
-/** Map session status to the appropriate board column. */
-function statusToColumn(status: string): string {
+function formatTaskMarkers(meta: Record<string, string | undefined>): string {
+  const parts: string[] = [];
+  const taskId = meta["taskId"];
+  const attemptId = meta["attemptId"];
+  const parentTaskId = meta["parentTaskId"];
+  if (taskId) parts.push(`[task:${taskId}]`);
+  if (attemptId) parts.push(`[attempt:${attemptId}]`);
+  if (parentTaskId) parts.push(`[parent:${parentTaskId}]`);
+  return parts.join(" ");
+}
+
+/** Map session status to canonical board role. */
+function statusToColumnRole(status: string): "dispatching" | "inProgress" | "review" | "done" | "blocked" {
   switch (status) {
     case "spawning":
-      return "Dispatching";
+      return "dispatching";
     case "working":
-      return "In Progress";
+      return "inProgress";
     case "pr_open":
     case "ci_failed":
     case "review_pending":
     case "changes_requested":
     case "approved":
     case "mergeable":
-      return "Review";
+      return "review";
     case "merged":
     case "done":
     case "cleanup":
     case "killed":
     case "terminated":
-      return "Done";
+      return "done";
     case "stuck":
     case "errored":
     case "needs_input":
-      return "Blocked";
+      return "blocked";
     default:
-      return "In Progress";
+      return "inProgress";
   }
 }
 
@@ -610,6 +620,9 @@ interface TrackedCard {
   line: string;
   column: string;
   basePrompt: string;
+  taskId: string | null;
+  attemptId: string | null;
+  parentTaskId: string | null;
 }
 
 /** Extract session ID from a card line — matches [prefix-slug-N] not followed by ( (excludes markdown links). */
@@ -620,38 +633,38 @@ function extractSessionId(line: string): string | null {
   return matches[matches.length - 1]![1]!;
 }
 
+function extractCardMarker(line: string, marker: "task" | "attempt" | "parent"): string | null {
+  const match = line.match(new RegExp(`\\[${marker}:([^\\]]+)\\]`));
+  return match?.[1]?.trim() ?? null;
+}
+
 /** Extract base prompt from a card line (text before the [sessionId] marker, excluding dynamic suffix). */
 function extractBasePrompt(line: string, sessionId: string): string {
+  const withoutMeta = line
+    .replace(/\s*\[(task|attempt|parent):[^\]]+\]/g, "")
+    .replace(/\s+/g, " ");
   const marker = `[${sessionId}]`;
-  const afterCheckbox = line.replace(/^- \[[ x]\] /, "");
+  const afterCheckbox = withoutMeta.replace(/^- \[[ x]\] /, "");
   const markerIdx = afterCheckbox.indexOf(marker);
   if (markerIdx === -1) return afterCheckbox.replace(/\s*—\s*.*$/, "").trim();
   return afterCheckbox.slice(0, markerIdx).trim();
 }
 
-/** Columns that contain cards to track and update with live session state. */
-const TRACKED_COLUMNS = ["Dispatching", "In Progress", "Review", "Blocked", "Done"];
-
 /** Get all cards with [sessionId] markers from tracked columns. */
-function getAllTrackedCards(content: string): TrackedCard[] {
+function getAllTrackedCards(content: string, trackedColumns: string[]): TrackedCard[] {
   const cards: TrackedCard[] = [];
-
-  for (const column of TRACKED_COLUMNS) {
-    const escapedCol = column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(`## ${escapedCol}\\n(.*?)(?=\\n## |\\n%%|$)`, "gs");
-    for (const sectionMatch of content.matchAll(pattern)) {
-      for (const line of sectionMatch[1]!.split("\n")) {
-        if (!line.startsWith("- [")) continue;
-        const sessionId = extractSessionId(line);
-        if (!sessionId) continue;
-        cards.push({
-          sessionId,
-          line,
-          column,
-          basePrompt: extractBasePrompt(line, sessionId),
-        });
-      }
-    }
+  for (const item of getTrackedCardLines(content, trackedColumns)) {
+    const sessionId = extractSessionId(item.line);
+    if (!sessionId) continue;
+    cards.push({
+      sessionId,
+      line: item.line,
+      column: item.column,
+      basePrompt: extractBasePrompt(item.line, sessionId),
+      taskId: extractCardMarker(item.line, "task"),
+      attemptId: extractCardMarker(item.line, "attempt"),
+      parentTaskId: extractCardMarker(item.line, "parent"),
+    });
   }
 
   return cards;
@@ -731,6 +744,7 @@ function writeSessionNote(
   md += `| **Duration** | ${duration} |\n`;
   if (session.branch) md += `| **Branch** | \`${session.branch}\` |\n`;
   if (meta["worktree"]) md += `| **Worktree** | \`${meta["worktree"]}\` |\n`;
+  if (meta["devServerLog"]) md += `| **Dev Server Log** | \`${meta["devServerLog"]}\` |\n`;
   md += `\n`;
 
   // Summary — prefer real agent summary; if fallback/noisy, synthesize from PR state.
@@ -943,12 +957,26 @@ function formatRichCardLine(
     }
   }
 
-  return `- [x] ${basePrompt} [${sessionId}] — ${info}`;
+  const markerSuffix = formatTaskMarkers({
+    taskId: session.metadata["taskId"],
+    attemptId: session.metadata["attemptId"],
+    parentTaskId: session.metadata["parentTaskId"],
+  });
+  return `- [x] ${basePrompt}${markerSuffix ? ` ${markerSuffix}` : ""} [${sessionId}] — ${info}`;
 }
 
 /** Format a card for sessions that are no longer active (archived/killed). */
-function formatCompletedCardLine(basePrompt: string, sessionId: string): string {
-  return `- [x] ${basePrompt} [${sessionId}] — ✅ completed`;
+function formatCompletedCardLine(
+  basePrompt: string,
+  sessionId: string,
+  markers?: { taskId?: string | null; attemptId?: string | null; parentTaskId?: string | null },
+): string {
+  const markerSuffix = formatTaskMarkers({
+    taskId: markers?.taskId ?? undefined,
+    attemptId: markers?.attemptId ?? undefined,
+    parentTaskId: markers?.parentTaskId ?? undefined,
+  });
+  return `- [x] ${basePrompt}${markerSuffix ? ` ${markerSuffix}` : ""} [${sessionId}] — ✅ completed`;
 }
 
 // ---------------------------------------------------------------------------
@@ -963,28 +991,12 @@ function moveCheckedCard(
   toColumn: string,
   newLine?: string,
 ): string {
-  const replacement = newLine ?? oldLine;
-
-  // Remove from source column
-  let updated = content.replace(oldLine + "\n", "");
-  if (updated === content) {
-    updated = content.replace(oldLine, "");
-  }
-
-  // Add to target column header
-  const escapedCol = toColumn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const headerPattern = new RegExp(`(## ${escapedCol}\\n)`);
-  const headerMatch = updated.match(headerPattern);
-  if (headerMatch) {
-    updated = updated.replace(headerMatch[1]!, `${headerMatch[1]}${replacement}\n`);
-  }
-
-  return updated;
+  return moveCardLine(content, oldLine, fromColumn, toColumn, newLine).content;
 }
 
 /** Replace a card line in-place (same column, text change only). */
 function replaceCardLine(content: string, oldLine: string, newLine: string): string {
-  return content.replace(oldLine, newLine);
+  return replaceLine(content, oldLine, newLine);
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,6 +1048,25 @@ async function fetchPreviewUrl(pr: PRInfo): Promise<string | null> {
 /** Generate a hash for dedup tracking. */
 function taskHash(text: string): string {
   return createHash("md5").update(text.trim()).digest("hex");
+}
+
+function generateEntityId(prefix: "t" | "a"): string {
+  return `${prefix}-${randomBytes(3).toString("hex")}`;
+}
+
+function ensureCardIds(card: ParsedCard): { taskId: string; attemptId: string } {
+  return {
+    taskId: card.taskId ?? generateEntityId("t"),
+    attemptId: card.attemptId ?? generateEntityId("a"),
+  };
+}
+
+function formatCardMetadataSuffix(card: ParsedCard, taskId: string, attemptId: string): string {
+  const parts = [`[task:${taskId}]`, `[attempt:${attemptId}]`];
+  if (card.parentTaskId) {
+    parts.push(`[parent:${card.parentTaskId}]`);
+  }
+  return parts.join(" ");
 }
 
 /** Derive project ID from a board file path. */
@@ -1271,21 +1302,49 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
   /** Max cache entries before evicting oldest. */
   const MAX_PREVIEW_CACHE = 200;
   const MAX_DISPATCHED = 5000;
+  const debugEnabled = process.env["CONDUCTOR_DEBUG"] === "1";
 
-  function log(msg: string): void {
+  function log(msg: string, boardPath?: string): void {
     console.log(`[board-watcher] ${msg}`);
+    recordWatcherAction(workspacePath, {
+      level: "info",
+      action: msg,
+      boardPath,
+    });
   }
 
-  function logError(err: Error, context: string): void {
+  function trace(msg: string, boardPath?: string): void {
+    if (!debugEnabled) return;
+    console.log(`[board-watcher][debug] ${msg}`);
+    recordWatcherAction(workspacePath, {
+      level: "debug",
+      action: msg,
+      boardPath,
+    });
+  }
+
+  function logError(err: Error, context: string, boardPath?: string): void {
     console.error(`[board-watcher] ${context}: ${err.message}`);
+    recordWatcherAction(workspacePath, {
+      level: "error",
+      action: `${context}: ${err.message}`,
+      boardPath,
+      context,
+    });
     onError?.(err, context);
+  }
+
+  function resolveBoardColumns(boardPath: string, content: string) {
+    const aliases = resolveBoardAliasesForPath(config, workspacePath, boardPath);
+    return resolveColumnsFromBoard(content, aliases);
   }
 
   async function dispatchTask(
     boardPath: string,
     card: ParsedCard,
     boardProjectId: string | undefined,
-  ): Promise<{ sessionId: string } | null> {
+    ids: { taskId: string; attemptId: string },
+  ): Promise<{ sessionId: string; taskId: string; attemptId: string } | null> {
     // Determine project — prefer explicit tag, fall back to board path inference
     const projectId = card.project ?? boardProjectId;
     if (!projectId) {
@@ -1302,12 +1361,19 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
     const agent = normalizeAgent(card.agent ?? autoDetectAgent(card.prompt));
 
     // Build the prompt/issue
-    const issueOrPrompt = card.issueId ?? card.prompt;
-
     if (card.attachments.length > 0) {
-      log(`  Attachments: ${card.attachments.map((a) => `${a.type}:${basename(a.path)}`).join(", ")}`);
+      log(`  Attachments: ${card.attachments.map((a) => `${a.type}:${basename(a.path)}`).join(", ")}`, boardPath);
     }
-    log(`Dispatching [${agent}${card.model ? ` model=${card.model}` : ""}] -> ${projectId}: "${card.prompt}"`);
+    trace(
+      `Dispatch metadata task=${ids.taskId} attempt=${ids.attemptId}` +
+        `${card.parentTaskId ? ` parent=${card.parentTaskId}` : ""}` +
+        `${card.profile ? ` profile=${card.profile}` : ""}`,
+      boardPath,
+    );
+    log(
+      `Dispatching [${agent}${card.model ? ` model=${card.model}` : ""}] -> ${projectId}: "${card.prompt}"`,
+      boardPath,
+    );
 
     try {
       const session: Session = await sessionManager.spawn({
@@ -1316,14 +1382,22 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         prompt: card.prompt || undefined,
         agent,
         model: card.model,
+        profile: card.profile,
+        taskId: ids.taskId,
+        attemptId: ids.attemptId,
+        parentTaskId: card.parentTaskId,
         attachments: card.attachments.length > 0 ? card.attachments : undefined,
       });
 
-      log(`Spawned session ${session.id} for "${card.prompt}"`);
+      log(`Spawned session ${session.id} for "${card.prompt}"`, boardPath);
       onDispatch?.(projectId, session.id, card.prompt);
-      return { sessionId: session.id };
+      return { sessionId: session.id, taskId: ids.taskId, attemptId: ids.attemptId };
     } catch (err) {
-      logError(err instanceof Error ? err : new Error(String(err)), `spawn for "${card.prompt}"`);
+      logError(
+        err instanceof Error ? err : new Error(String(err)),
+        `spawn for "${card.prompt}"`,
+        boardPath,
+      );
       return null;
     }
   }
@@ -1347,7 +1421,18 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
 
     try {
       const content = readFileSync(boardPath, "utf-8");
-      const tasks = getColumnTasks(content, "Ready to Dispatch");
+      const resolvedColumns = resolveBoardColumns(boardPath, content);
+      const readyColumn = resolvedColumns.columnsByRole.ready;
+      const dispatchingColumn = resolvedColumns.columnsByRole.dispatching;
+      const trackedColumns = [
+        resolvedColumns.columnsByRole.dispatching,
+        resolvedColumns.columnsByRole.inProgress,
+        resolvedColumns.columnsByRole.review,
+        resolvedColumns.columnsByRole.blocked,
+        resolvedColumns.columnsByRole.done,
+      ];
+      const tasks = getColumnTasks(content, readyColumn);
+      trace(`Parse ${boardPath}: ready=${readyColumn} tasks=${tasks.length}`, boardPath);
       if (tasks.length === 0) return;
 
       const boardProjectId = projectFromBoardPath(boardPath, config);
@@ -1356,13 +1441,14 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
 
       for (const taskText of tasks) {
         const card = parseCard(taskText, workspacePath);
-        const promptHash = taskHash(card.prompt);
+        const { taskId, attemptId } = ensureCardIds(card);
+        const promptHash = taskHash(`${taskId}|${card.prompt}`);
         if (dispatched.has(promptHash)) continue;
 
         // Restart-safe dedupe: if a tracked card with the same base prompt
         // already exists (Dispatching/In Progress/Review/Done/Blocked), skip.
-        const existingTracked = getAllTrackedCards(updatedContent).some(
-          (tracked) => tracked.basePrompt === card.prompt,
+        const existingTracked = getAllTrackedCards(updatedContent, trackedColumns).some(
+          (tracked) => (tracked.taskId ? tracked.taskId === taskId : tracked.basePrompt === card.prompt),
         );
         if (existingTracked) {
           dispatched.add(promptHash);
@@ -1372,7 +1458,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         // Mark as dispatched immediately to prevent re-entry
         dispatched.add(promptHash);
 
-        const result = await dispatchTask(boardPath, card, boardProjectId);
+        const result = await dispatchTask(boardPath, card, boardProjectId, { taskId, attemptId });
 
         if (result) {
           // Persist hash to survive process restarts / external board rewrites.
@@ -1382,8 +1468,9 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
             // Non-fatal
           }
           // Move card: Ready to Dispatch -> Dispatching (with session ID)
-          const newCardText = `${card.prompt} [${result.sessionId}]`;
-          updatedContent = moveCard(updatedContent, taskText, "Ready to Dispatch", "Dispatching", newCardText);
+          const metadataSuffix = formatCardMetadataSuffix(card, result.taskId, result.attemptId);
+          const newCardText = `${card.prompt} ${metadataSuffix} [${result.sessionId}]`;
+          updatedContent = moveCard(updatedContent, taskText, readyColumn, dispatchingColumn, newCardText);
           anyDispatched = true;
         } else {
           // Failed to dispatch -- remove from dispatched set so it retries
@@ -1394,7 +1481,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
       if (anyDispatched && updatedContent !== content) {
         writeFileSync(boardPath, updatedContent, "utf-8");
         writeGuard.set(boardPath, { content: updatedContent, at: Date.now() });
-        log(`Board updated: ${boardPath}`);
+        log(`Board updated: ${boardPath}`, boardPath);
         nudgeObsidian(boardPath);
       }
 
@@ -1409,7 +1496,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         }
       }
     } catch (err) {
-      logError(err instanceof Error ? err : new Error(String(err)), `checkBoard ${boardPath}`);
+      logError(err instanceof Error ? err : new Error(String(err)), `checkBoard ${boardPath}`, boardPath);
     } finally {
       boardLocks.delete(boardPath);
       resolve();
@@ -1428,13 +1515,22 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
 
     try {
       let content = readFileSync(boardPath, "utf-8");
+      const resolvedColumns = resolveBoardColumns(boardPath, content);
+      const trackedColumns = [
+        resolvedColumns.columnsByRole.dispatching,
+        resolvedColumns.columnsByRole.inProgress,
+        resolvedColumns.columnsByRole.review,
+        resolvedColumns.columnsByRole.blocked,
+        resolvedColumns.columnsByRole.done,
+      ];
+      const doneColumn = resolvedColumns.columnsByRole.done;
 
       // During guard window, ignore only our own just-written content.
       const guard = writeGuard.get(boardPath);
       if (guard && Date.now() - guard.at < WRITE_GUARD_MS && content === guard.content) {
         return;
       }
-      const trackedCards = getAllTrackedCards(content);
+      const trackedCards = getAllTrackedCards(content, trackedColumns);
       if (trackedCards.length === 0) return;
 
       // Fetch all active sessions in one call
@@ -1473,7 +1569,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
             previewUrlCache.set(cacheKey, { url, checkedAt: Date.now() });
             if (url) {
               previewUrls.set(card.sessionId, url);
-              log(`Preview URL for [${card.sessionId}]: ${url}`);
+              log(`Preview URL for [${card.sessionId}]: ${url}`, boardPath);
             }
           } catch {
             previewUrlCache.set(cacheKey, { url: null, checkedAt: Date.now() });
@@ -1499,17 +1595,24 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         if (!session) {
           // Session no longer active (archived/killed). Normalize to a stable
           // completed card line so stale "actively working" text does not linger.
-          const completedLine = formatCompletedCardLine(card.basePrompt, card.sessionId);
-          if (card.column !== "Done") {
-            updated = moveCheckedCard(updated, card.line, card.column, "Done", completedLine);
+          const completedLine = formatCompletedCardLine(card.basePrompt, card.sessionId, {
+            taskId: card.taskId,
+            attemptId: card.attemptId,
+            parentTaskId: card.parentTaskId,
+          });
+          if (card.column !== doneColumn) {
+            updated = moveCheckedCard(updated, card.line, card.column, doneColumn, completedLine);
             changed = true;
-            log(`Card [${card.sessionId}] ${card.column} → Done (session archived)`);
+            log(`Card [${card.sessionId}] ${card.column} → ${doneColumn} (session archived)`, boardPath);
           } else if (card.line !== completedLine) {
             updated = replaceCardLine(updated, card.line, completedLine);
             changed = true;
           }
           // Allow re-dispatch if user moves card back to Ready to Dispatch
-          dispatched.delete(taskHash(card.basePrompt));
+          const dedupeKey = card.taskId
+            ? taskHash(`${card.taskId}|${card.basePrompt}`)
+            : taskHash(card.basePrompt);
+          dispatched.delete(dedupeKey);
           continue;
         }
 
@@ -1517,10 +1620,15 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         try {
           writeSessionNote(workspacePath, card.sessionId, session, card.basePrompt, config);
         } catch (err) {
-          logError(err instanceof Error ? err : new Error(String(err)), `writeSessionNote ${card.sessionId}`);
+          logError(
+            err instanceof Error ? err : new Error(String(err)),
+            `writeSessionNote ${card.sessionId}`,
+            boardPath,
+          );
         }
 
-        const targetColumn = statusToColumn(session.status);
+        const targetRole = statusToColumnRole(session.status);
+        const targetColumn = resolvedColumns.columnsByRole[targetRole];
         const preview = previewUrls.get(card.sessionId) ?? null;
         const newLine = formatRichCardLine(card.basePrompt, card.sessionId, session, {
           previewUrl: preview,
@@ -1531,7 +1639,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
           // Move to correct column with updated text
           updated = moveCheckedCard(updated, card.line, card.column, targetColumn, newLine);
           changed = true;
-          log(`Card [${card.sessionId}] ${card.column} → ${targetColumn} (${session.status})`);
+          log(`Card [${card.sessionId}] ${card.column} → ${targetColumn} (${session.status})`, boardPath);
         } else if (card.line !== newLine) {
           // Same column — update card text in place.
           // Skip churn for terminal sessions (done/merged/etc.) to avoid
@@ -1547,12 +1655,13 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         writeFileSync(boardPath, updated, "utf-8");
         writeGuard.set(boardPath, { content: updated, at: Date.now() });
         nudgeObsidian(boardPath);
-        log(`Board state updated: ${boardPath}`);
+        log(`Board state updated: ${boardPath}`, boardPath);
       }
     } catch (err) {
       logError(
         err instanceof Error ? err : new Error(String(err)),
         `updateBoardState ${boardPath}`,
+        boardPath,
       );
     } finally {
       boardLocks.delete(boardPath);
@@ -1683,7 +1792,7 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
 /** Find all CONDUCTOR.md boards in the workspace. */
 export function discoverBoards(
   workspacePath: string,
-  boardPathsOrConfig?: readonly string[] | OrchestratorConfig,
+  boardPathsOrConfig?: readonly BoardConfigEntry[] | OrchestratorConfig,
 ): string[] {
   const boards = new Set<string>();
   const legacyConfig: OrchestratorConfig | undefined = isOrchestratorConfig(boardPathsOrConfig)
@@ -1698,7 +1807,10 @@ export function discoverBoards(
       return [...boards];
     }
 
-    for (const boardPatternRaw of boardPathsOrConfig) {
+    for (const boardPatternEntry of boardPathsOrConfig) {
+      const boardPatternRaw = typeof boardPatternEntry === "string"
+        ? boardPatternEntry
+        : boardPatternEntry.path;
       const boardPattern = boardPatternRaw.trim();
       if (!boardPattern) continue;
 

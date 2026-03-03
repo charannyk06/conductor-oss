@@ -81,7 +81,23 @@ export function create(config?: Record<string, unknown>): Workspace {
         // Fetch may fail if offline — continue anyway
       }
 
-      const baseRef = `origin/${cfg.project.defaultBranch}`;
+      const baseBranch = (cfg as WorkspaceCreateConfig & { baseBranch?: string }).baseBranch;
+      let baseRef = `origin/${cfg.project.defaultBranch}`;
+      if (baseBranch && baseBranch.trim()) {
+        const requested = baseBranch.trim();
+        try {
+          await git(repoPath, "rev-parse", "--verify", `origin/${requested}`);
+          baseRef = `origin/${requested}`;
+        } catch {
+          try {
+            await git(repoPath, "rev-parse", "--verify", requested);
+            baseRef = requested;
+          } catch {
+            // Fallback to project default branch when requested base does not exist.
+            baseRef = `origin/${cfg.project.defaultBranch}`;
+          }
+        }
+      }
 
       // Create worktree with a new branch
       try {

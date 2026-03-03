@@ -13,6 +13,19 @@ port: 4747
 #   #   - projects/*/CONDUCTOR.md
 #   - CONDUCTOR.md
 #   - projects/*/CONDUCTOR.md
+#   - path: projects/*/*.md
+#     aliases:
+#       intake: ["Inbox", "Backlog", "To do"]
+#       ready: ["Ready to Dispatch", "Ready"]
+#       review: ["Review", "In Review"]
+#       done: ["Done"]
+
+# Optional: global fallback aliases applied to all boards
+# columnAliases:
+#   intake: ["Inbox", "Backlog", "To do"]
+#   ready: ["Ready to Dispatch", "Ready"]
+#   review: ["Review", "In Review"]
+#   done: ["Done"]
 
 # Optional: MCP servers available to all projects by default
 # defaults:
@@ -34,6 +47,21 @@ projects:
     agentConfig:
       model: claude-sonnet-4-6     # claude-sonnet-4-6, claude-opus-4-6, o4-mini, etc.
       permissions: skip            # "skip" = fully autonomous (no prompts)
+    # Optional profile presets used by #profile/<name> tags or defaultProfile
+    defaultProfile: fast
+    agentProfiles:
+      fast:
+        agent: codex
+        model: gpt-5.3-codex-spark
+        permissions: skip
+      deep:
+        agent: claude-code
+        model: claude-opus-4-6
+        permissions: default
+    # Optional project dev server for preview/test loop
+    # devServer:
+    #   command: pnpm dev
+    #   cwd: ~/projects/my-app
     workspace: worktree            # git worktree isolation per task
     runtime: tmux                  # tmux session runner
     scm: github                    # GitHub PR/CI integration

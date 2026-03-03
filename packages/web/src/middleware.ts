@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
 
 const clerkConfigured = Boolean(
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
@@ -6,6 +6,7 @@ const clerkConfigured = Boolean(
 
 export default async function middleware(
   req: NextRequest,
+  event: NextFetchEvent,
 ): Promise<NextResponse> {
   if (!clerkConfigured) {
     return NextResponse.next();
@@ -25,7 +26,7 @@ export default async function middleware(
       }
     });
 
-    return handler(req) as NextResponse;
+    return handler(req, event) as NextResponse;
   } catch {
     return NextResponse.next();
   }
