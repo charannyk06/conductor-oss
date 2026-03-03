@@ -6,6 +6,14 @@ port: 4747
 # URL shown in board card links (set this to your actual dashboard URL)
 # dashboardUrl: http://localhost:4747
 
+# Optional: board paths to watch (explicit files + glob patterns)
+# boards:
+#   # Defaults to:
+#   #   - CONDUCTOR.md
+#   #   - projects/*/CONDUCTOR.md
+#   - CONDUCTOR.md
+#   - projects/*/CONDUCTOR.md
+
 # Optional: MCP servers available to all projects by default
 # defaults:
 #   mcpServers:
