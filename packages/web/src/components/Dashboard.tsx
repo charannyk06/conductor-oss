@@ -25,6 +25,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const [connected, setConnected] = useState(false);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [projectSearch, setProjectSearch] = useState("");
   const eventSourceRef = useRef<EventSource | null>(null);
   const { theme, toggleTheme } = useTheme();
 
@@ -178,16 +179,56 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   // Merge config projects + session-derived counts for sidebar
   const projects = useMemo(() => {
     const counts = new Map<string, number>();
+    const working = new Map<string, number>();
+    const attention = new Map<string, number>();
     for (const sess of sessions) {
       const pid = sess.projectId || "default";
       counts.set(pid, (counts.get(pid) ?? 0) + 1);
+      if (sess.activity === "active") {
+        working.set(pid, (working.get(pid) ?? 0) + 1);
+      }
+      if (
+        sess.status === "needs_input" ||
+        sess.status === "stuck" ||
+        sess.status === "errored" ||
+        sess.activity === "waiting_input" ||
+        sess.activity === "blocked"
+      ) {
+        attention.set(pid, (attention.get(pid) ?? 0) + 1);
+      }
     }
+
+    const configById = new Map(configProjects.map((project) => [project.id, project]));
     const allIds = new Set([...configProjects.map((p) => p.id), ...counts.keys()]);
-    return [...allIds].sort().map((id) => {
-      const cfg = configProjects.find((p) => p.id === id);
-      return { id, count: counts.get(id) ?? 0, boardDir: cfg?.boardDir ?? id, repo: cfg?.repo ?? null };
-    });
+
+    return [...allIds]
+      .map((id) => {
+        const cfg = configById.get(id);
+        return {
+          id,
+          count: counts.get(id) ?? 0,
+          boardDir: cfg?.boardDir ?? id,
+          repo: cfg?.repo ?? null,
+          description: cfg?.description ?? null,
+          working: working.get(id) ?? 0,
+          attention: attention.get(id) ?? 0,
+        };
+      })
+      .sort((a, b) => {
+        if (b.count !== a.count) return b.count - a.count;
+        return a.id.localeCompare(b.id);
+      });
   }, [sessions, configProjects]);
+
+  const query = projectSearch.trim().toLowerCase();
+  const filteredProjects = useMemo(() => {
+    if (!query) return projects;
+    return projects.filter(
+      (project) =>
+        project.id.toLowerCase().includes(query) ||
+        (project.description ?? "").toLowerCase().includes(query)
+    );
+  }, [projects, query]);
 
   // Filtered sessions
   const filteredSessions = useMemo(() => {
@@ -235,7 +276,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       {/* Sidebar */}
       <aside
         className={`shrink-0 border-r border-[var(--color-sidebar-border)] bg-[var(--color-sidebar-bg)] flex flex-col transition-all duration-200 ${
-          sidebarOpen ? "w-60" : "w-0 overflow-hidden border-r-0"
+          sidebarOpen ? "w-80" : "w-0 overflow-hidden border-r-0"
         }`}
       >
         {/* Sidebar header */}
@@ -250,64 +291,111 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
           <div className="mb-1 px-2 pt-3 pb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
             Projects
           </div>
+          <div className="px-2 pb-3">
+            <label className="sr-only" htmlFor="projectSearch">
+              Filter projects
+            </label>
+            <input
+              id="projectSearch"
+              value={projectSearch}
+              onChange={(event) => setProjectSearch(event.target.value)}
+              type="text"
+              placeholder="Filter projects..."
+              className="w-full rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[12px] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none ring-0 transition-colors focus:border-[var(--color-accent)]"
+            />
+          </div>
 
           {/* All sessions */}
           <button
             onClick={() => setActiveProject(null)}
-            className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-[13px] transition-colors ${
+            className={`flex w-full items-center gap-2 rounded-lg px-3.5 py-2.5 text-[14px] transition-colors ${
               activeProject === null
                 ? "bg-[var(--color-sidebar-active)] text-[var(--color-accent)] font-medium"
                 : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-hover)]"
             }`}
           >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" className="shrink-0 opacity-60">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" className="shrink-0 opacity-60">
               <path d="M1.5 1.75V13.5h13.25a.75.75 0 010 1.5H.75a.75.75 0 01-.75-.75V1.75a.75.75 0 011.5 0zm14.28 2.53l-5.25 5.25a.75.75 0 01-1.06 0L7 7.06 4.28 9.78a.75.75 0 01-1.06-1.06l3.25-3.25a.75.75 0 011.06 0L10 7.94l4.72-4.72a.75.75 0 111.06 1.06z" />
             </svg>
             <span>All Sessions</span>
-            <span className="ml-auto text-[11px] text-[var(--color-text-muted)] tabular-nums">
-              {sessions.length}
-            </span>
+              <span className="ml-auto text-[12px] text-[var(--color-text-muted)] tabular-nums">
+                {sessions.length}
+              </span>
           </button>
 
           {/* Project list */}
-          {projects.map((project) => {
+          {filteredProjects.map((project) => {
             const obsidianFile = project.boardDir.endsWith(".md")
               ? `projects/${project.boardDir}`
               : `projects/${project.boardDir}/CONDUCTOR.md`;
             const obsidianUrl = `obsidian://open?vault=workspace&file=${encodeURIComponent(obsidianFile)}`;
             const githubUrl = project.repo ? `https://github.com/${project.repo}` : null;
             return (
-              <div key={project.id} className="group relative">
-                <button
-                  onClick={() => setActiveProject(activeProject === project.id ? null : project.id)}
-                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-[13px] transition-colors ${
-                    activeProject === project.id
-                      ? "bg-[var(--color-sidebar-active)] text-[var(--color-accent)] font-medium"
-                      : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-hover)]"
-                  }`}
-                >
-                  <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--color-accent)]" />
+              <button
+                key={project.id}
+                onClick={() => setActiveProject(activeProject === project.id ? null : project.id)}
+                className={`mb-1 flex w-full flex-col gap-1.5 rounded-lg px-3.5 py-2.5 text-[14px] text-left transition-colors ${
+                  activeProject === project.id
+                    ? "bg-[var(--color-sidebar-active)] text-[var(--color-accent)] font-medium"
+                    : "text-[var(--color-text-secondary)] hover:bg-[var(--color-sidebar-hover)]"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                      project.count === 0
+                        ? "bg-[var(--color-text-muted)]"
+                        : project.attention > 0
+                        ? "bg-[var(--color-status-attention)]"
+                        : "bg-[var(--color-accent)]"
+                    }`}
+                  />
                   <span className="truncate">{project.id}</span>
-                  <span className="ml-auto text-[11px] text-[var(--color-text-muted)] tabular-nums">
+                  <span className="ml-auto text-[12px] text-[var(--color-text-muted)] tabular-nums">
                     {project.count}
                   </span>
-                </button>
-                {/* Quick-action icons shown on hover */}
-                <div className="absolute right-2 top-1/2 -translate-y-1/2 hidden group-hover:flex items-center gap-1">
+                </div>
+                {(project.description || project.working > 0 || project.attention > 0) && (
+                  <div className="ml-4 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--color-text-muted)]">
+                    {project.working > 0 ? (
+                      <span className="rounded-full bg-[var(--color-bg-elevated)] px-2 py-0.5">
+                        {project.working} working
+                      </span>
+                    ) : null}
+                    {project.attention > 0 ? (
+                      <span className="rounded-full bg-[var(--color-bg-elevated)] px-2 py-0.5 text-[var(--color-status-attention)]">
+                        {project.attention} need attention
+                      </span>
+                    ) : null}
+                    {project.description ? (
+                      <span className="truncate">{project.description}</span>
+                    ) : null}
+                  </div>
+                )}
+                <div className="ml-4 flex items-center gap-1.5">
                   <a href={obsidianUrl} title="Open board in Obsidian" onClick={(e) => e.stopPropagation()}
-                     className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-bg-subtle)]">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
+                     className="rounded-md p-1.5 text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-accent)] hover:bg-[var(--color-bg-subtle)]">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-label="Obsidian" role="img">
+                      <path fill="#4d2c6a" d="M19.355 18.538a68.967 68.959 0 0 0 1.858-2.954.81.81 0 0 0-.062-.9c-.516-.685-1.504-2.075-2.042-3.362-.553-1.321-.636-3.375-.64-4.377a1.707 1.707 0 0 0-.358-1.05l-3.198-4.064a3.744 3.744 0 0 1-.076.543c-.106.503-.307 1.004-.536 1.5-.134.29-.29.6-.446.914l-.31.626c-.516 1.068-.997 2.227-1.132 3.59-.124 1.26.046 2.73.815 4.481.128.011.257.025.386.044a6.363 6.363 0 0 1 3.326 1.505c.916.79 1.744 1.922 2.415 3.5zM8.199 22.569c.073.012.146.02.22.02.78.024 2.095.092 3.16.29.87.16 2.593.64 4.01 1.055 1.083.316 2.198-.548 2.355-1.664.114-.814.33-1.735.725-2.58l-.01.005c-.67-1.87-1.522-3.078-2.416-3.849a5.295 5.295 0 0 0-2.778-1.257c-1.54-.216-2.952.19-3.84.45.532 2.218.368 4.829-1.425 7.531zM5.533 9.938c-.023.1-.056.197-.098.29L2.82 16.059a1.602 1.602 0 0 0 .313 1.772l4.116 4.24c2.103-3.101 1.796-6.02.836-8.3-.728-1.73-1.832-3.081-2.55-3.831zM9.32 14.01c.615-.183 1.606-.465 2.745-.534-.683-1.725-.848-3.233-.716-4.577.154-1.552.7-2.847 1.235-3.95.113-.235.223-.454.328-.664.149-.297.288-.577.419-.86.217-.47.379-.885.46-1.27.08-.38.08-.72-.014-1.043-.095-.325-.297-.675-.68-1.06a1.6 1.6 0 0 0-1.475.36l-4.95 4.452a1.602 1.602 0 0 0-.513.952l-.427 2.83c.672.59 2.328 2.316 3.335 4.711.09.21.175.43.253.653z"/>
+                    </svg>
                   </a>
                   {githubUrl && (
                     <a href={githubUrl} target="_blank" rel="noopener noreferrer" title="Open repo on GitHub" onClick={(e) => e.stopPropagation()}
-                       className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:bg-[var(--color-bg-subtle)]">
-                      <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                       className="rounded-md p-1.5 text-black transition-colors hover:text-black hover:bg-[var(--color-bg-subtle)]">
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-label="GitHub" role="img">
+                        <path fill="#000000" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+                      </svg>
                     </a>
                   )}
                 </div>
-              </div>
+              </button>
             );
           })}
+          {projectSearch && filteredProjects.length === 0 && (
+            <p className="px-3 py-4 text-center text-[11px] text-[var(--color-text-muted)]">
+              No projects found for {projectSearch ? `"${projectSearch}"` : "this search"}
+            </p>
+          )}
         </nav>
       </aside>
 
