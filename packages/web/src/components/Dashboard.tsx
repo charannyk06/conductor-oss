@@ -85,6 +85,11 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                     status: update.status,
                     activity: update.activity,
                     lastActivityAt: update.lastActivityAt,
+                    createdAt: update.createdAt,
+                    projectId: update.projectId,
+                    issueId: update.issueId,
+                    branch: update.branch,
+                    metadata: update.metadata,
                     ...(summaryChanged ? { summary: update.summary! } : {}),
                   };
                   if (prChanged && merged.pr && update.pr) {
@@ -110,14 +115,14 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                 id,
                 status: update.status,
                 activity: update.activity,
+                createdAt: update.createdAt,
                 lastActivityAt: update.lastActivityAt,
                 summary: update.summary ?? null,
-                createdAt: update.lastActivityAt,
-                projectId: "",
-                issueId: null,
+                projectId: update.projectId,
+                issueId: update.issueId ?? null,
+                branch: update.branch ?? null,
+                metadata: update.metadata,
                 pr: null,
-                branch: null,
-                metadata: {},
               });
             }
 
@@ -266,7 +271,9 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
 
           {/* Project list */}
           {projects.map((project) => {
-            const obsidianFile = `projects/${project.boardDir}/CONDUCTOR`;
+            const obsidianFile = project.boardDir.endsWith(".md")
+              ? `projects/${project.boardDir}`
+              : `projects/${project.boardDir}/CONDUCTOR.md`;
             const obsidianUrl = `obsidian://open?vault=workspace&file=${encodeURIComponent(obsidianFile)}`;
             const githubUrl = project.repo ? `https://github.com/${project.repo}` : null;
             return (

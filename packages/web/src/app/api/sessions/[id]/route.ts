@@ -21,6 +21,22 @@ function parseMetadata(content: string): Record<string, string> {
   return result;
 }
 
+function readMetadataFile(filePath: string): Record<string, string> | null {
+  try {
+    return parseMetadata(readFileSync(filePath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function safeSessionDirs(projectDir: string): string[] {
+  try {
+    return readdirSync(projectDir);
+  } catch {
+    return [];
+  }
+}
+
 function buildArchivedSummary(meta: Record<string, string>): string | null {
   const existing = normalizeSummary(meta["summary"]);
   if (existing) return existing;
@@ -108,29 +124,43 @@ function findSessionDirect(sessionId: string): DashboardSession | null {
   const conductorDir = join(homedir(), ".conductor");
   if (!existsSync(conductorDir)) return null;
 
-  for (const projectDir of readdirSync(conductorDir)) {
+  const projectDirs = safeSessionDirs(conductorDir);
+  for (const projectDir of projectDirs) {
     const sessionsDir = join(conductorDir, projectDir, "sessions");
     if (!existsSync(sessionsDir)) continue;
+
+    let sessionStat: { isDirectory: () => boolean } | null = null;
+    try {
+      sessionStat = statSync(sessionsDir);
+    } catch {
+      continue;
+    }
+    if (!sessionStat?.isDirectory()) continue;
 
     // Active session
     const activeFile = join(sessionsDir, sessionId);
     if (existsSync(activeFile)) {
-      const meta = parseMetadata(readFileSync(activeFile, "utf-8"));
-      return metadataToDashboard(sessionId, meta, activeFile);
+      const meta = readMetadataFile(activeFile);
+      if (meta) {
+        return metadataToDashboard(sessionId, meta, activeFile);
+      }
     }
 
     // Archived session
     const archiveDir = join(sessionsDir, "archive");
     if (!existsSync(archiveDir)) continue;
-    const archiveFiles = readdirSync(archiveDir)
+
+    const archiveFiles = safeSessionDirs(archiveDir)
       .filter((f) => f.startsWith(sessionId + "_"))
       .sort()
       .reverse();
 
     if (archiveFiles.length > 0) {
       const filePath = join(archiveDir, archiveFiles[0]!);
-      const meta = parseMetadata(readFileSync(filePath, "utf-8"));
-      return metadataToDashboard(sessionId, meta, filePath);
+      const meta = readMetadataFile(filePath);
+      if (meta) {
+        return metadataToDashboard(sessionId, meta, filePath);
+      }
     }
   }
 
@@ -142,33 +172,35 @@ export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const denied = await guardApiAccess();
-  if (denied) return denied;
-  const { id } = await params;
-
-  if (!id || id.trim().length === 0) {
-    return NextResponse.json({ error: "Session ID is required" }, { status: 400 });
-  }
-  if (!VALID_SESSION_ID.test(id)) {
-    return NextResponse.json({ error: "Invalid session ID" }, { status: 400 });
-  }
-
   try {
+    const denied = await guardApiAccess();
+    if (denied) return denied;
+    const { id } = await params;
+    const sessionId = id.trim();
+
+    if (!sessionId) {
+      return NextResponse.json({ error: "Session ID is required" }, { status: 400 });
+    }
+    if (!VALID_SESSION_ID.test(sessionId)) {
+      return NextResponse.json({ error: "Invalid session ID" }, { status: 400 });
+    }
+
     // Try active sessions first via session manager
     const { sessionManager } = await getServices();
-    const session = await sessionManager.get(id);
+    const session = await sessionManager.get(sessionId);
     if (session) {
       return NextResponse.json(sessionToDashboard(session));
     }
-  } catch {
-    // Fall through to direct lookup
-  }
 
-  // Fallback: direct filesystem scan (finds archived sessions too)
-  const direct = findSessionDirect(id);
-  if (direct) {
-    return NextResponse.json(direct);
-  }
+    // Fallback: direct filesystem scan (finds archived sessions too)
+    const direct = findSessionDirect(sessionId);
+    if (direct) {
+      return NextResponse.json(direct);
+    }
 
-  return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to load session";
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 }

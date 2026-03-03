@@ -30,6 +30,27 @@ export function registerStart(program: Command): void {
         // Mutable ref — set after boardWatcher is created, used by lifecycle callback
         let boardWatcherRef: { updateNow(): void } | null = null;
         const port = opts.port ? parseInt(opts.port, 10) : (config.port ?? 3000);
+        const shutdownTasks: Array<() => void | Promise<void>> = [];
+        let isShuttingDown = false;
+
+        const requestShutdown = (): void => {
+          void (async () => {
+            if (isShuttingDown) return;
+            isShuttingDown = true;
+
+            for (const task of shutdownTasks) {
+              try {
+                await task();
+              } catch (err) {
+                console.error(err);
+              }
+            }
+            process.exit(0);
+          })();
+        };
+
+        process.on("SIGINT", requestShutdown);
+        process.on("SIGTERM", requestShutdown);
 
         const line = "=".repeat(50);
         console.log(chalk.dim(line));
@@ -58,13 +79,10 @@ export function registerStart(program: Command): void {
           spinner.succeed("Lifecycle manager running");
 
           // Graceful shutdown
-          const shutdown = (): void => {
+          shutdownTasks.push(() => {
             console.log(chalk.dim("\nShutting down lifecycle manager..."));
             lifecycle.stop();
-            process.exit(0);
-          };
-          process.on("SIGINT", shutdown);
-          process.on("SIGTERM", shutdown);
+          });
         }
 
         // ---- Start board watcher ----
@@ -74,7 +92,8 @@ export function registerStart(program: Command): void {
             const workspacePath = opts.workspace
               ?? process.env["CONDUCTOR_WORKSPACE"]
               ?? `${process.env["HOME"]}/.conductor/workspace`;
-            const boards = core.discoverBoards(workspacePath, config.boards);
+            const boardPatternsOrConfig = config.boards?.length ? config.boards : config;
+            const boards = core.discoverBoards(workspacePath, boardPatternsOrConfig);
             if (boards.length === 0) {
               watchSpinner.warn("No CONDUCTOR.md boards found");
             } else {
@@ -95,17 +114,8 @@ export function registerStart(program: Command): void {
               });
               boardWatcher.start();
               boardWatcherRef = boardWatcher;
+              shutdownTasks.push(() => boardWatcher.stop());
               watchSpinner.succeed(`Board watcher running (${boards.length} boards)`);
-
-              // Add to shutdown
-              const prevSIGINT = process.listeners("SIGINT");
-              process.removeAllListeners("SIGINT");
-              process.on("SIGINT", () => {
-                boardWatcher.stop();
-                for (const listener of prevSIGINT) {
-                  (listener as () => void)();
-                }
-              });
             }
           } catch (err) {
             watchSpinner.warn(`Board watcher failed: ${err}`);
@@ -181,10 +191,26 @@ export function registerStart(program: Command): void {
             if (hasNextBuild) {
               // Use pnpm run start (next start) — reliable, serves static assets correctly
               cmd = "pnpm";
-              args = ["run", "start"];
+              args = [
+                "run",
+                "start",
+                "--",
+                "--hostname",
+                "0.0.0.0",
+                "--port",
+                String(port),
+              ];
             } else {
               cmd = "pnpm";
-              args = ["run", "dev"];
+              args = [
+                "run",
+                "dev",
+                "--",
+                "--hostname",
+                "0.0.0.0",
+                "--port",
+                String(port),
+              ];
             }
 
             dashboardProcess = spawn(cmd, args, {
@@ -217,19 +243,10 @@ export function registerStart(program: Command): void {
             );
             const webhookServer = createWebhookServer(config, config.webhook);
             await webhookServer.start();
+            shutdownTasks.push(() => webhookServer.stop());
             webhookSpinner.succeed(
               `Webhook server running on port ${config.webhook.port}`,
             );
-
-            // Add to shutdown
-            const prevSIGINT2 = process.listeners("SIGINT");
-            process.removeAllListeners("SIGINT");
-            process.on("SIGINT", () => {
-              webhookServer.stop();
-              for (const listener of prevSIGINT2) {
-                (listener as () => void)();
-              }
-            });
           } catch (err) {
             webhookSpinner.warn(`Webhook server failed to start: ${err}`);
           }

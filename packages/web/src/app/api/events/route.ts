@@ -51,7 +51,12 @@ export async function GET(request: Request): Promise<Response> {
         status: s.status,
         activity: s.activity,
         attentionLevel: getAttentionLevel(s),
+        projectId: s.projectId,
+        issueId: s.issueId,
+        branch: s.branch,
+        createdAt: s.createdAt,
         lastActivityAt: s.lastActivityAt,
+        metadata: s.metadata,
         summary: s.summary,
         pr: s.pr ? {
           ciStatus: s.pr.ciStatus,
