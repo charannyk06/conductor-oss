@@ -54,37 +54,6 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 
 ## Demo
 
-<details open>
-<summary><strong>Live flow capture</strong> — task → launch → terminal → review/merge controls</summary>
-
-<br>
-
-### 1) Dashboard overview
-
-![Dashboard overview](docs/screenshots/01-dashboard-overview.png)
-
-### 2) Chat queue and manual responses
-
-![Chat queue](docs/screenshots/02-dashboard-chat.png)
-
-### 3) Review and PR triage
-
-![Review queue](docs/screenshots/03-dashboard-review.png)
-
-### 4) Agents health and install state
-
-![Agents tab](docs/screenshots/04-dashboard-agents.png)
-
-### 5) Launching a new session
-
-![Launch flow](docs/screenshots/05-launch-session.png)
-
-### 6) Command palette + quick actions
-
-![Command palette](docs/screenshots/06-command-palette.png)
-
-</details>
-
 ## Demo videos & GIFs
 
 ![Session add task (GIF)](docs/demo/01-add-task.gif)
@@ -123,6 +92,37 @@ Full capture (from the same source recording):
 
 - [Mar 01 full walkthrough (GIF)](docs/demo/full-demo.gif)
 - [Mar 01 full walkthrough (MP4)](docs/demo/full-demo.mp4)
+
+<details open>
+<summary><strong>Live flow capture</strong> — task → launch → terminal → review/merge controls</summary>
+
+<br>
+
+### 1) Dashboard overview
+
+![Dashboard overview](docs/screenshots/01-dashboard-overview.png)
+
+### 2) Chat queue and manual responses
+
+![Chat queue](docs/screenshots/02-dashboard-chat.png)
+
+### 3) Review and PR triage
+
+![Review queue](docs/screenshots/03-dashboard-review.png)
+
+### 4) Agents health and install state
+
+![Agents tab](docs/screenshots/04-dashboard-agents.png)
+
+### 5) Launching a new session
+
+![Launch flow](docs/screenshots/05-launch-session.png)
+
+### 6) Command palette + quick actions
+
+![Command palette](docs/screenshots/06-command-palette.png)
+
+</details>
 
 ---
 
