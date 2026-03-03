@@ -1686,34 +1686,43 @@ export function discoverBoards(
   boardPathsOrConfig?: readonly string[] | OrchestratorConfig,
 ): string[] {
   const boards = new Set<string>();
-  const boardPaths = Array.isArray(boardPathsOrConfig)
+  const legacyConfig: OrchestratorConfig | undefined = isOrchestratorConfig(boardPathsOrConfig)
     ? boardPathsOrConfig
     : undefined;
-  const config = Array.isArray(boardPathsOrConfig) ? undefined : boardPathsOrConfig;
+  if (Array.isArray(boardPathsOrConfig)) {
+    if (boardPathsOrConfig.length === 0) {
+      const legacyBoards = discoverBoardsLegacy(workspacePath);
+      for (const board of legacyBoards) {
+        boards.add(board);
+      }
+      return [...boards];
+    }
 
-  if (!boardPaths || boardPaths.length === 0) {
-    const legacyBoards = discoverBoardsLegacy(workspacePath, config);
-    for (const board of legacyBoards) {
-      boards.add(board);
+    for (const boardPatternRaw of boardPathsOrConfig) {
+      const boardPattern = boardPatternRaw.trim();
+      if (!boardPattern) continue;
+
+      const resolvedPattern = resolveBoardPattern(boardPattern);
+      const matches = resolveBoardPatternToFiles(
+        resolvedPattern,
+        workspacePath,
+        isAbsolutePath(resolvedPattern),
+      );
+      for (const match of matches) {
+        boards.add(match);
+      }
     }
     return [...boards];
   }
 
-  for (const boardPatternRaw of boardPaths) {
-    const boardPattern = boardPatternRaw.trim();
-    if (!boardPattern) continue;
-
-    const resolvedPattern = resolveBoardPattern(boardPattern);
-    const matches = resolveBoardPatternToFiles(resolvedPattern, workspacePath, isAbsolutePath(resolvedPattern));
-    for (const match of matches) {
-      boards.add(match);
-    }
+  const legacyBoards = discoverBoardsLegacy(workspacePath, legacyConfig);
+  for (const board of legacyBoards) {
+    boards.add(board);
   }
-
   return [...boards];
 }
 
-/** Legacy behavior: discover workspace CONDUCTOR.md + projects/*/CONDUCTOR.md. */
+/** Legacy behavior: discover workspace CONDUCTOR.md + project CONDUCTOR.md files. */
 function discoverBoardsLegacy(workspacePath: string, config?: OrchestratorConfig): string[] {
   const boards: string[] = [];
   const seen = new Set<string>();
@@ -1931,6 +1940,15 @@ function splitAbsolutePattern(patternPath: string): { root: string; parts: strin
   }
 
   return { root: "", parts: patternPath.split("/").filter(Boolean) };
+}
+
+/** Narrowing helper for overloaded discoverBoards parameter. */
+function isOrchestratorConfig(value: unknown): value is OrchestratorConfig {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  return "projects" in value && "defaults" in value;
 }
 
 /** Build the board-to-project mapping for a config. */
