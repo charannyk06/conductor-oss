@@ -13,18 +13,22 @@ export default async function middleware(
 
   // Dynamic import avoids crash when Clerk keys are absent —
   // clerkMiddleware() throws at call-time if publishableKey is missing.
-  const { clerkMiddleware, createRouteMatcher } = await import(
-    "@clerk/nextjs/server"
-  );
-  const isPublicRoute = createRouteMatcher(["/sign-in(.*)"]);
+  try {
+    const { clerkMiddleware, createRouteMatcher } = await import(
+      "@clerk/nextjs/server"
+    );
+    const isPublicRoute = createRouteMatcher(["/sign-in(.*)"]);
 
-  const handler = clerkMiddleware(async (auth, r) => {
-    if (!isPublicRoute(r)) {
-      await auth.protect();
-    }
-  });
+    const handler = clerkMiddleware(async (auth, r) => {
+      if (!isPublicRoute(r)) {
+        await auth.protect();
+      }
+    });
 
-  return handler(req, {} as never) as unknown as NextResponse;
+    return handler(req) as NextResponse;
+  } catch {
+    return NextResponse.next();
+  }
 }
 
 export const config = {

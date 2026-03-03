@@ -59,14 +59,18 @@ export async function loadConfig(): Promise<OrchestratorConfig> {
 /**
  * Create a PluginRegistry with all built-in plugins registered.
  */
-export async function createRegistry(): Promise<PluginRegistry> {
+export async function createRegistry(config?: OrchestratorConfig): Promise<PluginRegistry> {
   const core = await import("@conductor-oss/core");
   if (typeof core.createPluginRegistry !== "function") {
     throw new Error("@conductor-oss/core does not export createPluginRegistry");
   }
   const registry: PluginRegistry = core.createPluginRegistry();
   for (const plugin of ALL_PLUGINS) {
-    registry.register(plugin);
+    const pluginConfig =
+      config && plugin.manifest.slot === "notifier"
+        ? config.notifiers?.[plugin.manifest.name]
+        : undefined;
+    registry.register(plugin, pluginConfig);
   }
   return registry;
 }
@@ -81,7 +85,7 @@ export async function createServices(
   existingConfig?: OrchestratorConfig,
 ): Promise<{ config: OrchestratorConfig; sessionManager: SessionManager }> {
   const config = existingConfig ?? (await loadConfig());
-  const registry = await createRegistry();
+  const registry = await createRegistry(config);
   const core = await import("@conductor-oss/core");
 
   if (typeof core.createSessionManager !== "function") {

@@ -87,7 +87,12 @@ export interface SSESnapshotEvent {
     status: SessionStatus;
     activity: ActivityState | null;
     attentionLevel: AttentionLevel;
+    projectId: string;
+    issueId: string | null;
+    branch: string | null;
+    createdAt: string;
     lastActivityAt: string;
+    metadata: Record<string, string>;
     summary?: string | null;
     pr?: {
       ciStatus: CIStatus;

@@ -35,7 +35,7 @@ export function registerCleanup(program: Command): void {
 
         const spinner = opts.dryRun ? null : ora("Cleaning up sessions").start();
 
-        const result = await sessionManager.cleanup(project);
+        const result = await sessionManager.cleanup(project, { dryRun: Boolean(opts.dryRun) });
 
         spinner?.stop();
 

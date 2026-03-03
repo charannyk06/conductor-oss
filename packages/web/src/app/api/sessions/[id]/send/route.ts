@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { guardApiAccess } from "@/lib/auth";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -24,18 +24,40 @@ function parseMetadata(content: string): Record<string, string> {
   return result;
 }
 
+function safeReadMetadata(filePath: string): Record<string, string> | null {
+  try {
+    return parseMetadata(readFileSync(filePath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function safeEntries(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
 /** Resolve tmux session name by scanning conductor metadata. */
 function resolveTmuxName(sessionId: string): string | null {
   const conductorDir = join(homedir(), ".conductor");
   if (!existsSync(conductorDir)) return null;
 
-  for (const projectDir of readdirSync(conductorDir)) {
+  for (const projectDir of safeEntries(conductorDir)) {
     const sessionsDir = join(conductorDir, projectDir, "sessions");
     if (!existsSync(sessionsDir)) continue;
+    try {
+      if (!statSync(sessionsDir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
 
     const activeFile = join(sessionsDir, sessionId);
     if (existsSync(activeFile)) {
-      const meta = parseMetadata(readFileSync(activeFile, "utf-8"));
+      const meta = safeReadMetadata(activeFile);
+      if (!meta) continue;
       if (meta["tmuxName"]) return meta["tmuxName"];
       if (meta["runtimeHandle"]) {
         try {

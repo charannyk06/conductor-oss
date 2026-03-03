@@ -119,7 +119,12 @@ export default function SessionDetailPage() {
   const meta = session?.metadata ?? {};
 
   // Parse cost from metadata
-  interface CostInfo { inputTokens?: number; outputTokens?: number; totalUSD?: number }
+  interface CostInfo {
+    inputTokens?: number;
+    outputTokens?: number;
+    estimatedCostUsd?: number;
+    totalUSD?: number;
+  }
   let cost: CostInfo | null = null;
   if (meta["cost"]) {
     try {
@@ -321,8 +326,11 @@ export default function SessionDetailPage() {
               {cost && (
                 <MetaSection label="Cost">
                   <div className="space-y-1.5">
-                    {cost.totalUSD != null && (
-                      <MetaRow label="Total" value={`$${cost.totalUSD.toFixed(4)}`} />
+                    {(cost.estimatedCostUsd ?? cost.totalUSD) != null && (
+                      <MetaRow
+                        label="Total"
+                        value={`$${((cost.estimatedCostUsd ?? cost.totalUSD) as number).toFixed(4)}`}
+                      />
                     )}
                     {cost.inputTokens != null && (
                       <MetaRow label="Input" value={cost.inputTokens.toLocaleString()} />

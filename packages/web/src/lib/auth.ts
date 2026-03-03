@@ -33,40 +33,48 @@ export async function getDashboardAccess(): Promise<DashboardAccess> {
     return { ok: true, email: "local" };
   }
 
-  const { currentUser } = await import("@clerk/nextjs/server");
-  const user = await currentUser() as ClerkUser | null;
-  if (!user) return { ok: false, reason: "Not authenticated" };
+  try {
+    const { currentUser } = await import("@clerk/nextjs/server");
+    const user = await currentUser() as ClerkUser | null;
+    if (!user) return { ok: false, reason: "Not authenticated" };
 
-  const email = user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)?.emailAddress
-    ?? user.emailAddresses[0]?.emailAddress
-    ?? "";
+    const email = user.emailAddresses.find((e) => e.id === user.primaryEmailAddressId)?.emailAddress
+      ?? user.emailAddresses[0]?.emailAddress
+      ?? "";
 
-  if (!email) return { ok: false, reason: "No email on account" };
+    if (!email) return { ok: false, reason: "No email on account" };
 
-  const normalizedEmail = email.toLowerCase();
-  const allowedEmails = parseCsv(process.env.CONDUCTOR_ALLOWED_EMAILS);
-  const adminEmails = parseCsv(process.env.CONDUCTOR_ADMIN_EMAILS);
-  const allowedDomains = parseCsv(process.env.CONDUCTOR_ALLOWED_DOMAINS);
-  const requireApproval = (process.env.CONDUCTOR_REQUIRE_APPROVAL ?? "true") === "true";
+    const normalizedEmail = email.toLowerCase();
+    const allowedEmails = parseCsv(process.env.CONDUCTOR_ALLOWED_EMAILS);
+    const adminEmails = parseCsv(process.env.CONDUCTOR_ADMIN_EMAILS);
+    const allowedDomains = parseCsv(process.env.CONDUCTOR_ALLOWED_DOMAINS);
+    const requireApproval = (process.env.CONDUCTOR_REQUIRE_APPROVAL ?? "true") === "true";
 
-  const emailAllowed =
-    allowedEmails.length === 0 ||
-    allowedEmails.includes(normalizedEmail) ||
-    adminEmails.includes(normalizedEmail);
+    const emailAllowed =
+      allowedEmails.length === 0 ||
+      allowedEmails.includes(normalizedEmail) ||
+      adminEmails.includes(normalizedEmail);
 
-  const domainAllowed =
-    allowedDomains.length === 0 ||
-    allowedDomains.some((d) => normalizedEmail.endsWith(`@${d}`));
+    const domainAllowed =
+      allowedDomains.length === 0 ||
+      allowedDomains.some((d) => normalizedEmail.endsWith(`@${d}`));
 
-  if (!emailAllowed || !domainAllowed) {
-    return { ok: false, email: normalizedEmail, reason: "Email/domain not allowed" };
+    if (!emailAllowed || !domainAllowed) {
+      return { ok: false, email: normalizedEmail, reason: "Email/domain not allowed" };
+    }
+
+    if (requireApproval && !adminEmails.includes(normalizedEmail) && !isApproved(user)) {
+      return { ok: false, email: normalizedEmail, reason: "Awaiting manual approval" };
+    }
+
+    return { ok: true, email: normalizedEmail };
+  } catch {
+    return {
+      ok: false,
+      reason:
+        "Authentication service is unavailable. Check Clerk env vars and retry.",
+    };
   }
-
-  if (requireApproval && !adminEmails.includes(normalizedEmail) && !isApproved(user)) {
-    return { ok: false, email: normalizedEmail, reason: "Awaiting manual approval" };
-  }
-
-  return { ok: true, email: normalizedEmail };
 }
 
 export async function guardApiAccess(): Promise<NextResponse | null> {

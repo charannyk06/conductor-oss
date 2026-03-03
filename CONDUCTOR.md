@@ -7,6 +7,8 @@
 
 > Drop rough ideas here. Conductor auto-tags them within 20s.
 
+
+
 ## Ready to Dispatch
 
 > Move tagged tasks here to dispatch an agent.

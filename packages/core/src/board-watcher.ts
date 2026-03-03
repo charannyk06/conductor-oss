@@ -99,44 +99,72 @@ interface InboxEntry {
 
 /** Parse Inbox entries. Supports checkbox cards and plain text lines. */
 function getInboxEntries(content: string): InboxEntry[] {
-  const pattern = new RegExp(`## Inbox\n(.*?)(?=\n## |\n%%|$)`, "s");
-  const match = content.match(pattern);
-  if (!match) return [];
+  const sectionPattern = new RegExp(`## (Inbox|Backlog)\n(.*?)(?=\n## |\n%%|$)`, "gs");
+  const sections = [...content.matchAll(sectionPattern)];
+  if (sections.length === 0) return [];
 
   const entries: InboxEntry[] = [];
-  const lines = match[1].split("\n");
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    if (!line.trim()) continue;
-    if (line.trimStart().startsWith(">")) continue;
+  for (const section of sections) {
+    const lines = (section[2] ?? "").split("\n");
 
-    const checkboxMatch = line.match(/^- \[ \] (.+)$/);
-    if (checkboxMatch) {
-      const blockLines = [line];
-      let text = checkboxMatch[1] ?? "";
-      while (i + 1 < lines.length && /^[\t ]/.test(lines[i + 1] ?? "") && !(lines[i + 1] ?? "").startsWith("- ")) {
-        i++;
-        const cont = (lines[i] ?? "").trim();
-        blockLines.push(lines[i] ?? "");
-        if (cont) text += ` ${cont}`;
+    for (let i = 0; i < lines.length; i++) {
+      const rawLine = lines[i] ?? "";
+      if (!rawLine.trim()) continue;
+
+      let line = rawLine;
+      // Allow quoted task lines (common when typing below a quoted hint block),
+      // but skip known instructional quote text.
+      if (rawLine.trimStart().startsWith(">")) {
+        const unquoted = rawLine.trimStart().replace(/^>\s?/, "");
+        const lower = unquoted.trim().toLowerCase();
+        const isInstruction =
+          lower.startsWith("drop rough ideas")
+          || lower.startsWith("move tagged tasks")
+          || lower.startsWith("agent finished")
+          || lower.startsWith("tags:");
+        if (isInstruction || !unquoted.trim()) continue;
+        line = unquoted;
       }
-      entries.push({ block: blockLines.join("\n"), text: text.replace(/\s+/g, " ").trim() });
-      continue;
-    }
 
-    if (!line.startsWith("## ") && !line.trimStart().startsWith("%%") && !line.trimStart().startsWith("```")) {
-      const blockLines = [line];
-      let text = line.trim();
-      while (i + 1 < lines.length && /^[\t ]/.test(lines[i + 1] ?? "") && !(lines[i + 1] ?? "").startsWith("- ")) {
-        i++;
-        const cont = (lines[i] ?? "").trim();
-        blockLines.push(lines[i] ?? "");
-        if (cont) text += ` ${cont}`;
+      const checkboxMatch = line.match(/^\s*-\s\[\s\]\s+(.+)$/);
+      if (checkboxMatch) {
+        const blockLines = [rawLine];
+        let text = checkboxMatch[1] ?? "";
+        while (
+          i + 1 < lines.length
+          && /^[\t ]/.test(lines[i + 1] ?? "")
+          && !(lines[i + 1] ?? "").trimStart().startsWith("- ")
+        ) {
+          i++;
+          const contRaw = lines[i] ?? "";
+          const cont = contRaw.trimStart().replace(/^>\s?/, "").trim();
+          blockLines.push(contRaw);
+          if (cont) text += ` ${cont}`;
+        }
+        entries.push({ block: blockLines.join("\n"), text: text.replace(/\s+/g, " ").trim() });
+        continue;
       }
-      if (text) entries.push({ block: blockLines.join("\n"), text: text.replace(/\s+/g, " ").trim() });
+
+      if (!line.trimStart().startsWith("## ") && !line.trimStart().startsWith("%%") && !line.trimStart().startsWith("```")) {
+        const blockLines = [rawLine];
+        let text = line.trim();
+        while (
+          i + 1 < lines.length
+          && /^[\t ]/.test(lines[i + 1] ?? "")
+          && !(lines[i + 1] ?? "").trimStart().startsWith("- ")
+        ) {
+          i++;
+          const contRaw = lines[i] ?? "";
+          const cont = contRaw.trimStart().replace(/^>\s?/, "").trim();
+          blockLines.push(contRaw);
+          if (cont) text += ` ${cont}`;
+        }
+        if (text) entries.push({ block: blockLines.join("\n"), text: text.replace(/\s+/g, " ").trim() });
+      }
     }
   }
+
   return entries;
 }
 
@@ -209,7 +237,7 @@ function enhanceTaskHeuristically(
   boardProjectId: string | undefined,
   boardProjects: string[],
 ): string | null {
-  const normalized = stripTags(rawTask).replace(/^[\-*•]\s*/, "").replace(/\s+/g, " ").trim();
+  const normalized = stripTags(rawTask).replace(/^\s*[\-*•]\s*/, "").replace(/^\s*\[\s?\]\s*/, "").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
 
   if (hasProperTags(rawTask)) {
@@ -259,20 +287,29 @@ function nudgeObsidian(boardPath: string): void {
 
 async function enhanceInbox(boardPath: string, config: OrchestratorConfig): Promise<void> {
   if (!existsSync(boardPath)) return;
-  // Skip if we wrote recently — let Obsidian settle
+  const content = readFileSync(boardPath, "utf-8");
+
+  // During guard window, ignore only our own just-written content.
+  // If user edited the file (content differs), process immediately.
   const guard = writeGuard.get(boardPath);
-  if (guard && Date.now() - guard.at < WRITE_GUARD_MS) {
+  if (guard && Date.now() - guard.at < WRITE_GUARD_MS && content === guard.content) {
     return;
   }
-  const content = readFileSync(boardPath, "utf-8");
   const entries = getInboxEntries(content);
   if (entries.length === 0) return;
 
   const boardProjectId = projectFromBoardPath(boardPath, config);
   const dirName = basename(dirname(boardPath));
-  const boardProjects = Object.entries(config.projects)
+  let boardProjects = Object.entries(config.projects)
     .filter(([key, proj]) => key === dirName || (proj as { boardDir?: string }).boardDir === dirName)
     .map(([key]) => key);
+
+  // Root workspace board isn't tied to a single project directory.
+  // Fall back to all configured projects so keyword inference can pick
+  // a real project tag instead of defaulting to #project/my-app.
+  if (boardProjects.length === 0) {
+    boardProjects = Object.keys(config.projects);
+  }
 
   let updatedContent = content;
   let anyChanged = false;
@@ -1292,14 +1329,13 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
   }
 
   async function checkBoard(boardPath: string): Promise<void> {
-    // Write guard: if we wrote recently and content changed, Obsidian wrote back
-    // Write guard: skip processing if we wrote recently (let Obsidian settle)
-    const guardCheck = writeGuard.get(boardPath);
-    if (guardCheck && Date.now() - guardCheck.at < WRITE_GUARD_MS) {
-      return; // Don't process during cooldown — avoid Obsidian write-back race
-    }
-
     if (!existsSync(boardPath)) return;
+
+    const preContent = readFileSync(boardPath, "utf-8");
+    const guardCheck = writeGuard.get(boardPath);
+    if (guardCheck && Date.now() - guardCheck.at < WRITE_GUARD_MS && preContent === guardCheck.content) {
+      return; // Ignore only our own just-written content during cooldown
+    }
 
     // Serialize: if a check is already running for this board, wait for it then skip
     const existing = boardLocks.get(boardPath);
@@ -1393,10 +1429,10 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
     try {
       let content = readFileSync(boardPath, "utf-8");
 
-      // Write guard: skip state updates during cooldown to avoid Obsidian race
+      // During guard window, ignore only our own just-written content.
       const guard = writeGuard.get(boardPath);
-      if (guard && Date.now() - guard.at < WRITE_GUARD_MS) {
-        return; // Let Obsidian settle before updating board state
+      if (guard && Date.now() - guard.at < WRITE_GUARD_MS && content === guard.content) {
+        return;
       }
       const trackedCards = getAllTrackedCards(content);
       if (trackedCards.length === 0) return;
@@ -1582,26 +1618,15 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         }
       }, 2000);
 
-      // Fallback poll in case fs.watch misses events (common on macOS with Obsidian)
+      // Fallback poll in case fs.watch misses events (common on macOS + Obsidian).
+      // Run continuously so we don't rely on file event timing quirks.
       const pollMs = watcherConfig.pollIntervalMs ?? 2000;
-      const lastMtimes = new Map<string, number>();
 
       pollInterval = setInterval(() => {
         for (const boardPath of boardPaths) {
           if (!existsSync(boardPath)) continue;
-          try {
-            const { mtimeMs } = statSync(boardPath);
-            const last = lastMtimes.get(boardPath) ?? 0;
-            if (mtimeMs > last) {
-              lastMtimes.set(boardPath, mtimeMs);
-              if (last > 0) {
-                void enhanceInbox(boardPath, config);
-                void checkBoard(boardPath);
-              }
-            }
-          } catch {
-            // File may be mid-write
-          }
+          void enhanceInbox(boardPath, config);
+          void checkBoard(boardPath);
         }
       }, pollMs);
 
@@ -1655,26 +1680,78 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
 // Helpers for discovering boards
 // ---------------------------------------------------------------------------
 
-/** Find all CONDUCTOR.md boards in the workspace. */
-export function discoverBoards(workspacePath: string): string[] {
+/** Find all CONDUCTOR.md boards in the workspace and configured project paths. */
+export function discoverBoards(workspacePath: string, config?: OrchestratorConfig): string[] {
   const boards: string[] = [];
+  const seen = new Set<string>();
+
+  const addBoard = (path: string): void => {
+    if (!existsSync(path)) return;
+    if (seen.has(path)) return;
+    seen.add(path);
+    boards.push(path);
+  };
+
+  const expandHome = (path: string): string => {
+    if (path.startsWith("~/")) {
+      const home = process.env["HOME"] ?? "";
+      return home ? join(home, path.slice(2)) : path;
+    }
+    return path;
+  };
 
   // Workspace-level board
-  const rootBoard = join(workspacePath, "CONDUCTOR.md");
-  if (existsSync(rootBoard)) boards.push(rootBoard);
+  addBoard(join(workspacePath, "CONDUCTOR.md"));
+
+  const isKanbanBoardFile = (path: string): boolean => {
+    if (!existsSync(path)) return false;
+    try {
+      const content = readFileSync(path, "utf-8");
+      return /kanban-plugin:\s*board/i.test(content);
+    } catch {
+      return false;
+    }
+  };
 
   // Project-level boards under workspace/projects/*/CONDUCTOR.md
   const projectsDir = join(workspacePath, "projects");
   if (existsSync(projectsDir)) {
     try {
       for (const entry of readdirSync(projectsDir)) {
-        const projectBoard = join(projectsDir, entry, "CONDUCTOR.md");
-        if (existsSync(projectBoard)) {
-          boards.push(projectBoard);
+        const full = join(projectsDir, entry);
+        try {
+          const stat = statSync(full);
+          if (stat.isDirectory()) {
+            addBoard(join(full, "CONDUCTOR.md"));
+          } else if (stat.isFile() && entry.toLowerCase().endsWith(".md") && isKanbanBoardFile(full)) {
+            addBoard(full);
+          }
+        } catch {
+          // Ignore entries that disappear between readdir and stat
         }
       }
     } catch {
       // Can't read projects dir
+    }
+  }
+
+  // Also watch repo-local boards from configured project.path values.
+  // This covers cases where users edit <repo>/CONDUCTOR.md directly.
+  if (config) {
+    for (const project of Object.values(config.projects)) {
+      const projectRoot = expandHome(project.path);
+      addBoard(join(projectRoot, "CONDUCTOR.md"));
+
+      // Include additional kanban markdown boards in the project root.
+      try {
+        for (const entry of readdirSync(projectRoot)) {
+          if (!entry.toLowerCase().endsWith(".md")) continue;
+          const candidate = join(projectRoot, entry);
+          if (isKanbanBoardFile(candidate)) addBoard(candidate);
+        }
+      } catch {
+        // Ignore unreadable project roots
+      }
     }
   }
 

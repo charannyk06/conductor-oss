@@ -67,6 +67,7 @@ function formatDuration(createdAt: string, lastActivityAt: string): string {
 interface CostInfo {
   inputTokens?: number;
   outputTokens?: number;
+  estimatedCostUsd?: number;
   totalUSD?: number;
 }
 
@@ -90,6 +91,7 @@ export function SessionCard({ session, onSend, onKill, onRestore }: SessionCardP
   const isRestorable = isTerminal && session.status !== "merged";
   const projectColor = getProjectColor(session.projectId);
   const cost = parseCost(session.metadata);
+  const estimatedCost = cost?.estimatedCostUsd ?? cost?.totalUSD;
   const dotColor = STATUS_DOT_COLORS[level];
 
   const handleSendMessage = async () => {
@@ -179,9 +181,9 @@ export function SessionCard({ session, onSend, onKill, onRestore }: SessionCardP
 
       {/* Row 5: Meta row (cost, duration, actions) */}
       <div className="flex items-center gap-3 border-t border-[var(--color-border-subtle)] px-4 py-2.5">
-        {cost?.totalUSD != null && (
+        {estimatedCost != null && (
           <span className="text-[10px] text-[var(--color-text-muted)] font-mono">
-            ${cost.totalUSD.toFixed(2)}
+            ${estimatedCost.toFixed(2)}
           </span>
         )}
         <span className="text-[10px] text-[var(--color-text-muted)]">
