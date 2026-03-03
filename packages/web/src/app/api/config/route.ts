@@ -52,18 +52,21 @@ export async function GET() {
       process.env["CONDUCTOR_WORKSPACE"] ??
       `${process.env["HOME"]}/.conductor/workspace`;
 
-    const projects = Object.entries(config.projects).map(([id, project]) => ({
-      id,
-      repo: (project as { repo?: string }).repo ?? null,
-      boardDir: (project as { boardDir?: string }).boardDir ?? id,
-      boardFile: resolveBoardFile(
-        workspacePath,
-        (project as { boardDir?: string }).boardDir,
-        (project as { path?: string }).path,
-      ),
-      description: (project as { description?: string }).description ?? null,
-      agent: (project as { agent?: string }).agent ?? "claude-code",
-    }));
+    const projects = Object.entries(config.projects).map(([id, project]) => {
+      const boardDir = (project as { boardDir?: string }).boardDir ?? id;
+      return {
+        id,
+        repo: (project as { repo?: string }).repo ?? null,
+        boardDir,
+        boardFile: resolveBoardFile(
+          workspacePath,
+          boardDir,
+          (project as { path?: string }).path,
+        ),
+        description: (project as { description?: string }).description ?? null,
+        agent: (project as { agent?: string }).agent ?? "claude-code",
+      };
+    });
     return NextResponse.json({ projects });
   } catch (err) {
     return NextResponse.json(
