@@ -39,6 +39,7 @@ import {
   parseChecklistPrefix,
 } from "./board-parser.js";
 import { recordWatcherAction, resolveBoardAliasesForPath } from "./board-diagnostics.js";
+import { isSupportedAgent, normalizeAgentName } from "./agent-names.js";
 
 const execFileP = promisify(execFile);
 
@@ -77,99 +78,37 @@ const FALLBACK_WATCHER_AGENTS = [
   "github-copilot",
 ] as const;
 
-const AGENT_ALIASES: Record<string, string> = {
-  claude: "claude-code",
-  cc: "claude-code",
-  "claude-code": "claude-code",
-  "claude-code-cli": "claude-code",
-  "claude code cli": "claude-code",
-  "claude code": "claude-code",
-  claude_code: "claude-code",
-  "claude-cli": "claude-code",
-  cod: "codex",
-  codex: "codex",
-  "openai-codex": "codex",
-  "openai": "codex",
-  "open-ai": "codex",
-  "open ai": "codex",
-  "openai_codex": "codex",
-  "openai-codex-cli": "codex",
-  "codex-cli": "codex",
-  codexcli: "codex",
-  gm: "gemini",
-  gem: "gemini",
-  gemini: "gemini",
-  "google-gemini": "gemini",
-  "google-gemini-cli": "gemini",
-  "google_gemini": "gemini",
-  "gemini-cli": "gemini",
-  amp: "amp",
-  "amp-cli": "amp",
-  cursor: "cursor-cli",
-  "cursor-cli": "cursor-cli",
-  "cursor-agent": "cursor-cli",
-  "cursor-agent-cli": "cursor-cli",
-  "cursorcli": "cursor-cli",
-  "cursor cli": "cursor-cli",
-  "cursor_agent": "cursor-cli",
-  cursoragent: "cursor-cli",
-  copilot: "github-copilot",
-  "github-copilot": "github-copilot",
-  "copilot-cli": "github-copilot",
-  "github-copilot-cli": "github-copilot",
-  "copilot cli": "github-copilot",
-  "gh-copilot": "github-copilot",
-  qwen: "qwen-code",
-  "qwen-code": "qwen-code",
-  "qwen code": "qwen-code",
-  "qwen_code": "qwen-code",
-  "qwen-code-cli": "qwen-code",
-  ccr: "ccr",
-  "ccr-cli": "ccr",
-  "claude-code-router": "ccr",
-  claude_code_router: "ccr",
-  "claude code router": "ccr",
-  droid: "droid",
-  opencode: "opencode",
-  open_code: "opencode",
-  "open code": "opencode",
-  "open-code": "opencode",
-  "open-code-cli": "opencode",
-};
-
-function normalizeAgentName(agent: string, supportedAgents: readonly string[]): string {
-  const requested = agent
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/_/g, "-")
-    .replace(/[^a-z0-9-]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!requested) return "";
-  const alias = AGENT_ALIASES[requested];
-  if (alias) {
-    const canonical = supportedAgents.find((name) => name.toLowerCase() === alias);
-    if (canonical) return canonical;
-    return alias;
-  }
-  const exact = supportedAgents.find((name) => name.toLowerCase() === requested);
-  if (exact) return exact;
-  const prefixed = supportedAgents.find((name) => name.toLowerCase().includes(requested));
-  if (prefixed) return prefixed;
-  return requested;
+function splitKeywords(text: string): string[] {
+  return text.toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) ?? [];
 }
 
-function isSupportedAgent(agent: string, supportedAgents: readonly string[]): boolean {
-  return supportedAgents.some((name) => name.toLowerCase() === agent.toLowerCase());
+function hasKeyword(text: string, keyword: string): boolean {
+  if (!keyword.trim()) return false;
+
+  const normalized = text.toLowerCase();
+  const tokens = splitKeywords(normalized);
+  const normalizedKeyword = keyword.toLowerCase().replace(/\s+/g, " ").trim();
+
+  if (normalizedKeyword.includes(" ")) {
+    const parts = normalizedKeyword.split(" ");
+    const window = parts.length;
+    if (window === 0) return false;
+    for (let i = 0; i + window <= tokens.length; i += 1) {
+      if (tokens.slice(i, i + window).join(" ") === normalizedKeyword) return true;
+    }
+    return false;
+  }
+
+  return tokens.includes(normalizedKeyword);
 }
 
 function resolveSupportedAgent(agent: string, supportedAgents: readonly string[]): string {
   if (!agent) return supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
   const normalized = normalizeAgentName(agent, supportedAgents);
-  return isSupportedAgent(normalized, supportedAgents)
-    ? normalized
-    : supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
+  if (!isSupportedAgent(normalized, supportedAgents)) {
+    throw new Error(`Unsupported agent: ${agent}`);
+  }
+  return normalized;
 }
 
 function uniqueAgents(values: readonly string[]): string[] {
@@ -367,7 +306,7 @@ function inferAgent(text: string, supportedAgents: readonly string[]): string {
   const geminiKeywords = ["gemini", "google", "vertex"];
   if (geminiKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("gemini", supportedAgents);
   const ampKeywords = ["amplify", "amp"];
-  if (ampKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("amp", supportedAgents);
+  if (ampKeywords.some((k) => hasKeyword(lower, k))) return resolveSupportedAgent("amp", supportedAgents);
   const cursorKeywords = ["cursor"];
   if (cursorKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("cursor-cli", supportedAgents);
   const droidKeywords = ["robot", "agentic", "android", "droid"];
@@ -416,11 +355,18 @@ function enhanceTaskHeuristically(
     const agentFromTag = parseTags(rawTask)["agent"];
     if (agentFromTag) {
       const normalizedAgent = resolveSupportedAgent(agentFromTag, supportedAgents);
-      if (normalizeAgentName(agentFromTag, supportedAgents) !== normalizeAgentName(normalizedAgent, supportedAgents)) {
-        return rawTask.replace(`#agent/${agentFromTag}`, `#agent/${normalizedAgent}`);
+      const canonicalAgent = normalizeAgentName(normalizedAgent, supportedAgents);
+      if (normalizeAgentName(agentFromTag, supportedAgents) !== canonicalAgent) {
+        rawTask = rawTask.replace(`#agent/${agentFromTag}`, `#agent/${canonicalAgent}`);
       }
+      const tags = rawTask.match(/#[\w-]+\/[\w.\-]+/g) ?? [];
+      const normalizedTags = tags.map((tag) =>
+        tag.startsWith("#agent/")
+          ? `#agent/${canonicalAgent}`
+          : tag
+      );
       if (rawTask.startsWith("- [ ] ")) return null;
-      return `- [ ] ${normalized} ${rawTask.match(/#[\w-]+\/[\w.\-]+/g)?.join(" ") ?? ""}`.trim();
+      return `- [ ] ${normalized} ${normalizedTags.join(" ")}`.trim();
     }
     if (rawTask.startsWith("- [ ] ")) return null; // no change needed
     return `- [ ] ${normalized} ${rawTask.match(/#[\w-]+\/[\w.\-]+/g)?.join(" ") ?? ""}`.trim();
@@ -634,7 +580,7 @@ function autoDetectAgent(prompt: string, supportedAgents: readonly string[]): st
   }
   const ampKeywords = ["amplify", "amp"];
   for (const kw of ampKeywords) {
-    if (lower.includes(kw)) return resolveSupportedAgent("amp", supportedAgents);
+    if (hasKeyword(lower, kw)) return resolveSupportedAgent("amp", supportedAgents);
   }
   const cursorKeywords = ["cursor"];
   for (const kw of cursorKeywords) {
