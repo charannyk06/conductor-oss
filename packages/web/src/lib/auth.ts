@@ -17,6 +17,58 @@ function parseCsv(value?: string): string[] {
     .filter(Boolean);
 }
 
+type HostParts = {
+  hostname: string;
+  port: string;
+  host: string;
+};
+
+function parseHostParts(value: string, fallbackHost?: string): HostParts | null {
+  try {
+    const url = new URL(value, fallbackHost ? `https://${fallbackHost}` : undefined);
+    const hostname = url.hostname.toLowerCase();
+    const port = url.port || "443";
+    return { hostname, port, host: `${hostname}:${port}` };
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0" || hostname === "::1" || hostname === "[::1]";
+}
+
+function equivalentHost(candidate: string, expectedHost: string): boolean {
+  if (candidate.toLowerCase() === expectedHost.toLowerCase()) return true;
+
+  const expected = parseHostParts(`https://${expectedHost}`);
+  const current = parseHostParts(`https://${candidate}`);
+  if (!expected || !current) return false;
+
+  if (expected.port !== current.port) return false;
+  if (expected.hostname === current.hostname) return true;
+
+  return isLoopbackHost(expected.hostname) && isLoopbackHost(current.hostname);
+}
+
+function getAllowedActionHosts(expectedHost: string): Set<string> {
+  const hosts = new Set<string>([expectedHost.toLowerCase()]);
+  const raw = parseCsv(process.env.CONDUCTOR_ALLOWED_ORIGINS);
+
+  for (const entry of raw) {
+    if (!entry) continue;
+    const candidate = entry.includes("://") ? entry : `https://${entry}`;
+    const parsed = parseHostParts(candidate, expectedHost);
+    if (parsed) {
+      hosts.add(parsed.host.toLowerCase());
+      continue;
+    }
+    hosts.add(entry.toLowerCase());
+  }
+
+  return hosts;
+}
+
 type ClerkUser = {
   emailAddresses: { id: string; emailAddress: string }[];
   primaryEmailAddressId: string | null;
@@ -90,18 +142,17 @@ export async function guardApiAccess(): Promise<NextResponse | null> {
   );
 }
 
-function matchesHost(value: string, expectedHost: string): boolean {
-  try {
-    const parsed = new URL(value, `https://${expectedHost}`);
-    return parsed.host === expectedHost;
-  } catch {
-    return false;
-  }
+function matchesHost(value: string, expectedHost: string, allowedHosts: Set<string>): boolean {
+  const parsed = parseHostParts(value, expectedHost);
+  if (!parsed) return false;
+  if (allowedHosts.has(parsed.host.toLowerCase())) return true;
+  return equivalentHost(parsed.host, expectedHost);
 }
 
 function guardActionOrigin(request: NextRequest): NextResponse | null {
   const expectedHost = request.nextUrl.host;
   if (!expectedHost) return null;
+  const allowedHosts = getAllowedActionHosts(expectedHost);
 
   const secFetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
   if (secFetchSite && secFetchSite !== "none" && secFetchSite !== "same-origin" && secFetchSite !== "same-site") {
@@ -114,8 +165,9 @@ function guardActionOrigin(request: NextRequest): NextResponse | null {
     );
   }
 
-  const origin = request.headers.get("origin");
-  if (origin && !matchesHost(origin, expectedHost)) {
+  const originHeader = request.headers.get("origin");
+  const origin = originHeader && originHeader !== "null" ? originHeader : null;
+  if (origin && !matchesHost(origin, expectedHost, allowedHosts)) {
     return NextResponse.json(
       {
         error: "Invalid request origin",
@@ -126,7 +178,7 @@ function guardActionOrigin(request: NextRequest): NextResponse | null {
   }
 
   const referer = request.headers.get("referer") ?? request.headers.get("referrer");
-  if (!origin && referer && !matchesHost(referer, expectedHost)) {
+  if (!origin && referer && !matchesHost(referer, expectedHost, allowedHosts)) {
     return NextResponse.json(
       {
         error: "Invalid request origin",
