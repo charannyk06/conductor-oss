@@ -11,14 +11,14 @@ export const TooltipTrigger = TooltipPrimitive.Trigger;
 export const TooltipContent = forwardRef<
   HTMLDivElement,
   ComponentPropsWithoutRef<typeof TooltipPrimitive.Content>
->(({ className, sideOffset = 6, ...props }, ref) => (
+>(({ className, sideOffset = 8, ...props }, ref) => (
   <TooltipPrimitive.Portal>
     <TooltipPrimitive.Content
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        "z-50 rounded-md border border-[#30363d] bg-[#161b22] px-2.5 py-1.5",
-        "text-[11px] text-[var(--color-text-secondary)] shadow-md",
+        "z-50 rounded-[var(--radius-xs)] border border-[var(--border-strong)] bg-[var(--bg-panel)] px-2 py-1.5",
+        "text-[11px] text-[var(--text-normal)] shadow-[var(--shadow-soft)]",
         "animate-in fade-in-0 zoom-in-95",
         className,
       )}

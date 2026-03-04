@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useTheme } from "@/components/ThemeProvider";
 
 export type AgentTileIconSeed = {
   label: string;
@@ -8,55 +9,101 @@ export type AgentTileIconSeed = {
   homepage?: string | null;
 };
 
-function normalizeAgentName(value: string): string {
+type AgentIconKey =
+  | "amp"
+  | "claude"
+  | "codex"
+  | "copilot"
+  | "cursor"
+  | "droid"
+  | "gemini"
+  | "opencode"
+  | "qwen";
+
+const AGENT_ICON_ALIASES: Record<AgentIconKey, string[]> = {
+  amp: ["amp", "amp-code", "amp-cli", "ampcode", "agent-amp"],
+  claude: [
+    "claude",
+    "claude-code",
+    "claude-cli",
+    "claudecode",
+    "ccr",
+    "claude-code-router",
+    "claude-mcp",
+    "claude-mcp-cli",
+    "claude-mcp-agent",
+    "agent-claude-code",
+  ],
+  codex: ["codex", "openai-codex", "codex-cli", "codexcli", "openai", "agent-codex"],
+  copilot: ["copilot", "github-copilot", "githubcopilot", "copilot-cli", "agent-github-copilot"],
+  cursor: ["cursor", "cursor-cli", "cursor-agent", "cursoragent", "agent-cursor-cli"],
+  droid: ["droid", "factory-droid", "factory_droid", "agent-droid"],
+  gemini: ["gemini", "gemini-cli", "google-gemini", "googlegemini", "agent-gemini"],
+  opencode: ["opencode", "open-code", "open_code", "open-code-cli", "agent-opencode"],
+  qwen: ["qwen", "qwen-code", "qwen_code", "qwen-code-cli", "agent-qwen-code"],
+};
+
+const ALIAS_TO_ICON = new Map<string, AgentIconKey>();
+for (const [iconKey, aliases] of Object.entries(AGENT_ICON_ALIASES)) {
+  for (const alias of aliases) {
+    ALIAS_TO_ICON.set(normalize(alias), iconKey as AgentIconKey);
+  }
+}
+
+function normalize(value: string): string {
   return value
     .trim()
     .toLowerCase()
-    .replace(/[^\w-]+/gu, "-")
-    .replace(/-+/gu, "-")
-    .replace(/^-+|-+$/gu, "");
-}
-
-function asSimpleIconSlug(value: string): string {
-  return normalizeAgentName(value)
-    .replace(/_/g, "-")
-    .replace(/[^a-z0-9-]+/g, "")
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/_+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
 
-function parseGithubRepo(url: string): { owner: string; name: string } | null {
+function resolveAlias(value: string): AgentIconKey | null {
+  const normalized = normalize(value);
+  if (!normalized) return null;
+
+  const direct = ALIAS_TO_ICON.get(normalized);
+  if (direct) return direct;
+
+  for (const token of normalized.split("-")) {
+    const byToken = ALIAS_TO_ICON.get(token);
+    if (byToken) return byToken;
+  }
+
+  for (const [alias, iconKey] of ALIAS_TO_ICON.entries()) {
+    if (
+      normalized === alias ||
+      normalized.startsWith(`${alias}-`) ||
+      normalized.endsWith(`-${alias}`) ||
+      normalized.includes(`-${alias}-`)
+    ) {
+      return iconKey;
+    }
+  }
+
+  return null;
+}
+
+function resolveFromUrl(value: string): AgentIconKey | null {
   try {
-    const normalized = new URL(url);
-    const parts = normalized.pathname.split("/").filter(Boolean);
-    if (parts.length < 2) return null;
-    return { owner: parts[0], name: parts[1] };
+    const parsed = new URL(value);
+    const hostKey = resolveAlias(parsed.hostname.replace(/^www\./, "").replace(/\./g, "-"));
+    if (hostKey) return hostKey;
+    return resolveAlias(parsed.pathname.replace(/\//g, "-"));
   } catch {
-    return null;
+    return resolveAlias(value);
   }
 }
 
-const BRANDED_ICON_HINTS: Record<string, string> = {
-  "claude-code": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
-  claudecode: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
-  claude: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
-  "claude code": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
-  codex: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
-  "openai-codex": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
-  "openai codex": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
-  "github-copilot": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
-  "copilot-cli": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
-  gemini: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/googlegemini.svg",
-  "google-gemini": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/googlegemini.svg",
-  amp: "https://ampcode.com/amp-mark-color.svg",
-  "amp-code": "https://ampcode.com/amp-mark-color.svg",
-  cursor: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/cursor.svg",
-  "droid-cli": "https://raw.githubusercontent.com/Factory-AI/factory/main/docs/images/droid_logo_cli.png",
-  droid: "https://raw.githubusercontent.com/Factory-AI/factory/main/docs/images/droid_logo_cli.png",
-  "claude-code-router": "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
-};
+function resolveAgentIconKey(seed: AgentTileIconSeed): AgentIconKey | null {
+  return resolveAlias(seed.label) ??
+    (seed.homepage ? resolveFromUrl(seed.homepage) : null) ??
+    (seed.iconUrl ? resolveFromUrl(seed.iconUrl) : null);
+}
 
-function getSeededColor(seed: string): string {
+function getFallbackColor(seed: string): string {
   const palette = [
     "#14b8a6",
     "#06b6d4",
@@ -76,68 +123,8 @@ function getSeededColor(seed: string): string {
   return palette[Math.abs(hash) % palette.length] ?? "#6b7280";
 }
 
-function getAgentIconUrls(seed: AgentTileIconSeed): string[] {
-  const urls: string[] = [];
-  const iconSeed = normalizeAgentName(seed.label);
-  if (!iconSeed) return [];
-
-  if (seed.iconUrl) {
-    const direct = seed.iconUrl.trim();
-    if (direct) urls.push(direct);
-  }
-
-  if (BRANDED_ICON_HINTS[iconSeed]) {
-    urls.push(BRANDED_ICON_HINTS[iconSeed]);
-  }
-
-  const simpleIconCandidates = [
-    asSimpleIconSlug(seed.label),
-    asSimpleIconSlug(iconSeed),
-    asSimpleIconSlug(iconSeed).replace(/-cli$/u, ""),
-  ];
-  const simpleIconCandidatesUnique = [...new Set(simpleIconCandidates.filter(Boolean))];
-  for (const candidate of simpleIconCandidatesUnique) {
-    urls.push(`https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${candidate}.svg`);
-  }
-
-  if (seed.homepage) {
-    try {
-      const homepage = new URL(seed.homepage);
-      const homepageOrigin = `${homepage.origin}`;
-      const repo = parseGithubRepo(seed.homepage);
-      urls.push(`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(homepageOrigin)}`);
-      urls.push(`https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(homepage.hostname)}`);
-      urls.push(`https://icons.duckduckgo.com/ip3/${encodeURIComponent(homepage.hostname)}.ico`);
-      urls.push(`https://api.faviconkit.com/${encodeURIComponent(homepage.hostname)}/64`);
-      if (repo) {
-        const owner = encodeURIComponent(repo.owner);
-        const project = encodeURIComponent(repo.name);
-        urls.push(`https://opengraph.githubassets.com/1/${owner}/${project}`);
-        const repoIconFiles = [
-          ".github/logo.png",
-          ".github/favicon.png",
-          ".github/logo.svg",
-          "assets/logo.png",
-          "assets/favicon.png",
-          "favicon.ico",
-          "public/favicon.ico",
-          "assets/favicon.ico",
-          "logo.png",
-          "favicon.png",
-          "logo.svg",
-        ];
-        urls.push(...repoIconFiles.map((file) => `https://raw.githubusercontent.com/${owner}/${project}/HEAD/${file}`));
-      }
-    } catch {
-      // ignore malformed URL values
-    }
-  }
-
-  return [...new Set(urls.filter(Boolean))];
-}
-
 function DefaultAgentIcon({ label, className }: { label: string; className: string }) {
-  const display = label
+  const initials = label
     .split(/[^a-z0-9]/iu)
     .filter(Boolean)
     .slice(0, 2)
@@ -147,10 +134,10 @@ function DefaultAgentIcon({ label, className }: { label: string; className: stri
   return (
     <span
       aria-hidden="true"
-      className={`flex shrink-0 items-center justify-center rounded-[0.2rem] text-[9px] font-semibold text-white ${className}`}
-      style={{ backgroundColor: getSeededColor(`${label}:${label.length}`) }}
+      className={`inline-flex shrink-0 items-center justify-center rounded-[0.2rem] text-[9px] font-semibold text-white ${className}`}
+      style={{ backgroundColor: getFallbackColor(`${label}:${label.length}`) }}
     >
-      {display || "AI"}
+      {initials || "AI"}
     </span>
   );
 }
@@ -162,40 +149,40 @@ export function AgentTileIcon({
   seed: AgentTileIconSeed | null | undefined;
   className?: string;
 }) {
+  const { theme } = useTheme();
+  const [failed, setFailed] = useState(false);
   const label = seed?.label?.trim() ?? "";
-  const [iconErrorIndex, setIconErrorIndex] = useState(0);
-  const [loaded, setLoaded] = useState(false);
-  const iconUrls = useMemo(() => {
-    if (!label) return [];
-    return getAgentIconUrls({ label, iconUrl: seed?.iconUrl, homepage: seed?.homepage });
-  }, [label, seed?.iconUrl, seed?.homepage]);
+
+  const { localSrc, externalSrc } = useMemo(() => {
+    if (!label) return { localSrc: null as string | null, externalSrc: null as string | null };
+    const key = resolveAgentIconKey({ label, iconUrl: seed?.iconUrl, homepage: seed?.homepage });
+    const suffix = theme === "light" ? "-light" : "-dark";
+    return {
+      localSrc: key ? `/agents/${key}${suffix}.svg` : null,
+      externalSrc: typeof seed?.iconUrl === "string" && seed.iconUrl.trim().length > 0 ? seed.iconUrl.trim() : null,
+    };
+  }, [label, seed?.homepage, seed?.iconUrl, theme]);
 
   useEffect(() => {
-    setIconErrorIndex(0);
-    setLoaded(false);
-  }, [iconUrls]);
+    setFailed(false);
+  }, [localSrc, externalSrc, label]);
 
-  useEffect(() => {
-    setLoaded(false);
-  }, [iconErrorIndex]);
+  if (!label) {
+    return <DefaultAgentIcon label="AI" className={className} />;
+  }
 
-  const shouldUseFallback = !label || !iconUrls[iconErrorIndex];
-
-  if (shouldUseFallback) {
-    return <DefaultAgentIcon label={label || "AI"} className={className} />;
+  const src = failed ? null : (localSrc ?? externalSrc);
+  if (!src) {
+    return <DefaultAgentIcon label={label} className={className} />;
   }
 
   return (
-    <span className="relative inline-flex">
-      {!loaded && <DefaultAgentIcon label={label} className={className} />}
-      <img
-        src={iconUrls[iconErrorIndex]}
-        alt={`${label} icon`}
-        loading="lazy"
-        className={`${className} shrink-0 rounded-[0.2rem] border border-[var(--color-border-subtle)] bg-white object-contain ${loaded ? "inline-flex" : "hidden"}`}
-        onError={() => setIconErrorIndex((index) => index + 1)}
-        onLoad={() => setLoaded(true)}
-      />
-    </span>
+    <img
+      src={src}
+      alt={`${label} icon`}
+      loading="lazy"
+      className={`${className} shrink-0 rounded-[0.2rem] object-contain`}
+      onError={() => setFailed(true)}
+    />
   );
 }
