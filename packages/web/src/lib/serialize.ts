@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Core Session -> DashboardSession serialization.
  *

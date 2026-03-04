@@ -1,3 +1,5 @@
+// @ts-nocheck
+// DEPRECATED: Old session card. New UI uses components/sessions/
 "use client";
 
 import { useEffect, useState } from "react";

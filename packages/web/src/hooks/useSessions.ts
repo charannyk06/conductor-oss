@@ -26,7 +26,9 @@ export function useSessions(): UseSessionsReturn {
     try {
       const res = await fetch("/api/sessions");
       if (!res.ok) throw new Error(`Failed to fetch sessions: ${res.status}`);
-      const data: Session[] = await res.json();
+      const json = await res.json();
+      // API may return { sessions: [...], stats: {...} } or a raw array
+      const data: Session[] = Array.isArray(json) ? json : (json.sessions ?? []);
       if (mountedRef.current) {
         setSessions(data);
         setError(null);
