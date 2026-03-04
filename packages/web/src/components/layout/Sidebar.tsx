@@ -1,256 +1,220 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Search, ChevronDown, ChevronRight, Settings, Bot, Cpu, PanelLeftClose } from "lucide-react";
-import type { DashboardSession } from "@/lib/types";
+import { ChevronDown, ChevronRight, Search } from "lucide-react";
+import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { cn } from "@/lib/cn";
-import { Badge } from "@/components/ui/Badge";
-import { ScrollArea } from "@/components/ui/ScrollArea";
-import { Separator } from "@/components/ui/Separator";
-import { RunningDots } from "@/components/ui/RunningDots";
-
-interface ConfigProject {
-  id: string;
-  repo: string | null;
-  iconUrl?: string | null;
-  description: string | null;
-  agent: string;
-}
+import { AgentTileIcon } from "@/components/AgentTileIcon";
 
 interface SidebarProps {
   sessions: DashboardSession[];
   selectedId: string | null;
   onSelect: (id: string) => void;
-  projects: ConfigProject[];
-  version?: string;
-  onToggleSidebar?: () => void;
+  onCreateWorkspace?: () => void;
+  showHeader?: boolean;
 }
 
-const ATTENTION_COLORS: Record<string, string> = {
-  working: "var(--color-status-working)",
-  pending: "var(--color-status-attention)",
-  review: "var(--color-accent-orange)",
-  respond: "var(--color-status-error)",
-  merge: "var(--color-status-ready)",
-  done: "var(--color-status-done)",
-};
+interface GroupConfig {
+  id: "needs_attention" | "running" | "idle";
+  title: string;
+}
+
+const GROUPS: GroupConfig[] = [
+  { id: "needs_attention", title: "Needs Attention" },
+  { id: "running", title: "Running" },
+  { id: "idle", title: "Idle" },
+];
 
 function formatAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
   const minutes = Math.floor(diffMs / 60_000);
   if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
+  if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
-  return `${days}d`;
+  return `${days}d ago`;
 }
 
-function isActiveSession(session: DashboardSession): boolean {
-  const level = getAttentionLevel(session);
-  return level !== "done";
+function classify(attention: AttentionLevel): GroupConfig["id"] {
+  if (attention === "respond" || attention === "review" || attention === "merge") return "needs_attention";
+  if (attention === "working") return "running";
+  return "idle";
 }
 
-function AgentIcon({ agent }: { agent: string }) {
-  const isCpu = agent.toLowerCase().includes("code") || agent.toLowerCase().includes("claude");
-  const Icon = isCpu ? Cpu : Bot;
-  return <Icon className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />;
+function parseCostUsd(session: DashboardSession): string | null {
+  const raw = session.metadata?.["cost"];
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as { estimatedCostUsd?: number; totalUSD?: number };
+    const value = parsed.estimatedCostUsd ?? parsed.totalUSD;
+    if (!value || value <= 0) return null;
+    return `$${value.toFixed(2)}`;
+  } catch {
+    return null;
+  }
+}
+
+function getAttentionColor(level: AttentionLevel): string {
+  if (level === "merge") return "var(--vk-green)";
+  if (level === "respond") return "var(--vk-red)";
+  if (level === "review") return "var(--vk-orange)";
+  if (level === "working") return "#4e87f3";
+  return "var(--vk-text-muted)";
 }
 
 export function Sidebar({
   sessions,
   selectedId,
   onSelect,
-  projects,
-  version,
-  onToggleSidebar,
+  onCreateWorkspace,
+  showHeader = true,
 }: SidebarProps) {
-  const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [search, setSearch] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<GroupConfig["id"], boolean>>({
+    needs_attention: false,
+    running: false,
+    idle: false,
+  });
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return sessions;
-    const q = query.toLowerCase();
-    return sessions.filter(
-      (s) =>
-        s.id.toLowerCase().includes(q) ||
-        (s.summary ?? "").toLowerCase().includes(q) ||
-        s.projectId.toLowerCase().includes(q),
-    );
-  }, [sessions, query]);
+    if (!search.trim()) return sessions;
+    const q = search.toLowerCase();
+
+    return sessions.filter((session) => {
+      const summary = session.summary ?? "";
+      return (
+        session.id.toLowerCase().includes(q) ||
+        session.projectId.toLowerCase().includes(q) ||
+        summary.toLowerCase().includes(q)
+      );
+    });
+  }, [search, sessions]);
 
   const grouped = useMemo(() => {
-    const map = new Map<string, DashboardSession[]>();
-    for (const s of filtered) {
-      const pid = s.projectId || "ungrouped";
-      const arr = map.get(pid);
-      if (arr) {
-        arr.push(s);
-      } else {
-        map.set(pid, [s]);
-      }
+    const result: Record<GroupConfig["id"], DashboardSession[]> = {
+      needs_attention: [],
+      running: [],
+      idle: [],
+    };
+
+    for (const session of filtered) {
+      result[classify(getAttentionLevel(session))].push(session);
     }
-    // Sort sessions within each group by lastActivityAt desc
-    for (const arr of map.values()) {
-      arr.sort(
+
+    for (const key of Object.keys(result) as GroupConfig["id"][]) {
+      result[key].sort(
         (a, b) =>
-          new Date(b.lastActivityAt).getTime() -
-          new Date(a.lastActivityAt).getTime(),
+          new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime(),
       );
     }
-    return map;
+
+    return result;
   }, [filtered]);
 
-  const projectMap = useMemo(() => {
-    const m = new Map<string, ConfigProject>();
-    for (const p of projects) m.set(p.id, p);
-    return m;
-  }, [projects]);
-
-  const toggleGroup = (pid: string) => {
-    setCollapsed((prev) => ({ ...prev, [pid]: !prev[pid] }));
-  };
-
   return (
-    <div className="flex h-full flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3">
-        <div className="flex items-center gap-2">
-          <span className="text-[15px] font-bold tracking-tight text-[var(--color-text-primary)]">
-            Conductor
-          </span>
-          {version && (
-            <Badge variant="outline" className="text-[10px]">
-              {version}
-            </Badge>
+    <div className="flex h-full min-h-0 flex-col">
+      {showHeader && (
+        <div className="flex h-[33px] items-center gap-1 px-2">
+          <p className="text-[16px] text-[var(--vk-text-normal)]">Workspaces</p>
+          {onCreateWorkspace && (
+            <button
+              type="button"
+              onClick={onCreateWorkspace}
+              className="ml-auto inline-flex h-5 w-5 items-center justify-center rounded-[3px] text-[var(--vk-orange)] hover:bg-[var(--vk-bg-hover)] lg:hidden"
+              aria-label="New workspace"
+            >
+              <span className="text-[14px]">+</span>
+            </button>
           )}
         </div>
-        {onToggleSidebar && (
-          <button
-            onClick={onToggleSidebar}
-            className="flex h-6 w-6 items-center justify-center rounded text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)]"
-            aria-label="Collapse sidebar"
-          >
-            <PanelLeftClose className="h-4 w-4" />
-          </button>
-        )}
-      </div>
+      )}
 
-      {/* Search */}
-      <div className="px-3 pb-2">
-        <div className="flex items-center gap-2 rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-2.5 py-1.5">
-          <Search className="h-3.5 w-3.5 shrink-0 text-[var(--color-text-muted)]" />
+      <div className={cn("flex h-[38px] items-center px-2 pb-1.5", !showHeader && "pt-1.5")}>
+        <label className="flex h-[30px] flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2">
+          <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
           <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search sessions…"
-            className="w-full bg-transparent text-[13px] text-[var(--color-text-primary)] placeholder:text-[var(--color-text-muted)] outline-none"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search..."
+            className="ml-1.5 w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
           />
-        </div>
+        </label>
       </div>
 
-      <Separator />
+      <div className="flex-1 overflow-y-auto">
+        {GROUPS.map((group) => {
+          const items = grouped[group.id];
+          const isCollapsed = collapsed[group.id];
 
-      {/* Session list */}
-      <ScrollArea className="flex-1">
-        <div className="py-1">
-          {grouped.size === 0 && (
-            <p className="px-4 py-8 text-center text-[12px] text-[var(--color-text-muted)]">
-              No sessions found
-            </p>
-          )}
-          {[...grouped.entries()].map(([pid, groupSessions]) => {
-            const isCollapsed = collapsed[pid] ?? false;
-            const project = projectMap.get(pid);
-            const label = project?.id ?? pid;
-            const activeCount = groupSessions.filter(isActiveSession).length;
+          return (
+            <section key={group.id} className="pt-1">
+              <button
+                type="button"
+                className="flex h-8 w-full items-center px-2 text-left"
+                onClick={() => setCollapsed((prev) => ({ ...prev, [group.id]: !prev[group.id] }))}
+              >
+                <span className="text-[16px] text-[var(--vk-text-normal)]">{group.title}</span>
+                <span className="ml-auto text-[var(--vk-text-muted)]">
+                  {isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                </span>
+              </button>
 
-            return (
-              <div key={pid}>
-                {/* Group header */}
-                <button
-                  onClick={() => toggleGroup(pid)}
-                  className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]"
-                >
-                  {isCollapsed ? (
-                    <ChevronRight className="h-3 w-3" />
-                  ) : (
-                    <ChevronDown className="h-3 w-3" />
+              {!isCollapsed && (
+                <div>
+                  {items.length === 0 && (
+                    <p className="px-2 py-1 text-[14px] text-[var(--vk-text-muted)]">No workspaces</p>
                   )}
-                  <span className="truncate">{label}</span>
-                  {activeCount > 0 && (
-                    <span className="ml-auto text-[10px] tabular-nums text-[var(--color-text-muted)]">
-                      {activeCount}
-                    </span>
-                  )}
-                </button>
-
-                {/* Session items */}
-                {!isCollapsed &&
-                  groupSessions.map((session) => {
-                    const attention = getAttentionLevel(session);
+                  {items.map((session) => {
+                    const level = getAttentionLevel(session);
+                    const cost = parseCostUsd(session);
                     const isSelected = session.id === selectedId;
-                    const isRunning = attention === "working";
-                    const dotColor = ATTENTION_COLORS[attention] ?? "var(--color-text-muted)";
-                    const agentName = session.metadata["agent"] ?? "";
+                    const agentName = session.metadata["agent"]?.trim() ?? "";
 
                     return (
                       <button
                         key={session.id}
+                        type="button"
                         onClick={() => onSelect(session.id)}
                         className={cn(
-                          "flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors",
-                          isSelected
-                            ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]"
-                            : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)]/50",
+                          "group flex w-full flex-col px-2 py-1 text-left",
+                          isSelected ? "bg-[var(--vk-bg-hover)]" : "hover:bg-[var(--vk-bg-hover)]",
                         )}
                       >
-                        {/* Status dot */}
-                        <span
-                          className={cn(
-                            "h-2 w-2 shrink-0 rounded-full",
-                            isRunning && "animate-pulse",
-                          )}
-                          style={{ background: dotColor }}
-                        />
-
-                        {/* Name + running dots */}
-                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span className="flex items-center gap-1.5">
-                            <span className="truncate text-[13px]">
-                              {session.summary ?? session.id.slice(0, 8)}
+                        <div className="flex items-center gap-2">
+                          <AgentTileIcon
+                            seed={{ label: agentName || "agent" }}
+                            className="h-4 w-4"
+                          />
+                          <p className="truncate text-[14px] text-[var(--vk-text-normal)]">
+                            {session.summary ?? session.id}
+                          </p>
+                        </div>
+                        <div className="mt-0.5 flex items-center gap-1 text-[14px]">
+                          <span className="text-[var(--vk-text-muted)]">{formatAge(session.lastActivityAt)}</span>
+                          {agentName && (
+                            <span className="truncate text-[11px] text-[var(--vk-text-muted)]">
+                              {agentName}
                             </span>
-                            {isRunning && <RunningDots className="shrink-0" />}
-                          </span>
-                        </span>
-
-                        {/* Agent icon + time */}
-                        <div className="flex shrink-0 items-center gap-1.5">
-                          {agentName && <AgentIcon agent={agentName} />}
-                          <span className="text-[11px] tabular-nums text-[var(--color-text-muted)]">
-                            {formatAge(session.lastActivityAt)}
-                          </span>
+                          )}
+                          {cost && (
+                            <span className="ml-auto text-[11px]" style={{ color: getAttentionColor(level) }}>
+                              {cost}
+                            </span>
+                          )}
                         </div>
                       </button>
                     );
                   })}
-              </div>
-            );
-          })}
-        </div>
-      </ScrollArea>
-
-      <Separator />
-
-      {/* Footer */}
-      <div className="flex items-center gap-2 px-4 py-2.5">
-        <button className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-muted)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-secondary)]">
-          <Settings className="h-4 w-4" />
-        </button>
-        <span className="text-[11px] text-[var(--color-text-muted)]">Settings</span>
+                </div>
+              )}
+            </section>
+          );
+        })}
       </div>
+
     </div>
   );
 }
