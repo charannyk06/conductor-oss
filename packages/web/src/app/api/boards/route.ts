@@ -61,15 +61,19 @@ function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-function findNearestExistingAncestor(candidatePath: string): string {
+function findNearestExistingAncestor(rootPath: string, candidatePath: string): string | null {
+  const normalizedRoot = resolve(rootPath);
   let current = resolve(candidatePath);
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+
+  while (isPathInsideRoot(normalizedRoot, current)) {
     if (existsSync(current)) return current;
+
     const parent = dirname(current);
-    if (parent === current) return current;
+    if (parent === current) break;
     current = parent;
   }
+
+  return null;
 }
 
 /**
@@ -87,7 +91,8 @@ function resolveWorkspaceBoardPath(workspacePath: string, candidatePath: string)
   const resolvedCandidate = resolve(candidatePath);
   if (!isPathInsideRoot(workspaceRoot, resolvedCandidate)) return null;
 
-  const existingAncestor = findNearestExistingAncestor(resolvedCandidate);
+  const existingAncestor = findNearestExistingAncestor(workspaceRoot, resolvedCandidate);
+  if (!existingAncestor) return null;
   let canonicalAncestor = existingAncestor;
   try {
     canonicalAncestor = realpathSync(existingAncestor);
