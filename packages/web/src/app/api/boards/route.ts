@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createHash } from "node:crypto";
-import { dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -40,6 +40,8 @@ type BoardColumn = {
 
 const BOARD_ROLE_ORDER: BoardRole[] = ["intake", "ready", "dispatching", "inProgress", "review", "done", "blocked"];
 const PRIMARY_BOARD_ROLES: BoardRole[] = ["intake", "inProgress", "review", "done"];
+type ProjectConfig = OrchestratorConfig["projects"][string];
+type ProjectEntry = { id: string; project: ProjectConfig };
 
 function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -64,23 +66,63 @@ function constrainToWorkspacePath(workspacePath: string, candidatePath: string):
   return candidate;
 }
 
-function projectDirectorySegment(projectId: string): string {
-  const normalized = projectId
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
+function normalizeToken(value: string): string {
+  const input = value.trim().toLowerCase();
+  let output = "";
+  let prevDash = false;
+
+  for (const char of input) {
+    const code = char.charCodeAt(0);
+    const isDigit = code >= 48 && code <= 57;
+    const isLowerAlpha = code >= 97 && code <= 122;
+    const isSafeLiteral = char === "." || char === "_" || isDigit || isLowerAlpha;
+
+    if (isSafeLiteral) {
+      output += char;
+      prevDash = false;
+      continue;
+    }
+
+    if (!prevDash && output.length > 0) {
+      output += "-";
+      prevDash = true;
+    }
+  }
+
+  while (output.endsWith("-")) {
+    output = output.slice(0, -1);
+  }
+
+  return output;
+}
+
+function lastPathSegment(value: string): string {
+  const normalized = value.replaceAll("\\", "/");
+  const segments = normalized.split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? "";
+}
+
+function projectDirectorySegment(projectEntry: ProjectEntry): string {
+  const configuredBoardDir = typeof projectEntry.project.boardDir === "string"
+    ? lastPathSegment(projectEntry.project.boardDir)
+    : "";
+  const pathBase = lastPathSegment(basename(projectEntry.project.path));
+  const rawSegment = configuredBoardDir || pathBase || projectEntry.id;
+  const normalized = normalizeToken(rawSegment);
   return normalized || "project";
 }
 
 function normalizeTag(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  return normalizeToken(value);
+}
+
+function findProjectEntry(config: OrchestratorConfig, requestedProjectId: string): ProjectEntry | null {
+  for (const [id, project] of Object.entries(config.projects)) {
+    if (id === requestedProjectId) {
+      return { id, project };
+    }
+  }
+  return null;
 }
 
 function resolveWorkspacePath(config: OrchestratorConfig): string {
@@ -95,11 +137,11 @@ function resolveWorkspacePath(config: OrchestratorConfig): string {
   return resolve(process.cwd());
 }
 
-function resolveProjectBoardPath(config: OrchestratorConfig, projectId: string, workspacePath: string): string {
+function resolveProjectBoardPath(config: OrchestratorConfig, projectEntry: ProjectEntry, workspacePath: string): string {
   const workspaceRoot = resolve(workspacePath);
   const boards = discoverBoards(workspaceRoot, config.boards?.length ? config.boards : config);
   const boardMap = buildBoardProjectMap(boards, config);
-  const mappedPath = boards.find((path) => boardMap.get(path) === projectId);
+  const mappedPath = boards.find((path) => boardMap.get(path) === projectEntry.id);
   if (mappedPath) {
     const safeMappedPath = constrainToWorkspacePath(workspaceRoot, mappedPath);
     if (existsSync(safeMappedPath)) return safeMappedPath;
@@ -107,7 +149,7 @@ function resolveProjectBoardPath(config: OrchestratorConfig, projectId: string, 
 
   // Only use a sanitized project-id segment for new board path creation.
   // Existing custom board files are still handled above via board discovery mapping.
-  const fallbackSegment = projectDirectorySegment(projectId);
+  const fallbackSegment = projectDirectorySegment(projectEntry);
 
   const preferredProjectBoard = constrainToWorkspacePath(
     workspaceRoot,
@@ -149,10 +191,10 @@ function buildStarterBoard(projectId: string, headings: Record<BoardRole, string
 
 async function readOrInitializeBoard(
   config: OrchestratorConfig,
-  projectId: string,
+  projectEntry: ProjectEntry,
   workspacePath: string,
 ): Promise<{ boardPath: string; content: string; columnsByRole: Record<BoardRole, string> }> {
-  const unresolvedBoardPath = resolveProjectBoardPath(config, projectId, workspacePath);
+  const unresolvedBoardPath = resolveProjectBoardPath(config, projectEntry, workspacePath);
   const boardPath = constrainToWorkspacePath(workspacePath, unresolvedBoardPath);
   const aliases = resolveBoardAliasesForPath(config, workspacePath, boardPath);
 
@@ -168,7 +210,7 @@ async function readOrInitializeBoard(
       done: aliases.done[0] ?? "Done",
       blocked: aliases.blocked[0] ?? "Blocked",
     };
-    content = buildStarterBoard(projectId, headings);
+    content = buildStarterBoard(projectEntry.id, headings);
     await writeFile(boardPath, content, "utf8");
   } else {
     content = await readFile(boardPath, "utf8");
@@ -290,16 +332,22 @@ export async function GET(request: NextRequest) {
 
   try {
     const { config } = await getServices();
-    if (!config.projects[projectId]) {
+    const projectEntry = findProjectEntry(config, projectId);
+    if (!projectEntry) {
       return NextResponse.json({ error: `Unknown project: ${projectId}` }, { status: 404 });
     }
+    const canonicalProjectId = projectEntry.id;
 
     const workspacePath = resolveWorkspacePath(config);
-    const { boardPath, content, columnsByRole } = await readOrInitializeBoard(config, projectId, workspacePath);
+    const { boardPath, content, columnsByRole } = await readOrInitializeBoard(
+      config,
+      projectEntry,
+      workspacePath,
+    );
     const columns = parseColumns(content, columnsByRole);
 
     return NextResponse.json({
-      projectId,
+      projectId: canonicalProjectId,
       boardPath,
       workspacePath,
       columns,
@@ -353,17 +401,23 @@ export async function POST(request: NextRequest) {
 
   try {
     const { config } = await getServices();
-    if (!config.projects[projectId]) {
+    const projectEntry = findProjectEntry(config, projectId);
+    if (!projectEntry) {
       return NextResponse.json({ error: `Unknown project: ${projectId}` }, { status: 404 });
     }
+    const canonicalProjectId = projectEntry.id;
 
     const workspacePath = resolveWorkspacePath(config);
-    const { boardPath, content, columnsByRole } = await readOrInitializeBoard(config, projectId, workspacePath);
+    const { boardPath, content, columnsByRole } = await readOrInitializeBoard(
+      config,
+      projectEntry,
+      workspacePath,
+    );
     const heading = columnsByRole[role];
     const line = buildTaskLine({
       title,
       description,
-      projectId,
+      projectId: canonicalProjectId,
       agent,
       type,
       priority,
@@ -374,7 +428,7 @@ export async function POST(request: NextRequest) {
 
     const columns = parseColumns(updated, columnsByRole);
     return NextResponse.json({
-      projectId,
+      projectId: canonicalProjectId,
       boardPath,
       columns,
       primaryRoles: PRIMARY_BOARD_ROLES,
