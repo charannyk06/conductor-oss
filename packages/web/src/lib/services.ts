@@ -20,6 +20,26 @@ export interface Services {
   sessionManager: SessionManager;
 }
 
+const BUILTIN_PLUGIN_IMPORTS: Record<string, () => Promise<unknown>> = {
+  "@conductor-oss/plugin-runtime-tmux": () => import("@conductor-oss/plugin-runtime-tmux"),
+  "@conductor-oss/plugin-agent-claude-code": () => import("@conductor-oss/plugin-agent-claude-code"),
+  "@conductor-oss/plugin-agent-codex": () => import("@conductor-oss/plugin-agent-codex"),
+  "@conductor-oss/plugin-agent-gemini": () => import("@conductor-oss/plugin-agent-gemini"),
+  "@conductor-oss/plugin-agent-amp": () => import("@conductor-oss/plugin-agent-amp"),
+  "@conductor-oss/plugin-agent-cursor-cli": () => import("@conductor-oss/plugin-agent-cursor-cli"),
+  "@conductor-oss/plugin-agent-opencode": () => import("@conductor-oss/plugin-agent-opencode"),
+  "@conductor-oss/plugin-agent-droid": () => import("@conductor-oss/plugin-agent-droid"),
+  "@conductor-oss/plugin-agent-qwen-code": () => import("@conductor-oss/plugin-agent-qwen-code"),
+  "@conductor-oss/plugin-agent-ccr": () => import("@conductor-oss/plugin-agent-ccr"),
+  "@conductor-oss/plugin-agent-github-copilot": () => import("@conductor-oss/plugin-agent-github-copilot"),
+  "@conductor-oss/plugin-workspace-worktree": () => import("@conductor-oss/plugin-workspace-worktree"),
+  "@conductor-oss/plugin-tracker-github": () => import("@conductor-oss/plugin-tracker-github"),
+  "@conductor-oss/plugin-scm-github": () => import("@conductor-oss/plugin-scm-github"),
+  "@conductor-oss/plugin-notifier-desktop": () => import("@conductor-oss/plugin-notifier-desktop"),
+  "@conductor-oss/plugin-notifier-discord": () => import("@conductor-oss/plugin-notifier-discord"),
+  "@conductor-oss/plugin-terminal-web": () => import("@conductor-oss/plugin-terminal-web"),
+};
+
 // Cache in globalThis for Next.js HMR stability
 const globalForServices = globalThis as typeof globalThis & {
   _conductorServices?: Services;
@@ -216,6 +236,10 @@ function clearCachedServices(reason = "stale config"): void {
   console.info(`[conductor:web] service cache reset (${reason})`);
 }
 
+export function invalidateServicesCache(reason = "manual invalidation"): void {
+  clearCachedServices(reason);
+}
+
 /** Get (or lazily initialize) the core services singleton. */
 export function getServices(): Promise<Services> {
   const configState = getConfigStateFromEnv();
@@ -274,7 +298,11 @@ async function initServices(): Promise<Services> {
 
   // Load built-in plugins with config for proper initialization
   if (typeof registry.loadBuiltins === "function") {
-    await registry.loadBuiltins(config);
+    await registry.loadBuiltins(config, async (pkg) => {
+      const importer = BUILTIN_PLUGIN_IMPORTS[pkg];
+      if (importer) return importer();
+      return import(pkg);
+    });
   }
 
   const sessionManager = createSessionManager({ config, registry });
