@@ -157,6 +157,21 @@ export function registerStart(program: Command): void {
               return;
             }
 
+            // Kill any stale process holding the dashboard port (prevents EADDRINUSE on restart)
+            try {
+              const { execSync } = await import("node:child_process");
+              const pids = execSync(`lsof -ti :${port} -sTCP:LISTEN 2>/dev/null`, { encoding: "utf8" }).trim();
+              if (pids) {
+                for (const pid of pids.split("\n").filter(Boolean)) {
+                  if (pid !== String(process.pid)) {
+                    process.kill(Number(pid), "SIGTERM");
+                    console.log(`[dashboard] Killed stale process ${pid} on port ${port}`);
+                  }
+                }
+                await new Promise(r => setTimeout(r, 1000));
+              }
+            } catch { /* no stale process — expected */ }
+
             // Prefer standalone build (output: standalone in next.config), then production, then dev
             // Find standalone server.js (location varies by monorepo nesting)
             const { readdirSync, statSync: fsStat } = await import("node:fs");

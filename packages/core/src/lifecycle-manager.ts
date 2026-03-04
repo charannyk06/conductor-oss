@@ -418,6 +418,21 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       return; // Still in spawn grace period — skip
     }
 
+    // Max spawn timeout: if a session has been "spawning" for over 10 minutes
+    // without transitioning to "working", it's a zombie — auto-terminate it.
+    const SPAWN_TIMEOUT_MS = 600_000; // 10 minutes
+    if (session.status === "spawning" && effectiveAge > SPAWN_TIMEOUT_MS) {
+      console.log(`[lifecycle] ${session.id}: spawn timeout (${Math.round(effectiveAge / 60_000)}m) — terminating zombie session`);
+      updateSessionStatus(session, "killed");
+      state.lastStatus = "killed";
+      await emit(createEvent("session.exited", "urgent", session, `Session ${session.id} killed — spawn timeout after ${Math.round(effectiveAge / 60_000)}m`));
+      const rt = getRuntime(project);
+      if (session.runtimeHandle && rt) {
+        try { await rt.destroy(session.runtimeHandle); } catch { /* best-effort */ }
+      }
+      return;
+    }
+
     // Detect exited sessions — agent process is no longer running.
     // If the session was actively working (not just spawning), treat as
     // normal completion ("done") rather than a crash ("killed").
