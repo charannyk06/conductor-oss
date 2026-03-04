@@ -1,61 +1,86 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
-import type { Terminal as XTerminal } from "@xterm/xterm";
+import { useEffect, useRef } from "react";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
+import type { ITerminalOptions, Terminal as XTerminal } from "@xterm/xterm";
+import { useSessionOutputStream } from "@/hooks/useSessionOutputStream";
 
 interface TerminalViewProps {
   sessionId: string;
+}
+
+function getTerminalTheme(): NonNullable<ITerminalOptions["theme"]> {
+  const isLight = document.documentElement.classList.contains("light");
+
+  if (isLight) {
+    return {
+      background: "#f8fbff",
+      foreground: "#1f2a3a",
+      cursor: "#ea580c",
+      selectionBackground: "rgba(234,88,12,0.25)",
+      black: "#4b5563",
+      red: "#dc2626",
+      green: "#15803d",
+      yellow: "#b45309",
+      blue: "#2563eb",
+      magenta: "#7e22ce",
+      cyan: "#0e7490",
+      white: "#334155",
+      brightBlack: "#64748b",
+      brightRed: "#ef4444",
+      brightGreen: "#22c55e",
+      brightYellow: "#f59e0b",
+      brightBlue: "#3b82f6",
+      brightMagenta: "#a855f7",
+      brightCyan: "#06b6d4",
+      brightWhite: "#0f172a",
+    };
+  }
+
+  return {
+    background: "#0a0f16",
+    foreground: "#d0d8e5",
+    cursor: "#f97316",
+    selectionBackground: "rgba(249,115,22,0.26)",
+    black: "#1f2937",
+    red: "#ef4444",
+    green: "#22c55e",
+    yellow: "#f59e0b",
+    blue: "#38bdf8",
+    magenta: "#c084fc",
+    cyan: "#06b6d4",
+    white: "#cbd5e1",
+    brightBlack: "#475569",
+    brightRed: "#f87171",
+    brightGreen: "#4ade80",
+    brightYellow: "#fbbf24",
+    brightBlue: "#7dd3fc",
+    brightMagenta: "#e9d5ff",
+    brightCyan: "#67e8f9",
+    brightWhite: "#f8fafc",
+  };
 }
 
 export function TerminalView({ sessionId }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerminal | null>(null);
   const fitRef = useRef<XFitAddon | null>(null);
-  const lastOutputRef = useRef<string>("");
-  const [connected, setConnected] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const lastRenderedOutputRef = useRef<string>("");
 
-  const fetchOutput = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/output?lines=500`);
-      if (!res.ok) {
-        const data = (await res.json()) as { error?: string };
-        throw new Error(data.error ?? `HTTP ${res.status}`);
-      }
-      const data = (await res.json()) as { output: string };
-      setConnected(true);
-      setError(null);
-
-      if (data.output !== lastOutputRef.current && termRef.current) {
-        lastOutputRef.current = data.output;
-        const term = termRef.current;
-        term.reset();
-        // Write all output at once — xterm handles ANSI codes, \r\n for line breaks
-        const normalized = data.output.replace(/\r?\n/g, "\r\n");
-        term.write(normalized, () => {
-          // Scroll after write completes (xterm callback)
-          term.scrollToBottom();
-          fitRef.current?.fit();
-        });
-      }
-    } catch (err) {
-      setConnected(false);
-      setError(err instanceof Error ? err.message : "Connection lost");
-    }
-  }, [sessionId]);
+  const { output, connected, error } = useSessionOutputStream(sessionId, {
+    lines: 1200,
+    pollIntervalMs: 1300,
+  });
 
   useEffect(() => {
     let term: XTerminal | null = null;
     let fit: XFitAddon | null = null;
-    let interval: ReturnType<typeof setInterval> | null = null;
     let resizeObserver: ResizeObserver | null = null;
     let mounted = true;
 
     async function init() {
       if (!containerRef.current || !mounted) return;
 
-      // Dynamic import to avoid SSR issues
       const [xtermMod, fitMod] = await Promise.all([
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
@@ -69,32 +94,11 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
         cursorStyle: "underline",
         disableStdin: true,
         scrollback: 5000,
-        fontSize: isMobile ? 11 : 13,
-        fontFamily: "'JetBrains Mono', 'SF Mono', 'Menlo', monospace",
-        lineHeight: 1.2,
+        fontSize: isMobile ? 11 : 12,
+        fontFamily: "'IBM Plex Mono', 'JetBrains Mono', 'SF Mono', monospace",
+        lineHeight: 1.25,
         convertEol: true,
-        theme: {
-          background: "#0d1117",
-          foreground: "#c9d1d9",
-          cursor: "#58a6ff",
-          selectionBackground: "rgba(88,166,255,0.3)",
-          black: "#484f58",
-          red: "#f85149",
-          green: "#3fb950",
-          yellow: "#d29922",
-          blue: "#58a6ff",
-          magenta: "#a371f7",
-          cyan: "#56d4dd",
-          white: "#c9d1d9",
-          brightBlack: "#6e7681",
-          brightRed: "#ffa198",
-          brightGreen: "#56d364",
-          brightYellow: "#e3b341",
-          brightBlue: "#79c0ff",
-          brightMagenta: "#d2a8ff",
-          brightCyan: "#76e3ea",
-          brightWhite: "#f0f6fc",
-        },
+        theme: getTerminalTheme(),
       });
 
       fit = new fitMod.FitAddon();
@@ -105,66 +109,76 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
       termRef.current = term;
       fitRef.current = fit;
 
-      // Handle resize
       resizeObserver = new ResizeObserver(() => {
-        if (fit && mounted) {
-          try {
-            fit.fit();
-          } catch {
-            // Container might not be visible
-          }
+        if (!fit || !mounted) return;
+        try {
+          fit.fit();
+        } catch {
+          // Container may be hidden while switching tabs.
         }
       });
+
       resizeObserver.observe(containerRef.current);
-
-      // Initial fetch
-      await fetchOutput();
-
-      // Poll every 1s
-      interval = setInterval(() => {
-        if (mounted) void fetchOutput();
-      }, 1000);
     }
 
     void init();
 
     return () => {
       mounted = false;
-      if (interval) clearInterval(interval);
       if (resizeObserver) resizeObserver.disconnect();
       if (term) term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      lastRenderedOutputRef.current = "";
     };
-  }, [sessionId, fetchOutput]);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!termRef.current) return;
+    if (output === lastRenderedOutputRef.current) return;
+
+    lastRenderedOutputRef.current = output;
+    const term = termRef.current;
+    term.reset();
+
+    const normalized = output.replace(/\r?\n/g, "\r\n");
+    term.write(normalized, () => {
+      term.scrollToBottom();
+      fitRef.current?.fit();
+    });
+  }, [output]);
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Status bar */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[var(--color-border-default)] bg-[var(--color-bg-subtle)]">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center gap-2 border-b border-[var(--border-soft)] bg-[var(--bg-panel)] px-3 py-1.5">
         <div
-          className={`w-2 h-2 rounded-full ${
+          className={`h-2 w-2 rounded-full ${
             connected
-              ? "bg-[var(--color-status-ready)]"
+              ? "bg-[var(--status-ready)]"
               : error
-                ? "bg-[var(--color-status-error)] animate-pulse"
-                : "bg-[var(--color-text-muted)]"
+                ? "bg-[var(--status-error)] animate-pulse"
+                : "bg-[var(--text-faint)]"
           }`}
         />
-        <span className={`text-xs ${connected ? "text-[var(--color-status-ready)]" : error ? "text-[var(--color-status-error)]" : "text-[var(--color-text-muted)]"}`}>
-          {connected ? "Live" : error?.includes("not found") || error?.includes("404") ? "No terminal — session ended" : error ?? "Connecting..."}
+        <span
+          className={`text-[11px] ${
+            connected
+              ? "text-[var(--status-ready)]"
+              : error
+                ? "text-[var(--status-error)]"
+                : "text-[var(--text-faint)]"
+          }`}
+        >
+          {connected
+            ? "Live"
+            : error?.includes("not found") || error?.includes("404")
+              ? "No terminal (session ended)"
+              : error ?? "Connecting"}
         </span>
-        <span className="text-xs text-[var(--color-text-muted)] ml-auto font-mono">
-          {sessionId}
-        </span>
+        <span className="ml-auto truncate font-mono text-[10px] text-[var(--text-faint)]">{sessionId}</span>
       </div>
 
-      {/* Terminal container */}
-      <div
-        ref={containerRef}
-        className="flex-1 min-h-0 overflow-hidden"
-        style={{ padding: "8px 4px", minHeight: 0, height: "100%" }}
-      />
+      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden px-1 py-2" />
     </div>
   );
 }

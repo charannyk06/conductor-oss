@@ -1,34 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-
-interface SessionDetail {
-  id: string;
-  status: string;
-  agent: string;
-  output: string;
-  createdAt: string;
-  [key: string]: unknown;
-}
+import type { DashboardSession } from "@/lib/types";
 
 interface UseSessionReturn {
-  session: SessionDetail | null;
+  session: DashboardSession | null;
   loading: boolean;
   error: string | null;
 }
 
 export function useSession(id: string): UseSessionReturn {
-  const [session, setSession] = useState<SessionDetail | null>(null);
+  const [session, setSession] = useState<DashboardSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const notFoundRef = useRef(false);
 
   const fetchSession = useCallback(async () => {
-    if (!id) return;
+    if (!id || notFoundRef.current) return;
     try {
-      const res = await fetch(`/api/sessions/${id}`);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
+      if (res.status === 404) {
+        if (!mountedRef.current) return;
+        notFoundRef.current = true;
+        setSession(null);
+        setError(null);
+        return;
+      }
       if (!res.ok) throw new Error(`Failed to fetch session: ${res.status}`);
-      const data: SessionDetail = await res.json();
+      const data: DashboardSession = await res.json();
       if (mountedRef.current) {
         setSession(data);
         setError(null);
@@ -42,6 +42,7 @@ export function useSession(id: string): UseSessionReturn {
 
   useEffect(() => {
     mountedRef.current = true;
+    notFoundRef.current = false;
     fetchSession();
     const interval = setInterval(fetchSession, 2000);
     return () => {
