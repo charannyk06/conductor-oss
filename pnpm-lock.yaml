@@ -374,6 +374,57 @@ importers:
       '@conductor-oss/core':
         specifier: workspace:*
         version: link:../core
+      '@conductor-oss/plugin-agent-amp':
+        specifier: workspace:*
+        version: link:../plugins/agent-amp
+      '@conductor-oss/plugin-agent-ccr':
+        specifier: workspace:*
+        version: link:../plugins/agent-ccr
+      '@conductor-oss/plugin-agent-claude-code':
+        specifier: workspace:*
+        version: link:../plugins/agent-claude-code
+      '@conductor-oss/plugin-agent-codex':
+        specifier: workspace:*
+        version: link:../plugins/agent-codex
+      '@conductor-oss/plugin-agent-cursor-cli':
+        specifier: workspace:*
+        version: link:../plugins/agent-cursor-cli
+      '@conductor-oss/plugin-agent-droid':
+        specifier: workspace:*
+        version: link:../plugins/agent-droid
+      '@conductor-oss/plugin-agent-gemini':
+        specifier: workspace:*
+        version: link:../plugins/agent-gemini
+      '@conductor-oss/plugin-agent-github-copilot':
+        specifier: workspace:*
+        version: link:../plugins/agent-github-copilot
+      '@conductor-oss/plugin-agent-opencode':
+        specifier: workspace:*
+        version: link:../plugins/agent-opencode
+      '@conductor-oss/plugin-agent-qwen-code':
+        specifier: workspace:*
+        version: link:../plugins/agent-qwen-code
+      '@conductor-oss/plugin-notifier-desktop':
+        specifier: workspace:*
+        version: link:../plugins/notifier-desktop
+      '@conductor-oss/plugin-notifier-discord':
+        specifier: workspace:*
+        version: link:../plugins/notifier-discord
+      '@conductor-oss/plugin-runtime-tmux':
+        specifier: workspace:*
+        version: link:../plugins/runtime-tmux
+      '@conductor-oss/plugin-scm-github':
+        specifier: workspace:*
+        version: link:../plugins/scm-github
+      '@conductor-oss/plugin-terminal-web':
+        specifier: workspace:*
+        version: link:../plugins/terminal-web
+      '@conductor-oss/plugin-tracker-github':
+        specifier: workspace:*
+        version: link:../plugins/tracker-github
+      '@conductor-oss/plugin-workspace-worktree':
+        specifier: workspace:*
+        version: link:../plugins/workspace-worktree
       '@radix-ui/react-dialog':
         specifier: ^1.1.15
         version: 1.1.15(@types/react-dom@19.2.3)(@types/react@19.2.14)(react-dom@19.2.4)(react@19.2.4)
@@ -422,6 +473,9 @@ importers:
       tailwind-merge:
         specifier: ^3.5.0
         version: 3.5.0
+      yaml:
+        specifier: ^2.8.2
+        version: 2.8.2
     devDependencies:
       '@tailwindcss/postcss':
         specifier: ^4.2.1

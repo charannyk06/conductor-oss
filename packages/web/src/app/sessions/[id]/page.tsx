@@ -9,13 +9,13 @@ export default function SessionPage() {
   if (!params.id) {
     return (
       <div className="flex h-screen items-center justify-center">
-        <span className="text-[13px] text-[var(--color-text-muted)]">No session ID provided</span>
+        <span className="text-[13px] text-[var(--text-muted)]">No session ID provided</span>
       </div>
     );
   }
 
   return (
-    <div className="h-screen bg-[var(--color-bg-base)]">
+    <div className="h-screen bg-[var(--bg-canvas)] p-2">
       <SessionDetail sessionId={params.id} />
     </div>
   );

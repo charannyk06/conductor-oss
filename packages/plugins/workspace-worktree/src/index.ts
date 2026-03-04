@@ -82,20 +82,22 @@ export function create(config?: Record<string, unknown>): Workspace {
       }
 
       const baseBranch = (cfg as WorkspaceCreateConfig & { baseBranch?: string }).baseBranch;
-      let baseRef = `origin/${cfg.project.defaultBranch}`;
-      if (baseBranch && baseBranch.trim()) {
-        const requested = baseBranch.trim();
+      const requestedBranch = baseBranch?.trim() || cfg.project.defaultBranch;
+      const candidates = [
+        `origin/${requestedBranch}`,
+        requestedBranch,
+        `origin/${cfg.project.defaultBranch}`,
+        cfg.project.defaultBranch,
+      ];
+
+      let baseRef = "HEAD";
+      for (const candidate of candidates) {
         try {
-          await git(repoPath, "rev-parse", "--verify", `origin/${requested}`);
-          baseRef = `origin/${requested}`;
+          await git(repoPath, "rev-parse", "--verify", candidate);
+          baseRef = candidate;
+          break;
         } catch {
-          try {
-            await git(repoPath, "rev-parse", "--verify", requested);
-            baseRef = requested;
-          } catch {
-            // Fallback to project default branch when requested base does not exist.
-            baseRef = `origin/${cfg.project.defaultBranch}`;
-          }
+          // Try the next candidate.
         }
       }
 

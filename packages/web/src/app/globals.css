@@ -2,294 +2,205 @@
 @import "@xterm/xterm/css/xterm.css";
 
 @theme {
-  --font-mono: "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
-  --font-sans: "Inter", -apple-system, system-ui, sans-serif;
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --radius-xs: 3px;
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
 }
 
-/* ==========================================================================
-   Dark mode (default)
-   ========================================================================== */
 :root {
   color-scheme: dark;
 
-  --color-bg-base:      #09090b;
-  --color-bg-surface:   #18181b;
-  --color-bg-elevated:  #27272a;
-  --color-bg-subtle:    #3f3f46;
-  --color-bg-secondary: #27272a;
+  --vk-bg-outer: #09090b;
+  --vk-bg-main: #18181b;
+  --vk-bg-panel: #111113;
+  --vk-bg-hover: #27272a;
+  --vk-bg-active: #3f3f46;
 
-  --color-border-subtle:  rgba(39, 39, 42, 0.8);
-  --color-border-default: #3f3f46;
-  --color-border-strong:  #52525b;
+  --vk-border: #3f3f46;
+  --vk-text-strong: #fafafa;
+  --vk-text-normal: #d4d4d8;
+  --vk-text-muted: #a1a1aa;
+  --vk-orange: #a1a1aa;
+  --vk-green: #54b04f;
+  --vk-red: #d25151;
 
-  --color-text-primary:   #fafafa;
-  --color-text-secondary: #d4d4d8;
-  --color-text-tertiary:  #a1a1aa;
-  --color-text-muted:     #71717a;
-  --color-text-inverse:   #09090b;
+  --bg-canvas: var(--vk-bg-outer);
+  --bg-shell: var(--vk-bg-main);
+  --bg-surface: var(--vk-bg-main);
+  --bg-panel: var(--vk-bg-panel);
+  --bg-panel-2: var(--vk-bg-hover);
+  --bg-muted: var(--vk-bg-active);
 
-  --color-accent:         #3b82f6;
-  --color-accent-hover:   #60a5fa;
-  --color-accent-subtle:  rgba(59, 130, 246, 0.12);
+  --border-soft: var(--vk-border);
+  --border-strong: #52525b;
 
-  --color-status-working:   #3b82f6;
-  --color-status-ready:     #22c55e;
-  --color-status-attention: #f59e0b;
-  --color-status-idle:      #52525b;
-  --color-status-done:      #3f3f46;
-  --color-status-error:     #ef4444;
+  --text-strong: var(--vk-text-strong);
+  --text-normal: var(--vk-text-normal);
+  --text-muted: var(--vk-text-muted);
+  --text-faint: #71717a;
+  --text-inverse: #111111;
 
-  --color-accent-blue:    #3b82f6;
-  --color-accent-green:   #22c55e;
-  --color-accent-yellow:  #f59e0b;
-  --color-accent-orange:  #d97706;
-  --color-accent-red:     #ef4444;
-  --color-accent-violet:  #8b5cf6;
-  --color-accent-cyan:    #06b6d4;
+  --accent: var(--vk-orange);
+  --accent-hover: #d4d4d8;
+  --accent-soft: color-mix(in srgb, var(--vk-orange) 18%, transparent);
 
-  --color-card-bg:        #18181b;
-  --color-card-bg-hover:  #27272a;
-  --color-card-border:    #27272a;
-  --color-card-shadow:    rgba(0, 0, 0, 0.4);
+  --status-working: #6ca8ff;
+  --status-ready: var(--vk-green);
+  --status-attention: #d2a03b;
+  --status-review: var(--vk-orange);
+  --status-error: var(--vk-red);
+  --status-idle: #a1a1aa;
 
-  --color-sidebar-bg:     #0f0f12;
-  --color-sidebar-border: #27272a;
-  --color-sidebar-hover:  rgba(255, 255, 255, 0.04);
-  --color-sidebar-active: rgba(59, 130, 246, 0.1);
+  --shadow-card: none;
+  --shadow-soft: none;
+
+  --color-bg-base: var(--bg-canvas);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-elevated: var(--bg-panel);
+  --color-bg-subtle: var(--bg-panel-2);
+  --color-bg-secondary: var(--bg-muted);
+  --color-border-subtle: var(--border-soft);
+  --color-border-default: var(--border-soft);
+  --color-border-strong: var(--border-strong);
+  --color-text-primary: var(--text-strong);
+  --color-text-secondary: var(--text-normal);
+  --color-text-tertiary: var(--text-muted);
+  --color-text-muted: var(--text-faint);
+  --color-text-inverse: var(--text-inverse);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-subtle: var(--accent-soft);
+  --color-status-working: var(--status-working);
+  --color-status-ready: var(--status-ready);
+  --color-status-attention: var(--status-attention);
+  --color-status-error: var(--status-error);
+  --color-status-idle: var(--status-idle);
+  --color-status-done: var(--status-idle);
+  --color-sidebar-bg: var(--bg-panel);
+  --color-sidebar-border: var(--border-soft);
+  --color-sidebar-hover: var(--vk-bg-hover);
+  --color-sidebar-active: var(--accent-soft);
+  --color-card-bg: var(--bg-panel);
+  --color-card-bg-hover: var(--bg-panel-2);
+  --color-card-border: var(--border-soft);
+  --color-card-shadow: rgba(0, 0, 0, 0);
 }
 
-/* ==========================================================================
-   Light mode
-   ========================================================================== */
 .light {
-  color-scheme: light;
-
-  --color-bg-base:      #ffffff;
-  --color-bg-surface:   #fafafa;
-  --color-bg-elevated:  #f4f4f5;
-  --color-bg-subtle:    #e4e4e7;
-  --color-bg-secondary: #f4f4f5;
-
-  --color-border-subtle:  #e4e4e7;
-  --color-border-default: #d4d4d8;
-  --color-border-strong:  #a1a1aa;
-
-  --color-text-primary:   #18181b;
-  --color-text-secondary: #27272a;
-  --color-text-tertiary:  #52525b;
-  --color-text-muted:     #3f3f46;
-  --color-text-inverse:   #fafafa;
-
-  --color-accent:         #2563eb;
-  --color-accent-hover:   #3b82f6;
-  --color-accent-subtle:  rgba(37, 99, 235, 0.08);
-
-  --color-status-working:   #2563eb;
-  --color-status-ready:     #16a34a;
-  --color-status-attention: #d97706;
-  --color-status-idle:      #a1a1aa;
-  --color-status-done:      #d4d4d8;
-  --color-status-error:     #dc2626;
-
-  --color-accent-blue:    #2563eb;
-  --color-accent-green:   #16a34a;
-  --color-accent-yellow:  #d97706;
-  --color-accent-orange:  #c2410c;
-  --color-accent-red:     #dc2626;
-  --color-accent-violet:  #7c3aed;
-  --color-accent-cyan:    #0891b2;
-
-  --color-card-bg:        #ffffff;
-  --color-card-bg-hover:  #fafafa;
-  --color-card-border:    #e4e4e7;
-  --color-card-shadow:    rgba(0, 0, 0, 0.06);
-
-  --color-sidebar-bg:     #f9f9fa;
-  --color-sidebar-border: #e4e4e7;
-  --color-sidebar-hover:  rgba(0, 0, 0, 0.04);
-  --color-sidebar-active: rgba(37, 99, 235, 0.08);
+  color-scheme: dark;
 }
 
-/* ==========================================================================
-   Base styles
-   ========================================================================== */
+* {
+  border-color: var(--border-soft);
+}
+
+html,
 body {
-  font-family: var(--font-sans);
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-sans), sans-serif;
   font-size: 16px;
-  line-height: 1.35;
-  background: var(--color-bg-base);
-  color: var(--color-text-primary);
-  min-height: 100vh;
+  line-height: 1.4;
+  background: linear-gradient(90deg, #09090b 0%, #18181b 100%);
+  color: var(--text-strong);
 }
 
-a { color: var(--color-accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-
-/* ==========================================================================
-   Scrollbar
-   ========================================================================== */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--color-border-default); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--color-border-strong); }
-
-/* ==========================================================================
-   Animations
-   ========================================================================== */
-@keyframes activity-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
-  50%      { box-shadow: 0 0 0 4px rgba(59, 130, 246, 0); }
+a {
+  color: var(--accent);
+  text-decoration: none;
 }
 
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.4; }
+a:hover {
+  color: var(--accent-hover);
 }
 
-@keyframes slide-up {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
+::selection {
+  background: var(--accent-soft);
 }
 
-/* ==========================================================================
-   Session cards
-   ========================================================================== */
-.session-card {
-  background: var(--color-card-bg);
-  border: 1px solid var(--color-card-border);
-  border-radius: 10px;
-  box-shadow: 0 1px 3px var(--color-card-shadow);
-  transition: all 0.15s ease;
-}
-.session-card:hover {
-  border-color: var(--color-border-strong);
-  box-shadow: 0 4px 12px var(--color-card-shadow);
-  transform: translateY(-1px);
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
 }
 
-/* Readability upgrades for small arbitrary sizes used throughout the dashboard. */
-.text-\[9px\] { font-size: 10px; line-height: 1.4; }
-.text-\[10px\] { font-size: 11px; line-height: 1.45; }
-.text-\[11px\] { font-size: 12px; line-height: 1.45; }
-.text-\[12px\] { font-size: 13px; line-height: 1.45; }
-.text-\[13px\] { font-size: 14px; line-height: 1.45; }
-.text-\[14px\] { font-size: 15px; line-height: 1.45; }
+::-webkit-scrollbar-track {
+  background: transparent;
+}
 
-/* ==========================================================================
-   xterm.js mobile
-   ========================================================================== */
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+.surface-card {
+  border: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+}
+
+.surface-panel {
+  border: 1px solid var(--border-soft);
+  background: var(--bg-panel);
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-working) 40%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+}
+
+@keyframes run-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: scale(0.72);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.attention-glow {
+  animation: pulse-ring 1.8s ease-out infinite;
+}
+
+.xterm {
+  height: 100%;
+  width: 100%;
+  touch-action: pan-y;
+}
+
 .xterm .xterm-viewport {
   overflow-y: auto !important;
   -webkit-overflow-scrolling: touch;
-  overscroll-behavior: contain;
 }
-.xterm .xterm-screen { touch-action: pan-y !important; }
+
+.xterm .xterm-screen {
+  touch-action: pan-y !important;
+}
+
 @media (pointer: coarse) {
   .xterm .xterm-screen,
-  .xterm .xterm-screen canvas { pointer-events: none !important; }
-  .xterm textarea.xterm-helper-textarea { pointer-events: none !important; opacity: 0 !important; }
+  .xterm .xterm-screen canvas {
+    pointer-events: none !important;
+  }
+
+  .xterm textarea.xterm-helper-textarea {
+    pointer-events: none !important;
+    opacity: 0 !important;
+  }
 }
-.xterm { touch-action: pan-y; overscroll-behavior: contain; }
-
-/* ==========================================================================
-   Utilities
-   ========================================================================== */
-.scrollbar-none { -ms-overflow-style: none; scrollbar-width: none; }
-.scrollbar-none::-webkit-scrollbar { display: none; }
-
-.project-action-icons {
-  -webkit-tap-highlight-color: transparent;
-}
-
-.project-action-icons button {
-  -webkit-tap-highlight-color: transparent;
-}
-
-.project-action-icon {
-  all: unset;
-  border: none;
-  border-radius: 0;
-  outline: none;
-  background: transparent !important;
-  color: var(--color-text-muted);
-  -webkit-tap-highlight-color: transparent;
-  box-shadow: none !important;
-  transition: none !important;
-}
-
-.project-action-icon:hover,
-.project-action-icon:focus,
-.project-action-icon:active,
-.project-action-icon:focus-visible {
-  background: transparent !important;
-  outline: none !important;
-  box-shadow: none !important;
-}
-
-.project-action-icon > svg,
-.project-action-icon > svg path {
-  fill: var(--color-text-muted) !important;
-  color: var(--color-text-muted) !important;
-}
-
-.project-action-icon[title="Open board in Obsidian"],
-.project-action-icon[data-action="obsidian"],
-.project-action-icon.obsidian-action {
-  color: var(--color-accent-violet) !important;
-}
-
-.project-action-icon[title="Open board in Obsidian"] > svg,
-.project-action-icon[title="Open board in Obsidian"] > svg *,
-.project-action-icon[data-action="obsidian"] > svg,
-.project-action-icon[data-action="obsidian"] > svg *,
-.project-action-icon.obsidian-action > svg,
-.project-action-icon.obsidian-action > svg * {
-  fill: var(--color-accent-violet) !important;
-  color: var(--color-accent-violet) !important;
-}
-
-/* Legacy fallback when the old Dashboard bundle is still cached */
-.group.relative a[title="Open board in Obsidian"],
-.group.relative a[title="Open repo on GitHub"] {
-  background: transparent !important;
-  color: var(--color-text-muted) !important;
-  outline: none !important;
-  box-shadow: none !important;
-  transition: none !important;
-}
-
-.group.relative a[title="Open board in Obsidian"] {
-  color: var(--color-accent-violet) !important;
-}
-
-.group.relative a[title="Open board in Obsidian"] svg,
-.group.relative a[title="Open board in Obsidian"] svg *,
-.group.relative a[title="Open repo on GitHub"] svg,
-.group.relative a[title="Open repo on GitHub"] svg * {
-  color: var(--color-text-muted) !important;
-  fill: var(--color-text-muted) !important;
-}
-
-.group.relative a[title="Open board in Obsidian"] svg,
-.group.relative a[title="Open board in Obsidian"] svg path,
-.group.relative a[title="Open repo on GitHub"] svg,
-.group.relative a[title="Open repo on GitHub"] svg path {
-  fill: var(--color-text-muted) !important;
-  color: var(--color-text-muted) !important;
-}
-
-.group.relative a[title="Open board in Obsidian"] svg,
-.group.relative a[title="Open board in Obsidian"] svg *,
-.group.relative a[title="Open board in Obsidian"] svg path {
-  fill: var(--color-accent-violet) !important;
-  color: var(--color-accent-violet) !important;
-}
-
-/* Hide Clerk dev banner */
-.cl-internal-b3fm6y,
-div[data-clerk-component] + div[style*="position: fixed"][style*="bottom"],
-[class*="cl-internal"][class*="dev"] { display: none !important; }
-div#clerk-components ~ div:last-child { display: none !important; }

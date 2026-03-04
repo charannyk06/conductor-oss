@@ -1,20 +1,24 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, JetBrains_Mono } from "next/font/google";
+import { JetBrains_Mono, Tomorrow } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import "./globals.css";
 
-const inter = Inter({
+const tomorrow = Tomorrow({
   subsets: ["latin"],
   variable: "--font-sans",
   display: "swap",
+  weight: ["400", "500", "600", "700"],
 });
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-mono",
   display: "swap",
+  weight: ["400", "500"],
 });
+
+const rootClass = `${tomorrow.variable} ${jetbrainsMono.variable}`;
 
 export const metadata: Metadata = {
   title: "Conductor",
@@ -29,15 +33,15 @@ export const viewport: Viewport = {
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${inter.variable} ${jetbrainsMono.variable}`} suppressHydrationWarning>
+    <html lang="en" className={`${rootClass} dark`} suppressHydrationWarning>
       <head>
         <script
           dangerouslySetInnerHTML={{
-            __html: `try{var t=localStorage.getItem("conductor-theme");if(t==="light"||t==="dark")document.documentElement.className=t+" ${inter.variable} ${jetbrainsMono.variable}"}catch{}`,
+            __html: `try{var t=localStorage.getItem("conductor-theme");var e=document.documentElement;e.classList.remove("light","dark");e.classList.add(t==="light"||t==="dark"?t:"dark")}catch{}`,
           }}
         />
       </head>
-      <body className="bg-[var(--color-bg-base)] text-[var(--color-text-primary)] antialiased">
+      <body className="bg-[var(--bg-canvas)] text-[var(--text-strong)] antialiased">
         <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>

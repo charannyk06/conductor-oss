@@ -13,6 +13,21 @@ interface UseAgentsReturn {
   loading: boolean;
 }
 
+function normalizeAgentsPayload(payload: unknown): Agent[] {
+  if (Array.isArray(payload)) return payload as Agent[];
+
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "agents" in payload &&
+    Array.isArray((payload as { agents?: unknown }).agents)
+  ) {
+    return (payload as { agents: Agent[] }).agents;
+  }
+
+  return [];
+}
+
 export function useAgents(): UseAgentsReturn {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,7 +42,7 @@ export function useAgents(): UseAgentsReturn {
         if (!res.ok) throw new Error(`Failed to fetch agents: ${res.status}`);
         return res.json();
       })
-      .then((data: Agent[]) => setAgents(data))
+      .then((data: unknown) => setAgents(normalizeAgentsPayload(data)))
       .catch(() => {})
       .finally(() => setLoading(false));
   }, []);

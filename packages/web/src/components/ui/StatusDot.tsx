@@ -3,10 +3,10 @@ import { cn } from "@/lib/cn";
 type StatusDotStatus = "running" | "done" | "error" | "idle";
 
 const statusColors: Record<StatusDotStatus, string> = {
-  running: "bg-emerald-500 animate-pulse",
-  done: "bg-emerald-500",
-  error: "bg-red-500",
-  idle: "bg-[#484f58]",
+  running: "bg-[var(--status-working)] attention-glow",
+  done: "bg-[var(--status-ready)]",
+  error: "bg-[var(--status-error)]",
+  idle: "bg-[var(--status-idle)]",
 };
 
 interface StatusDotProps {

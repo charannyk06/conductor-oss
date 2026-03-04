@@ -1,9 +1,15 @@
 "use client";
 
-import { FileCode, MessageSquare, MonitorDot, LayoutDashboard } from "lucide-react";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/Tabs";
+import {
+  FileCode,
+  LayoutDashboard,
+  MessageSquare,
+} from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
+import { Card, CardContent } from "@/components/ui/Card";
+import { Badge } from "@/components/ui/Badge";
 import { useSession } from "@/hooks/useSession";
-import { TerminalView } from "@/components/TerminalView";
+import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { SessionOverview } from "./SessionOverview";
 import { SessionDiff } from "./SessionDiff";
 import { ChatPanel } from "./ChatPanel";
@@ -17,74 +23,78 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <span className="text-[13px] text-[var(--color-text-muted)]">Loading session...</span>
+      <div className="flex h-full items-center justify-center p-6">
+        <Card className="w-full max-w-md">
+          <CardContent className="py-7 text-center text-[13px] text-[var(--text-muted)]">
+            Loading session workspace...
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <span className="text-[13px] text-[var(--color-status-error)]">{error}</span>
+      <div className="flex h-full items-center justify-center p-6">
+        <Card className="w-full max-w-md border-[color:color-mix(in_srgb,var(--status-error)_45%,transparent)]">
+          <CardContent className="py-7 text-center text-[13px] text-[var(--status-error)]">
+            {error}
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
   if (!session) {
     return (
-      <div className="flex h-full items-center justify-center">
-        <span className="text-[13px] text-[var(--color-text-muted)]">Session not found</span>
+      <div className="flex h-full items-center justify-center p-6">
+        <Card className="w-full max-w-md">
+          <CardContent className="py-7 text-center text-[13px] text-[var(--text-muted)]">
+            Session not found
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
-  return (
-    <div className="flex h-full flex-col">
-      {/* Header */}
-      <div className="flex items-center gap-3 border-b border-[var(--color-border-default)] px-4 py-2.5">
-        <span className="truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
-          {session.agent}
-        </span>
-        <span className="font-mono text-[11px] text-[var(--color-text-muted)]">
-          {sessionId.slice(0, 8)}
-        </span>
-      </div>
+  const status = typeof session.status === "string" ? session.status : "unknown";
+  const agentName = session.metadata["agent"]?.trim() ?? "";
 
-      {/* Tabs */}
-      <Tabs defaultValue="overview" className="flex flex-1 flex-col min-h-0">
-        <TabsList>
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col gap-2 p-2">
+        <TabsList className="w-fit">
           <TabsTrigger value="overview">
             <LayoutDashboard className="h-3.5 w-3.5" />
             Overview
           </TabsTrigger>
           <TabsTrigger value="chat">
-            <MessageSquare className="h-3.5 w-3.5" />
+            {agentName
+              ? <AgentTileIcon seed={{ label: agentName }} className="h-3.5 w-3.5" />
+              : <MessageSquare className="h-3.5 w-3.5" />}
             Chat
-          </TabsTrigger>
-          <TabsTrigger value="terminal">
-            <MonitorDot className="h-3.5 w-3.5" />
-            Terminal
           </TabsTrigger>
           <TabsTrigger value="diff">
             <FileCode className="h-3.5 w-3.5" />
             Diff
           </TabsTrigger>
+          <Badge variant="outline" className="ml-1">
+            {status}
+          </Badge>
+          <span className="ml-1 font-mono text-[10px] text-[var(--vk-text-muted)]">{sessionId}</span>
         </TabsList>
 
-        <TabsContent value="overview" className="flex-1 min-h-0 overflow-auto">
+        <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto">
           <SessionOverview session={session} />
         </TabsContent>
 
-        <TabsContent value="chat" className="flex-1 min-h-0">
-          <ChatPanel sessionId={sessionId} />
+        <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden">
+          <Card className="h-full">
+            <ChatPanel sessionId={sessionId} agentName={agentName} />
+          </Card>
         </TabsContent>
 
-        <TabsContent value="terminal" className="flex-1 min-h-0">
-          <TerminalView sessionId={sessionId} />
-        </TabsContent>
-
-        <TabsContent value="diff" className="flex-1 min-h-0 overflow-auto">
+        <TabsContent value="diff" className="min-h-0 flex-1 overflow-auto">
           <SessionDiff sessionId={sessionId} />
         </TabsContent>
       </Tabs>

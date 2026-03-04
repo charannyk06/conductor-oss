@@ -79,19 +79,54 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const normalizedProjectId = projectId.trim();
+  const normalizedIssueId = typeof issueId === "string" && issueId.trim().length > 0
+    ? issueId.trim()
+    : undefined;
+  const normalizedPrompt = typeof prompt === "string" && prompt.trim().length > 0
+    ? prompt.trim()
+    : undefined;
+  const normalizedAgent = typeof agent === "string" && agent.trim().length > 0
+    ? agent.trim()
+    : undefined;
+  const normalizedModel = typeof model === "string" && model.trim().length > 0
+    ? model.trim()
+    : undefined;
+  const normalizedProfile = typeof profile === "string" && profile.trim().length > 0
+    ? profile.trim()
+    : undefined;
+  const normalizedBranch = typeof branch === "string" && branch.trim().length > 0
+    ? branch.trim()
+    : undefined;
+  const normalizedBaseBranch = typeof baseBranch === "string" && baseBranch.trim().length > 0
+    ? baseBranch.trim()
+    : undefined;
+
   try {
-    const { sessionManager } = await getServices();
+    const { sessionManager, config } = await getServices();
+    if (!config.projects[normalizedProjectId]) {
+      return NextResponse.json(
+        { error: `Unknown project: ${normalizedProjectId}` },
+        { status: 404 },
+      );
+    }
+
+    if (!normalizedPrompt && !normalizedIssueId) {
+      return NextResponse.json(
+        { error: "Either prompt or issueId is required to create a workspace" },
+        { status: 400 },
+      );
+    }
+
     const session = await sessionManager.spawn({
-      projectId: projectId.trim(),
-      issueId: typeof issueId === "string" ? issueId.trim() : undefined,
-      prompt: typeof prompt === "string" && prompt.trim().length > 0 ? prompt.trim() : undefined,
-      agent: typeof agent === "string" && agent.trim().length > 0 ? agent.trim() : undefined,
-      model: typeof model === "string" && model.trim().length > 0 ? model.trim() : undefined,
-      profile: typeof profile === "string" && profile.trim().length > 0 ? profile.trim() : undefined,
-      branch: typeof branch === "string" && branch.trim().length > 0 ? branch.trim() : undefined,
-      baseBranch: typeof baseBranch === "string" && baseBranch.trim().length > 0
-        ? baseBranch.trim()
-        : undefined,
+      projectId: normalizedProjectId,
+      issueId: normalizedIssueId,
+      prompt: normalizedPrompt,
+      agent: normalizedAgent,
+      model: normalizedModel,
+      profile: normalizedProfile,
+      branch: normalizedBranch,
+      baseBranch: normalizedBaseBranch,
     });
 
     return NextResponse.json(

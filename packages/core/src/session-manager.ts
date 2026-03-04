@@ -862,43 +862,49 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw err;
     }
 
-    // Send initial prompt post-launch for agents that need it.
-    // Poll terminal output until the agent's prompt indicator appears (e.g. "❯")
-    // rather than using a fixed delay, since agent startup time varies.
+    // Send initial prompt post-launch for agents that need it. This runs
+    // asynchronously so spawn() returns immediately and the UI can transition
+    // to the workspace without waiting for CLI readiness probing.
     if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
-      try {
-        const maxWaitMs = 90_000;
-        const pollIntervalMs = 1_000;
-        const startTime = Date.now();
-        let ready = false;
+      const runtime = plugins.runtime;
+      const initialPrompt = agentLaunchConfig.prompt;
+      if (!runtime || !initialPrompt) return session;
 
-        // Wait at least 3s for the process to start
-        await new Promise((resolve) => setTimeout(resolve, 3_000));
+      void (async () => {
+        try {
+          const maxWaitMs = 90_000;
+          const pollIntervalMs = 1_000;
+          const startTime = Date.now();
+          let ready = false;
 
-        while (Date.now() - startTime < maxWaitMs) {
-          try {
-            const output = await plugins.runtime.getOutput(handle, 20);
-            // Claude Code shows "❯" when ready for input
-            // Codex shows ">" or "$" when ready
-            if (/[❯>$]\s*$/.test(output.trim()) || /Try "/.test(output)) {
-              ready = true;
-              break;
+          // Wait at least 3s for the process to start
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
+
+          while (Date.now() - startTime < maxWaitMs) {
+            try {
+              const output = await runtime.getOutput(handle, 20);
+              // Claude Code shows "❯" when ready for input
+              // Codex shows ">" or "$" when ready
+              if (/[❯>$]\s*$/.test(output.trim()) || /Try "/.test(output)) {
+                ready = true;
+                break;
+              }
+            } catch {
+              // Can't read output -- keep trying
             }
-          } catch {
-            // Can't read output -- keep trying
+            await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           }
-          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-        }
 
-        if (!ready) {
-          console.log(`[session-manager] ${sessionId}: agent prompt not detected after ${maxWaitMs / 1000}s, sending anyway`);
-        }
+          if (!ready) {
+            console.log(`[session-manager] ${sessionId}: agent prompt not detected after ${maxWaitMs / 1000}s, sending anyway`);
+          }
 
-        await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
-      } catch {
-        // Non-fatal: agent is running but didn't receive the initial prompt.
-        // User can retry with `co send`.
-      }
+          await runtime.sendMessage(handle, initialPrompt);
+        } catch {
+          // Non-fatal: agent is running but didn't receive the initial prompt.
+          // User can retry with `co send`.
+        }
+      })();
     }
 
     return session;

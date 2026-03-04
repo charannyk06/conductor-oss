@@ -1,6 +1,7 @@
 "use client";
 
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { PanelLeftOpen, PanelRightClose } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 interface AppShellProps {
@@ -16,38 +17,54 @@ export function AppShell({
   sidebarOpen,
   onToggleSidebar,
 }: AppShellProps) {
+  const shellStyle = { "--workspace-sidebar-width": "356px" } as CSSProperties;
+
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#0d1117]">
-      {/* Sidebar */}
+    <div
+      style={shellStyle}
+      className="relative flex h-screen w-screen overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]"
+    >
+      {sidebarOpen && (
+        <button
+          type="button"
+          className="absolute inset-0 z-20 bg-black/45 lg:hidden"
+          onClick={onToggleSidebar}
+          aria-label="Close workspace panel"
+        />
+      )}
+
       <aside
         className={cn(
-          "flex h-full shrink-0 flex-col border-r border-[var(--color-border-default)] bg-[var(--color-bg-surface)] transition-[width] duration-200",
-          sidebarOpen ? "w-[280px]" : "w-0 overflow-hidden border-r-0",
+          "absolute inset-y-0 left-0 z-30 flex h-full w-[min(90vw,var(--workspace-sidebar-width))] flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)] transition-transform duration-200 lg:relative lg:w-[var(--workspace-sidebar-width)]",
+          sidebarOpen
+            ? "translate-x-0"
+            : "-translate-x-full lg:-translate-x-0 lg:w-0 lg:overflow-hidden lg:border-r-0",
+          "lg:left-auto",
         )}
       >
         {sidebar}
       </aside>
 
-      {/* Main content area */}
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Sidebar toggle when collapsed */}
+      {sidebarOpen && (
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          className="absolute left-[var(--workspace-sidebar-width)] top-2 z-40 hidden h-7 w-7 -translate-x-1/2 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_0_0_1px_rgba(0,0,0,0.25)] hover:bg-[var(--vk-bg-hover)] lg:inline-flex"
+          aria-label="Hide workspace panel"
+        >
+          <PanelRightClose className="h-4 w-4" />
+        </button>
+      )}
+
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
         {!sidebarOpen && (
           <button
+            type="button"
             onClick={onToggleSidebar}
-            className="absolute left-2 top-3 z-10 flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-elevated)] hover:text-[var(--color-text-primary)]"
-            aria-label="Open sidebar"
+            className="absolute left-2 top-2 z-40 inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+            aria-label="Open workspace panel"
           >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-            >
-              <path d="M3 4h10M3 8h10M3 12h10" />
-            </svg>
+            <PanelLeftOpen className="h-4 w-4" />
           </button>
         )}
         {children}
