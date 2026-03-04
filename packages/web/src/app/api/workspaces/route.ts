@@ -282,6 +282,31 @@ async function writeProjectToConfig(args: {
 export const dynamic = "force-dynamic";
 
 /**
+ * GET /api/workspaces
+ *
+ * Returns all configured projects/workspaces from conductor.yaml.
+ */
+export async function GET() {
+  const denied = await guardApiAccess();
+  if (denied) return denied;
+
+  try {
+    const { config } = await getServices();
+    const workspaces = Object.entries(config.projects).map(([id, project]) => ({
+      id,
+      path: project.path,
+      repo: project.repo ?? null,
+      defaultBranch: project.defaultBranch ?? "main",
+      agent: project.agent ?? config.defaults.agent,
+    }));
+    return NextResponse.json({ workspaces });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to list workspaces";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+/**
  * POST /api/workspaces
  *
  * Adds a new project to conductor.yaml and prepares the backing repo path.

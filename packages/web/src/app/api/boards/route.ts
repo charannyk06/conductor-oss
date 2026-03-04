@@ -326,12 +326,20 @@ export async function GET(request: NextRequest) {
   if (denied) return denied;
 
   const projectId = asNonEmptyString(request.nextUrl.searchParams.get("projectId"));
-  if (!projectId) {
-    return NextResponse.json({ error: "projectId query param is required" }, { status: 400 });
-  }
 
   try {
     const { config } = await getServices();
+
+    // If no projectId specified, return a summary of all boards
+    if (!projectId) {
+      const boards = Object.entries(config.projects).map(([id, project]) => ({
+        projectId: id,
+        repo: project.repo ?? null,
+        agent: project.agent ?? config.defaults.agent,
+      }));
+      return NextResponse.json({ boards });
+    }
+
     const projectEntry = findProjectEntry(config, projectId);
     if (!projectEntry) {
       return NextResponse.json({ error: `Unknown project: ${projectId}` }, { status: 404 });
