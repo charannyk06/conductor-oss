@@ -26,5 +26,5 @@ conductor.yaml
 # Conductor runtime
 .conductor/
 orchestrator/
-sessions/
+/sessions/
 *.log
