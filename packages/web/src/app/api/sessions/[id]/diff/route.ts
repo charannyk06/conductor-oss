@@ -299,7 +299,10 @@ async function loadRemotePrDiff(pr: { owner: string; repo: string; number: numbe
   return stdout;
 }
 
-async function loadSessionWorkingDiff(workspacePath: string): Promise<{ diff: string; status: string }> {
+async function loadSessionWorkingDiff(
+  workspacePath: string,
+  baseBranch?: string | null,
+): Promise<{ diff: string; status: string }> {
   if (!existsSync(workspacePath) || !statSync(workspacePath).isDirectory()) {
     throw new Error(`Session workspace not found: ${workspacePath}`);
   }
@@ -315,6 +318,34 @@ async function loadSessionWorkingDiff(workspacePath: string): Promise<{ diff: st
         maxBuffer: 8 * 1024 * 1024,
       }),
     ]);
+
+    // If working-tree diff is empty (all changes committed), diff against base branch
+    if (!diffResult.stdout.trim() && baseBranch) {
+      // Prefer local base branch (tracks the fork point more accurately than origin)
+      const branches = [
+        baseBranch,
+        `origin/${baseBranch}`,
+        "main",
+        "origin/main",
+        "master",
+        "origin/master",
+      ];
+      for (const base of branches) {
+        try {
+          const branchDiff = await execFileAsync(
+            "git",
+            ["-C", workspacePath, "diff", `${base}...HEAD`, "--no-color", "--no-ext-diff"],
+            { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+          );
+          if (branchDiff.stdout.trim()) {
+            return { diff: branchDiff.stdout, status: statusResult.stdout };
+          }
+        } catch {
+          // Base ref doesn't exist in this worktree — try next
+        }
+      }
+    }
+
     return {
       diff: diffResult.stdout,
       status: statusResult.stdout,
@@ -352,7 +383,8 @@ export async function GET(
     const workspacePath = session.workspacePath ?? session.metadata["worktree"];
     if (workspacePath) {
       try {
-        const { diff, status } = await loadSessionWorkingDiff(workspacePath);
+        const baseBranch = project?.defaultBranch ?? session.metadata["baseBranch"] ?? "main";
+        const { diff, status } = await loadSessionWorkingDiff(workspacePath, baseBranch);
         const payload = buildPayload(diff, parseUntrackedFiles(status), "working-tree");
         return NextResponse.json(payload);
       } catch (err) {
