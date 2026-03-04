@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { existsSync, realpathSync } from "node:fs";
+import { dirname, join, resolve, sep } from "node:path";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import type { OrchestratorConfig } from "@conductor-oss/core";
@@ -54,57 +54,24 @@ function expandHome(value: string): string {
   return resolve(value);
 }
 
-function isPathInsideRoot(rootPath: string, candidatePath: string): boolean {
-  const normalizedRoot = resolve(rootPath);
-  const normalizedCandidate = resolve(candidatePath);
-  const rel = relative(normalizedRoot, normalizedCandidate);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-function findNearestExistingAncestor(rootPath: string, candidatePath: string): string | null {
-  const normalizedRoot = resolve(rootPath);
-  let current = resolve(candidatePath);
-
-  while (isPathInsideRoot(normalizedRoot, current)) {
-    if (existsSync(current)) return current;
-
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-
-  return null;
-}
-
-/**
- * Resolve a board path candidate and ensure it stays inside the workspace root.
- * Also validates against symlink escapes by resolving the nearest existing ancestor.
- */
-function resolveWorkspaceBoardPath(workspacePath: string, candidatePath: string): string | null {
+function constrainToWorkspacePath(workspacePath: string, candidatePath: string): string {
   const workspaceRoot = resolve(workspacePath);
-  let canonicalWorkspaceRoot = workspaceRoot;
-  try {
-    canonicalWorkspaceRoot = realpathSync(workspaceRoot);
-  } catch {
-    // Use lexical workspace root when canonical path cannot be resolved.
+  const candidate = resolve(candidatePath);
+  const workspacePrefix = workspaceRoot.endsWith(sep) ? workspaceRoot : `${workspaceRoot}${sep}`;
+  if (candidate !== workspaceRoot && !candidate.startsWith(workspacePrefix)) {
+    throw new Error("Resolved path escapes workspace root");
   }
-  const resolvedCandidate = resolve(candidatePath);
-  if (!isPathInsideRoot(workspaceRoot, resolvedCandidate)) return null;
+  return candidate;
+}
 
-  const existingAncestor = findNearestExistingAncestor(workspaceRoot, resolvedCandidate);
-  if (!existingAncestor) return null;
-  let canonicalAncestor = existingAncestor;
-  try {
-    canonicalAncestor = realpathSync(existingAncestor);
-  } catch {
-    // Keep lexical ancestor when realpath cannot be resolved.
-  }
-  if (!isPathInsideRoot(canonicalWorkspaceRoot, canonicalAncestor)) return null;
-
-  const remainder = relative(existingAncestor, resolvedCandidate);
-  const canonicalCandidate = remainder ? resolve(canonicalAncestor, remainder) : canonicalAncestor;
-  if (!isPathInsideRoot(canonicalWorkspaceRoot, canonicalCandidate)) return null;
-  return canonicalCandidate;
+function projectDirectorySegment(projectId: string): string {
+  const normalized = projectId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "project";
 }
 
 function normalizeTag(value: string): string {
@@ -130,51 +97,29 @@ function resolveWorkspacePath(config: OrchestratorConfig): string {
 
 function resolveProjectBoardPath(config: OrchestratorConfig, projectId: string, workspacePath: string): string {
   const workspaceRoot = resolve(workspacePath);
-  const project = config.projects[projectId];
   const boards = discoverBoards(workspaceRoot, config.boards?.length ? config.boards : config);
   const boardMap = buildBoardProjectMap(boards, config);
   const mappedPath = boards.find((path) => boardMap.get(path) === projectId);
   if (mappedPath) {
-    const safeMappedPath = resolveWorkspaceBoardPath(workspaceRoot, mappedPath);
-    if (safeMappedPath && existsSync(safeMappedPath)) return safeMappedPath;
+    const safeMappedPath = constrainToWorkspacePath(workspaceRoot, mappedPath);
+    if (existsSync(safeMappedPath)) return safeMappedPath;
   }
 
-  const boardDir = typeof project.boardDir === "string" && project.boardDir.trim().length > 0
-    ? project.boardDir.trim()
-    : projectId;
-  const preferredProjectBoard = resolveWorkspaceBoardPath(
+  // Only use a sanitized project-id segment for new board path creation.
+  // Existing custom board files are still handled above via board discovery mapping.
+  const fallbackSegment = projectDirectorySegment(projectId);
+
+  const preferredProjectBoard = constrainToWorkspacePath(
     workspaceRoot,
-    join(workspaceRoot, "projects", boardDir, "CONDUCTOR.md"),
+    join(workspaceRoot, "projects", fallbackSegment, "CONDUCTOR.md"),
   );
-  const localProjectBoard = resolveWorkspaceBoardPath(
+  const localProjectBoard = constrainToWorkspacePath(
     workspaceRoot,
-    join(workspaceRoot, boardDir, "CONDUCTOR.md"),
+    join(workspaceRoot, fallbackSegment, "CONDUCTOR.md"),
   );
-
-  const explicitCandidates: string[] = [];
-
-  if (boardDir.endsWith(".md")) {
-    const homeCandidate = resolveWorkspaceBoardPath(workspaceRoot, expandHome(boardDir));
-    if (homeCandidate) explicitCandidates.push(homeCandidate);
-    const workspaceCandidate = resolveWorkspaceBoardPath(workspaceRoot, join(workspaceRoot, boardDir));
-    if (workspaceCandidate) explicitCandidates.push(workspaceCandidate);
-  }
-
-  if (project.path.endsWith(".md")) {
-    const projectPathCandidate = resolveWorkspaceBoardPath(workspaceRoot, expandHome(project.path));
-    if (projectPathCandidate) explicitCandidates.push(projectPathCandidate);
-  }
-
-  for (const candidate of explicitCandidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-
-  if (preferredProjectBoard && existsSync(preferredProjectBoard)) return preferredProjectBoard;
-  if (localProjectBoard && existsSync(localProjectBoard)) return localProjectBoard;
-  if (preferredProjectBoard) return preferredProjectBoard;
-  if (localProjectBoard) return localProjectBoard;
-
-  throw new Error(`Unable to resolve board path inside workspace for project '${projectId}'`);
+  if (existsSync(preferredProjectBoard)) return preferredProjectBoard;
+  if (existsSync(localProjectBoard)) return localProjectBoard;
+  return preferredProjectBoard;
 }
 
 function buildStarterBoard(projectId: string, headings: Record<BoardRole, string>): string {
@@ -208,10 +153,7 @@ async function readOrInitializeBoard(
   workspacePath: string,
 ): Promise<{ boardPath: string; content: string; columnsByRole: Record<BoardRole, string> }> {
   const unresolvedBoardPath = resolveProjectBoardPath(config, projectId, workspacePath);
-  const boardPath = resolveWorkspaceBoardPath(workspacePath, unresolvedBoardPath);
-  if (!boardPath) {
-    throw new Error(`Board path escapes workspace root for project '${projectId}'`);
-  }
+  const boardPath = constrainToWorkspacePath(workspacePath, unresolvedBoardPath);
   const aliases = resolveBoardAliasesForPath(config, workspacePath, boardPath);
 
   let content: string;
