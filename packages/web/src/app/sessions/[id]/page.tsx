@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import type { DashboardSession } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { TerminalView } from "@/components/TerminalView";
@@ -46,7 +46,7 @@ interface DiffUIState {
   selectedFilePath: string | null;
   search: string;
   wrapLines: boolean;
-  activePanel: "overview" | "diff";
+  activePanel: "overview" | "diff" | "terminal";
 }
 
 type AgentCatalogEntry = {
@@ -73,8 +73,10 @@ function normalizeAgentName(value: string): string {
 export default function SessionDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const sessionId = params.id;
   const { theme, toggleTheme } = useTheme();
+  const initialPanel = searchParams.get("tab") === "terminal" ? "terminal" : "overview";
 
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [loading, setLoading] = useState(true);
@@ -85,6 +87,7 @@ export default function SessionDetailPage() {
   const [reviewSending, setReviewSending] = useState(false);
   const [killInProgress, setKillInProgress] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
   const [agentDirectory, setAgentDirectory] = useState<AgentDirectory>({});
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [diffState, setDiffState] = useState<DiffUIState>({
@@ -98,7 +101,7 @@ export default function SessionDetailPage() {
     selectedFilePath: null,
     search: "",
     wrapLines: false,
-    activePanel: "overview",
+    activePanel: initialPanel,
   });
 
   const fetchSession = useCallback(async () => {
@@ -194,6 +197,13 @@ export default function SessionDetailPage() {
     };
   }, [fetchSession, fetchAgentDirectory, fetchDiff]);
 
+  useEffect(() => {
+    const tab = searchParams.get("tab");
+    if (tab === "terminal") {
+      setDiffState((prev) => (prev.activePanel === "terminal" ? prev : { ...prev, activePanel: "terminal" }));
+    }
+  }, [searchParams]);
+
   const handleSend = async () => {
     const msg = messageInput.trim();
     if (!msg) return;
@@ -254,6 +264,18 @@ export default function SessionDetailPage() {
       // ignore
     }
   };
+
+  const handleCopyField = useCallback(async (label: string, value: string | null | undefined) => {
+    const text = value?.trim();
+    if (!text || typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(label);
+      setTimeout(() => setCopiedField((current) => (current === label ? null : current)), 1500);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const isTerminal =
     session?.status === "merged" ||
@@ -448,35 +470,48 @@ export default function SessionDetailPage() {
         </div>
       )}
 
-      {/* Main content: Terminal + Metadata sidebar */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Terminal area */}
-        <div className="flex-1 min-w-0">
-          <TerminalView sessionId={sessionId} />
-        </div>
-
-        {/* Metadata sidebar */}
-        {session && (
-        <aside className="w-full border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] overflow-hidden flex flex-col lg:w-72 lg:shrink-0 lg:border-t-0 lg:border-l">
-          <div className="flex items-center justify-between border-b border-[var(--color-border-subtle)] px-4 py-2">
-            <div className="flex items-center gap-1 rounded-md bg-[var(--color-bg-base)] p-0.5">
-              <button
-                onClick={() =>
-                  setDiffState((prev) => ({ ...prev, activePanel: "overview" }))
-                }
-                className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${diffState.activePanel === "overview" ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]" : "text-[var(--color-text-muted)]"}`}
-              >
-                Overview
-              </button>
-              <button
-                onClick={() =>
-                  setDiffState((prev) => ({ ...prev, activePanel: "diff" }))
-                }
-                className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${diffState.activePanel === "diff" ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]" : "text-[var(--color-text-muted)]"}`}
-              >
-                Diff
-              </button>
-            </div>
+      {/* Main content */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="flex items-center justify-between border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-2">
+          <div className="flex items-center gap-1 rounded-md bg-[var(--color-bg-base)] p-0.5">
+            <button
+              onClick={() =>
+                setDiffState((prev) => ({ ...prev, activePanel: "overview" }))
+              }
+              className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                diffState.activePanel === "overview"
+                  ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]"
+                  : "text-[var(--color-text-muted)]"
+              }`}
+            >
+              Overview
+            </button>
+            <button
+              onClick={() =>
+                setDiffState((prev) => ({ ...prev, activePanel: "diff" }))
+              }
+              className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                diffState.activePanel === "diff"
+                  ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]"
+                  : "text-[var(--color-text-muted)]"
+              }`}
+            >
+              Diff
+            </button>
+            <button
+              onClick={() =>
+                setDiffState((prev) => ({ ...prev, activePanel: "terminal" }))
+              }
+              className={`rounded-md px-2.5 py-1 text-[11px] font-medium ${
+                diffState.activePanel === "terminal"
+                  ? "bg-[var(--color-bg-elevated)] text-[var(--color-text-primary)]"
+                  : "text-[var(--color-text-muted)]"
+              }`}
+            >
+              Terminal
+            </button>
+          </div>
+          {diffState.activePanel === "diff" && (
             <button
               onClick={() => void fetchDiff()}
               disabled={diffState.loading}
@@ -484,387 +519,322 @@ export default function SessionDetailPage() {
             >
               {diffState.loading ? "Refreshing..." : "Refresh diff"}
             </button>
-          </div>
+          )}
+        </div>
 
-          <div className="px-4 py-2 text-[10px] text-[var(--color-text-muted)]">
-            {diffState.loading && "Pulling latest code changes..."}
-            {diffState.generatedAt && !diffState.loading ? `Updated ${formatTimestamp(new Date(diffState.generatedAt))}` : ""}
+        {diffState.activePanel === "terminal" ? (
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <TerminalView sessionId={sessionId} />
           </div>
-
-          <div className="px-4 py-2 pb-4 overflow-auto">
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto p-4">
             {diffState.activePanel === "overview" ? (
-              <div className="space-y-5">
-                {/* Summary */}
-                {session.summary && (
-                  <MetaSection label="Summary">
-                    <p className="text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
-                      {session.summary}
-                    </p>
-                  </MetaSection>
-                )}
-
-                {/* Prompt */}
-                {meta["prompt"] && (
-                  <MetaSection label="Prompt">
-                    <p className="rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--color-text-secondary)] font-mono">
-                      {meta["prompt"]}
-                    </p>
-                  </MetaSection>
-                )}
-
-                {/* Status */}
-                <MetaSection label="Status">
-                  <div className="space-y-2">
-                    <MetaRow label="Status" value={session.status.replace(/_/g, " ")} />
-                    <MetaRow label="Activity" value={session.activity ?? "-"} />
-                    <MetaRow label="Attention" value={attentionLevel} />
-                  </div>
-                </MetaSection>
-
-                {/* Agent */}
-                <MetaSection label="Agent">
-                  {(agentName || runtimeHandle || meta["agent"]) && (
-                    <div className="mb-2 flex items-center gap-2">
-                      <AgentTileIcon
-                        seed={{
-                          label: agentDirectorySeed.label,
-                          iconUrl: agentDirectorySeed.iconUrl,
-                          homepage: agentDirectorySeed.homepage,
-                        }}
-                        className="h-3.5 w-3.5"
-                      />
-                      <span className="text-[12px] text-[var(--color-text-secondary)]">
-                        {agentDirectorySeed.label}
-                      </span>
+              <div className="grid gap-4 xl:grid-cols-2">
+                <section className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] p-4">
+                  <h2 className="mb-3 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Summary</h2>
+                  <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
+                    {session.summary?.trim() || "No summary yet."}
+                  </p>
+                  {meta["prompt"] && (
+                    <div className="mt-4 rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-3">
+                      <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">Prompt</div>
+                      <p className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-[var(--color-text-secondary)]">
+                        {meta["prompt"]}
+                      </p>
                     </div>
                   )}
-                  <MetaRow label="Type" value={meta["agent"] ?? "-"} />
-                  {meta["model"] && <MetaRow label="Model" value={meta["model"]} />}
-                  {meta["permissions"] && <MetaRow label="Permissions" value={meta["permissions"]} />}
-                </MetaSection>
+                </section>
 
-                {/* Git */}
-                {(session.branch || meta["worktree"]) && (
-                  <MetaSection label="Git">
-                    {session.branch && (
-                      <div className="text-[11px] font-mono text-[var(--color-text-secondary)] break-all">
-                        {session.branch}
-                        {session.pr ? ` ← ${session.pr.baseBranch || "main"}` : ""}
-                      </div>
-                    )}
-                    {meta["baseBranch"] && (
-                      <div className="text-[11px] font-mono text-[var(--color-text-muted)] mt-1">
-                        Base: {meta["baseBranch"]}
-                      </div>
-                    )}
-                    {meta["worktree"] && (
-                      <div className="text-[11px] font-mono text-[var(--color-text-muted)] truncate mt-1">
-                        {meta["worktree"]}
-                      </div>
-                    )}
-                  </MetaSection>
-                )}
+                <section className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] p-4">
+                  <h2 className="mb-3 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Status</h2>
+                  <div className="flex flex-wrap gap-2">
+                    <InfoPill label="Status" value={session.status.replace(/_/g, " ")} tone="blue" />
+                    <InfoPill label="Activity" value={session.activity ?? "-"} tone="violet" />
+                    <InfoPill label="Attention" value={attentionLevel} tone={attentionLevel === "respond" || attentionLevel === "review" ? "amber" : "slate"} />
+                  </div>
+                </section>
 
-                {/* PR */}
+                <section className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] p-4">
+                  <h2 className="mb-3 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Agent</h2>
+                  <div className="mb-3 flex items-center gap-2">
+                    <AgentTileIcon
+                      seed={{
+                        label: agentDirectorySeed.label,
+                        iconUrl: agentDirectorySeed.iconUrl,
+                        homepage: agentDirectorySeed.homepage,
+                      }}
+                      className="h-4 w-4"
+                    />
+                    <span className="text-[13px] font-medium text-[var(--color-text-primary)]">{agentDirectorySeed.label}</span>
+                  </div>
+                  <div className="space-y-1.5 text-[11px] text-[var(--color-text-secondary)]">
+                    <MetaRow label="Type" value={meta["agent"] ?? "-"} />
+                    {meta["model"] && <MetaRow label="Model" value={meta["model"]} />}
+                    {meta["permissions"] && <MetaRow label="Permissions" value={meta["permissions"]} />}
+                  </div>
+                </section>
+
                 {session.pr && (
-                  <MetaSection label="Pull Request">
+                  <section className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] p-4">
+                    <h2 className="mb-3 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Pull Request</h2>
                     <a
                       href={session.pr.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-[12px] font-medium text-[var(--color-accent)] hover:underline block mb-2"
+                      className="mb-3 block text-[12px] font-medium text-[var(--color-accent)] hover:underline"
                     >
                       #{session.pr.number} — {session.pr.title}
                     </a>
-                    <div className="space-y-1.5">
-                      <MetaRow label="State" value={session.pr.state} />
-                      <ColoredMetaRow
-                        label="CI"
-                        value={session.pr.ciStatus}
-                        status={session.pr.ciStatus === "passing" ? "green" : session.pr.ciStatus === "failing" ? "red" : "amber"}
-                      />
-                      <ColoredMetaRow
-                        label="Review"
-                        value={session.pr.reviewDecision.replace(/_/g, " ")}
-                        status={session.pr.reviewDecision === "approved" ? "green" : session.pr.reviewDecision === "changes_requested" ? "red" : "amber"}
-                      />
-                      <MetaRow
-                        label="Mergeable"
-                        value={session.pr.mergeability.mergeable ? "Yes" : "No"}
-                      />
+                    <div className="grid grid-cols-2 gap-2">
+                      <InfoPill label="State" value={session.pr.state} tone="violet" />
+                      <InfoPill label="CI" value={session.pr.ciStatus} tone={session.pr.ciStatus === "failing" ? "amber" : "blue"} />
+                      <InfoPill label="Review" value={session.pr.reviewDecision.replace(/_/g, " ")} tone={session.pr.reviewDecision === "changes_requested" ? "amber" : "slate"} />
+                      <InfoPill label="Mergeable" value={session.pr.mergeability.mergeable ? "yes" : "no"} tone={session.pr.mergeability.mergeable ? "blue" : "amber"} />
                     </div>
+                  </section>
+                )}
 
-                    {/* Links */}
-                    <div className="mt-2 space-y-1">
-                      {session.pr.previewUrl && (
-                        <a
-                          href={session.pr.previewUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center gap-1 text-[11px] text-[var(--color-accent)] hover:underline"
-                        >
-                          <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-                          Preview Deploy
-                        </a>
-                      )}
-                      <a
-                        href={`${session.pr.url}/checks`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] hover:underline hover:text-[var(--color-text-primary)]"
-                      >
-                        View CI Checks ↗
-                      </a>
-                      <a
-                        href={`${session.pr.url}#pullrequestreview`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-[11px] text-[var(--color-text-secondary)] hover:underline hover:text-[var(--color-text-primary)]"
-                      >
-                        View Reviews ↗
-                      </a>
-                    </div>
-
-                    {session.pr.mergeability.blockers.length > 0 && (
-                      <div className="mt-2 rounded-md bg-[rgba(239,68,68,0.06)] border border-[rgba(239,68,68,0.15)] p-2">
-                        <div className="text-[10px] font-semibold text-[var(--color-status-error)] mb-1">Blockers</div>
-                        {session.pr.mergeability.blockers.map((b, i) => (
-                          <div key={i} className="text-[11px] text-[var(--color-text-secondary)]">
-                            {b}
-                          </div>
-                        ))}
-                      </div>
+                <section className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] p-4">
+                  <h2 className="mb-3 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Git</h2>
+                  <div className="space-y-2">
+                    {session.branch && (
+                      <MonoField
+                        label="Branch"
+                        value={session.branch}
+                        copied={copiedField === "branch"}
+                        onCopy={() => void handleCopyField("branch", session.branch)}
+                      />
                     )}
-                  </MetaSection>
-                )}
-
-                {/* Cost */}
-                {cost && (
-                  <MetaSection label="Cost">
-                    <div className="space-y-1.5">
-                      {(cost.estimatedCostUsd ?? cost.totalUSD) != null && (
-                        <MetaRow
-                          label="Total"
-                          value={`$${((cost.estimatedCostUsd ?? cost.totalUSD) as number).toFixed(4)}`}
-                        />
-                      )}
-                      {cost.inputTokens != null && (
-                        <MetaRow label="Input" value={cost.inputTokens.toLocaleString()} />
-                      )}
-                      {cost.outputTokens != null && (
-                        <MetaRow label="Output" value={cost.outputTokens.toLocaleString()} />
-                      )}
-                    </div>
-                  </MetaSection>
-                )}
-
-                {/* Timing */}
-                <MetaSection label="Timing">
-                  <div className="space-y-1.5">
-                    <MetaRow label="Created" value={formatTimestamp(createdDate)} />
-                    <MetaRow label="Last Active" value={formatTimestamp(lastActivityDate)} />
-                    <MetaRow label="Duration" value={formatDuration(durationMs)} />
+                    {meta["baseBranch"] && (
+                      <MonoField
+                        label="Base"
+                        value={meta["baseBranch"]}
+                        copied={copiedField === "baseBranch"}
+                        onCopy={() => void handleCopyField("baseBranch", meta["baseBranch"])}
+                      />
+                    )}
+                    {meta["worktree"] && (
+                      <MonoField
+                        label="Worktree"
+                        value={meta["worktree"]}
+                        copied={copiedField === "worktree"}
+                        onCopy={() => void handleCopyField("worktree", meta["worktree"])}
+                      />
+                    )}
                   </div>
-                </MetaSection>
+                </section>
 
-                {/* Timeline */}
-                <MetaSection label="Timeline">
-                  <div className="relative pl-4 border-l border-[var(--color-border-default)]">
-                    <TimelineEvent
-                      label="Created"
-                      time={formatTimestamp(createdDate)}
-                      color="var(--color-accent)"
-                    />
-                    {session.pr && (
-                      <TimelineEvent
-                        label="PR opened"
-                        time={`#${session.pr.number}`}
-                        color="var(--color-accent-violet)"
-                      />
-                    )}
+                <section className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] p-4">
+                  <h2 className="mb-3 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Cost + Timing</h2>
+                  <div className="grid grid-cols-2 gap-2">
+                    <MetricBox label="Total">
+                      {(cost?.estimatedCostUsd ?? cost?.totalUSD) != null
+                        ? `$${((cost?.estimatedCostUsd ?? cost?.totalUSD) as number).toFixed(4)}`
+                        : "-"}
+                    </MetricBox>
+                    <MetricBox label="Duration">{formatDuration(durationMs)}</MetricBox>
+                    <MetricBox label="Input tokens">
+                      {cost?.inputTokens != null ? cost.inputTokens.toLocaleString() : "-"}
+                    </MetricBox>
+                    <MetricBox label="Output tokens">
+                      {cost?.outputTokens != null ? cost.outputTokens.toLocaleString() : "-"}
+                    </MetricBox>
+                  </div>
+                  <div className="mt-3 space-y-1.5 text-[11px] text-[var(--color-text-secondary)]">
+                    <MetaRow label="Created" value={formatTimestamp(createdDate)} />
+                    <MetaRow label="Last active" value={formatTimestamp(lastActivityDate)} />
+                  </div>
+                </section>
+
+                <section className="rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] p-4">
+                  <h2 className="mb-3 text-[12px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">Timeline</h2>
+                  <div className="relative pl-4">
+                    <div className="absolute left-0 top-0 h-full w-px bg-[var(--color-border-default)]" />
+                    <TimelineEvent label="Created" time={formatTimestamp(createdDate)} color="var(--color-accent)" />
+                    {session.pr && <TimelineEvent label="PR opened" time={`#${session.pr.number}`} color="var(--color-accent-violet)" />}
                     <TimelineEvent
                       label={session.status.replace(/_/g, " ")}
                       time={formatTimestamp(lastActivityDate)}
-                      color={
-                        isTerminal
-                          ? "var(--color-text-muted)"
-                          : "var(--color-status-working)"
-                      }
+                      color={isTerminal ? "var(--color-text-muted)" : "var(--color-status-working)"}
                       active={!isTerminal}
                     />
                   </div>
-                </MetaSection>
+                </section>
               </div>
             ) : (
-              <div className="space-y-3">
-                <div className="relative">
-                  <input
-                    value={diffState.search}
-                    onChange={(e) =>
-                      setDiffState((prev) => ({
-                        ...prev,
-                        search: e.target.value,
-                        selectedFilePath: (() => {
-                          const filteredFiles = prev.files.filter((file) =>
-                            file.path.toLowerCase().includes(e.target.value.trim().toLowerCase()),
-                          );
-
-                          return prev.selectedFilePath && filteredFiles.find((file) => file.path === prev.selectedFilePath)
-                            ? prev.selectedFilePath
-                            : filteredFiles[0]?.path ?? null;
-                        })(),
-                      }))
-                    }
-                    placeholder="Filter files..."
-                    className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-1.5 pr-16 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
-                  />
-                  <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-[var(--color-text-muted)]">
-                    {diffFiles.length} files
+              <div className="grid min-h-0 gap-4 xl:grid-cols-[minmax(280px,360px)_minmax(0,1fr)]">
+                <div className="space-y-3">
+                  <div className="relative">
+                    <input
+                      value={diffState.search}
+                      onChange={(e) =>
+                        setDiffState((prev) => ({
+                          ...prev,
+                          search: e.target.value,
+                          selectedFilePath: (() => {
+                            const filteredFiles = prev.files.filter((file) =>
+                              file.path.toLowerCase().includes(e.target.value.trim().toLowerCase()),
+                            );
+                            return prev.selectedFilePath && filteredFiles.find((file) => file.path === prev.selectedFilePath)
+                              ? prev.selectedFilePath
+                              : filteredFiles[0]?.path ?? null;
+                          })(),
+                        }))
+                      }
+                      placeholder="Filter files..."
+                      className="w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-1.5 pr-16 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                    />
+                    <div className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-[var(--color-text-muted)]">
+                      {diffFiles.length} files
+                    </div>
                   </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() =>
-                      setDiffState((prev) => ({ ...prev, wrapLines: !prev.wrapLines }))
-                    }
-                    className="rounded-md border border-[var(--color-border-default)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
-                  >
-                    {diffState.wrapLines ? "No wrap" : "Wrap lines"}
-                  </button>
-                  <div className="text-[10px] text-[var(--color-text-muted)]">
-                    {diffState.hasDiff || diffState.untracked.length > 0 ? "Live diff" : "No local changes"}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() =>
+                        setDiffState((prev) => ({ ...prev, wrapLines: !prev.wrapLines }))
+                      }
+                      className="rounded-md border border-[var(--color-border-default)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                    >
+                      {diffState.wrapLines ? "No wrap" : "Wrap lines"}
+                    </button>
+                    <div className="text-[10px] text-[var(--color-text-muted)]">
+                      {diffState.generatedAt ? `Updated ${formatTimestamp(new Date(diffState.generatedAt))}` : "Waiting for diff..."}
+                    </div>
                   </div>
-                </div>
 
-                {diffState.error && (
-                  <div className="rounded-md border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.12)] px-2.5 py-1.5 text-[10px] text-[var(--color-status-error)]">
-                    {diffState.error}
-                  </div>
-                )}
+                  {diffState.error && (
+                    <div className="rounded-md border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.12)] px-2.5 py-1.5 text-[10px] text-[var(--color-status-error)]">
+                      {diffState.error}
+                    </div>
+                  )}
 
-                <div className="grid gap-2">
-                  {diffFiles.length > 0 ? (
-                    diffFiles.map((file) => {
-                      const selected = file.path === activeDiffFile?.path;
-                      const statusColor =
-                        file.status === "added"
-                          ? "rgba(34,197,94,0.16)"
-                          : file.status === "deleted"
-                            ? "rgba(239,68,68,0.16)"
-                            : file.status === "renamed" || file.status === "copy"
-                              ? "rgba(59,130,246,0.16)"
-                              : file.status === "binary"
-                                ? "rgba(217,119,6,0.16)"
-                                : "rgba(63,63,70,0.25)";
-                      return (
-                        <button
-                          key={file.path}
-                          onClick={() =>
-                            setDiffState((prev) => ({ ...prev, selectedFilePath: file.path }))
-                          }
-                          className={`rounded-md border px-2 py-1.5 text-left transition-colors ${
-                            selected
-                              ? "border-[var(--color-accent)] bg-[rgba(59,130,246,0.12)]"
-                              : "border-[var(--color-border-subtle)] bg-[var(--color-bg-base)]"
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="text-[11px] text-[var(--color-text-secondary)] truncate">
-                              {file.path}
+                  <div className="grid gap-2">
+                    {diffFiles.length > 0 ? (
+                      diffFiles.map((file) => {
+                        const selected = file.path === activeDiffFile?.path;
+                        const statusColor =
+                          file.status === "added"
+                            ? "rgba(34,197,94,0.16)"
+                            : file.status === "deleted"
+                              ? "rgba(239,68,68,0.16)"
+                              : file.status === "renamed" || file.status === "copy"
+                                ? "rgba(59,130,246,0.16)"
+                                : file.status === "binary"
+                                  ? "rgba(217,119,6,0.16)"
+                                  : "rgba(63,63,70,0.25)";
+                        return (
+                          <button
+                            key={file.path}
+                            onClick={() =>
+                              setDiffState((prev) => ({ ...prev, selectedFilePath: file.path }))
+                            }
+                            className={`rounded-md border px-2 py-1.5 text-left transition-colors ${
+                              selected
+                                ? "border-[var(--color-accent)] bg-[rgba(59,130,246,0.12)]"
+                                : "border-[var(--color-border-subtle)] bg-[var(--color-bg-base)]"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="truncate text-[11px] text-[var(--color-text-secondary)]">
+                                {file.path}
+                              </div>
+                              <span className="rounded-full px-1.5 py-0.5 text-[9px]" style={{ background: statusColor }}>
+                                {file.status}
+                              </span>
                             </div>
-                            <span className="text-[9px] px-1.5 py-0.5 rounded-full" style={{ background: statusColor }}>
-                              {file.status}
-                            </span>
-                          </div>
-                          <div className="mt-1 text-[10px] text-[var(--color-text-muted)]">
-                            +{file.additions} -{file.deletions}
-                          </div>
-                        </button>
-                      );
-                    })
+                            <div className="mt-1 text-[10px] text-[var(--color-text-muted)]">
+                              +{file.additions} -{file.deletions}
+                            </div>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
+                        {diffState.hasDiff || diffState.untracked.length > 0
+                          ? "Diff computed, but no file hunks were returned."
+                          : "No changes yet"}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2">
+                    <textarea
+                      value={reviewDraft}
+                      onChange={(event) => setReviewDraft(event.target.value)}
+                      placeholder="Send review notes to this agent..."
+                      className="min-h-[72px] w-full rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
+                      rows={3}
+                    />
+                    <div className="mt-2 flex items-center gap-2">
+                      <button
+                        onClick={() => void handleSendReview()}
+                        disabled={reviewSending || !reviewDraft.trim()}
+                        className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[10px] font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {reviewSending ? "Sending..." : "Send review notes"}
+                      </button>
+                      <button
+                        onClick={() => setDiffState((prev) => ({ ...prev, selectedFilePath: null }))}
+                        className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]"
+                      >
+                        Clear selection
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="min-h-0 overflow-hidden rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)]">
+                  {activeDiffFile ? (
+                    <>
+                      <div className="border-b border-[var(--color-border-subtle)] px-3 py-2 text-[10px] text-[var(--color-text-muted)]">
+                        {activeDiffFile.path}
+                      </div>
+                      <div className="max-h-[72vh] overflow-auto">
+                        <div className="font-mono text-[11px] leading-5">
+                          {activeDiffFile.lines.map((line, idx) => (
+                            <DiffLineRow
+                              key={`${activeDiffFile.path}-${idx}`}
+                              line={line}
+                              wrapLines={diffState.wrapLines}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </>
                   ) : (
-                    <div className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
-                      {diffState.hasDiff || diffState.untracked.length > 0
-                        ? "Diff computed, but no file hunks were returned."
-                        : "No changes yet"}
+                    <div className="p-6 text-center text-[11px] text-[var(--color-text-muted)]">
+                      Select a file to inspect its diff.
+                    </div>
+                  )}
+
+                  {diffState.untracked.length > 0 && (
+                    <div className="border-t border-[var(--color-border-subtle)] px-3 py-2">
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">Untracked files</div>
+                      <ul className="space-y-1">
+                        {diffState.untracked.map((file) => (
+                          <li key={file} className="break-all font-mono text-[10px] text-[var(--color-text-secondary)]">
+                            {file}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {diffState.truncated && (
+                    <div className="border-t border-[rgba(245,158,11,0.35)] bg-[rgba(245,158,11,0.1)] px-3 py-2 text-[10px] text-[var(--color-accent-orange)]">
+                      Diff output truncated for display.
                     </div>
                   )}
                 </div>
-
-                {activeDiffFile && (
-                  <div className="overflow-hidden border border-[var(--color-border-subtle)] rounded-md">
-                    <div className="px-2 py-1.5 text-[10px] text-[var(--color-text-muted)] border-b border-[var(--color-border-subtle)] truncate">
-                      {activeDiffFile.path}
-                    </div>
-                    <div className="overflow-auto max-h-72">
-                      <div className="text-[11px] leading-5 font-mono">
-                        {activeDiffFile.lines.map((line, idx) => (
-                          <DiffLineRow
-                            key={`${activeDiffFile.path}-${idx}`}
-                            line={line}
-                            wrapLines={diffState.wrapLines}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div className="rounded-md border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2">
-                  <textarea
-                    value={reviewDraft}
-                    onChange={(event) => setReviewDraft(event.target.value)}
-                    placeholder="Send review notes to this agent..."
-                    className="w-full rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)] min-h-[72px]"
-                    rows={3}
-                  />
-                  <div className="mt-2 flex items-center gap-2">
-                    <button
-                      onClick={() => void handleSendReview()}
-                      disabled={reviewSending || !reviewDraft.trim()}
-                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[10px] font-semibold text-white disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      {reviewSending ? "Sending..." : "Send review notes"}
-                    </button>
-                    <button
-                      onClick={() => setDiffState((prev) => ({ ...prev, selectedFilePath: null }))}
-                      className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] text-[var(--color-text-secondary)]"
-                    >
-                      Clear selection
-                    </button>
-                  </div>
-                </div>
-
-                {diffState.untracked.length > 0 && (
-                  <div className="rounded-md border border-[var(--color-border-subtle)] px-2 py-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)] mb-1">
-                      Untracked files
-                    </div>
-                    <ul className="space-y-1">
-                      {diffState.untracked.map((file) => (
-                        <li key={file} className="text-[10px] text-[var(--color-text-secondary)] font-mono break-all">
-                          {file}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {diffState.truncated && (
-                  <div className="rounded-md border border-[rgba(245,158,11,0.35)] bg-[rgba(245,158,11,0.1)] px-2 py-1.5 text-[10px] text-[var(--color-accent-orange)]">
-                    Diff output truncated for display.
-                  </div>
-                )}
               </div>
             )}
           </div>
-        </aside>
         )}
       </div>
 
       {/* Bottom input bar */}
-      {!isTerminal && (
+      {!isTerminal && diffState.activePanel !== "terminal" && (
         <div className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)]">
           {/* Quick action buttons */}
           <div className="flex items-center gap-1.5 px-4 pt-2 pb-1 overflow-x-auto scrollbar-none">
@@ -930,7 +900,7 @@ export default function SessionDetailPage() {
       )}
 
       {/* Terminal status footer for completed sessions */}
-      {isTerminal && (
+      {isTerminal && diffState.activePanel !== "terminal" && (
         <div
           className="border-t border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-2.5 flex items-center gap-2"
           style={{ paddingBottom: "max(10px, env(safe-area-inset-bottom))" }}
@@ -988,13 +958,64 @@ function DiffLineRow({ line, wrapLines }: { line: DiffLine; wrapLines: boolean }
   );
 }
 
-function MetaSection({ label, children }: { label: string; children: React.ReactNode }) {
+type InfoPillTone = "blue" | "violet" | "amber" | "slate";
+
+function InfoPill({
+  label,
+  value,
+  tone = "slate",
+}: {
+  label: string;
+  value: string;
+  tone?: InfoPillTone;
+}) {
+  const toneClasses: Record<InfoPillTone, string> = {
+    blue: "border-[rgba(59,130,246,0.3)] bg-[rgba(59,130,246,0.14)] text-[var(--color-accent)]",
+    violet: "border-[rgba(139,92,246,0.32)] bg-[rgba(139,92,246,0.14)] text-[var(--color-accent-violet)]",
+    amber: "border-[rgba(245,158,11,0.32)] bg-[rgba(245,158,11,0.14)] text-[var(--color-status-attention)]",
+    slate: "border-[var(--color-border-default)] bg-[var(--color-bg-base)] text-[var(--color-text-secondary)]",
+  };
+
   return (
-    <div>
-      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-        {label}
+    <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] ${toneClasses[tone]}`}>
+      <span className="uppercase tracking-wide text-[9px] opacity-80">{label}</span>
+      <span className="font-medium capitalize">{value}</span>
+    </div>
+  );
+}
+
+function MetricBox({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-3 py-2">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{label}</div>
+      <div className="text-[12px] font-semibold text-[var(--color-text-primary)]">{children}</div>
+    </div>
+  );
+}
+
+function MonoField({
+  label,
+  value,
+  copied,
+  onCopy,
+}: {
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] p-2">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wide text-[var(--color-text-muted)]">{label}</span>
+        <button
+          onClick={onCopy}
+          className="rounded border border-[var(--color-border-default)] px-1.5 py-0.5 text-[9px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text-primary)]"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
       </div>
-      {children}
+      <div className="break-all font-mono text-[11px] text-[var(--color-text-secondary)]">{value}</div>
     </div>
   );
 }
@@ -1004,22 +1025,6 @@ function MetaRow({ label, value }: { label: string; value: string }) {
     <div className="flex items-baseline justify-between gap-2">
       <span className="text-[11px] text-[var(--color-text-muted)] shrink-0">{label}</span>
       <span className="text-[11px] text-[var(--color-text-secondary)] text-right truncate capitalize">
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function ColoredMetaRow({ label, value, status }: { label: string; value: string; status: "green" | "red" | "amber" }) {
-  const colorMap = {
-    green: "var(--color-status-ready)",
-    red: "var(--color-status-error)",
-    amber: "var(--color-status-attention)",
-  };
-  return (
-    <div className="flex items-baseline justify-between gap-2">
-      <span className="text-[11px] text-[var(--color-text-muted)] shrink-0">{label}</span>
-      <span className="text-[11px] text-right truncate capitalize font-medium" style={{ color: colorMap[status] }}>
         {value}
       </span>
     </div>

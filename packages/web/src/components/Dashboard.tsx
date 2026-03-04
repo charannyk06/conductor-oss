@@ -9,6 +9,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { useRouter } from "next/navigation";
 import type {
   DashboardSession,
   DashboardStats,
@@ -18,7 +19,6 @@ import { getAttentionLevel } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@conductor-oss/core/types";
 import { SessionCard } from "./SessionCard";
 import { EmptyState } from "./EmptyState";
-import { TerminalView } from "./TerminalView";
 import { useTheme } from "./ThemeProvider";
 
 type ConfigProject = {
@@ -38,7 +38,7 @@ type AgentInfo = {
   iconUrl: string | null;
 };
 
-type DashboardTab = "overview" | "chat" | "review" | "terminal" | "agents";
+type DashboardTab = "overview" | "chat" | "review" | "agents";
 type ReviewDiffSource = "working-tree" | "remote-pr" | "not-found";
 
 type AgentRoster = {
@@ -222,7 +222,7 @@ function getProjectFaviconUrls(repo?: string | null, iconUrl?: string | null): s
   try {
     if (!resolved) return [];
     const url = new URL(resolved);
-    const github = parseGithubRepo(repo);
+    const github = parseGithubRepo(repo ?? null);
     if (github) {
       const owner = encodeURIComponent(github.owner);
       const project = encodeURIComponent(github.name);
@@ -589,7 +589,6 @@ const TAB_DEFINITIONS: Array<{ id: DashboardTab; label: string; subtitle: string
   { id: "overview", label: "Overview", subtitle: "All sessions and controls" },
   { id: "chat", label: "Chat", subtitle: "Respond to agents in need of action" },
   { id: "review", label: "Review", subtitle: "Send review feedback quickly" },
-  { id: "terminal", label: "Terminal", subtitle: "View and switch active terminal sessions" },
   { id: "agents", label: "Agents", subtitle: "Health and launch controls" },
 ];
 
@@ -777,6 +776,7 @@ interface DashboardProps {
 }
 
 export function Dashboard({ sessions: initialSessions, stats: initialStats, configProjects: initialConfigProjects = [] }: DashboardProps) {
+  const router = useRouter();
   const [sessions, setSessions] = useState<DashboardSession[]>(initialSessions);
   const [stats, setStats] = useState<DashboardStats>(initialStats);
   const [configProjects, setConfigProjects] = useState<ConfigProject[]>(initialConfigProjects);
@@ -802,7 +802,6 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [sortMode, setSortMode] = useState<SortMode>("recent");
   const [attentionOnly, setAttentionOnly] = useState(false);
-  const [activeTerminalSessionId, setActiveTerminalSessionId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [dashboardTab, setDashboardTab] = useState<DashboardTab>("overview");
   const [isLaunchCollapsed, setIsLaunchCollapsed] = useState(true);
@@ -1051,6 +1050,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
         boardDir: cfg?.boardDir ?? id,
         boardFile: cfg?.boardFile,
         repo: cfg?.repo ?? null,
+        iconUrl: cfg?.iconUrl ?? null,
       };
     });
   }, [sessions, configProjects]);
@@ -1192,10 +1192,15 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     return ranked;
   }, [sessions, activeProject, statusFilter, attentionOnly, agentFilter, search, sortMode]);
 
-  const reviewSessions = useMemo(
-    () => filteredSessions.filter((session) => getAttentionLevel(session) === "review"),
-    [filteredSessions],
-  );
+  const reviewSessions = useMemo(() => {
+    return filteredSessions.filter((session) => {
+      if (session.pr && session.pr.number > 0) return true;
+      const diff = reviewDiffState[session.id];
+      if (!diff) return true;
+      if (!diff.loaded) return true;
+      return diff.hasDiff || diff.untracked.length > 0;
+    });
+  }, [filteredSessions, reviewDiffState]);
 
   const chatSessions = useMemo(
     () => filteredSessions.filter((session) => getAttentionLevel(session) === "respond"),
@@ -1446,7 +1451,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   }, [updateReviewDiffState]);
 
   const applyQuickMessage = useCallback(
-    (sessionId: string, kind: "chat" | "review", template: string) => {
+    (sessionId: string, kind: string, template: string) => {
       if (kind === "review") {
         setReviewMessages((prev) => {
           const current = prev[sessionId] ?? "";
@@ -1961,9 +1966,6 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   const visibleTabSessions = useMemo(() => {
     if (dashboardTab === "chat") return chatSessions;
     if (dashboardTab === "review") return reviewSessions;
-    if (dashboardTab === "terminal") {
-      return filteredSessions.filter((session) => TERMINAL_STATUSES.has(session.status));
-    }
     return filteredSessions;
   }, [chatSessions, reviewSessions, filteredSessions, dashboardTab]);
 
@@ -1988,19 +1990,12 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     [visibleAgentRoster],
   );
 
-  const activeTerminalSession = useMemo(() => {
-    if (!activeTerminalSessionId) return null;
-    return sessions.find((session) => session.id === activeTerminalSessionId) ?? null;
-  }, [activeTerminalSessionId, sessions]);
-
   const searchPlaceholder = dashboardTab === "agents"
     ? "Search agents..."
     : dashboardTab === "chat"
       ? "Search sessions needing agent response..."
       : dashboardTab === "review"
         ? "Search sessions or changed files..."
-        : dashboardTab === "terminal"
-          ? "Search terminal sessions..."
         : "Search sessions, issues, branches, agents...";
 
   const totalAgentCatalogCount = Math.max(
@@ -2021,9 +2016,8 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
     : Boolean(busySessionId) || bulkBusy;
 
   const handleOpenTerminal = useCallback((sessionId: string) => {
-    setActiveTerminalSessionId(sessionId);
-    setDashboardTab("terminal");
-  }, []);
+    router.push(`/sessions/${encodeURIComponent(sessionId)}?tab=terminal`);
+  }, [router]);
 
   useEffect(() => {
     if (dashboardTab !== "chat" && dashboardTab !== "review") return;
@@ -2040,26 +2034,6 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       setSortMode("recent");
     }
   }, [agentFilter, attentionOnly, dashboardTab, sortMode, statusFilter]);
-
-  useEffect(() => {
-    if (dashboardTab === "terminal") return;
-    setActiveTerminalSessionId(null);
-  }, [dashboardTab]);
-
-  useEffect(() => {
-    if (!activeTerminalSession) return;
-    if (!TERMINAL_STATUSES.has(activeTerminalSession.status)) {
-      setActiveTerminalSessionId(null);
-    }
-  }, [activeTerminalSession]);
-
-  useEffect(() => {
-    if (!activeTerminalSessionId) return;
-    const stillExists = sessions.some((session) => session.id === activeTerminalSessionId);
-    if (!stillExists) {
-      setActiveTerminalSessionId(null);
-    }
-  }, [activeTerminalSessionId, sessions]);
 
   return (
     <div className="flex h-dvh overflow-hidden">
@@ -2755,60 +2729,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
             </div>
           )}
 
-          {dashboardTab === "terminal" ? (
-            <div className="flex min-h-0 flex-1 flex-col gap-3">
-              <div className="rounded-lg border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3">
-                <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
-                  Terminal sessions
-                </div>
-                {activeTerminalSession ? (
-                  <div className="mb-2 flex items-center gap-2 text-[11px] text-[var(--color-text-secondary)]">
-                    <span className="rounded-full bg-[var(--color-bg-subtle)] px-2 py-0.5">
-                      Active: {activeTerminalSession.id}
-                    </span>
-                    <div className="flex-1" />
-                    <button
-                      type="button"
-                      onClick={() => setActiveTerminalSessionId(null)}
-                      className="rounded-md border border-[var(--color-border-subtle)] px-2 py-1 text-[10px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-border-strong)]"
-                    >
-                      Close terminal
-                    </button>
-                  </div>
-                ) : null}
-                {visibleTabSessions.length === 0 ? (
-                  <EmptyState />
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {visibleTabSessions.map((session) => (
-                      <button
-                        key={session.id}
-                        onClick={() => setActiveTerminalSessionId(session.id)}
-                        className={`rounded-md border px-2 py-1 text-[10px] transition-colors ${
-                          activeTerminalSessionId === session.id
-                            ? "border-[var(--color-accent)] bg-[var(--color-accent-subtle)] text-[var(--color-accent)]"
-                            : "border-[var(--color-border-subtle)] text-[var(--color-text-secondary)] hover:border-[var(--color-border-strong)]"
-                        }`}
-                      >
-                        <span className="font-mono text-[10px]">{session.id}</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {activeTerminalSession ? (
-                <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)]">
-                  <TerminalView sessionId={activeTerminalSession.id} />
-                </div>
-              ) : (
-                <div className="rounded-xl border border-dashed border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-4 py-12 text-center text-[11px] text-[var(--color-text-muted)]">
-                  Select a terminal session above to open its live output.
-                </div>
-              )}
-            </div>
-          ) : (
-            <>
+          <>
               {visibleTabSessions.length === 0 ? (
                 <EmptyState />
               ) : dashboardTab === "overview" && viewMode === "lanes" ? (
@@ -3301,8 +3222,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                   })}
                 </div>
               )}
-            </>
-          )}
+          </>
         </main>
 
         {commandOpen && (
