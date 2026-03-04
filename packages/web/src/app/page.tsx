@@ -1,69 +1,142 @@
-import { Dashboard } from "@/components/Dashboard";
-import type { DashboardSession, DashboardStats } from "@/lib/types";
-import { getServices } from "@/lib/services";
-import { sessionToDashboard, computeStats } from "@/lib/serialize";
-import { getDashboardAccess } from "@/lib/auth";
+"use client";
 
-export const dynamic = "force-dynamic";
+import { useState, useMemo } from "react";
+import { Bot, LayoutDashboard } from "lucide-react";
+import type { DashboardSession } from "@/lib/types";
+import { getAttentionLevel } from "@/lib/types";
+import { useSessions } from "@/hooks/useSessions";
+import { useConfig } from "@/hooks/useConfig";
+import { AppShell } from "@/components/layout/AppShell";
+import { Sidebar } from "@/components/layout/Sidebar";
+import { TopBar } from "@/components/layout/TopBar";
+import { LayoutEmptyState } from "@/components/layout/EmptyState";
+import { SessionDetail } from "@/components/sessions/SessionDetail";
+import { AgentGrid } from "@/components/agents/AgentGrid";
+import { cn } from "@/lib/cn";
 
-export default async function Home() {
-  const access = await getDashboardAccess();
-  if (!access.ok) {
-    return (
-      <main className="min-h-screen flex items-center justify-center px-6 text-center bg-[var(--color-bg-base)]">
-        <div className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-8 max-w-sm">
-          <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-full bg-[rgba(239,68,68,0.1)] mx-auto">
-            <svg width="20" height="20" viewBox="0 0 16 16" fill="var(--color-status-error)">
-              <path d="M8 0a8 8 0 100 16A8 8 0 008 0zm3.28 5.78l-4 4a.75.75 0 01-1.06 0l-2-2a.75.75 0 111.06-1.06L6.5 8.19l3.47-3.47a.75.75 0 111.06 1.06z" />
-            </svg>
+type ActiveTab = "sessions" | "agents";
+
+export default function Home() {
+  const { sessions, loading } = useSessions();
+  const { config } = useConfig();
+
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activeTab, setActiveTab] = useState<ActiveTab>("sessions");
+
+  // Cast sessions from hook to DashboardSession (API returns full shape)
+  const dashboardSessions = sessions as unknown as DashboardSession[];
+
+  const projects = useMemo(() => {
+    if (!config?.projects) return [];
+    const p = config.projects as Record<string, Record<string, unknown>>;
+    return Object.entries(p).map(([id, project]) => ({
+      id,
+      repo: (project["repo"] as string | undefined) ?? null,
+      iconUrl: (project["iconUrl"] as string | undefined) ?? null,
+      description: (project["description"] as string | undefined) ?? null,
+      agent: (project["agent"] as string | undefined) ?? "claude-code",
+    }));
+  }, [config]);
+
+  const selectedSession = useMemo(
+    () => dashboardSessions.find((s) => s.id === selectedSessionId) ?? null,
+    [dashboardSessions, selectedSessionId],
+  );
+
+  const stats = useMemo(() => {
+    const active = dashboardSessions.filter(
+      (s) => getAttentionLevel(s) !== "done",
+    );
+    const totalCost = dashboardSessions.reduce((sum, s) => {
+      try {
+        const raw = s.metadata?.["cost"];
+        if (!raw) return sum;
+        const parsed = JSON.parse(raw) as { estimatedCostUsd?: number; totalUSD?: number };
+        return sum + (parsed.estimatedCostUsd ?? parsed.totalUSD ?? 0);
+      } catch {
+        return sum;
+      }
+    }, 0);
+    return {
+      total: dashboardSessions.length,
+      active: active.length,
+      totalCost,
+    };
+  }, [dashboardSessions]);
+
+  const toggleSidebar = () => setSidebarOpen((prev) => !prev);
+
+  return (
+    <AppShell
+      sidebarOpen={sidebarOpen}
+      onToggleSidebar={toggleSidebar}
+      sidebar={
+        <div className="flex h-full flex-col">
+          {/* Tab switcher */}
+          <div className="flex border-b border-[var(--color-border-default)]">
+            <button
+              onClick={() => setActiveTab("sessions")}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1.5 py-2 text-[12px] font-medium transition-colors",
+                activeTab === "sessions"
+                  ? "border-b-2 border-[var(--color-accent)] text-[var(--color-text-primary)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]",
+              )}
+            >
+              <LayoutDashboard className="h-3.5 w-3.5" />
+              Sessions
+            </button>
+            <button
+              onClick={() => setActiveTab("agents")}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1.5 py-2 text-[12px] font-medium transition-colors",
+                activeTab === "agents"
+                  ? "border-b-2 border-[var(--color-accent)] text-[var(--color-text-primary)]"
+                  : "text-[var(--color-text-muted)] hover:text-[var(--color-text-secondary)]",
+              )}
+            >
+              <Bot className="h-3.5 w-3.5" />
+              Agents
+            </button>
           </div>
-          <h1 className="text-[16px] font-semibold text-[var(--color-text-primary)] mb-2">Access denied</h1>
-          <p className="text-[13px] text-[var(--color-text-secondary)]">{access.reason}</p>
-          {access.email && (
-            <p className="text-[11px] text-[var(--color-text-muted)] mt-2">Signed in as {access.email}</p>
+
+          {/* Tab content */}
+          {activeTab === "sessions" ? (
+            <Sidebar
+              sessions={dashboardSessions}
+              selectedId={selectedSessionId}
+              onSelect={setSelectedSessionId}
+              projects={projects}
+              onToggleSidebar={toggleSidebar}
+            />
+          ) : (
+            <div className="flex-1 overflow-auto p-3">
+              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Configured Agents
+              </p>
+              <p className="text-[12px] text-[var(--color-text-secondary)]">
+                View agents in the main panel.
+              </p>
+            </div>
           )}
         </div>
-      </main>
-    );
-  }
-
-  let sessions: DashboardSession[] = [];
-  let stats: DashboardStats = {
-    totalSessions: 0,
-    workingSessions: 0,
-    openPRs: 0,
-    needsAttention: 0,
-  };
-
-  type ConfigProject = {
-    id: string;
-    boardDir: string;
-    repo: string | null;
-    iconUrl?: string | null;
-    description: string | null;
-    agent: string;
-  };
-  let configProjects: ConfigProject[] = [];
-
-  try {
-    const { sessionManager, config } = await getServices();
-    const allSessions = await sessionManager.list();
-    sessions = allSessions.map(sessionToDashboard);
-    stats = computeStats(sessions);
-    configProjects = Object.entries(config.projects).map(([id, project]) => {
-      const p = project as unknown as Record<string, unknown>;
-      return {
-        id,
-        repo: (p["repo"] as string | undefined) ?? null,
-        iconUrl: (p["iconUrl"] as string | undefined) ?? null,
-        boardDir: (p["boardDir"] as string | undefined) ?? id,
-        description: (p["description"] as string | undefined) ?? null,
-        agent: (p["agent"] as string | undefined) ?? "claude-code",
-      };
-    });
-  } catch {
-    // Services unavailable — show empty dashboard
-  }
-
-  return <Dashboard sessions={sessions} stats={stats} configProjects={configProjects} />;
+      }
+    >
+      {activeTab === "agents" ? (
+        <AgentGrid />
+      ) : selectedSessionId ? (
+        <div className="flex h-full flex-col">
+          <TopBar session={selectedSession} />
+          <SessionDetail sessionId={selectedSessionId} />
+        </div>
+      ) : (
+        <LayoutEmptyState
+          totalSessions={stats.total}
+          activeSessions={stats.active}
+          totalCost={stats.totalCost}
+        />
+      )}
+    </AppShell>
+  );
 }
