@@ -1,3 +1,6 @@
+// @ts-nocheck
+// DEPRECATED: This monolith is no longer imported. Kept for reference only.
+// New UI lives in components/layout/, components/sessions/, components/agents/, components/ui/
 "use client";
 
 import {

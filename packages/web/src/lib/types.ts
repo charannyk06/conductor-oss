@@ -5,23 +5,22 @@
  * Dashboard types flatten/extend core types for JSON-safe client-side rendering.
  */
 
-import type {
-  SessionStatus,
-  ActivityState,
-  CIStatus,
-  ReviewDecision,
-  MergeReadiness,
-  PRState,
-} from "@conductor-oss/core/types";
-
-export type {
-  SessionStatus,
-  ActivityState,
-  CIStatus,
-  ReviewDecision,
-  MergeReadiness,
-  PRState,
-};
+// Inlined from @conductor-oss/core/types to avoid client-side bundle issues
+// with serverExternalPackages excluding the core package from client builds.
+// Using string to support all core + legacy + dashboard status values without conflicts
+export type SessionStatus = string;
+export type ActivityState =
+  | "active" | "ready" | "idle" | "waiting_input" | "blocked" | "exited";
+export type CIStatus = "pending" | "passing" | "failing" | "none";
+export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
+export interface MergeReadiness {
+  mergeable: boolean;
+  ciPassing: boolean;
+  approved: boolean;
+  noConflicts: boolean;
+  blockers: string[];
+}
+export type PRState = "open" | "merged" | "closed";
 
 /**
  * Attention zone priority level, ordered by human action urgency:
