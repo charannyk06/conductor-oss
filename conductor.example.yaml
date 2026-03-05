@@ -3,6 +3,16 @@
 
 port: 4747
 
+# Optional: interactive UI preferences (also editable from dashboard settings)
+preferences:
+  onboardingAcknowledged: false
+  codingAgent: claude-code
+  ide: vscode
+  markdownEditor: obsidian
+  notifications:
+    soundEnabled: true
+    soundFile: abstract-sound-4
+
 # URL shown in board card links (set this to your actual dashboard URL)
 # dashboardUrl: http://localhost:4747
 

@@ -331,7 +331,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "mode must be either 'git' or 'local'" }, { status: 400 });
   }
 
-  const requestedDefaultBranch = asNonEmptyString(body.defaultBranch) ?? "main";
+  const requestedDefaultBranchRaw = asNonEmptyString(body.defaultBranch);
+  const fallbackDefaultBranch = requestedDefaultBranchRaw ?? "main";
   const useWorktree = body.useWorktree !== false;
   const gitUrl = asNonEmptyString(body.gitUrl);
   const rawPath = asNonEmptyString(body.path);
@@ -399,7 +400,8 @@ export async function POST(request: NextRequest) {
         await execFileAsync("git", ["clone", gitUrl, targetPath], { timeout: 120_000 });
       }
 
-      const defaultBranch = await detectDefaultBranch(targetPath, requestedDefaultBranch);
+      const detectedDefaultBranch = await detectDefaultBranch(targetPath, fallbackDefaultBranch);
+      const defaultBranch = requestedDefaultBranchRaw ?? detectedDefaultBranch;
       const repoValue = extractRepoNameFromGitUrl(gitUrl) ?? gitUrl;
       const sessionPrefix = createUniqueSessionPrefix(targetPath, config.projects);
 
@@ -454,7 +456,7 @@ export async function POST(request: NextRequest) {
 
     let gitRepo = await isGitRepository(localPath);
     if (!gitRepo && initializeGit) {
-      await initializeGitRepository(localPath, requestedDefaultBranch);
+      await initializeGitRepository(localPath, fallbackDefaultBranch);
       gitRepo = true;
     }
 
@@ -467,7 +469,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const defaultBranch = await detectDefaultBranch(localPath, requestedDefaultBranch);
+    const detectedDefaultBranch = await detectDefaultBranch(localPath, fallbackDefaultBranch);
+    const defaultBranch = requestedDefaultBranchRaw ?? detectedDefaultBranch;
     const initialProjectId = deriveProjectIdFromInputs({
       providedId: asNonEmptyString(body.projectId),
       gitUrl: null,

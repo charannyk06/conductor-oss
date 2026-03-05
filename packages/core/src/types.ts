@@ -423,6 +423,23 @@ export interface WebhookConfig {
   secret?: string;
 }
 
+export interface NotificationPreferences {
+  soundEnabled: boolean;
+  soundFile: string | null;
+}
+
+export interface UserPreferences {
+  /** Whether the interactive first-run setup has been completed. */
+  onboardingAcknowledged: boolean;
+  /** Preferred coding agent shown by default in the UI. */
+  codingAgent?: string;
+  /** Preferred IDE used when opening attempts/files. */
+  ide?: string;
+  /** Preferred markdown editor for second-brain/context workflows. */
+  markdownEditor?: string;
+  notifications: NotificationPreferences;
+}
+
 export interface OrchestratorConfig {
   configPath: string;
   port?: number;
@@ -439,6 +456,7 @@ export interface OrchestratorConfig {
   notificationRouting: Record<EventPriority, string[]>;
   reactions: Record<string, ReactionConfig>;
   webhook?: WebhookConfig;
+  preferences: UserPreferences;
 }
 
 export interface MCPServerConfig {
@@ -491,6 +509,8 @@ export interface ProjectConfig {
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
+  /** Optional subdirectory (relative to repo root) where the agent runtime starts. */
+  defaultWorkingDirectory?: string;
   /** Maps this project to an Obsidian board directory name (when dir name != config key). */
   boardDir?: string;
   runtime?: string;
@@ -500,6 +520,16 @@ export interface ProjectConfig {
   scm?: SCMConfig;
   symlinks?: string[];
   postCreate?: string[];
+  /** Setup commands run after workspace creation and before/with agent startup. */
+  setupScript?: string[];
+  /** When true, setup runs in background while agent starts. */
+  runSetupInParallel?: boolean;
+  /** Cleanup commands run before archiving a workspace when changes exist. */
+  cleanupScript?: string[];
+  /** Archive commands run when a workspace/session is archived. */
+  archiveScript?: string[];
+  /** Relative file paths or glob patterns copied from repo root into worktree. */
+  copyFiles?: string[];
   agentConfig?: AgentSpecificConfig;
   reactions?: Record<string, Partial<ReactionConfig>>;
   agentRules?: string;

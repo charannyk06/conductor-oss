@@ -41,6 +41,15 @@ const CONDUCTOR_YAML = `# Conductor Configuration
 
 port: 4747
 
+preferences:
+  onboardingAcknowledged: false
+  codingAgent: claude-code
+  ide: vscode
+  markdownEditor: obsidian
+  notifications:
+    soundEnabled: true
+    soundFile: abstract-sound-4
+
 projects:
   my-app:
     path: ~/projects/my-app        # Path to your project
@@ -100,8 +109,8 @@ export function registerInit(program: Command): void {
       if (created > 0) {
         console.log();
         console.log(chalk.bold("Next steps:"));
-        console.log(chalk.dim("  1."), chalk.cyan("Edit conductor.yaml"), chalk.dim("— set your project path, repo, and agent"));
-        console.log(chalk.dim("  2."), chalk.cyan("co start"), chalk.dim("         — start the orchestrator"));
+        console.log(chalk.dim("  1."), chalk.cyan("co start"), chalk.dim("— start the orchestrator"));
+        console.log(chalk.dim("  2."), chalk.cyan("Open dashboard"), chalk.dim("— confirm preferences and click 'Add Workspace'"));
         console.log(chalk.dim("  3."), chalk.cyan("Open CONDUCTOR.md"), chalk.dim("— write a task in 'Ready to Dispatch'"));
         console.log();
         console.log(chalk.dim("  Tip: Install the Obsidian Kanban plugin for the best board experience."));

@@ -1,7 +1,7 @@
 // This file mirrors the route type declarations generated in `.next/dev/types/routes.d.ts`.
 
 type AppRoutes = "/" | "/sessions/[id]" | "/sign-in/[[...sign-in]]"
-type AppRouteHandlerRoutes = "/api/agents" | "/api/config" | "/api/events" | "/api/health/boards" | "/api/sessions" | "/api/sessions/[id]" | "/api/sessions/[id]/checks" | "/api/sessions/[id]/diff" | "/api/sessions/[id]/feedback" | "/api/sessions/[id]/keys" | "/api/sessions/[id]/kill" | "/api/sessions/[id]/output" | "/api/sessions/[id]/restore" | "/api/sessions/[id]/send" | "/api/spawn"
+type AppRouteHandlerRoutes = "/api/agents" | "/api/config" | "/api/events" | "/api/filesystem/directory" | "/api/github/repos" | "/api/health/boards" | "/api/preferences" | "/api/sessions" | "/api/sessions/[id]" | "/api/sessions/[id]/checks" | "/api/sessions/[id]/diff" | "/api/sessions/[id]/feedback" | "/api/sessions/[id]/keys" | "/api/sessions/[id]/kill" | "/api/sessions/[id]/output" | "/api/sessions/[id]/restore" | "/api/sessions/[id]/send" | "/api/spawn" | "/api/workspaces/branches"
 type PageRoutes = never
 type LayoutRoutes = "/"
 type RedirectRoutes = never
@@ -14,7 +14,10 @@ interface ParamMap {
   "/api/agents": {}
   "/api/config": {}
   "/api/events": {}
+  "/api/filesystem/directory": {}
+  "/api/github/repos": {}
   "/api/health/boards": {}
+  "/api/preferences": {}
   "/api/sessions": {}
   "/api/sessions/[id]": { "id": string; }
   "/api/sessions/[id]/checks": { "id": string; }
@@ -26,6 +29,7 @@ interface ParamMap {
   "/api/sessions/[id]/restore": { "id": string; }
   "/api/sessions/[id]/send": { "id": string; }
   "/api/spawn": {}
+  "/api/workspaces/branches": {}
   "/sessions/[id]": { "id": string; }
   "/sign-in/[[...sign-in]]": { "sign-in"?: string[]; }
 }

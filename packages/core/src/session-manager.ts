@@ -155,6 +155,66 @@ async function checkoutBranchForDirectWorkspace(
   });
 }
 
+function sanitizeRelativeSubdir(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === ".") return null;
+  const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/g, "");
+  if (!normalized || normalized === ".") return null;
+  if (normalized.startsWith("/") || normalized.includes("..")) {
+    throw new Error(
+      `Invalid defaultWorkingDirectory "${value}": use a relative path inside the repository`,
+    );
+  }
+  return normalized.replace(/^\.?\//, "");
+}
+
+function resolveAgentWorkspacePath(workspacePath: string, project: ProjectConfig): string {
+  const rel = typeof project.defaultWorkingDirectory === "string"
+    ? sanitizeRelativeSubdir(project.defaultWorkingDirectory)
+    : null;
+  if (!rel) return workspacePath;
+
+  const resolved = join(workspacePath, rel);
+  const stats = statSync(resolved, { throwIfNoEntry: false });
+  if (!stats || !stats.isDirectory()) {
+    throw new Error(
+      `defaultWorkingDirectory "${project.defaultWorkingDirectory}" does not exist in workspace "${workspacePath}"`,
+    );
+  }
+  return resolved;
+}
+
+async function workspaceHasGitChanges(workspacePath: string): Promise<boolean> {
+  if (!existsSync(join(workspacePath, ".git"))) return false;
+  try {
+    const { stdout } = await execFileP("git", ["status", "--porcelain"], {
+      cwd: workspacePath,
+      timeout: 20_000,
+    });
+    return stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function runWorkspaceCommands(
+  commands: string[] | undefined,
+  workspacePath: string,
+  label: string,
+): Promise<void> {
+  if (!commands || commands.length === 0) return;
+  for (const command of commands) {
+    const script = command.trim();
+    if (!script) continue;
+    try {
+      await execFileP("sh", ["-c", script], { cwd: workspacePath, timeout: 300_000 });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[session-manager] ${label} command failed in ${workspacePath}: ${message}`);
+    }
+  }
+}
+
 /** Max sessions per project -- hard limit enforced at spawn time. */
 const MAX_SESSIONS_PER_PROJECT = 5;
 
@@ -796,6 +856,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // When agent is overridden via #agent/ tag, don't leak the project's model
     // to the wrong CLI (e.g. passing claude-opus-4-6 to codex would crash).
     // Each agent plugin has its own default model as fallback.
+    let agentWorkspacePath = workspacePath;
     const agentLaunchConfig = {
       sessionId,
       projectConfig: project,
@@ -805,15 +866,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       model: profileSelection.model,
       attachments: spawnConfig.attachments,
       mcpServers: resolvedMcpServers,
-      workspacePath,
+      workspacePath: agentWorkspacePath,
     };
 
     let handle: RuntimeHandle;
     try {
+      agentWorkspacePath = resolveAgentWorkspacePath(workspacePath, project);
+      agentLaunchConfig.workspacePath = agentWorkspacePath;
+
       // Set up workspace hooks (writes MCP config files, shell wrappers, etc.)
       // Must run before getLaunchCommand so MCP config files exist when referenced.
       if (plugins.agent.setupWorkspaceHooks) {
-        await plugins.agent.setupWorkspaceHooks(workspacePath, {
+        await plugins.agent.setupWorkspaceHooks(agentWorkspacePath, {
           dataDir: sessionsDir,
           sessionId,
           mcpServers: resolvedMcpServers,
@@ -825,13 +889,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
       handle = await plugins.runtime.create({
         sessionId: tmuxName ?? sessionId,
-        workspacePath,
+        workspacePath: agentWorkspacePath,
         launchCommand,
         environment: {
           ...environment,
           CO_SESSION: sessionId,
           CO_DATA_DIR: sessionsDir,
           CO_SESSION_NAME: sessionId,
+          CO_AGENT_CWD: agentWorkspacePath,
           ...(tmuxName && { CO_TMUX_NAME: tmuxName }),
         },
       });
@@ -1084,6 +1149,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const worktree = raw["worktree"];
     const isProjectPath = project && worktree === project.path;
     if (worktree && !isProjectPath) {
+      if (project && existsSync(worktree)) {
+        const hasChanges = await workspaceHasGitChanges(worktree);
+        if (hasChanges) {
+          await runWorkspaceCommands(project.cleanupScript, worktree, "cleanup");
+        }
+        await runWorkspaceCommands(project.archiveScript, worktree, "archive");
+      }
+
       const workspacePlugin = project
         ? resolvePlugins(project).workspace
         : registry.get<Workspace>("workspace", config.defaults.workspace);
@@ -1482,6 +1555,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const restoreMcpServers =
       Object.keys(restoreMergedMcp).length > 0 ? restoreMergedMcp : undefined;
 
+    let agentWorkspacePath = workspacePath;
     const agentLaunchConfig = {
       sessionId,
       projectConfig: project,
@@ -1491,12 +1565,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         ?? "skip",
       model: raw["model"] ?? project.agentConfig?.model,
       mcpServers: restoreMcpServers,
-      workspacePath,
+      workspacePath: agentWorkspacePath,
     };
+
+    agentWorkspacePath = resolveAgentWorkspacePath(workspacePath, project);
+    agentLaunchConfig.workspacePath = agentWorkspacePath;
 
     // Set up workspace hooks (re-writes MCP config and shell wrappers on restore)
     if (plugins.agent.setupWorkspaceHooks) {
-      await plugins.agent.setupWorkspaceHooks(workspacePath, {
+      await plugins.agent.setupWorkspaceHooks(agentWorkspacePath, {
         dataDir: sessionsDir,
         sessionId,
         mcpServers: restoreMcpServers,
@@ -1516,13 +1593,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const tmuxName = raw["tmuxName"];
     const handle = await plugins.runtime.create({
       sessionId: tmuxName ?? sessionId,
-      workspacePath,
+      workspacePath: agentWorkspacePath,
       launchCommand,
       environment: {
         ...environment,
         CO_SESSION: sessionId,
         CO_DATA_DIR: sessionsDir,
         CO_SESSION_NAME: sessionId,
+        CO_AGENT_CWD: agentWorkspacePath,
         ...(tmuxName && { CO_TMUX_NAME: tmuxName }),
       },
     });
