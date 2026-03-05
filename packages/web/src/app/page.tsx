@@ -1181,8 +1181,8 @@ function NewWorkspaceDialog({
                   Adding...
                 </>
               ) : "Add Workspace"}
-            </button>
-          </footer>
+              </button>
+            </footer>
         </form>
       </div>
 
