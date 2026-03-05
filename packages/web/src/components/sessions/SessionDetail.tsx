@@ -70,7 +70,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
           </TabsTrigger>
           <TabsTrigger value="chat">
             {agentName
-              ? <AgentTileIcon seed={{ label: agentName }} className="h-3.5 w-3.5" />
+              ? <AgentTileIcon seed={{ label: agentName }} className="h-6 w-6" />
               : <MessageSquare className="h-3.5 w-3.5" />}
             Chat
           </TabsTrigger>

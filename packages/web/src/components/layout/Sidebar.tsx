@@ -186,7 +186,7 @@ export function Sidebar({
                         <div className="flex items-center gap-2">
                           <AgentTileIcon
                             seed={{ label: agentName || "agent" }}
-                            className="h-4 w-4"
+                            className="h-6 w-6"
                           />
                           <p className="truncate text-[14px] text-[var(--vk-text-normal)]">
                             {session.summary ?? session.id}

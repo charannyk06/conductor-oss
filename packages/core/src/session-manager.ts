@@ -111,6 +111,50 @@ async function directWorktreeCleanup(
   }
 }
 
+/** Best-effort branch checkout when running directly in the project repo (no worktree plugin). */
+async function checkoutBranchForDirectWorkspace(
+  workspacePath: string,
+  branch: string,
+): Promise<void> {
+  const targetBranch = branch.trim();
+  if (!targetBranch) return;
+  if (!existsSync(join(workspacePath, ".git"))) return;
+
+  try {
+    await execFileP("git", ["fetch", "origin", "--quiet"], {
+      cwd: workspacePath,
+      timeout: 20_000,
+    });
+  } catch {
+    // Offline or no origin remote -- continue.
+  }
+
+  try {
+    await execFileP("git", ["checkout", targetBranch], {
+      cwd: workspacePath,
+      timeout: 20_000,
+    });
+    return;
+  } catch {
+    // Try creating a local tracking branch next.
+  }
+
+  try {
+    await execFileP("git", ["checkout", "--track", "-b", targetBranch, `origin/${targetBranch}`], {
+      cwd: workspacePath,
+      timeout: 20_000,
+    });
+    return;
+  } catch {
+    // Try creating a plain local branch from current HEAD next.
+  }
+
+  await execFileP("git", ["checkout", "-b", targetBranch], {
+    cwd: workspacePath,
+    timeout: 20_000,
+  });
+}
+
 /** Max sessions per project -- hard limit enforced at spawn time. */
 const MAX_SESSIONS_PER_PROJECT = 5;
 
@@ -647,6 +691,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     let branch: string;
     if (spawnConfig.branch) {
       branch = spawnConfig.branch;
+    } else if (!plugins.workspace) {
+      // No workspace isolation plugin: run directly on the configured base/default branch.
+      branch = baseBranch;
     } else if (spawnConfig.issueId && plugins.tracker && resolvedIssue) {
       branch = plugins.tracker.branchName(spawnConfig.issueId, project);
     } else if (spawnConfig.issueId) {
@@ -697,6 +744,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         }
       } catch (err) {
         // Clean up reserved session ID on workspace failure
+        try {
+          deleteMetadata(sessionsDir, sessionId, false);
+        } catch {
+          /* best effort */
+        }
+        throw err;
+      }
+    } else {
+      try {
+        await checkoutBranchForDirectWorkspace(project.path, branch);
+      } catch (err) {
+        // Clean up reserved session ID when direct branch checkout fails.
         try {
           deleteMetadata(sessionsDir, sessionId, false);
         } catch {

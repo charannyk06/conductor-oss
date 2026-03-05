@@ -2573,7 +2573,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                               <div className="mb-3 flex items-start justify-between gap-2">
                                 <div className="min-w-0 flex-1">
                                   <div className="mb-1 flex items-center gap-2">
-                                    <AgentIcon agent={agentIconSource} className="h-4 w-4" />
+                                    <AgentIcon agent={agentIconSource} className="h-6 w-6" />
                                     <h2 className="truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
                                       {agent.label}
                                     </h2>
@@ -2685,7 +2685,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                             <div className="mb-3 flex items-start justify-between gap-2">
                               <div className="min-w-0 flex-1">
                                 <div className="mb-1 flex items-center gap-2">
-                                  <AgentIcon agent={agentIconSource} className="h-4 w-4" />
+                                  <AgentIcon agent={agentIconSource} className="h-6 w-6" />
                                   <h2 className="truncate text-[14px] font-semibold text-[var(--color-text-primary)]">
                                   {agent.label}
                                   </h2>

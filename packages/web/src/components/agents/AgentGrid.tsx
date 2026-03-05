@@ -20,7 +20,7 @@ function AgentCard({ name, description, model, homepage, iconUrl }: AgentCardPro
       <CardContent className="flex h-full flex-col gap-3">
         <div className="flex items-start gap-3">
           <span className="surface-panel inline-flex h-10 w-10 items-center justify-center rounded-[var(--radius-sm)] border">
-            <AgentTileIcon seed={{ label: name, homepage, iconUrl }} className="h-5 w-5" />
+            <AgentTileIcon seed={{ label: name, homepage, iconUrl }} className="h-7 w-7" />
           </span>
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-[14px] font-semibold text-[var(--text-strong)]">{name}</h3>

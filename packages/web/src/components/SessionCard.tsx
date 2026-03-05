@@ -167,7 +167,7 @@ export function SessionCard({
         </span>
         {session.metadata?.agent && (
           <span className="inline-flex items-center gap-1.5 rounded bg-[var(--color-accent-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-accent)]">
-            <AgentTileIcon seed={{ label: session.metadata.agent }} className="h-3.5 w-3.5" />
+            <AgentTileIcon seed={{ label: session.metadata.agent }} className="h-6 w-6" />
             <span>{session.metadata.agent}</span>
           </span>
         )}

@@ -18,6 +18,7 @@ type WorkspaceRequestBody = {
   projectId?: unknown;
   agent?: unknown;
   defaultBranch?: unknown;
+  useWorktree?: unknown;
   gitUrl?: unknown;
   path?: unknown;
   initializeGit?: unknown;
@@ -203,6 +204,7 @@ function buildProjectPayload(args: {
   defaultBranch: string;
   agent: string;
   sessionPrefix: string;
+  useWorktree: boolean;
 }): Record<string, unknown> {
   return {
     path: args.path,
@@ -210,7 +212,7 @@ function buildProjectPayload(args: {
     defaultBranch: args.defaultBranch,
     agent: args.agent,
     sessionPrefix: args.sessionPrefix,
-    workspace: "worktree",
+    workspace: args.useWorktree ? "worktree" : "local",
     runtime: "tmux",
   };
 }
@@ -298,6 +300,7 @@ export async function GET() {
       repo: project.repo ?? null,
       defaultBranch: project.defaultBranch ?? "main",
       agent: project.agent ?? config.defaults.agent,
+      workspace: project.workspace ?? config.defaults.workspace,
     }));
     return NextResponse.json({ workspaces });
   } catch (err) {
@@ -329,6 +332,7 @@ export async function POST(request: NextRequest) {
   }
 
   const requestedDefaultBranch = asNonEmptyString(body.defaultBranch) ?? "main";
+  const useWorktree = body.useWorktree !== false;
   const gitUrl = asNonEmptyString(body.gitUrl);
   const rawPath = asNonEmptyString(body.path);
   const initializeGit = body.initializeGit === true;
@@ -408,6 +412,7 @@ export async function POST(request: NextRequest) {
           defaultBranch,
           agent: requestedAgent,
           sessionPrefix,
+          useWorktree,
         }),
       });
 
@@ -419,6 +424,7 @@ export async function POST(request: NextRequest) {
             repo: repoValue,
             defaultBranch,
             agent: requestedAgent,
+            workspace: useWorktree ? "worktree" : "local",
           },
         },
         { status: 201 },
@@ -481,6 +487,7 @@ export async function POST(request: NextRequest) {
         defaultBranch,
         agent: requestedAgent,
         sessionPrefix,
+        useWorktree,
       }),
     });
 
@@ -492,6 +499,7 @@ export async function POST(request: NextRequest) {
           repo: repoValue,
           defaultBranch,
           agent: requestedAgent,
+          workspace: useWorktree ? "worktree" : "local",
         },
       },
       { status: 201 },
