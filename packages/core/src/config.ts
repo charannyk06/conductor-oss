@@ -110,6 +110,7 @@ const ProjectConfigSchema = z.object({
   repo: z.string(),
   path: z.string(),
   defaultBranch: z.string().default("main"),
+  defaultWorkingDirectory: z.string().optional(),
   sessionPrefix: z
     .string()
     .regex(/^[a-zA-Z0-9_-]+$/, "sessionPrefix must match [a-zA-Z0-9_-]+")
@@ -123,6 +124,11 @@ const ProjectConfigSchema = z.object({
   scm: SCMConfigSchema.optional(),
   symlinks: z.array(z.string()).optional(),
   postCreate: z.array(z.string()).optional(),
+  setupScript: z.array(z.string()).optional(),
+  runSetupInParallel: z.boolean().optional(),
+  cleanupScript: z.array(z.string()).optional(),
+  archiveScript: z.array(z.string()).optional(),
+  copyFiles: z.array(z.string()).optional(),
   agentConfig: AgentSpecificConfigSchema.default(DEFAULT_AGENT_CONFIG),
   reactions: z.record(z.string(), ReactionConfigSchema.partial()).optional(),
   agentRules: z.string().optional(),
@@ -147,6 +153,22 @@ const WebhookConfigSchema = z.object({
   secret: z.string().optional(),
 });
 
+const NotificationPreferencesSchema = z.object({
+  soundEnabled: z.boolean().default(true),
+  soundFile: z.string().nullable().default("abstract-sound-4"),
+});
+
+const UserPreferencesSchema = z.object({
+  onboardingAcknowledged: z.boolean().default(false),
+  codingAgent: z.string().optional(),
+  ide: z.string().optional(),
+  markdownEditor: z.string().optional(),
+  notifications: NotificationPreferencesSchema.default({
+    soundEnabled: true,
+    soundFile: "abstract-sound-4",
+  }),
+});
+
 const ConductorConfigSchema = z.object({
   port: z.number().default(4747),
   terminalPort: z.number().optional(),
@@ -166,6 +188,13 @@ const ConductorConfigSchema = z.object({
   }),
   reactions: z.record(z.string(), ReactionConfigSchema).default({}),
   webhook: WebhookConfigSchema.optional(),
+  preferences: UserPreferencesSchema.default({
+    onboardingAcknowledged: false,
+    notifications: {
+      soundEnabled: true,
+      soundFile: "abstract-sound-4",
+    },
+  }),
 });
 
 // =============================================================================

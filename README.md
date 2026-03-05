@@ -100,16 +100,19 @@ npm install -g conductor-oss
 mkdir my-project && cd my-project
 co init
 
-# 3. Edit conductor.yaml — set your project path + GitHub repo
-# (takes 30 seconds)
-
-# 4. Start the orchestrator
+# 3. Start the orchestrator
 co start
 
-# 4b. Optional: run against an explicit workspace/config path
+# 3b. Optional: run against an explicit workspace/config path
 cd /path/to/workspace
 CO_CONFIG_PATH=./conductor.yaml co start --workspace . --port 4747
 ```
+
+Then in the dashboard:
+
+1. First run opens **Confirm your preferences** (agent, IDE, markdown editor, notifications).
+2. Click **Add Workspace** in the left sidebar.
+3. Pick **Git Repository** to load GitHub repos + select branch, or **Local Folder** to choose a repo from the folder picker.
 
 Open `CONDUCTOR.md` in your editor (or Obsidian), write a task in **Ready to Dispatch**, save — done.
 
@@ -289,6 +292,16 @@ columnAliases:
   ready: ["Ready to Dispatch", "Ready"]
   review: ["Review", "In Review"]
   done: ["Done"]
+
+# Optional: dashboard first-run + settings preferences
+preferences:
+  onboardingAcknowledged: false
+  codingAgent: claude-code
+  ide: vscode
+  markdownEditor: obsidian
+  notifications:
+    soundEnabled: true
+    soundFile: abstract-sound-4
 
 projects:
   my-app:

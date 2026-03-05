@@ -41,10 +41,10 @@ export function WorkspaceSidebarPanel({
           type="button"
           onClick={onCreateWorkspace}
           className="ml-auto inline-flex h-7 items-center gap-1 rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-          aria-label="Create workspace"
+          aria-label="Add workspace"
         >
           <Plus className="h-3.5 w-3.5" />
-          <span>New</span>
+          <span>Add Workspace</span>
         </button>
       </section>
 
