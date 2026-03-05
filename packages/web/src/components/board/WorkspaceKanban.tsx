@@ -360,8 +360,8 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
             <span className="px-3 py-1 text-[13px] text-[var(--vk-text-muted)]">Cancelled</span>
           </div>
 
-          <div className="ml-auto flex min-w-[220px] flex-1 items-center gap-2 sm:flex-none">
-            <label className="flex h-[31px] min-w-[200px] flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:w-[240px] sm:flex-none">
+          <div className="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:min-w-[220px] sm:flex-nowrap sm:flex-none">
+            <label className="flex h-[31px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:min-w-[200px] sm:w-[240px] sm:flex-none">
               <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
               <input
                 value={search}
@@ -374,7 +374,7 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
             <button
               type="button"
               onClick={() => openComposer("intake")}
-              className="inline-flex h-[31px] items-center gap-1 rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[14px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)]"
+              className="inline-flex h-[31px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[14px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] sm:w-auto"
             >
               <span>New Issue</span>
               <Plus className="h-3.5 w-3.5" />
@@ -478,9 +478,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
       </div>
 
       {composerOpen && (
-        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/60 px-3" onClick={() => !submitting && setComposerOpen(false)}>
+        <div className="fixed inset-0 z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0" onClick={() => !submitting && setComposerOpen(false)}>
           <div
-            className="w-full max-w-[560px] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]"
+            className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[560px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -492,7 +492,7 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               </p>
             </header>
 
-            <div className="space-y-3 px-4 py-4">
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
               <label className="block">
                 <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Title</span>
                 <input
@@ -690,7 +690,7 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               )}
             </div>
 
-            <footer className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
+            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
               <button
                 type="button"
                 onClick={() => setComposerOpen(false)}

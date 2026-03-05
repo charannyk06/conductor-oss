@@ -9,12 +9,20 @@ import {
   FolderGit2,
   GitBranch,
   ListChecks,
+  SquareArrowOutUpRight,
   Timer,
 } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import type { DashboardSession } from "@/lib/types";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { usePreferences } from "@/hooks/usePreferences";
+import {
+  buildRemoteEditorUrl,
+  formatRemoteAuthority,
+  getRemoteEditorLabel,
+  supportsRemoteEditor,
+} from "@/lib/editorLinks";
 
 type SessionData = DashboardSession & {
   agent?: string;
@@ -108,6 +116,8 @@ function pickMetadata(session: SessionData, key: string): string | undefined {
 }
 
 export function SessionOverview({ session }: SessionOverviewProps) {
+  const { preferences } = usePreferences();
+
   const prompt = useMemo(
     () => (
       pickMetadata(session, "task")
@@ -149,6 +159,30 @@ export function SessionOverview({ session }: SessionOverviewProps) {
     [session],
   );
 
+  const remoteEditorUrl = useMemo(
+    () => buildRemoteEditorUrl({
+      editorId: preferences?.ide,
+      workspacePath: worktree,
+      remoteSshHost: preferences?.remoteSshHost,
+      remoteSshUser: preferences?.remoteSshUser,
+    }),
+    [preferences?.ide, preferences?.remoteSshHost, preferences?.remoteSshUser, worktree],
+  );
+
+  const remoteEditorLabel = useMemo(
+    () => (preferences && supportsRemoteEditor(preferences.ide) ? getRemoteEditorLabel(preferences.ide) : null),
+    [preferences],
+  );
+
+  const remoteAuthority = useMemo(
+    () => (
+      preferences?.remoteSshHost
+        ? formatRemoteAuthority(preferences.remoteSshHost, preferences.remoteSshUser)
+        : ""
+    ),
+    [preferences?.remoteSshHost, preferences?.remoteSshUser],
+  );
+
   return (
     <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
       <div className="space-y-3">
@@ -183,6 +217,29 @@ export function SessionOverview({ session }: SessionOverviewProps) {
                 <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
                   <FolderGit2 className="h-3.5 w-3.5 text-[var(--text-faint)]" />
                   <CopyText text={worktree} />
+                </div>
+              )}
+              {(remoteEditorUrl || remoteAuthority) && (
+                <div className="surface-panel space-y-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+                  {remoteEditorUrl && remoteEditorLabel ? (
+                    <a
+                      href={remoteEditorUrl}
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] transition-colors hover:text-[var(--text-strong)]"
+                    >
+                      <SquareArrowOutUpRight className="h-3.5 w-3.5" />
+                      <span>{`Open in ${remoteEditorLabel}`}</span>
+                    </a>
+                  ) : (
+                    <p className="text-[12px] text-[var(--text-muted)]">
+                      Remote deep links currently support VS Code and VS Code Insiders.
+                    </p>
+                  )}
+                  {remoteAuthority && (
+                    <p className="text-[11px] text-[var(--text-muted)]">
+                      Remote SSH: <span className="font-mono text-[var(--text-normal)]">{remoteAuthority}</span>
+                    </p>
+                  )}
                 </div>
               )}
             </CardContent>

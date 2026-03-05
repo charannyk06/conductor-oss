@@ -1,0 +1,78 @@
+name: Release Packages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Detect pending changesets
+        id: changesets
+        run: |
+          if find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' ! -name 'config.json' -print -quit | grep -q .; then
+            echo "has_changesets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changesets=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stop when there is nothing to release
+        if: steps.changesets.outputs.has_changesets != 'true'
+        run: echo "No pending changesets on main."
+
+      - name: Version packages
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: pnpm version-packages
+
+      - name: Build publishable packages
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: pnpm --filter='!@conductor-oss/web' build
+
+      - name: Commit release versions
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "chore: release packages [skip ci]"
+
+      - name: Publish packages
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: pnpm release
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Push release commit and tags
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: git push origin HEAD:main --follow-tags

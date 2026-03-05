@@ -4,7 +4,7 @@ const clerkConfigured = Boolean(
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
 );
 
-export default async function middleware(
+export default async function proxy(
   req: NextRequest,
   event: NextFetchEvent,
 ): Promise<NextResponse> {
@@ -12,7 +12,7 @@ export default async function middleware(
     return NextResponse.next();
   }
 
-  // Dynamic import avoids crash when Clerk keys are absent —
+  // Dynamic import avoids crash when Clerk keys are absent.
   // clerkMiddleware() throws at call-time if publishableKey is missing.
   try {
     const { clerkMiddleware, createRouteMatcher } = await import(

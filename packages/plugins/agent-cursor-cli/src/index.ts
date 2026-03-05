@@ -148,7 +148,7 @@ export const manifest = {
   name: "cursor-cli",
   slot: "agent" as const,
   description: "Agent plugin: Cursor CLI",
-  version: "0.1.0",
+  version: "0.2.0",
 };
 
 function createAgent(): Agent {

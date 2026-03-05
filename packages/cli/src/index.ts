@@ -26,13 +26,14 @@ import { registerDoctor } from "./commands/doctor.js";
 import { registerRetry } from "./commands/retry.js";
 import { registerTask } from "./commands/task.js";
 import { registerFeedback } from "./commands/feedback.js";
+import { registerSetup } from "./commands/setup.js";
 
 const program = new Command();
 
 program
   .name("co")
   .description("Conductor — markdown-native AI agent orchestrator")
-  .version("0.1.0");
+  .version("0.2.0");
 
 registerSpawn(program);
 registerList(program);
@@ -46,6 +47,7 @@ registerDashboard(program);
 registerStart(program);
 registerWatch(program);
 registerInit(program);
+registerSetup(program);
 registerMcpServer(program);
 registerWebhook(program);
 registerDoctor(program);

@@ -11,6 +11,7 @@ import {
   Building2,
   Check,
   ChevronDown,
+  Copy,
   FolderOpen,
   FolderGit2,
   FolderKanban,
@@ -108,6 +109,8 @@ type PreferencesPayload = {
   onboardingAcknowledged: boolean;
   codingAgent: string;
   ide: string;
+  remoteSshHost: string;
+  remoteSshUser: string;
   markdownEditor: string;
   notifications: {
     soundEnabled: boolean;
@@ -126,6 +129,10 @@ type RepositorySettingsPayload = {
   displayName: string;
   repo: string;
   path: string;
+  agent: string;
+  workspaceMode: string;
+  runtimeMode: string;
+  scmMode: string;
   defaultWorkingDirectory: string;
   defaultBranch: string;
   devServerScript: string;
@@ -208,6 +215,12 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
   const ide = typeof payload["ide"] === "string" && payload["ide"].trim().length > 0
     ? payload["ide"].trim()
     : "vscode";
+  const remoteSshHost = typeof payload["remoteSshHost"] === "string" && payload["remoteSshHost"].trim().length > 0
+    ? payload["remoteSshHost"].trim()
+    : "";
+  const remoteSshUser = typeof payload["remoteSshUser"] === "string" && payload["remoteSshUser"].trim().length > 0
+    ? payload["remoteSshUser"].trim()
+    : "";
   const markdownEditor = typeof payload["markdownEditor"] === "string" && payload["markdownEditor"].trim().length > 0
     ? payload["markdownEditor"].trim()
     : "obsidian";
@@ -216,6 +229,8 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
     onboardingAcknowledged: payload["onboardingAcknowledged"] === true,
     codingAgent,
     ide,
+    remoteSshHost,
+    remoteSshUser,
     markdownEditor,
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
@@ -257,6 +272,38 @@ function CodeEditorIcon({ editorId, label }: { editorId: string; label: string }
   }
   const Icon = iconSpec.icon;
   return <Icon className={iconSpec.className} />;
+}
+
+function shellQuote(value: string): string {
+  return JSON.stringify(value);
+}
+
+function buildRepositoryBootstrapCommand(
+  repository: RepositorySettingsPayload,
+  preferences: Pick<PreferencesPayload, "ide" | "markdownEditor">,
+): string {
+  const initArgs = [
+    "npx conductor-oss@latest setup",
+    "--yes",
+    `--path ${shellQuote(repository.path)}`,
+    `--project-id ${shellQuote(repository.id)}`,
+    `--display-name ${shellQuote(repository.displayName)}`,
+    `--agent ${shellQuote(repository.agent || "claude-code")}`,
+    `--ide ${shellQuote(preferences.ide)}`,
+    `--markdown-editor ${shellQuote(preferences.markdownEditor)}`,
+  ];
+
+  if (repository.repo.trim().length > 0) {
+    initArgs.push(`--repo ${shellQuote(repository.repo.trim())}`);
+  }
+  if (repository.defaultBranch.trim().length > 0) {
+    initArgs.push(`--default-branch ${shellQuote(repository.defaultBranch.trim())}`);
+  }
+  if (repository.defaultWorkingDirectory.trim().length > 0) {
+    initArgs.push(`--default-working-directory ${shellQuote(repository.defaultWorkingDirectory.trim())}`);
+  }
+
+  return initArgs.join(" ");
 }
 
 type MarkdownEditorIconSpec =
@@ -313,6 +360,13 @@ export default function Home() {
 
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const workspaceError = createError ?? configError ?? sessionsError ?? preferencesError;
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.innerWidth < 1024) {
+      setSidebarOpen(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (projects.length === 0) {
@@ -444,10 +498,24 @@ export default function Home() {
 
   const toggleSidebar = () => setSidebarOpen((prev) => !prev);
 
+  const closeSidebarOnMobile = () => {
+    if (typeof window !== "undefined" && window.innerWidth < 1024) {
+      setSidebarOpen(false);
+    }
+  };
+
+  const syncSidebarForViewport = () => {
+    if (typeof window !== "undefined" && window.innerWidth < 1024) {
+      setSidebarOpen(false);
+      return;
+    }
+    setSidebarOpen(true);
+  };
+
   const openWorkspaceDialog = () => {
     setNewWorkspaceError(null);
     setNewWorkspaceOpen(true);
-    setSidebarOpen(true);
+    syncSidebarForViewport();
   };
 
   async function handleCreateSession() {
@@ -488,7 +556,7 @@ export default function Home() {
 
       setPrompt("");
       setWorkspaceView("chat");
-      setSidebarOpen(true);
+      syncSidebarForViewport();
       await refreshSessions();
       setSelectedSessionId(data.session.id);
     } catch (err) {
@@ -526,7 +594,7 @@ export default function Home() {
       setSelectedProjectId(createdProjectId);
       setSelectedSessionId(null);
       setPrompt("");
-      setSidebarOpen(true);
+      syncSidebarForViewport();
       setNewWorkspaceOpen(false);
     } catch (err) {
       setNewWorkspaceError(err instanceof Error ? err.message : "Failed to add workspace");
@@ -551,10 +619,14 @@ export default function Home() {
             onSelectProject={(projectId) => {
               setSelectedProjectId(projectId);
               setSelectedSessionId(null);
+              closeSidebarOnMobile();
             }}
             sessions={dashboardSessions}
             selectedSessionId={selectedSessionId}
-            onSelectSession={(id) => setSelectedSessionId(id)}
+            onSelectSession={(id) => {
+              setSelectedSessionId(id);
+              closeSidebarOnMobile();
+            }}
             onCreateWorkspace={() => {
               openWorkspaceDialog();
             }}
@@ -895,7 +967,7 @@ function NewWorkspaceDialog({
   return (
     <>
       <div
-        className="fixed inset-0 z-[80] flex items-center justify-center bg-black/65 px-3"
+        className="fixed inset-0 z-[80] flex items-start justify-center overflow-y-auto bg-black/65 px-3 py-3 sm:items-center sm:py-0"
         onClick={() => {
           if (creating || folderPickerOpen) return;
           onClose();
@@ -905,7 +977,7 @@ function NewWorkspaceDialog({
         <form
           onSubmit={handleSubmit}
           onClick={(event) => event.stopPropagation()}
-          className="w-full max-w-[760px] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+          className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[760px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
         >
           <header className="flex items-center border-b border-[var(--vk-border)] px-4 py-3">
             <div>
@@ -925,7 +997,7 @@ function NewWorkspaceDialog({
             </button>
           </header>
 
-          <div className="space-y-4 px-4 py-4">
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
             <div className="inline-flex rounded-[4px] border border-[var(--vk-border)] p-1">
               <button
                 type="button"
@@ -1161,7 +1233,7 @@ function NewWorkspaceDialog({
             {error && <p className="text-[12px] text-[var(--vk-red)]">{error}</p>}
           </div>
 
-          <footer className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
+          <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
             <button
               type="button"
               onClick={onClose}
@@ -1302,7 +1374,7 @@ function FolderPickerDialog({
 
   return (
     <div
-      className="fixed inset-0 z-[95] flex items-center justify-center bg-black/70 px-3"
+      className="fixed inset-0 z-[95] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center sm:py-0"
       onClick={() => {
         onClose();
         onSelect(null);
@@ -1310,7 +1382,7 @@ function FolderPickerDialog({
       role="presentation"
     >
       <div
-        className="h-[75vh] w-full max-w-[760px] overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+        className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[760px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="border-b border-[var(--vk-border)] px-4 py-3">
@@ -1318,8 +1390,8 @@ function FolderPickerDialog({
           <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">{description}</p>
         </header>
 
-        <div className="flex h-[calc(75vh-118px)] min-h-0 flex-col gap-3 px-4 py-3">
-          <div className="flex items-center gap-2">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 py-3">
+          <div className="flex flex-wrap items-center gap-2">
             <input
               value={manualPath}
               onChange={(event) => setManualPath(event.target.value)}
@@ -1337,7 +1409,7 @@ function FolderPickerDialog({
             </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => {
@@ -1470,23 +1542,23 @@ function CreateWorkspacePanel({
   const selectedAgentLabel = getAgentLabel(selectedAgent);
 
   return (
-    <section className="flex h-full min-h-0 items-center justify-center overflow-auto px-3 py-6">
+    <section className="flex h-full min-h-0 items-start justify-center overflow-auto px-3 py-4 sm:items-center sm:py-6">
       <div className="w-full max-w-[768px]">
-        <h1 className="pb-4 text-center text-[36px] font-medium leading-[40px] tracking-[-0.9px] text-[var(--vk-text-strong)]">
+        <h1 className="pb-4 text-center text-[28px] font-medium leading-[32px] tracking-[-0.6px] text-[var(--vk-text-strong)] sm:text-[36px] sm:leading-[40px] sm:tracking-[-0.9px]">
           What would you like to work on?
         </h1>
 
         <div className="rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
-          <div className="flex items-center border-b border-[var(--vk-border)] px-2 py-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--vk-border)] px-2 py-2">
             <AgentTileIcon seed={{ label: selectedAgent }} className="h-8 w-8 border-none bg-transparent" />
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
                   type="button"
-                  className="ml-2 inline-flex h-[31px] items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)]"
+                  className="inline-flex h-[31px] max-w-[70vw] items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)] sm:max-w-none"
                   aria-label="Select agent"
                 >
-                  <span className="pr-1">{selectedAgentLabel}</span>
+                  <span className="truncate pr-1">{selectedAgentLabel}</span>
                   <ChevronDown className="h-3 w-3 text-[var(--vk-text-muted)]" />
                 </button>
               </DropdownMenu.Trigger>
@@ -1532,16 +1604,16 @@ function CreateWorkspacePanel({
             />
           </div>
 
-          <div className="flex items-center justify-between border-t border-[var(--vk-border)] px-2 py-2">
+          <div className="flex flex-col gap-2 border-t border-[var(--vk-border)] px-2 py-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center text-[14px] text-[var(--vk-text-normal)]">
               <span className="truncate">{projectLabel}</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
               {!hasProject ? (
                 <button
                   type="button"
                   onClick={onOpenAddWorkspace}
-                  className="inline-flex min-h-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[13px] text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)]"
+                  className="inline-flex min-h-[32px] w-full items-center justify-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[13px] text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] sm:w-auto"
                 >
                   Add Workspace
                 </button>
@@ -1550,7 +1622,7 @@ function CreateWorkspacePanel({
                   type="button"
                   onClick={onCreate}
                   disabled={creating || prompt.trim().length === 0}
-                  className="inline-flex min-h-[29px] items-center justify-center rounded-[3px] bg-[var(--vk-bg-active)] px-2 text-[16px] text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] disabled:opacity-45"
+                  className="inline-flex min-h-[32px] w-full items-center justify-center rounded-[3px] bg-[var(--vk-bg-active)] px-2 text-[16px] text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] disabled:opacity-45 sm:w-auto"
                 >
                   {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
                 </button>
@@ -1562,6 +1634,35 @@ function CreateWorkspacePanel({
         {error && <p className="pt-2 text-[12px] text-[var(--vk-red)]">{error}</p>}
       </div>
     </section>
+  );
+}
+
+function CopySnippetButton({
+  value,
+  idleLabel = "Copy",
+  copiedLabel = "Copied",
+}: {
+  value: string;
+  idleLabel?: string;
+  copiedLabel?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function handleCopy() {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void handleCopy()}
+      className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+    >
+      {copied ? <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" /> : <Copy className="h-3.5 w-3.5" />}
+      <span>{copied ? copiedLabel : idleLabel}</span>
+    </button>
   );
 }
 
@@ -1589,6 +1690,8 @@ function SettingsDialog({
   const [activeTab, setActiveTab] = useState<SettingsTabId>("preferences");
   const [codingAgent, setCodingAgent] = useState(current.codingAgent);
   const [ide, setIde] = useState(current.ide);
+  const [remoteSshHost, setRemoteSshHost] = useState(current.remoteSshHost);
+  const [remoteSshUser, setRemoteSshUser] = useState(current.remoteSshUser);
   const [markdownEditor, setMarkdownEditor] = useState(current.markdownEditor);
   const [soundEnabled, setSoundEnabled] = useState(current.notifications.soundEnabled);
   const [soundFile, setSoundFile] = useState<string | null>(current.notifications.soundFile);
@@ -1710,6 +1813,7 @@ function SettingsDialog({
           displayName: repositoryDraft.displayName,
           repo: repositoryDraft.repo,
           path: repositoryDraft.path,
+          agent: repositoryDraft.agent,
           defaultWorkingDirectory: repositoryDraft.defaultWorkingDirectory,
           defaultBranch: repositoryDraft.defaultBranch,
           devServerScript: repositoryDraft.devServerScript,
@@ -1755,6 +1859,8 @@ function SettingsDialog({
     setActiveTab("preferences");
     setCodingAgent(current.codingAgent);
     setIde(current.ide);
+    setRemoteSshHost(current.remoteSshHost);
+    setRemoteSshUser(current.remoteSshUser);
     setMarkdownEditor(current.markdownEditor);
     setSoundEnabled(current.notifications.soundEnabled);
     setSoundFile(current.notifications.soundFile);
@@ -1823,6 +1929,12 @@ function SettingsDialog({
     && repositoryDraft.repo.trim().length > 0
     && repositoryDraft.path.trim().length > 0
     && repositoryDraft.defaultBranch.trim().length > 0;
+  const repositoryBootstrapCommand = repositoryDraft
+    ? buildRepositoryBootstrapCommand(repositoryDraft, {
+        ide,
+        markdownEditor,
+      })
+    : "";
 
   async function handleSubmitPreferences() {
     if (!canSubmitPreferences || creating) return;
@@ -1834,6 +1946,8 @@ function SettingsDialog({
       onboardingAcknowledged: mode === "onboarding" ? true : current.onboardingAcknowledged,
       codingAgent: codingAgent.trim(),
       ide: ide.trim(),
+      remoteSshHost: remoteSshHost.trim(),
+      remoteSshUser: remoteSshUser.trim(),
       markdownEditor: markdownEditor.trim(),
       notifications: {
         soundEnabled,
@@ -1845,7 +1959,7 @@ function SettingsDialog({
   return (
     <>
       <div
-        className="fixed inset-0 z-[90] flex items-center justify-center bg-black/70 px-3 py-3"
+        className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center"
         onClick={() => {
           if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen) return;
           onClose();
@@ -1853,14 +1967,14 @@ function SettingsDialog({
         role="presentation"
       >
         <div
-          className="flex h-[min(92vh,760px)] w-full max-w-[1120px] overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)]"
+          className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[1120px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(92vh,760px)] sm:flex-row"
           onClick={(event) => event.stopPropagation()}
         >
-          <aside className="flex w-[224px] shrink-0 flex-col border-r border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)]">
-            <header className="border-b border-[var(--vk-border)] px-4 py-4">
-              <h2 className="text-[27px] leading-[27px] text-[var(--vk-text-strong)]">Settings</h2>
+          <aside className="flex w-full shrink-0 flex-col border-b border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)] sm:w-[224px] sm:border-b-0 sm:border-r">
+            <header className="border-b border-[var(--vk-border)] px-4 py-3 sm:py-4">
+              <h2 className="text-[22px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">Settings</h2>
             </header>
-            <nav className="space-y-1 overflow-auto p-2">
+            <nav className="flex gap-1 overflow-x-auto p-2 sm:block sm:space-y-1 sm:overflow-auto">
               {visibleTabs.map((tab) => {
                 const Icon = tab.icon;
                 const selected = activeTabItem.id === tab.id;
@@ -1870,7 +1984,7 @@ function SettingsDialog({
                     type="button"
                     onClick={() => setActiveTab(tab.id)}
                     disabled={isBusy}
-                    className={`flex w-full items-center gap-3 rounded-[3px] px-3 py-2 text-left text-[14px] leading-[21px] transition-colors ${
+                    className={`flex shrink-0 items-center gap-3 rounded-[3px] px-3 py-2 text-left text-[14px] leading-[21px] transition-colors sm:w-full ${
                       selected
                         ? "bg-[rgba(234,122,42,0.1)] text-[var(--vk-orange)]"
                         : "text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
@@ -1885,8 +1999,8 @@ function SettingsDialog({
           </aside>
 
           <div className="flex min-w-0 flex-1 flex-col">
-            <header className="flex items-center justify-between border-b border-[var(--vk-border)] px-4 py-4">
-              <h3 className="text-[27px] leading-[27px] text-[var(--vk-text-strong)]">
+            <header className="flex items-center justify-between border-b border-[var(--vk-border)] px-4 py-3 sm:py-4">
+              <h3 className="text-[20px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
                 {mode === "onboarding" && isPreferencesTab ? "2. Confirm your preferences" : activeTabItem.label}
               </h3>
               <button
@@ -1900,7 +2014,7 @@ function SettingsDialog({
               </button>
             </header>
 
-            <div className="min-h-0 flex-1 overflow-auto px-6 py-4">
+            <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-6 sm:py-4">
               {isPreferencesTab ? (
                 <div className="space-y-5">
                   <section className="space-y-2">
@@ -1953,6 +2067,43 @@ function SettingsDialog({
                         );
                       })}
                     </div>
+                  </section>
+
+                  <section className="space-y-3">
+                    <div className="space-y-1">
+                      <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Editor Access</h4>
+                      <p className="text-[12px] text-[var(--vk-text-muted)]">
+                        Use your local Remote-SSH editor to jump straight into a remote worktree. This complements
+                        ngrok or Cloudflare Tunnel for dashboard access; it does not replace the tunnel.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH Host or Alias</span>
+                        <input
+                          value={remoteSshHost}
+                          onChange={(event) => setRemoteSshHost(event.target.value)}
+                          placeholder="e.g., conductor-dev or 203.0.113.10"
+                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                        />
+                      </label>
+
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH User (optional)</span>
+                        <input
+                          value={remoteSshUser}
+                          onChange={(event) => setRemoteSshUser(event.target.value)}
+                          placeholder="e.g., ubuntu"
+                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                        />
+                      </label>
+                    </div>
+
+                    <p className="text-[12px] text-[var(--vk-text-muted)]">
+                      One-click remote open currently supports VS Code and VS Code Insiders. Other editors will still
+                      save as your preference, but they will not get a remote launch button yet.
+                    </p>
                   </section>
 
                   <section className="space-y-2">
@@ -2062,6 +2213,41 @@ function SettingsDialog({
                   {repositoryDraft && (
                     <>
                       <section className="space-y-3 border-t border-[var(--vk-border)] pt-4">
+                        <div className="space-y-1">
+                          <h5 className="text-[22px] leading-[22px] text-[var(--vk-text-strong)]">One-Line Bootstrap</h5>
+                          <p className="text-[13px] text-[var(--vk-text-muted)]">
+                            Run this from any terminal to launch a PM-friendly guided setup. It checks the machine,
+                            installs supported tools, connects GitHub, writes the repo defaults below, and starts Conductor.
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 text-[11px] text-[var(--vk-text-muted)]">
+                          <span className="rounded-[999px] border border-[var(--vk-border)] px-2 py-1">
+                            Workspace: {repositoryDraft.workspaceMode}
+                          </span>
+                          <span className="rounded-[999px] border border-[var(--vk-border)] px-2 py-1">
+                            Runtime: {repositoryDraft.runtimeMode}
+                          </span>
+                          <span className="rounded-[999px] border border-[var(--vk-border)] px-2 py-1">
+                            SCM: {repositoryDraft.scmMode}
+                          </span>
+                        </div>
+
+                        <div className="rounded-[4px] border border-[var(--vk-border)] bg-[rgba(15,15,15,0.72)] p-3">
+                          <pre className="overflow-x-auto whitespace-pre-wrap break-all text-[12px] leading-5 text-[var(--vk-text-normal)]">
+                            {repositoryBootstrapCommand}
+                          </pre>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-[12px] text-[var(--vk-text-muted)]">
+                            This command uses your selected agent, editor, and notes app. Best on macOS with Homebrew. GitHub sign-in still opens a browser so the user can approve access.
+                          </p>
+                          <CopySnippetButton value={repositoryBootstrapCommand} idleLabel="Copy Setup Command" />
+                        </div>
+                      </section>
+
+                      <section className="space-y-3 border-t border-[var(--vk-border)] pt-4">
                         <h5 className="text-[22px] leading-[22px] text-[var(--vk-text-strong)]">General Settings</h5>
                         <p className="text-[13px] text-[var(--vk-text-muted)]">Configure basic repository information.</p>
 
@@ -2073,6 +2259,33 @@ function SettingsDialog({
                             className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                           />
                           <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">A friendly name for this repository.</p>
+                        </label>
+
+                        <label className="block">
+                          <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Repository Slug</span>
+                          <input
+                            value={repositoryDraft.repo}
+                            onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, repo: event.target.value } : prev)}
+                            placeholder="e.g., your-org/your-repo"
+                            className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                          />
+                          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">Used for PR tracking, GitHub links, and onboarding defaults.</p>
+                        </label>
+
+                        <label className="block">
+                          <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Default Agent</span>
+                          <select
+                            value={repositoryDraft.agent}
+                            onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, agent: event.target.value } : prev)}
+                            className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                          >
+                            {orderedAgentOptions.map((agent) => (
+                              <option key={agent} value={agent}>
+                                {getAgentLabel(agent)}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">Used by the one-line bootstrap and as the project default when tasks dispatch.</p>
                         </label>
 
                         <label className="block">
@@ -2281,7 +2494,7 @@ function SettingsDialog({
               )}
             </div>
 
-            <footer className="flex items-center justify-between gap-2 border-t border-[var(--vk-border)] px-4 py-3">
+            <footer className="flex flex-col gap-3 border-t border-[var(--vk-border)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
               <div className="min-w-0">
                 {(isRepositoriesTab ? repositoriesError : error) && (
                   <p className="truncate rounded-[4px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-2 py-1 text-[12px] text-[var(--vk-red)]">
@@ -2301,7 +2514,7 @@ function SettingsDialog({
                   </p>
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
                 {mode === "settings" && (
                   <button
                     type="button"

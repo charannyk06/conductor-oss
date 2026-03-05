@@ -13,12 +13,11 @@ export function TopBar({ session, fallbackTitle, onOpenPreferences }: TopBarProp
   const title = session?.summary ?? fallbackTitle ?? "Create Workspace";
 
   return (
-    <header className="flex h-[33px] items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[11px] text-[var(--vk-text-muted)]">
-      <div className="w-[33%]" />
-      <div className="flex w-[34%] items-center justify-center">
-        <span className="truncate">{title}</span>
+    <header className="flex h-[36px] items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[11px] text-[var(--vk-text-muted)] sm:h-[33px]">
+      <div className="min-w-0 flex-1 text-center">
+        <span className="block truncate">{title}</span>
       </div>
-      <div className="flex w-[33%] justify-end">
+      <div className="ml-1 flex shrink-0">
         <button
           type="button"
           onClick={onOpenPreferences}
