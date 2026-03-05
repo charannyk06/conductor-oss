@@ -71,6 +71,9 @@ importers:
       '@conductor-oss/plugin-scm-github':
         specifier: workspace:*
         version: link:../plugins/scm-github
+      '@conductor-oss/plugin-terminal-web':
+        specifier: workspace:*
+        version: link:../plugins/terminal-web
       '@conductor-oss/plugin-tracker-github':
         specifier: workspace:*
         version: link:../plugins/tracker-github
