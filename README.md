@@ -480,6 +480,7 @@ co mcp-server                          # Start MCP server (stdio)
 - GitHub-tracked versions are managed through Changesets files merged into `main`.
 - Add a release note with `pnpm changeset`.
 - On the next push to `main`, GitHub Actions versions packages, publishes them to npm, pushes tags, and commits the version bump automatically.
+- Before publish, the pipeline packs the public CLI and rejects the release if the npm artifact still depends on internal workspace packages or does not include the bundled dashboard.
 - Version package manifests locally with `pnpm version-packages` when you want to preview the release diff before CI runs.
 - Publish all public packages from the monorepo locally with `pnpm release` only when you intentionally want a manual publish.
 - Package and plugin source version strings are kept in sync via `pnpm sync:versions`.
