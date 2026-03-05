@@ -24,7 +24,7 @@ export function registerWatch(program: Command): void {
     .option("--poll <ms>", "Polling interval in milliseconds", "5000")
       .action(async (opts: { workspace: string; poll: string }) => {
       try {
-        const config = await loadConfig();
+        const config = await loadConfig(opts.workspace);
         const { sessionManager, registry } = await createServices(config);
         const core = await import("@conductor-oss/core");
 

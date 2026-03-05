@@ -148,7 +148,7 @@ export const manifest = {
   name: "github-copilot",
   slot: "agent" as const,
   description: "Agent plugin: GitHub Copilot CLI",
-  version: "0.2.0",
+  version: "0.2.2",
 };
 
 function createAgent(): Agent {

@@ -62,12 +62,29 @@ export type { OrchestratorConfig, SessionManager };
  * Load config from the standard YAML file.
  * Imported lazily from @conductor-oss/core.
  */
-export async function loadConfig(): Promise<OrchestratorConfig> {
+export async function loadConfig(configHint?: string): Promise<OrchestratorConfig> {
   const core = await import("@conductor-oss/core");
   if (typeof core.loadConfig !== "function") {
     throw new Error("@conductor-oss/core does not export loadConfig");
   }
-  return core.loadConfig() as OrchestratorConfig;
+  const findConfigFile = core.findConfigFile as ((startDir?: string) => string | null) | undefined;
+  const { existsSync, statSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+
+  let configPath: string | undefined;
+  if (configHint) {
+    const resolvedHint = resolve(configHint);
+    if (existsSync(resolvedHint) && statSync(resolvedHint).isFile()) {
+      configPath = resolvedHint;
+    } else if (findConfigFile) {
+      configPath = findConfigFile(resolvedHint) ?? undefined;
+      if (!configPath) {
+        throw new Error(`No conductor.yaml found under ${resolvedHint}. Run \`co setup\` or \`co init\` there first.`);
+      }
+    }
+  }
+
+  return core.loadConfig(configPath) as OrchestratorConfig;
 }
 
 /**

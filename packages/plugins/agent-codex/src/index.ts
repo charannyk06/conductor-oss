@@ -85,7 +85,7 @@ export const manifest = {
   name: "codex",
   slot: "agent" as const,
   description: "Agent plugin: OpenAI Codex CLI",
-  version: "0.2.0",
+  version: "0.2.2",
 };
 
 // =============================================================================
