@@ -182,7 +182,7 @@ export function registerStart(program: Command): void {
               const nextQueue: string[] = [];
               for (const d of searchQueue) {
                 const candidate = join(d, "server.js");
-                if (existsSync(candidate) && !candidate.includes("node_modules")) {
+                if (existsSync(candidate)) {
                   standaloneServer = candidate;
                   break;
                 }
@@ -201,8 +201,13 @@ export function registerStart(program: Command): void {
 
             let cmd: string;
             let args: string[];
+            let dashboardCwd = webDir;
 
-            if (hasNextBuild) {
+            if (standaloneServer) {
+              cmd = process.execPath;
+              args = [standaloneServer];
+              dashboardCwd = standaloneDir;
+            } else if (hasNextBuild) {
               // Use pnpm run start (next start) — reliable, serves static assets correctly
               cmd = "pnpm";
               args = [
@@ -226,7 +231,7 @@ export function registerStart(program: Command): void {
             }
 
             dashboardProcess = spawn(cmd, args, {
-              cwd: webDir,
+              cwd: dashboardCwd,
               stdio: "inherit",
               detached: false,
               env: {

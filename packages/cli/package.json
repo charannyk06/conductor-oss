@@ -31,6 +31,7 @@
     "@conductor-oss/plugin-notifier-discord": "workspace:*",
     "@conductor-oss/plugin-runtime-tmux": "workspace:*",
     "@conductor-oss/plugin-scm-github": "workspace:*",
+    "@conductor-oss/plugin-terminal-web": "workspace:*",
     "@conductor-oss/plugin-tracker-github": "workspace:*",
     "@conductor-oss/plugin-webhook": "workspace:*",
     "@conductor-oss/plugin-workspace-worktree": "workspace:*",
