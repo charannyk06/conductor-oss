@@ -2,8 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUp,
+  ChevronDown,
+  Eraser,
+  LoaderCircle,
   MessageCircleDashed,
+  Paperclip,
+  Play,
   Send,
+  SlidersHorizontal,
+  TerminalSquare,
 } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
@@ -39,17 +47,143 @@ const EMPTY_SUMMARY: DiffSummary = {
   deletions: 0,
 };
 
+type StreamItemKind = "text" | "thinking" | "command";
+
+interface StreamItem {
+  kind: StreamItemKind;
+  text: string;
+}
+
+const COMMAND_PREFIXES = [
+  "git",
+  "npm",
+  "pnpm",
+  "yarn",
+  "npx",
+  "node",
+  "python",
+  "pip",
+  "uv",
+  "cargo",
+  "go",
+  "docker",
+  "kubectl",
+  "helm",
+  "ls",
+  "cd",
+  "cat",
+  "sed",
+  "awk",
+  "rg",
+  "grep",
+  "find",
+  "touch",
+  "mkdir",
+  "cp",
+  "mv",
+  "rm",
+  "echo",
+  "pwd",
+  "whoami",
+  "curl",
+  "wget",
+  "tail",
+  "head",
+  "wc",
+  "sort",
+  "uniq",
+  "tr",
+  "xargs",
+  "make",
+  "just",
+  "bun",
+  "deno",
+  "tmux",
+] as const;
+
+const TOOL_LINE_PREFIXES = [
+  "searched for ",
+  "searching for ",
+  "read ",
+  "opened ",
+  "edited ",
+  "updated ",
+  "created ",
+  "applied patch",
+  "ran ",
+  "running ",
+  "wrote ",
+] as const;
+
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
 }
 
-function parseBlocks(raw: string): string[] {
-  return raw
-    .split(/\n{2,}/)
-    .map((block) => stripAnsi(block).trim())
-    .filter((block) => block.length > 0)
-    .slice(-120);
+function normalizeOutputLine(rawLine: string): string {
+  return stripAnsi(rawLine).replace(/\t/g, "  ").trim();
+}
+
+function stripPromptPrefix(line: string): string {
+  return line.replace(/^\s*(?:[^$>#%\n]{0,120}\s+)?(?:[$>#%]\s+)+/, "").trim();
+}
+
+function isThinkingLine(line: string): boolean {
+  const normalized = line.trim().toLowerCase();
+  return (
+    normalized === "thinking"
+    || normalized === "thinking..."
+    || normalized === "analyzing"
+    || normalized === "analyzing..."
+  );
+}
+
+function isCommandLine(line: string): boolean {
+  const normalized = stripPromptPrefix(line).toLowerCase();
+  if (!normalized) return false;
+  if (TOOL_LINE_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return true;
+  return COMMAND_PREFIXES.some(
+    (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `),
+  );
+}
+
+function parseStreamItems(raw: string): StreamItem[] {
+  const lines = raw.split(/\r?\n/).slice(-1400);
+  const items: StreamItem[] = [];
+  const textBuffer: string[] = [];
+
+  const flushTextBuffer = () => {
+    if (textBuffer.length === 0) return;
+    const text = textBuffer.join("\n").trim();
+    textBuffer.length = 0;
+    if (!text) return;
+    items.push({ kind: "text", text });
+  };
+
+  for (const rawLine of lines) {
+    const line = normalizeOutputLine(rawLine);
+    if (!line) {
+      flushTextBuffer();
+      continue;
+    }
+
+    if (isThinkingLine(line)) {
+      flushTextBuffer();
+      items.push({ kind: "thinking", text: "Thinking" });
+      continue;
+    }
+
+    if (isCommandLine(line)) {
+      flushTextBuffer();
+      items.push({ kind: "command", text: stripPromptPrefix(line) });
+      continue;
+    }
+
+    textBuffer.push(line);
+  }
+
+  flushTextBuffer();
+  return items.slice(-180);
 }
 
 function summarizeDiff(payload: DiffPayload): DiffSummary {
@@ -85,13 +219,17 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
     refresh,
   } = useSessionOutputStream(sessionId, { lines: 900, pollIntervalMs: 2000 });
 
-  const blocks = useMemo(() => parseBlocks(output), [output]);
+  const streamItems = useMemo(() => parseStreamItems(output), [output]);
 
-  useEffect(() => {
+  const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [blocks]);
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [scrollToBottom, streamItems]);
 
   const fetchDiffSummary = useCallback(async () => {
     try {
@@ -165,50 +303,110 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
   }, [sending]);
 
   const combinedError = sendError ?? streamError ?? diffError;
+  const controlButtonClass = "inline-flex h-[29px] min-w-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[#1c1c1c] px-2 text-[var(--vk-text-muted)] transition-colors hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
-        {blocks.length === 0 && (
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
+        {streamItems.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
             <MessageCircleDashed className="h-6 w-6 text-[var(--text-faint)]" />
             <p className="text-[13px] text-[var(--text-muted)]">No output yet</p>
           </div>
         )}
 
-        {blocks.map((block, index) => (
-          <article
-            key={`${index}-${block.slice(0, 24)}`}
-            className="surface-panel animate-rise-in rounded-[var(--radius-sm)] border px-3 py-2"
-          >
-            <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[var(--text-normal)]">
-              {block}
-            </pre>
-          </article>
-        ))}
+        {streamItems.length > 0 && (
+          <div className="space-y-3">
+            {streamItems.map((item, index) => {
+              if (item.kind === "thinking") {
+                return (
+                  <article
+                    key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
+                    className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
+                  >
+                    <LoaderCircle className="h-[15px] w-[15px]" />
+                    <span>{item.text}</span>
+                  </article>
+                );
+              }
+
+              if (item.kind === "command") {
+                return (
+                  <article
+                    key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
+                    className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
+                  >
+                    <span className="relative inline-flex h-[20px] w-[20px] items-center justify-center text-[var(--vk-text-muted)]">
+                      <TerminalSquare className="h-[15px] w-[15px]" />
+                      <span className="absolute -bottom-[2px] -left-[1px] h-[6px] w-[6px] rounded-full bg-[var(--vk-green)]" />
+                    </span>
+                    <span className="whitespace-pre-wrap break-words">{item.text}</span>
+                  </article>
+                );
+              }
+
+              return (
+                <article key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}>
+                  <pre className="whitespace-pre-wrap break-words font-sans text-[16px] leading-[24px] text-[#c4c4c4]">
+                    {item.text}
+                  </pre>
+                </article>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      <div className="border-t border-[var(--vk-border)] p-1">
-        <div className="rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+      <div className="border-t border-[var(--vk-border)] px-3 pb-3 pt-2">
+        <div className="rounded-[3px] border border-[var(--vk-border)] bg-[#1c1c1c]">
           <div className="flex items-center gap-2 border-b border-[var(--vk-border)] px-2 py-2">
-            <div className="flex min-h-[29px] flex-1 items-center gap-2">
-              {agentName && (
-                <div className="inline-flex min-h-[29px] items-center gap-1.5 rounded-[3px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)]">
-                  <AgentTileIcon seed={{ label: agentName }} className="h-4 w-4" />
-                  <span className="max-w-[180px] truncate">{agentName}</span>
-                </div>
-              )}
-              {diffSummary.hasDiff && (
-                <div className="inline-flex min-h-[29px] items-center gap-1.5 rounded-[3px] bg-[var(--vk-bg-active)] px-2 text-[14px] text-[var(--vk-text-normal)]">
+            <div className="flex min-h-[29px] flex-1 items-center gap-2 overflow-hidden">
+              {diffSummary.hasDiff ? (
+                <div className="inline-flex min-h-[29px] items-center gap-1.5 rounded-[3px] bg-[#292929] px-2 text-[14px] leading-[21px] text-[#c4c4c4]">
                   <span>{diffSummary.filesChanged} files changed</span>
                   <span className="text-[var(--vk-green)]">+{diffSummary.additions}</span>
                   <span className="text-[var(--vk-red)]">-{diffSummary.deletions}</span>
                 </div>
+              ) : agentName ? (
+                <div className="inline-flex min-h-[29px] items-center gap-1.5 rounded-[3px] border border-[var(--vk-border)] px-2 text-[13px] text-[var(--vk-text-normal)]">
+                  <AgentTileIcon seed={{ label: agentName }} className="h-6 w-6" />
+                  <span className="max-w-[180px] truncate">{agentName}</span>
+                </div>
+              ) : (
+                <span className="text-[13px] text-[var(--vk-text-muted)]">No file changes yet</span>
               )}
             </div>
-            <span className="text-[11px] text-[var(--vk-text-muted)]">
-              {connected ? "Live" : "Offline"}
-            </span>
+
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`h-2 w-2 rounded-full ${connected ? "bg-[var(--vk-green)]" : "bg-[var(--vk-text-muted)]"}`}
+                title={connected ? "Live output streaming" : "Reconnecting to output stream"}
+              />
+
+              <button
+                type="button"
+                className={controlButtonClass}
+                aria-label="Jump to latest output"
+                onClick={scrollToBottom}
+              >
+                <ArrowUp className="h-[15px] w-[15px]" />
+              </button>
+
+              {agentName && (
+                <span className="inline-flex h-[25px] w-[25px] items-center justify-center overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+                  <AgentTileIcon seed={{ label: agentName }} className="h-8 w-8" />
+                </span>
+              )}
+
+              <button type="button" className={controlButtonClass} aria-label="Chat settings">
+                <SlidersHorizontal className="h-[15px] w-[15px]" />
+              </button>
+
+              <button type="button" className={`${controlButtonClass} gap-1 text-[14px] leading-[21px]`}>
+                <span>Latest</span>
+                <ChevronDown className="h-[10px] w-[10px]" />
+              </button>
+            </div>
           </div>
 
           <div className="px-2 pt-2">
@@ -224,7 +422,7 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
               disabled={sending}
               rows={1}
               placeholder={placeholderText}
-              className="min-h-[24px] max-h-40 w-full resize-none bg-transparent text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+              className="min-h-[24px] max-h-40 w-full resize-none bg-transparent text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[#8f8f8f]"
             />
           </div>
 
@@ -232,11 +430,20 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
             <div className="flex flex-wrap items-center gap-1">
               <button
                 type="button"
-                className="inline-flex min-h-[29px] items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[13px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                aria-label="Clear draft"
+                className={controlButtonClass}
+                aria-label="Clear message draft"
                 onClick={() => setInput("")}
               >
-                Clear draft
+                <Eraser className="h-[15px] w-[15px]" />
+              </button>
+              <button type="button" className={controlButtonClass} aria-label="Playback tools">
+                <Play className="h-[15px] w-[15px]" />
+              </button>
+              <button type="button" className={controlButtonClass} aria-label="Attach files">
+                <Paperclip className="h-[15px] w-[15px]" />
+              </button>
+              <button type="button" className={controlButtonClass} aria-label="Additional options">
+                <SlidersHorizontal className="h-[15px] w-[15px]" />
               </button>
             </div>
 
@@ -244,7 +451,7 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
               variant="primary"
               onClick={() => void handleSend()}
               disabled={sending || !input.trim()}
-              className="min-h-[29px] rounded-[3px] bg-[var(--vk-bg-active)] px-2 py-1 text-[16px] font-normal text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+              className="min-h-[29px] rounded-[3px] border border-[var(--vk-border)] bg-[#292929] px-2 py-1 text-[16px] font-normal text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
             >
               <span>Send</span>
               <Send className="ml-1 h-[15px] w-[15px]" />
@@ -257,10 +464,6 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
             {combinedError}
           </p>
         )}
-
-        <p className="pt-1 text-[11px] text-[var(--vk-text-muted)]">
-          {connected ? "Streaming live output" : "Reconnecting to output stream"}
-        </p>
       </div>
     </div>
   );

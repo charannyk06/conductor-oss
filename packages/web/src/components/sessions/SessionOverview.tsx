@@ -193,7 +193,7 @@ export function SessionOverview({ session }: SessionOverviewProps) {
       <div className="space-y-3">
         <Card>
           <CardHeader>
-            <AgentTileIcon seed={{ label: agentName || "agent" }} className="h-4 w-4" />
+            <AgentTileIcon seed={{ label: agentName || "agent" }} className="h-6 w-6" />
             <span className="text-[12px] font-semibold text-[var(--text-normal)]">Session Status</span>
           </CardHeader>
           <CardContent className="space-y-2.5">

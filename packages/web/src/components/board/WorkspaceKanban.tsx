@@ -34,6 +34,18 @@ type BoardResponse = {
   watcherHint?: string;
 };
 
+type ContextFile = {
+  path: string;
+  name: string;
+  kind: "image" | "file";
+  source?: string;
+  sizeBytes?: number | null;
+};
+
+type ContextFilesResponse = {
+  files: ContextFile[];
+};
+
 interface WorkspaceKanbanProps {
   projectId: string | null;
   defaultAgent: string;
@@ -81,6 +93,13 @@ function formatAgentLabel(value: string): string {
     .join(" ");
 }
 
+function formatFileSize(value: number | null | undefined): string {
+  if (!value || value <= 0) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: WorkspaceKanbanProps) {
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -94,6 +113,13 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
   const [agent, setAgent] = useState(defaultAgent);
   const [taskType, setTaskType] = useState("feature");
   const [priority, setPriority] = useState("normal");
+  const [contextNotes, setContextNotes] = useState("");
+  const [selectedContextPaths, setSelectedContextPaths] = useState<string[]>([]);
+  const [contextSearch, setContextSearch] = useState("");
+  const [contextFiles, setContextFiles] = useState<ContextFile[]>([]);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -110,6 +136,42 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
       setAgent(orderedAgentOptions[0] ?? "qwen-code");
     }
   }, [agent, orderedAgentOptions]);
+
+  useEffect(() => {
+    if (!composerOpen || !projectId) return;
+    let cancelled = false;
+
+    const loadContextFiles = async () => {
+      setContextLoading(true);
+      setContextError(null);
+      try {
+        const res = await fetch(`/api/context-files?projectId=${encodeURIComponent(projectId)}`);
+        const payload = (await res.json().catch(() => null)) as
+          | ContextFilesResponse
+          | { error?: string }
+          | null;
+        if (!res.ok) {
+          throw new Error((payload as { error?: string } | null)?.error ?? `Failed to load context files: ${res.status}`);
+        }
+        if (cancelled) return;
+        const files = Array.isArray((payload as ContextFilesResponse | null)?.files)
+          ? (payload as ContextFilesResponse).files
+          : [];
+        setContextFiles(files);
+      } catch (err) {
+        if (cancelled) return;
+        setContextFiles([]);
+        setContextError(err instanceof Error ? err.message : "Failed to load context files");
+      } finally {
+        if (!cancelled) setContextLoading(false);
+      }
+    };
+
+    void loadContextFiles();
+    return () => {
+      cancelled = true;
+    };
+  }, [composerOpen, projectId]);
 
   const loadBoard = useCallback(async () => {
     if (!projectId) {
@@ -167,10 +229,37 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
       });
   }, [board?.columns, search, visibleRoles]);
 
+  const filteredContextFiles = useMemo(() => {
+    const query = contextSearch.trim().toLowerCase();
+    if (!query) return contextFiles;
+    return contextFiles.filter((file) => {
+      const haystack = `${file.path} ${file.name} ${file.source ?? ""}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [contextFiles, contextSearch]);
+
   function openComposer(role: BoardRole) {
     setComposerRole(role);
     setComposerOpen(true);
     setSubmitError(null);
+    setContextNotes("");
+    setContextSearch("");
+    setSelectedContextPaths([]);
+    setUploadFiles([]);
+  }
+
+  function toggleContextPath(path: string) {
+    setSelectedContextPaths((current) => (
+      current.includes(path)
+        ? current.filter((item) => item !== path)
+        : [...current, path]
+    ));
+  }
+
+  function removeUploadFile(file: File) {
+    setUploadFiles((current) => current.filter((entry) => (
+      entry.name !== file.name || entry.size !== file.size || entry.lastModified !== file.lastModified
+    )));
   }
 
   async function handleCreateTask() {
@@ -179,6 +268,29 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
     setSubmitError(null);
 
     try {
+      let uploadedPaths: string[] = [];
+      if (uploadFiles.length > 0) {
+        const formData = new FormData();
+        formData.append("projectId", projectId);
+        for (const file of uploadFiles) {
+          formData.append("files", file);
+        }
+        const uploadRes = await fetch("/api/attachments", {
+          method: "POST",
+          body: formData,
+        });
+        const uploadPayload = (await uploadRes.json().catch(() => null)) as
+          | { files?: Array<{ path?: string }>; error?: string }
+          | null;
+        if (!uploadRes.ok) {
+          throw new Error(uploadPayload?.error ?? `Upload failed: ${uploadRes.status}`);
+        }
+        uploadedPaths = (uploadPayload?.files ?? [])
+          .map((entry) => entry.path?.trim())
+          .filter((value): value is string => Boolean(value));
+      }
+
+      const attachments = [...new Set([...selectedContextPaths, ...uploadedPaths])];
       const res = await fetch("/api/boards", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -186,6 +298,8 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
           projectId,
           title: title.trim(),
           description: description.trim() || undefined,
+          contextNotes: contextNotes.trim() || undefined,
+          attachments: attachments.length > 0 ? attachments : undefined,
           agent,
           role: composerRole,
           type: taskType.trim() || undefined,
@@ -215,6 +329,10 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
       setDescription("");
       setTaskType("feature");
       setPriority("normal");
+      setContextNotes("");
+      setSelectedContextPaths([]);
+      setContextSearch("");
+      setUploadFiles([]);
       setComposerOpen(false);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to create task");
@@ -328,7 +446,7 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                           <div className="flex min-w-0 items-center gap-1.5">
                             {task.agent ? (
                               <>
-                                <AgentTileIcon seed={{ label: task.agent }} className="h-4 w-4" />
+                                <AgentTileIcon seed={{ label: task.agent }} className="h-6 w-6" />
                                 <span className="truncate text-[12px] text-[var(--vk-text-muted)]">{formatAgentLabel(task.agent)}</span>
                               </>
                             ) : (
@@ -396,6 +514,17 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 />
               </label>
 
+              <label className="block">
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Context notes (optional)</span>
+                <textarea
+                  value={contextNotes}
+                  onChange={(event) => setContextNotes(event.target.value)}
+                  rows={2}
+                  placeholder="Anything the agent should prioritize or avoid for this task."
+                  className="w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                />
+              </label>
+
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block">
                   <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Agent</span>
@@ -448,6 +577,112 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                     className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                   />
                 </label>
+              </div>
+
+              <div className="rounded-[4px] border border-[var(--vk-border)] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[12px] text-[var(--vk-text-muted)]">Context attachments</p>
+                  <p className="text-[12px] text-[var(--vk-text-muted)]">
+                    {selectedContextPaths.length} selected
+                    {uploadFiles.length > 0 ? ` · ${uploadFiles.length} upload(s)` : ""}
+                  </p>
+                </div>
+
+                <div className="mt-2">
+                  <label className="inline-flex cursor-pointer items-center rounded-[3px] border border-[var(--vk-border)] px-2 py-1 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]">
+                    <input
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={(event) => {
+                        const next = Array.from(event.target.files ?? []);
+                        if (next.length === 0) return;
+                        setUploadFiles((current) => {
+                          const merged = [...current];
+                          for (const file of next) {
+                            const exists = merged.some((entry) => (
+                              entry.name === file.name
+                              && entry.size === file.size
+                              && entry.lastModified === file.lastModified
+                            ));
+                            if (!exists) merged.push(file);
+                          }
+                          return merged;
+                        });
+                        event.currentTarget.value = "";
+                      }}
+                    />
+                    Upload files/images
+                  </label>
+                </div>
+
+                {uploadFiles.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {uploadFiles.map((file) => (
+                      <button
+                        key={`${file.name}-${file.size}-${file.lastModified}`}
+                        type="button"
+                        onClick={() => removeUploadFile(file)}
+                        className="inline-flex items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-hover)] px-2 py-1 text-[11px] text-[var(--vk-text-normal)]"
+                        title="Remove upload"
+                      >
+                        <span className="truncate max-w-[220px]">{file.name}</span>
+                        <span className="text-[var(--vk-text-muted)]">×</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <label className="mt-3 block">
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Select existing context</span>
+                  <input
+                    value={contextSearch}
+                    onChange={(event) => setContextSearch(event.target.value)}
+                    placeholder="Search context files..."
+                    className="h-8 w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                  />
+                </label>
+
+                <div className="mt-2 max-h-[180px] overflow-auto rounded-[3px] border border-[var(--vk-border)]">
+                  {contextLoading ? (
+                    <div className="flex items-center gap-2 px-2 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Loading context files...</span>
+                    </div>
+                  ) : contextError ? (
+                    <p className="px-2 py-2 text-[12px] text-[var(--vk-red)]">{contextError}</p>
+                  ) : filteredContextFiles.length === 0 ? (
+                    <p className="px-2 py-2 text-[12px] text-[var(--vk-text-muted)]">No context files found.</p>
+                  ) : (
+                    <ul className="divide-y divide-[var(--vk-border)]">
+                      {filteredContextFiles.map((file) => {
+                        const checked = selectedContextPaths.includes(file.path);
+                        return (
+                          <li key={file.path} className="px-2 py-1.5">
+                            <label className="flex cursor-pointer items-start gap-2 text-[12px] text-[var(--vk-text-normal)]">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleContextPath(file.path)}
+                                className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--vk-border)] bg-transparent"
+                              />
+                              <span className="min-w-0">
+                                <span className="block truncate">
+                                  {file.path}
+                                </span>
+                                <span className="block text-[11px] text-[var(--vk-text-muted)]">
+                                  {file.kind}
+                                  {file.source ? ` · ${file.source}` : ""}
+                                  {file.sizeBytes ? ` · ${formatFileSize(file.sizeBytes)}` : ""}
+                                </span>
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
               </div>
 
               {submitError && (

@@ -16,7 +16,7 @@
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, statSync, readdirSync, mkdirSync, watch as fsWatch } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -161,6 +161,7 @@ function stripTags(text: string): string {
   return text
     .replace(/#[\w-]+\/[\w.\-]+/g, "")           // #agent/codex etc.
     .replace(/!\[\[([^\]]+)\]\]/g, "")             // ![[image.png]]
+    .replace(/\[\[([^\]]+)\]\]/g, "")              // [[note.md]]
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, "")      // ![alt](path)
     .replace(/\[(task|attempt|parent):[^\]]+\]/g, "") // [task:t-001] style metadata
     .replace(/\s+/g, " ")
@@ -487,33 +488,81 @@ const IMAGE_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico", ".tiff",
 ]);
 
+function attachmentTypeFromPath(value: string): "image" | "file" {
+  const normalized = value.toLowerCase();
+  for (const ext of IMAGE_EXTENSIONS) {
+    if (normalized.endsWith(ext)) return "image";
+  }
+  return "file";
+}
+
+function stripWikiDecorators(rawPath: string): string {
+  let value = rawPath.trim();
+  const pipeIndex = value.indexOf("|");
+  if (pipeIndex >= 0) value = value.slice(0, pipeIndex);
+  const hashIndex = value.indexOf("#");
+  if (hashIndex >= 0) value = value.slice(0, hashIndex);
+  return value.trim();
+}
+
+function stripMarkdownLinkDecorators(rawPath: string): string {
+  let value = rawPath.trim();
+  if (value.startsWith("<") && value.endsWith(">")) {
+    value = value.slice(1, -1).trim();
+  }
+  const withTitle = value.match(/^(.+?)\s+["'][^"']*["']$/);
+  if (withTitle?.[1]) {
+    value = withTitle[1].trim();
+  }
+  return value;
+}
+
 /** Extract image/file attachment references from card text. */
 function extractAttachments(text: string, workspacePath: string): TaskAttachment[] {
   const attachments: TaskAttachment[] = [];
   const seen = new Set<string>();
 
+  const addAttachment = (ref: string, rawPath: string): void => {
+    const resolved = resolveAttachmentPath(rawPath, workspacePath);
+    if (!resolved || seen.has(resolved)) return;
+    seen.add(resolved);
+    attachments.push({
+      path: resolved,
+      ref,
+      type: attachmentTypeFromPath(rawPath),
+    });
+  };
+
   // Obsidian wiki-link embeds: ![[image.png]] or ![[folder/mockup.png]]
   for (const match of text.matchAll(/!\[\[([^\]]+)\]\]/g)) {
     const ref = match[0];
     const rawPath = match[1]!;
-    const resolved = resolveAttachmentPath(rawPath, workspacePath);
-    if (resolved && !seen.has(resolved)) {
-      seen.add(resolved);
-      const ext = rawPath.slice(rawPath.lastIndexOf(".")).toLowerCase();
-      attachments.push({ path: resolved, ref, type: IMAGE_EXTENSIONS.has(ext) ? "image" : "file" });
-    }
+    addAttachment(ref, rawPath);
+  }
+
+  // Obsidian wiki-links: [[context/spec.md]] or [[note|label]]
+  for (const match of text.matchAll(/\[\[([^\]]+)\]\]/g)) {
+    const start = match.index ?? 0;
+    if (start > 0 && text[start - 1] === "!") continue;
+    const ref = match[0];
+    const rawPath = match[1]!;
+    addAttachment(ref, rawPath);
   }
 
   // Standard markdown embeds: ![alt text](path/to/file.png)
   for (const match of text.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)) {
     const ref = match[0];
     const rawPath = match[2]!;
-    const resolved = resolveAttachmentPath(rawPath, workspacePath);
-    if (resolved && !seen.has(resolved)) {
-      seen.add(resolved);
-      const ext = rawPath.slice(rawPath.lastIndexOf(".")).toLowerCase();
-      attachments.push({ path: resolved, ref, type: IMAGE_EXTENSIONS.has(ext) ? "image" : "file" });
-    }
+    addAttachment(ref, rawPath);
+  }
+
+  // Standard markdown links to local files: [Spec](docs/spec.md)
+  for (const match of text.matchAll(/\[([^\]]*)\]\(([^)]+)\)/g)) {
+    const start = match.index ?? 0;
+    if (start > 0 && text[start - 1] === "!") continue;
+    const ref = match[0];
+    const rawPath = match[2]!;
+    addAttachment(ref, rawPath);
   }
 
   return attachments;
@@ -526,27 +575,57 @@ function extractAttachments(text: string, workspacePath: string): TaskAttachment
 function resolveAttachmentPath(rawPath: string, workspacePath: string): string | null {
   if (!rawPath.trim()) return null;
 
-  // Block absolute paths and ~ expansion — only allow workspace-relative paths.
-  // This prevents path traversal attacks via cards referencing /etc/passwd, ~/.ssh/id_rsa, etc.
-  if (rawPath.startsWith("/") || rawPath.startsWith("~")) {
+  let normalizedRawPath = stripWikiDecorators(rawPath);
+  normalizedRawPath = stripMarkdownLinkDecorators(normalizedRawPath);
+  normalizedRawPath = normalizedRawPath.trim();
+  if (!normalizedRawPath) return null;
+
+  // Ignore web links, vault deep links, and anchors.
+  if (
+    /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedRawPath)
+    || normalizedRawPath.startsWith("obsidian://")
+    || normalizedRawPath.startsWith("mailto:")
+    || normalizedRawPath.startsWith("#")
+  ) {
     return null;
   }
 
-  // Resolve relative to workspace (Obsidian vault)
-  const resolved = join(workspacePath, rawPath);
+  try {
+    normalizedRawPath = decodeURIComponent(normalizedRawPath);
+  } catch {
+    // Keep original when path contains malformed %-encoding.
+  }
+  normalizedRawPath = normalizedRawPath.replace(/\\/g, "/").trim();
 
-  // Path traversal guard: resolved path must stay within workspace
-  const normalizedWorkspace = workspacePath.endsWith("/") ? workspacePath : workspacePath + "/";
-  if (!resolved.startsWith(normalizedWorkspace)) {
+  // Block absolute paths and ~ expansion — only allow workspace-relative paths.
+  // This prevents path traversal attacks via cards referencing /etc/passwd, ~/.ssh/id_rsa, etc.
+  if (normalizedRawPath.startsWith("/") || normalizedRawPath.startsWith("~")) {
+    return null;
+  }
+
+  const workspaceRoot = resolve(workspacePath);
+  const workspacePrefix = workspaceRoot.endsWith("/") ? workspaceRoot : `${workspaceRoot}/`;
+  const resolved = resolve(workspaceRoot, normalizedRawPath);
+  if (resolved !== workspaceRoot && !resolved.startsWith(workspacePrefix)) {
     return null;
   }
 
   if (existsSync(resolved)) return resolved;
+
+  // Obsidian note links commonly omit the .md extension.
+  if (!normalizedRawPath.endsWith(".md")) {
+    const withMd = resolve(workspaceRoot, `${normalizedRawPath}.md`);
+    if ((withMd === workspaceRoot || withMd.startsWith(workspacePrefix)) && existsSync(withMd)) {
+      return withMd;
+    }
+  }
+
   // Try attachments subfolder (common Obsidian convention)
-  const inAttachments = join(workspacePath, "attachments", rawPath);
-  if (inAttachments.startsWith(normalizedWorkspace) && existsSync(inAttachments)) {
+  const inAttachments = resolve(workspaceRoot, "attachments", normalizedRawPath);
+  if ((inAttachments === workspaceRoot || inAttachments.startsWith(workspacePrefix)) && existsSync(inAttachments)) {
     return inAttachments;
   }
+
   // File doesn't exist yet — still pass the path so the agent gets the reference
   return resolved;
 }

@@ -236,6 +236,10 @@ function extractMarker(text: string, marker: "task" | "attempt"): string | null 
 
 function cleanCardText(text: string): string {
   return text
+    .replace(/\s*!\[\[[^\]]+\]\]/g, "")
+    .replace(/\s*!\[[^\]]*\]\([^)]+\)/g, "")
+    .replace(/\s*\[\[[^\]]+\]\]/g, "")
+    .replace(/\s*\[[^\]]*\]\([^)]+\)/g, "")
     .replace(/\s*\[(task|attempt|parent):[^\]]+\]/gi, "")
     .replace(/\s*#(project|agent|type|priority)\/[\w.-]+/gi, "")
     .replace(/\s+/g, " ")
@@ -300,15 +304,68 @@ function insertTaskLine(content: string, heading: string, line: string): string 
   return lines.join("\n");
 }
 
+function normalizeAttachmentPath(value: string): string | null {
+  if (!value.trim()) return null;
+  let normalized = value.trim();
+
+  if (normalized.startsWith("![[") && normalized.endsWith("]]")) {
+    normalized = normalized.slice(3, -2).trim();
+  } else if (normalized.startsWith("[[") && normalized.endsWith("]]")) {
+    normalized = normalized.slice(2, -2).trim();
+  }
+
+  if (!normalized) return null;
+  if (
+    normalized.startsWith("/")
+    || normalized.startsWith("~")
+    || normalized.startsWith("obsidian://")
+    || /^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)
+  ) {
+    return null;
+  }
+
+  normalized = normalized.replace(/\\/g, "/").replace(/^\.\/+/, "").trim();
+  const pipeIndex = normalized.indexOf("|");
+  if (pipeIndex >= 0) normalized = normalized.slice(0, pipeIndex).trim();
+  const hashIndex = normalized.indexOf("#");
+  if (hashIndex >= 0) normalized = normalized.slice(0, hashIndex).trim();
+
+  const parts = normalized.split("/").map((segment) => segment.trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts.some((segment) => segment === "." || segment === "..")) return null;
+  return parts.join("/");
+}
+
+function parseAttachmentPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const normalized = normalizeAttachmentPath(entry);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+    if (out.length >= 24) break;
+  }
+  return out;
+}
+
 function buildTaskLine(params: {
   title: string;
   description: string | null;
+  contextNotes: string | null;
+  attachments: string[];
   projectId: string;
   agent: string;
   type: string | null;
   priority: string | null;
 }): string {
-  const details = params.description ? `${params.title} - ${params.description}` : params.title;
+  const detailsParts = [params.title];
+  if (params.description) detailsParts.push(params.description);
+  if (params.contextNotes) detailsParts.push(`Context: ${params.contextNotes}`);
+  const details = detailsParts.join(" - ");
+
   const tags = [
     `#project/${normalizeTag(params.projectId)}`,
     `#agent/${normalizeTag(params.agent)}`,
@@ -317,7 +374,11 @@ function buildTaskLine(params: {
   if (params.type) tags.push(`#type/${normalizeTag(params.type)}`);
   if (params.priority) tags.push(`#priority/${normalizeTag(params.priority)}`);
 
-  return `- [ ] ${details} ${tags.join(" ")}`.trim();
+  const attachments = params.attachments.map((item) => `![[${item}]]`);
+  const parts = [`- [ ] ${details}`];
+  if (attachments.length > 0) parts.push(attachments.join(" "));
+  parts.push(tags.join(" "));
+  return parts.join(" ").trim();
 }
 
 /** GET /api/boards?projectId=<id> -- Return parsed kanban board for a project. */
@@ -372,7 +433,7 @@ export async function GET(request: NextRequest) {
 
 /**
  * POST /api/boards -- Add a task card to a project board.
- * Body: { projectId, title, description?, agent, role?, type?, priority? }
+ * Body: { projectId, title, description?, contextNotes?, attachments?, agent, role?, type?, priority? }
  */
 export async function POST(request: NextRequest) {
   const denied = await guardApiAccess();
@@ -388,6 +449,8 @@ export async function POST(request: NextRequest) {
   const projectId = asNonEmptyString(body.projectId);
   const title = asNonEmptyString(body.title);
   const description = asNonEmptyString(body.description);
+  const contextNotes = asNonEmptyString(body.contextNotes)?.replace(/\s+/g, " ").trim() ?? null;
+  const attachments = parseAttachmentPaths(body.attachments);
   const agent = asNonEmptyString(body.agent);
   const requestedRole = asNonEmptyString(body.role);
   const type = asNonEmptyString(body.type);
@@ -425,6 +488,8 @@ export async function POST(request: NextRequest) {
     const line = buildTaskLine({
       title,
       description,
+      contextNotes,
+      attachments,
       projectId: canonicalProjectId,
       agent,
       type,

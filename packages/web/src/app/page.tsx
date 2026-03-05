@@ -59,6 +59,7 @@ type NewWorkspacePayload = {
   projectId?: string;
   agent: string;
   defaultBranch: string;
+  useWorktree?: boolean;
   gitUrl?: string;
   path?: string;
   initializeGit?: boolean;
@@ -350,6 +351,7 @@ function NewWorkspaceDialog({
   const [path, setPath] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
   const [agent, setAgent] = useState(defaultAgent);
+  const [useWorktree, setUseWorktree] = useState(true);
   const [initializeGit, setInitializeGit] = useState(true);
 
   useEffect(() => {
@@ -360,6 +362,7 @@ function NewWorkspaceDialog({
     setPath("");
     setDefaultBranch("main");
     setInitializeGit(true);
+    setUseWorktree(true);
     setAgent(defaultAgent);
   }, [defaultAgent, open]);
 
@@ -401,6 +404,7 @@ function NewWorkspaceDialog({
             projectId: projectId.trim() || undefined,
             agent,
             defaultBranch: defaultBranch.trim(),
+            useWorktree,
             gitUrl: gitUrl.trim(),
             path: path.trim() || undefined,
           }
@@ -409,6 +413,7 @@ function NewWorkspaceDialog({
             projectId: projectId.trim() || undefined,
             agent,
             defaultBranch: defaultBranch.trim(),
+            useWorktree,
             path: path.trim(),
             initializeGit,
           };
@@ -556,6 +561,21 @@ function NewWorkspaceDialog({
             </label>
           </div>
 
+          <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] px-2 py-2 text-[13px] text-[var(--vk-text-normal)]">
+            <input
+              type="checkbox"
+              checked={useWorktree}
+              onChange={(event) => setUseWorktree(event.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
+            />
+            <span>
+              Use worktree isolation
+              <span className="block text-[11px] text-[var(--vk-text-muted)]">
+                If unchecked, sessions run directly on the selected branch in the local repo.
+              </span>
+            </span>
+          </label>
+
           {error && <p className="text-[12px] text-[var(--vk-red)]">{error}</p>}
         </div>
 
@@ -628,7 +648,7 @@ function CreateWorkspacePanel({
 
         <div className="rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
           <div className="flex items-center border-b border-[var(--vk-border)] px-2 py-2">
-            <AgentTileIcon seed={{ label: selectedAgent }} className="h-[25px] w-[25px] border-none bg-transparent" />
+            <AgentTileIcon seed={{ label: selectedAgent }} className="h-8 w-8 border-none bg-transparent" />
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
@@ -659,7 +679,7 @@ function CreateWorkspacePanel({
                         onSelect={() => setSelectedAgent(agent)}
                         className="flex h-[40px] cursor-default items-center gap-2 rounded-[3px] px-2 text-[14px] leading-[21px] text-[var(--vk-text-strong)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]"
                       >
-                        <AgentTileIcon seed={{ label: agent }} className="h-4 w-4 border-none bg-transparent" />
+                        <AgentTileIcon seed={{ label: agent }} className="h-6 w-6 border-none bg-transparent" />
                         <span>{getAgentLabel(agent)}</span>
                         <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
                           {isSelected ? <Check className="h-4 w-4" /> : null}

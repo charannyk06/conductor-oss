@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useTheme } from "@/components/ThemeProvider";
 
 export type AgentTileIconSeed = {
   label: string;
@@ -144,34 +143,40 @@ function DefaultAgentIcon({ label, className }: { label: string; className: stri
 
 export function AgentTileIcon({
   seed,
-  className = "h-4 w-4",
+  className = "h-6 w-6",
 }: {
   seed: AgentTileIconSeed | null | undefined;
   className?: string;
 }) {
-  const { theme } = useTheme();
-  const [failed, setFailed] = useState(false);
+  const [sourceIndex, setSourceIndex] = useState(0);
   const label = seed?.label?.trim() ?? "";
 
-  const { localSrc, externalSrc } = useMemo(() => {
-    if (!label) return { localSrc: null as string | null, externalSrc: null as string | null };
+  const sources = useMemo(() => {
+    if (!label) return [] as string[];
     const key = resolveAgentIconKey({ label, iconUrl: seed?.iconUrl, homepage: seed?.homepage });
-    const suffix = theme === "light" ? "-light" : "-dark";
-    return {
-      localSrc: key ? `/agents/${key}${suffix}.svg` : null,
-      externalSrc: typeof seed?.iconUrl === "string" && seed.iconUrl.trim().length > 0 ? seed.iconUrl.trim() : null,
-    };
-  }, [label, seed?.homepage, seed?.iconUrl, theme]);
+    const externalSrc = typeof seed?.iconUrl === "string" && seed.iconUrl.trim().length > 0
+      ? seed.iconUrl.trim()
+      : null;
+
+    const list: string[] = [];
+    if (key) {
+      // The app uses a dark surface; prefer high-contrast dark variants first.
+      list.push(`/agents/${key}-dark.svg`);
+      list.push(`/agents/${key}-light.svg`);
+    }
+    if (externalSrc) list.push(externalSrc);
+    return list;
+  }, [label, seed?.homepage, seed?.iconUrl]);
 
   useEffect(() => {
-    setFailed(false);
-  }, [localSrc, externalSrc, label]);
+    setSourceIndex(0);
+  }, [label, sources]);
 
   if (!label) {
     return <DefaultAgentIcon label="AI" className={className} />;
   }
 
-  const src = failed ? null : (localSrc ?? externalSrc);
+  const src = sources[sourceIndex] ?? null;
   if (!src) {
     return <DefaultAgentIcon label={label} className={className} />;
   }
@@ -181,8 +186,8 @@ export function AgentTileIcon({
       src={src}
       alt={`${label} icon`}
       loading="lazy"
-      className={`${className} shrink-0 rounded-[0.2rem] object-contain`}
-      onError={() => setFailed(true)}
+      className={`${className} shrink-0 rounded-[0.2rem] object-contain scale-125`}
+      onError={() => setSourceIndex((current) => current + 1)}
     />
   );
 }
