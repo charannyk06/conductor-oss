@@ -3,12 +3,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
+  BookOpen,
   ChevronDown,
   Eraser,
+  FilePenLine,
+  FilePlus2,
+  Hammer,
   LoaderCircle,
   MessageCircleDashed,
   Paperclip,
   Play,
+  ScanSearch,
   Send,
   SlidersHorizontal,
   TerminalSquare,
@@ -48,10 +53,12 @@ const EMPTY_SUMMARY: DiffSummary = {
 };
 
 type StreamItemKind = "text" | "thinking" | "command";
+type ToolAction = "search" | "read" | "edit" | "create" | "run";
 
 interface StreamItem {
   kind: StreamItemKind;
   text: string;
+  action?: ToolAction;
 }
 
 const COMMAND_PREFIXES = [
@@ -101,19 +108,19 @@ const COMMAND_PREFIXES = [
   "tmux",
 ] as const;
 
-const TOOL_LINE_PREFIXES = [
-  "searched for ",
-  "searching for ",
-  "read ",
-  "opened ",
-  "edited ",
-  "updated ",
-  "created ",
-  "applied patch",
-  "ran ",
-  "running ",
-  "wrote ",
-] as const;
+const TOOL_LINE_PREFIXES: Array<{ prefix: string; action: ToolAction }> = [
+  { prefix: "searched for ", action: "search" },
+  { prefix: "searching for ", action: "search" },
+  { prefix: "read ", action: "read" },
+  { prefix: "opened ", action: "read" },
+  { prefix: "edited ", action: "edit" },
+  { prefix: "updated ", action: "edit" },
+  { prefix: "created ", action: "create" },
+  { prefix: "applied patch", action: "edit" },
+  { prefix: "ran ", action: "run" },
+  { prefix: "running ", action: "run" },
+  { prefix: "wrote ", action: "edit" },
+];
 
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -128,8 +135,12 @@ function stripPromptPrefix(line: string): string {
   return line.replace(/^\s*(?:[^$>#%\n]{0,120}\s+)?(?:[$>#%]\s+)+/, "").trim();
 }
 
+function stripLeadingDecorators(line: string): string {
+  return line.replace(/^[^a-zA-Z0-9]+/, "").trim();
+}
+
 function isThinkingLine(line: string): boolean {
-  const normalized = line.trim().toLowerCase();
+  const normalized = stripLeadingDecorators(line).trim().toLowerCase();
   return (
     normalized === "thinking"
     || normalized === "thinking..."
@@ -138,10 +149,20 @@ function isThinkingLine(line: string): boolean {
   );
 }
 
+function parseToolLine(line: string): { action: ToolAction; text: string } | null {
+  const stripped = stripLeadingDecorators(stripPromptPrefix(line));
+  const normalized = stripped.toLowerCase();
+  const match = TOOL_LINE_PREFIXES.find((item) => normalized.startsWith(item.prefix));
+  if (!match) return null;
+  return {
+    action: match.action,
+    text: stripped,
+  };
+}
+
 function isCommandLine(line: string): boolean {
-  const normalized = stripPromptPrefix(line).toLowerCase();
+  const normalized = stripLeadingDecorators(stripPromptPrefix(line)).toLowerCase();
   if (!normalized) return false;
-  if (TOOL_LINE_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return true;
   return COMMAND_PREFIXES.some(
     (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `),
   );
@@ -173,9 +194,16 @@ function parseStreamItems(raw: string): StreamItem[] {
       continue;
     }
 
+    const toolLine = parseToolLine(line);
+    if (toolLine) {
+      flushTextBuffer();
+      items.push({ kind: "command", text: toolLine.text, action: toolLine.action });
+      continue;
+    }
+
     if (isCommandLine(line)) {
       flushTextBuffer();
-      items.push({ kind: "command", text: stripPromptPrefix(line) });
+      items.push({ kind: "command", text: stripLeadingDecorators(stripPromptPrefix(line)) });
       continue;
     }
 
@@ -210,6 +238,7 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
   const [diffSummary, setDiffSummary] = useState<DiffSummary>(EMPTY_SUMMARY);
   const [diffError, setDiffError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [isPinnedToLatest, setIsPinnedToLatest] = useState(true);
   const mountedRef = useRef(true);
 
   const {
@@ -221,15 +250,42 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
 
   const streamItems = useMemo(() => parseStreamItems(output), [output]);
 
+  const isNearBottom = useCallback((element: HTMLDivElement, threshold = 44) => {
+    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+    return distance <= threshold;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    setIsPinnedToLatest(true);
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [scrollToBottom, streamItems]);
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const handleScroll = () => {
+      setIsPinnedToLatest(isNearBottom(el));
+    };
+
+    handleScroll();
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", handleScroll);
+    };
+  }, [isNearBottom]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !isPinnedToLatest) return;
+    el.scrollTop = el.scrollHeight;
+  }, [isPinnedToLatest, streamItems]);
+
+  useEffect(() => {
+    setIsPinnedToLatest(true);
+  }, [sessionId]);
 
   const fetchDiffSummary = useCallback(async () => {
     try {
@@ -307,59 +363,89 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-4">
-        {streamItems.length === 0 && (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-            <MessageCircleDashed className="h-6 w-6 text-[var(--text-faint)]" />
-            <p className="text-[13px] text-[var(--text-muted)]">No output yet</p>
-          </div>
-        )}
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          className="h-full overflow-y-auto px-3 py-3 sm:px-4 sm:py-4"
+        >
+          {streamItems.length === 0 && (
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
+              <MessageCircleDashed className="h-6 w-6 text-[var(--text-faint)]" />
+              <p className="text-[13px] text-[var(--text-muted)]">No output yet</p>
+            </div>
+          )}
 
-        {streamItems.length > 0 && (
-          <div className="space-y-3">
-            {streamItems.map((item, index) => {
-              if (item.kind === "thinking") {
+          {streamItems.length > 0 && (
+            <div className="space-y-3">
+              {streamItems.map((item, index) => {
+                if (item.kind === "thinking") {
+                  return (
+                    <article
+                      key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
+                      className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
+                    >
+                      <LoaderCircle className="h-[15px] w-[15px]" />
+                      <span>{item.text}</span>
+                    </article>
+                  );
+                }
+
+                if (item.kind === "command") {
+                  const iconClass = "h-[15px] w-[15px]";
+                  const CommandIcon = item.action === "search"
+                    ? ScanSearch
+                    : item.action === "read"
+                      ? BookOpen
+                      : item.action === "edit"
+                        ? FilePenLine
+                        : item.action === "create"
+                          ? FilePlus2
+                          : item.action === "run"
+                            ? Hammer
+                            : TerminalSquare;
+                  return (
+                    <article
+                      key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
+                      className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
+                    >
+                      <span className="relative inline-flex h-[20px] w-[20px] items-center justify-center text-[var(--vk-text-muted)]">
+                        <CommandIcon className={iconClass} />
+                        <span className="absolute -bottom-[2px] -left-[1px] h-[6px] w-[6px] rounded-full bg-[var(--vk-green)]" />
+                      </span>
+                      <span className="whitespace-pre-wrap break-words">{item.text}</span>
+                    </article>
+                  );
+                }
+
                 return (
-                  <article
-                    key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
-                    className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
-                  >
-                    <LoaderCircle className="h-[15px] w-[15px]" />
-                    <span>{item.text}</span>
+                  <article key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}>
+                    <pre className="whitespace-pre-wrap break-words font-sans text-[16px] leading-[24px] text-[#c4c4c4]">
+                      {item.text}
+                    </pre>
                   </article>
                 );
-              }
+              })}
+            </div>
+          )}
+        </div>
 
-              if (item.kind === "command") {
-                return (
-                  <article
-                    key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
-                    className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
-                  >
-                    <span className="relative inline-flex h-[20px] w-[20px] items-center justify-center text-[var(--vk-text-muted)]">
-                      <TerminalSquare className="h-[15px] w-[15px]" />
-                      <span className="absolute -bottom-[2px] -left-[1px] h-[6px] w-[6px] rounded-full bg-[var(--vk-green)]" />
-                    </span>
-                    <span className="whitespace-pre-wrap break-words">{item.text}</span>
-                  </article>
-                );
-              }
-
-              return (
-                <article key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}>
-                  <pre className="whitespace-pre-wrap break-words font-sans text-[16px] leading-[24px] text-[#c4c4c4]">
-                    {item.text}
-                  </pre>
-                </article>
-              );
-            })}
+        {!isPinnedToLatest && streamItems.length > 0 && (
+          <div className="pointer-events-none absolute bottom-3 right-3 z-10">
+            <button
+              type="button"
+              className="pointer-events-auto inline-flex h-8 items-center gap-1 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2.5 text-[11px] text-[var(--vk-text-normal)] shadow-[0_8px_24px_rgba(0,0,0,0.4)] hover:bg-[var(--vk-bg-hover)]"
+              onClick={scrollToBottom}
+            >
+              <ArrowUp className="h-3.5 w-3.5" />
+              Latest
+            </button>
           </div>
         )}
       </div>
 
       <div className="border-t border-[var(--vk-border)] px-3 pb-3 pt-2">
         <div className="rounded-[3px] border border-[var(--vk-border)] bg-[#1c1c1c]">
-          <div className="flex items-center gap-2 border-b border-[var(--vk-border)] px-2 py-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--vk-border)] px-2 py-2 sm:flex-nowrap">
             <div className="flex min-h-[29px] flex-1 items-center gap-2 overflow-hidden">
               {diffSummary.hasDiff ? (
                 <div className="inline-flex min-h-[29px] items-center gap-1.5 rounded-[3px] bg-[#292929] px-2 text-[14px] leading-[21px] text-[#c4c4c4]">
@@ -393,7 +479,7 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
               </button>
 
               {agentName && (
-                <span className="inline-flex h-[25px] w-[25px] items-center justify-center overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+                <span className="hidden h-[25px] w-[25px] items-center justify-center overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] sm:inline-flex">
                   <AgentTileIcon seed={{ label: agentName }} className="h-8 w-8" />
                 </span>
               )}
@@ -427,7 +513,7 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
           </div>
 
           <div className="flex items-end justify-between gap-2 px-2 pb-2 pt-3">
-            <div className="flex flex-wrap items-center gap-1">
+            <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
               <button
                 type="button"
                 className={controlButtonClass}

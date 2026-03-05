@@ -92,27 +92,30 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 ## Quick Start
 
 ```bash
-# 1. Install
-npm install -g conductor-oss
-# or: npx conductor-oss init
+# 1. From any terminal, run the guided setup for a repo
+npx conductor-oss@latest setup --path /path/to/your-repo
 
-# 2. Scaffold a project
-mkdir my-project && cd my-project
-co init
+# 2. Optional: pin explicit defaults and skip the prompts
+npx conductor-oss@latest setup --yes \
+  --path /path/to/your-repo \
+  --project-id my-app \
+  --display-name "My App" \
+  --agent codex \
+  --ide vscode \
+  --markdown-editor obsidian \
+  --default-branch main
 
-# 3. Start the orchestrator
-co start
-
-# 3b. Optional: run against an explicit workspace/config path
-cd /path/to/workspace
-CO_CONFIG_PATH=./conductor.yaml co start --workspace . --port 4747
+# 3. Manual/technical path still exists if you want raw scaffolding only
+cd /path/to/your-repo
+npx conductor-oss@latest init
+npx conductor-oss@latest start
 ```
 
 Then in the dashboard:
 
 1. First run opens **Confirm your preferences** (agent, IDE, markdown editor, notifications).
-2. Click **Add Workspace** in the left sidebar.
-3. Pick **Git Repository** to load GitHub repos + select branch, or **Local Folder** to choose a repo from the folder picker.
+2. Open **Settings → Repositories** for the exact one-line bootstrap command and repository defaults.
+3. Click **Add Workspace** in the left sidebar if you want to connect more repos from the UI.
 
 Open `CONDUCTOR.md` in your editor (or Obsidian), write a task in **Ready to Dispatch**, save — done.
 
@@ -150,6 +153,31 @@ If you edit `conductor.yaml` while the dashboard is already running:
 
 - Projects are now refreshed from `/api/config` every few seconds on the dashboard page, so new/updated projects appear without restarting.
 - If project IDs still look stale, restart the web process as above to clear app-level state.
+
+### Remote access
+
+For browser access from another device, keep using a tunnel or reverse proxy such as ngrok or Cloudflare Tunnel. Conductor's dashboard is still just a web app that needs an externally reachable URL.
+
+You can also add Remote-SSH editor deep links for remote worktrees:
+
+- Open **Settings > Preferences** in the dashboard.
+- Set your **SSH Host or Alias** and optional **SSH User**.
+- Keep your preferred IDE on **VS Code** or **VS Code Insiders**.
+- Session overview cards will show **Open in VS Code** for remote worktrees.
+
+This mirrors the practical part of Vibe Kanban's remote workflow: tunnel the UI, then jump into the remote repo with your local editor.
+
+### Guided setup behavior
+
+`co setup` is the default onboarding path for product and design teams:
+
+- checks whether `git`, `tmux`, `gh`, your chosen agent CLI, and selected apps are already available
+- installs supported missing tools automatically when possible
+- opens GitHub CLI browser auth when a repo connection is needed
+- writes `CONDUCTOR.md` and `conductor.yaml` into the selected repository
+- starts Conductor in that repository automatically
+
+Today the smoothest auto-install path is macOS with Homebrew. On other systems, Conductor still guides the user but may leave a few tools as manual installs.
 
 ### Prerequisites
 
@@ -268,7 +296,7 @@ Aliases are normalized and resolved to the dedicated native plugin ID before dis
 
 ## Configuration
 
-`conductor.yaml` (created by `co init`):
+`conductor.yaml` (created by `co setup` or `co init`):
 
 ```yaml
 port: 4747
@@ -426,7 +454,8 @@ When running the standalone webhook command, the listener defaults to port `4748
 ## CLI Reference
 
 ```bash
-co init                                # Scaffold CONDUCTOR.md + conductor.yaml
+co setup [--path <repo>] [--yes] [--agent <agent>] [--ide <editor>] [--markdown-editor <app>] # Guided setup with readiness checks + installs
+co init [--project-id <id>] [--repo <owner/repo>] [--agent <agent>] # Scaffold CONDUCTOR.md + conductor.yaml with repo-aware defaults
 co start [--no-dashboard] [--no-watcher] [--port <port>] [--workspace <path>] # Start orchestrator
 co watch                               # Run board watcher only
 co doctor                              # Diagnose board parsing/dispatch issues
@@ -445,6 +474,16 @@ co dashboard [--port]                  # Open web dashboard in browser
 co webhook [--port]                    # Start webhook server only
 co mcp-server                          # Start MCP server (stdio)
 ```
+
+## Versioning & Releases
+
+- GitHub-tracked versions are managed through Changesets files merged into `main`.
+- Add a release note with `pnpm changeset`.
+- On the next push to `main`, GitHub Actions versions packages, publishes them to npm, pushes tags, and commits the version bump automatically.
+- Before publish, the pipeline packs the public CLI and rejects the release if the npm artifact still depends on internal workspace packages or does not include the bundled dashboard.
+- Version package manifests locally with `pnpm version-packages` when you want to preview the release diff before CI runs.
+- Publish all public packages from the monorepo locally with `pnpm release` only when you intentionally want a manual publish.
+- Package and plugin source version strings are kept in sync via `pnpm sync:versions`.
 
 ## Local Troubleshooting (Common)
 

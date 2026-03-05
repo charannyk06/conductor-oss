@@ -21,6 +21,7 @@ type RepositoryPatchBody = {
   displayName?: unknown;
   repo?: unknown;
   path?: unknown;
+  agent?: unknown;
   defaultWorkingDirectory?: unknown;
   defaultBranch?: unknown;
   devServerScript?: unknown;
@@ -217,6 +218,10 @@ async function serializeRepository(projectId: string, project: Record<string, un
     displayName: asNonEmptyString(project["name"]) ?? projectId,
     repo,
     path,
+    agent: asNonEmptyString(project["agent"]) ?? "claude-code",
+    workspaceMode: asNonEmptyString(project["workspace"]) ?? "worktree",
+    runtimeMode: asNonEmptyString(project["runtime"]) ?? "tmux",
+    scmMode: asNonEmptyString(project["scm"]) ?? "github",
     defaultWorkingDirectory: asNonEmptyString(project["defaultWorkingDirectory"]) ?? "",
     defaultBranch: asNonEmptyString(project["defaultBranch"]) ?? "main",
     devServerScript: asNonEmptyString(toObject(project["devServer"])["command"]) ?? "",
@@ -295,6 +300,7 @@ export async function PUT(request: NextRequest) {
     const displayName = asNonEmptyString(body.displayName) ?? id;
     const repo = asNonEmptyString(body.repo);
     const path = asNonEmptyString(body.path);
+    const agent = asNonEmptyString(body.agent) ?? asNonEmptyString(existingProject["agent"]) ?? "claude-code";
     const defaultBranch = asNonEmptyString(body.defaultBranch) ?? "main";
     const defaultWorkingDirectory = normalizeWorkingDirectory(asNonEmptyString(body.defaultWorkingDirectory));
 
@@ -308,6 +314,7 @@ export async function PUT(request: NextRequest) {
     nextProject["name"] = displayName;
     nextProject["repo"] = repo;
     nextProject["path"] = expandHome(path);
+    nextProject["agent"] = agent;
     nextProject["defaultBranch"] = defaultBranch;
 
     if (defaultWorkingDirectory) {

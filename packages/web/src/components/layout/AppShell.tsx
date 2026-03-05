@@ -22,7 +22,7 @@ export function AppShell({
   return (
     <div
       style={shellStyle}
-      className="relative flex h-screen w-screen overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]"
+      className="relative flex h-dvh min-h-[100dvh] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]"
     >
       {sidebarOpen && (
         <button

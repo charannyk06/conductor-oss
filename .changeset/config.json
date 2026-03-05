@@ -1,0 +1,37 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
+  "changelog": false,
+  "commit": false,
+  "fixed": [
+    [
+      "conductor-oss",
+      "@conductor-oss/core",
+      "@conductor-oss/plugin-agent-amp",
+      "@conductor-oss/plugin-agent-ccr",
+      "@conductor-oss/plugin-agent-claude-code",
+      "@conductor-oss/plugin-agent-codex",
+      "@conductor-oss/plugin-agent-cursor-cli",
+      "@conductor-oss/plugin-agent-droid",
+      "@conductor-oss/plugin-agent-gemini",
+      "@conductor-oss/plugin-agent-github-copilot",
+      "@conductor-oss/plugin-agent-opencode",
+      "@conductor-oss/plugin-agent-qwen-code",
+      "@conductor-oss/plugin-mcp-server",
+      "@conductor-oss/plugin-notifier-desktop",
+      "@conductor-oss/plugin-notifier-discord",
+      "@conductor-oss/plugin-runtime-tmux",
+      "@conductor-oss/plugin-scm-github",
+      "@conductor-oss/plugin-terminal-web",
+      "@conductor-oss/plugin-tracker-github",
+      "@conductor-oss/plugin-webhook",
+      "@conductor-oss/plugin-workspace-worktree"
+    ]
+  ],
+  "linked": [],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": [
+    "@conductor-oss/web"
+  ]
+}

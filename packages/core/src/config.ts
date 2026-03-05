@@ -162,6 +162,8 @@ const UserPreferencesSchema = z.object({
   onboardingAcknowledged: z.boolean().default(false),
   codingAgent: z.string().optional(),
   ide: z.string().optional(),
+  remoteSshHost: z.string().optional(),
+  remoteSshUser: z.string().optional(),
   markdownEditor: z.string().optional(),
   notifications: NotificationPreferencesSchema.default({
     soundEnabled: true,
@@ -459,7 +461,7 @@ export function loadConfig(configPath?: string): OrchestratorConfig {
   const path = configPath ?? findConfigFile();
 
   if (!path) {
-    throw new Error("No conductor.yaml found. Run `co init` to create one.");
+    throw new Error("No conductor.yaml found. Run `co setup` or `co init` to create one.");
   }
 
   const raw = readFileSync(path, "utf-8");
@@ -479,7 +481,7 @@ export function loadConfigWithPath(configPath?: string): {
   const path = configPath ?? findConfigFile();
 
   if (!path) {
-    throw new Error("No conductor.yaml found. Run `co init` to create one.");
+    throw new Error("No conductor.yaml found. Run `co setup` or `co init` to create one.");
   }
 
   const raw = readFileSync(path, "utf-8");

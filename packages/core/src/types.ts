@@ -435,6 +435,10 @@ export interface UserPreferences {
   codingAgent?: string;
   /** Preferred IDE used when opening attempts/files. */
   ide?: string;
+  /** Optional SSH host/alias used for remote editor deep links. */
+  remoteSshHost?: string;
+  /** Optional SSH username used for remote editor deep links. */
+  remoteSshUser?: string;
   /** Preferred markdown editor for second-brain/context workflows. */
   markdownEditor?: string;
   notifications: NotificationPreferences;

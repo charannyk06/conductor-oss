@@ -8,6 +8,11 @@ preferences:
   onboardingAcknowledged: false
   codingAgent: claude-code
   ide: vscode
+  # Optional: enable "Open in VS Code" from the dashboard for remote worktrees.
+  # Keep using ngrok / Cloudflare Tunnel / a reverse proxy for dashboard access;
+  # these fields only power editor deep links.
+  # remoteSshHost: conductor-dev
+  # remoteSshUser: ubuntu
   markdownEditor: obsidian
   notifications:
     soundEnabled: true

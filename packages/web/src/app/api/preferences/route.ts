@@ -13,6 +13,8 @@ type PreferencesPatchBody = {
   onboardingAcknowledged?: unknown;
   codingAgent?: unknown;
   ide?: unknown;
+  remoteSshHost?: unknown;
+  remoteSshUser?: unknown;
   markdownEditor?: unknown;
   notifications?: unknown;
 };
@@ -35,11 +37,15 @@ function normalizePreferences(
   const root = toObject(value);
   const notifications = toObject(root["notifications"]);
   const soundFile = notifications["soundFile"];
+  const remoteSshHost = asNonEmptyString(root["remoteSshHost"]);
+  const remoteSshUser = asNonEmptyString(root["remoteSshUser"]);
 
   return {
     onboardingAcknowledged: root["onboardingAcknowledged"] === true,
     codingAgent: asNonEmptyString(root["codingAgent"]) ?? fallbackAgent,
     ide: asNonEmptyString(root["ide"]) ?? "vscode",
+    ...(remoteSshHost ? { remoteSshHost } : {}),
+    ...(remoteSshUser ? { remoteSshUser } : {}),
     markdownEditor: asNonEmptyString(root["markdownEditor"]) ?? "obsidian",
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
@@ -110,6 +116,24 @@ export async function PUT(request: NextRequest) {
     if (body.ide !== undefined) {
       const value = asNonEmptyString(body.ide);
       if (value) nextPreferences.ide = value;
+    }
+
+    if (body.remoteSshHost !== undefined) {
+      const value = asNonEmptyString(body.remoteSshHost);
+      if (value) {
+        nextPreferences.remoteSshHost = value;
+      } else {
+        delete nextPreferences.remoteSshHost;
+      }
+    }
+
+    if (body.remoteSshUser !== undefined) {
+      const value = asNonEmptyString(body.remoteSshUser);
+      if (value) {
+        nextPreferences.remoteSshUser = value;
+      } else {
+        delete nextPreferences.remoteSshUser;
+      }
     }
 
     if (body.markdownEditor !== undefined) {

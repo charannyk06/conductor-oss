@@ -1,6 +1,7 @@
 {
-  "name": "conductor-oss",
+  "name": "conductor-oss-workspace",
   "version": "0.1.0",
+  "private": true,
   "license": "MIT",
   "author": "Conductor Contributors",
   "repository": {
@@ -12,13 +13,19 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",
+    "changeset": "changeset",
     "dev": "pnpm --filter @conductor-oss/web dev",
+    "release": "pnpm --filter='!@conductor-oss/web' build && pnpm release:verify && changeset publish",
+    "release:verify": "node scripts/verify-cli-package.mjs",
+    "sync:versions": "node scripts/sync-package-versions.mjs",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm --filter @conductor-oss/core test",
     "clean": "pnpm -r clean",
-    "ui:screenshots": "node scripts/capture-dashboard-screenshots.mjs"
+    "ui:screenshots": "node scripts/capture-dashboard-screenshots.mjs",
+    "version-packages": "changeset version && pnpm sync:versions && pnpm install --lockfile-only"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.30.0",
     "@types/node": "^25.3.3",
     "puppeteer": "^24.37.5",
     "typescript": "^5.9.3"
