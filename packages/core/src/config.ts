@@ -386,18 +386,9 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
  * 4. Home directory locations
  */
 export function findConfigFile(startDir?: string): string | null {
-  // 1. Check environment variable override
-  if (process.env["CO_CONFIG_PATH"]) {
-    const envPath = resolve(process.env["CO_CONFIG_PATH"]);
-    if (existsSync(envPath)) {
-      return envPath;
-    }
-  }
+  const configFiles = ["conductor.yaml", "conductor.yml"];
 
-  // 2. Search up directory tree from CWD (like git)
   const searchUpTree = (dir: string): string | null => {
-    const configFiles = ["conductor.yaml", "conductor.yml"];
-
     for (const filename of configFiles) {
       const configPath = resolve(dir, filename);
       if (existsSync(configPath)) {
@@ -407,28 +398,32 @@ export function findConfigFile(startDir?: string): string | null {
 
     const parent = resolve(dir, "..");
     if (parent === dir) {
-      // Reached root
       return null;
     }
 
     return searchUpTree(parent);
   };
 
-  const cwd = process.cwd();
-  const foundInTree = searchUpTree(cwd);
-  if (foundInTree) {
-    return foundInTree;
+  // 1. Check environment variable override
+  if (process.env["CO_CONFIG_PATH"]) {
+    const envPath = resolve(process.env["CO_CONFIG_PATH"]);
+    if (existsSync(envPath)) {
+      return envPath;
+    }
   }
 
-  // 3. Check explicit startDir if provided
+  // 2. Search up directory tree from explicit startDir first.
   if (startDir) {
-    const files = ["conductor.yaml", "conductor.yml"];
-    for (const filename of files) {
-      const path = resolve(startDir, filename);
-      if (existsSync(path)) {
-        return path;
-      }
+    const foundFromStartDir = searchUpTree(resolve(startDir));
+    if (foundFromStartDir) {
+      return foundFromStartDir;
     }
+  }
+
+  // 3. Search up directory tree from CWD (like git)
+  const foundInTree = searchUpTree(process.cwd());
+  if (foundInTree) {
+    return foundInTree;
   }
 
   // 4. Check home directory locations

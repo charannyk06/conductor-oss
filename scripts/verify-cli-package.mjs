@@ -107,6 +107,21 @@ try {
   const configContents = readFileSync(configPath, "utf8").replace(/^port:\s*4747$/m, "port: 4111");
   writeFileSync(configPath, configContents, "utf8");
 
+  execFileSync(
+    "node",
+    [
+      "node_modules/conductor-oss/dist/index.js",
+      "doctor",
+      "--workspace",
+      repoDir,
+      "--json",
+    ],
+    {
+      cwd: installDir,
+      stdio: "inherit",
+    },
+  );
+
   dashboardProcess = spawn(
     "node",
     [
@@ -122,7 +137,6 @@ try {
       cwd: installDir,
       env: {
         ...process.env,
-        CO_CONFIG_PATH: configPath,
         CONDUCTOR_WORKSPACE: repoDir,
       },
       stdio: ["ignore", "pipe", "pipe"],

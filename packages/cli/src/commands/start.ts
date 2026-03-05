@@ -25,7 +25,7 @@ export function registerStart(program: Command): void {
     .option("-w, --workspace <path>", "Obsidian workspace path")
       .action(async (opts: { dashboard?: boolean; watcher?: boolean; port?: string; workspace?: string }) => {
       try {
-        const config = await loadConfig();
+        const config = await loadConfig(opts.workspace);
         const { sessionManager, registry } = await createServices(config);
         const supportedAgents = registry.list("agent").map((agent) => agent.name);
 

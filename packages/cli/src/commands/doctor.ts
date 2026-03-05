@@ -16,7 +16,7 @@ export function registerDoctor(program: Command): void {
     .option("--json", "Output JSON report")
     .action(async (opts: DoctorOptions) => {
       try {
-        const config = await loadConfig();
+        const config = await loadConfig(opts.workspace);
         const coreModule = await import("@conductor-oss/core");
         const core = coreModule as Record<string, unknown>;
         const discoverBoards = core["discoverBoards"] as

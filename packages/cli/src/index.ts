@@ -33,7 +33,7 @@ const program = new Command();
 program
   .name("co")
   .description("Conductor — markdown-native AI agent orchestrator")
-  .version("0.2.0");
+  .version("0.2.2");
 
 registerSpawn(program);
 registerList(program);
