@@ -13,9 +13,11 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",
+    "build:release": "pnpm --filter='!@conductor-oss/web' build && pnpm --filter @conductor-oss/web build",
     "changeset": "changeset",
     "dev": "pnpm --filter @conductor-oss/web dev",
-    "release": "pnpm --filter='!@conductor-oss/web' build && pnpm release:verify && changeset publish",
+    "release": "pnpm build:release && pnpm release:verify && pnpm release:publish",
+    "release:publish": "node scripts/publish-cli-package.mjs",
     "release:verify": "node scripts/verify-cli-package.mjs",
     "sync:versions": "node scripts/sync-package-versions.mjs",
     "typecheck": "pnpm -r typecheck",

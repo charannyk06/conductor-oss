@@ -57,7 +57,11 @@ jobs:
 
       - name: Build publishable packages
         if: steps.changesets.outputs.has_changesets == 'true'
-        run: pnpm --filter='!@conductor-oss/web' build
+        run: pnpm build:release
+
+      - name: Verify release artifact
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: pnpm release:verify
 
       - name: Commit release versions
         if: steps.changesets.outputs.has_changesets == 'true'
@@ -69,7 +73,7 @@ jobs:
 
       - name: Publish packages
         if: steps.changesets.outputs.has_changesets == 'true'
-        run: pnpm release
+        run: pnpm release:publish
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
