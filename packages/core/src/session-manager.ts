@@ -1016,6 +1016,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
           while (Date.now() - startTime < maxWaitMs) {
             try {
+              const alive = await runtime.isAlive(handle);
+              if (!alive) {
+                console.log(`[session-manager] ${sessionId}: runtime exited before initial prompt delivery`);
+                return;
+              }
+            } catch {
+              // Can't check liveness; continue probing output.
+            }
+
+            try {
               const output = await runtime.getOutput(handle, 20);
               // Claude Code shows "❯" when ready for input
               // Codex shows ">" or "$" when ready
@@ -1024,13 +1034,23 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
                 break;
               }
             } catch {
-              // Can't read output -- keep trying
+              // Can't read output; keep trying.
             }
             await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           }
 
+          try {
+            const aliveBeforeSend = await runtime.isAlive(handle);
+            if (!aliveBeforeSend) {
+              console.log(`[session-manager] ${sessionId}: skipping initial prompt, runtime is no longer alive`);
+              return;
+            }
+          } catch {
+            // If liveness check fails, try sending once.
+          }
+
           if (!ready) {
-            console.log(`[session-manager] ${sessionId}: agent prompt not detected after ${maxWaitMs / 1000}s, sending anyway`);
+            console.log(`[session-manager] ${sessionId}: agent prompt not detected after ${maxWaitMs / 1000}s, attempting send`);
           }
 
           await runtime.sendMessage(handle, initialPrompt);
