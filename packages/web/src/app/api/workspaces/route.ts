@@ -5,9 +5,10 @@ import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
-import { generateSessionPrefix } from "@conductor-oss/core";
+import { buildConductorBoard, buildProjectConfigRecord, generateSessionPrefix } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { syncProjectLocalConfig } from "@/lib/projectConfigSync";
 
 const execFileAsync = promisify(execFile);
 
@@ -198,7 +199,16 @@ function toProjectMap(value: unknown): Record<string, unknown> {
   return { ...(value as Record<string, unknown>) };
 }
 
+function deriveDisplayName(projectId: string): string {
+  const humanized = projectId
+    .replace(/[-_]+/g, " ")
+    .trim();
+  if (humanized.length === 0) return projectId;
+  return humanized.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function buildProjectPayload(args: {
+  projectId: string;
   path: string;
   repo: string;
   defaultBranch: string;
@@ -206,7 +216,9 @@ function buildProjectPayload(args: {
   sessionPrefix: string;
   useWorktree: boolean;
 }): Record<string, unknown> {
-  return {
+  return buildProjectConfigRecord({
+    projectId: args.projectId,
+    displayName: deriveDisplayName(args.projectId),
     path: args.path,
     repo: args.repo,
     defaultBranch: args.defaultBranch,
@@ -214,7 +226,8 @@ function buildProjectPayload(args: {
     sessionPrefix: args.sessionPrefix,
     workspace: args.useWorktree ? "worktree" : "local",
     runtime: "tmux",
-  };
+    scm: args.repo.includes("/") ? "github" : null,
+  });
 }
 
 function getExistingPathBasenames(existingPaths: string[]): Set<string> {
@@ -279,6 +292,20 @@ async function writeProjectToConfig(args: {
     invalidateServicesCache("workspace add rollback");
     throw err;
   }
+}
+
+async function ensureProjectBoard(args: {
+  path: string;
+  projectId: string;
+  displayName: string;
+}): Promise<void> {
+  const boardPath = resolve(args.path, "CONDUCTOR.md");
+  const boardStats = await stat(boardPath).catch(() => null);
+  if (boardStats?.isFile()) {
+    return;
+  }
+
+  await writeFile(boardPath, buildConductorBoard(args.projectId, args.displayName), "utf8");
 }
 
 export const dynamic = "force-dynamic";
@@ -409,6 +436,7 @@ export async function POST(request: NextRequest) {
         configPath,
         projectId,
         projectData: buildProjectPayload({
+          projectId,
           path: targetPath,
           repo: repoValue,
           defaultBranch,
@@ -417,6 +445,15 @@ export async function POST(request: NextRequest) {
           useWorktree,
         }),
       });
+      await ensureProjectBoard({
+        path: targetPath,
+        projectId,
+        displayName: deriveDisplayName(projectId),
+      });
+      {
+        const { config: refreshedConfig } = await getServices();
+        await syncProjectLocalConfig(refreshedConfig as unknown as Record<string, unknown>, projectId);
+      }
 
       return NextResponse.json(
         {
@@ -485,6 +522,7 @@ export async function POST(request: NextRequest) {
       configPath,
       projectId,
       projectData: buildProjectPayload({
+        projectId,
         path: localPath,
         repo: repoValue,
         defaultBranch,
@@ -493,6 +531,15 @@ export async function POST(request: NextRequest) {
         useWorktree,
       }),
     });
+    await ensureProjectBoard({
+      path: localPath,
+      projectId,
+      displayName: deriveDisplayName(projectId),
+    });
+    {
+      const { config: refreshedConfig } = await getServices();
+      await syncProjectLocalConfig(refreshedConfig as unknown as Record<string, unknown>, projectId);
+    }
 
     return NextResponse.json(
       {

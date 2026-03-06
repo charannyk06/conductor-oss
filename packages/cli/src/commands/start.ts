@@ -10,10 +10,71 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
+import { buildConductorBoard, buildConductorYaml } from "@conductor-oss/core";
 import { createServices, loadConfig } from "../services.js";
+
+function openDashboardInBrowser(url: string): void {
+  const opener = process.platform === "darwin" ? "open" : "xdg-open";
+  const child = spawn(opener, [url], { stdio: "ignore", detached: true });
+  child.unref();
+  child.on("error", () => {
+    console.log(chalk.yellow(`Could not open browser automatically. Open ${url} manually.`));
+  });
+}
+
+async function waitForDashboard(url: string, timeoutMs = 15_000): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) {
+        return true;
+      }
+    } catch {
+      // Dashboard is still starting.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  return false;
+}
+
+function getDefaultLauncherWorkspace(): string {
+  return resolve(homedir(), ".openclaw", "workspace");
+}
+
+function ensureDashboardBootstrapWorkspace(): { workspacePath: string; configPath: string } {
+  const workspacePath = getDefaultLauncherWorkspace();
+  const configPath = join(workspacePath, "conductor.yaml");
+  const boardPath = join(workspacePath, "CONDUCTOR.md");
+
+  mkdirSync(workspacePath, { recursive: true });
+
+  if (!existsSync(configPath)) {
+    writeFileSync(configPath, buildConductorYaml({
+      preferences: {
+        onboardingAcknowledged: false,
+        codingAgent: "claude-code",
+        ide: "vscode",
+        markdownEditor: "obsidian",
+      },
+      projects: [],
+    }), "utf8");
+  }
+
+  if (!existsSync(boardPath)) {
+    writeFileSync(boardPath, buildConductorBoard("home", "Conductor Home"), "utf8");
+  }
+
+  return { workspacePath, configPath };
+}
 
 export function registerStart(program: Command): void {
   program
@@ -21,20 +82,47 @@ export function registerStart(program: Command): void {
     .description("Start lifecycle manager + board watcher + web dashboard (foreground)")
     .option("--no-dashboard", "Skip starting the web dashboard")
     .option("--no-watcher", "Skip starting the board watcher")
+    .option("--open", "Open the dashboard in your default browser")
     .option("-p, --port <port>", "Dashboard port override")
     .option("-w, --workspace <path>", "Obsidian workspace path")
-      .action(async (opts: { dashboard?: boolean; watcher?: boolean; port?: string; workspace?: string }) => {
+      .action(async (opts: { dashboard?: boolean; watcher?: boolean; open?: boolean; port?: string; workspace?: string }) => {
       try {
-        const config = await loadConfig(opts.workspace);
+        const explicitWorkspaceHint = opts.workspace ?? process.env["CONDUCTOR_WORKSPACE"];
+        let config;
+        if (explicitWorkspaceHint) {
+          config = await loadConfig(explicitWorkspaceHint);
+        } else {
+          try {
+            config = await loadConfig();
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            if (!/No conductor\.ya?ml found/i.test(message)) {
+              throw err;
+            }
+
+            const bootstrap = ensureDashboardBootstrapWorkspace();
+            process.env["CONDUCTOR_WORKSPACE"] = bootstrap.workspacePath;
+            process.env["CO_CONFIG_PATH"] = bootstrap.configPath;
+            config = await loadConfig(bootstrap.workspacePath);
+          }
+        }
+
+        const workspacePath = opts.workspace
+          ?? process.env["CONDUCTOR_WORKSPACE"]
+          ?? (config.configPath ? dirname(config.configPath) : `${process.env["HOME"]}/.conductor/workspace`);
+        if (!process.env["CONDUCTOR_WORKSPACE"]) {
+          process.env["CONDUCTOR_WORKSPACE"] = workspacePath;
+        }
+        if (!process.env["CO_CONFIG_PATH"] && config.configPath) {
+          process.env["CO_CONFIG_PATH"] = config.configPath;
+        }
+
         const { sessionManager, registry } = await createServices(config);
         const supportedAgents = registry.list("agent").map((agent) => agent.name);
 
         // Mutable ref — set after boardWatcher is created, used by lifecycle callback
         let boardWatcherRef: { updateNow(): void } | null = null;
         const port = opts.port ? parseInt(opts.port, 10) : (config.port ?? 3000);
-        const workspacePath = opts.workspace
-          ?? process.env["CONDUCTOR_WORKSPACE"]
-          ?? `${process.env["HOME"]}/.conductor/workspace`;
         const shutdownTasks: Array<() => void | Promise<void>> = [];
         let isShuttingDown = false;
 
@@ -129,8 +217,8 @@ export function registerStart(program: Command): void {
 
           try {
             const cliDir = new URL(".", import.meta.url).pathname;
-            const { join, resolve } = await import("node:path");
-            const { existsSync } = await import("node:fs");
+            const { dirname, join, resolve } = await import("node:path");
+            const { cpSync, existsSync, mkdirSync } = await import("node:fs");
 
             // Search order:
             // 1. Standalone build inside CLI package (npm install -g)
@@ -204,6 +292,14 @@ export function registerStart(program: Command): void {
             let dashboardCwd = webDir;
 
             if (standaloneServer) {
+              const standaloneAppDir = dirname(standaloneServer);
+              const standaloneStaticDir = join(standaloneAppDir, ".next", "static");
+              const sourceStaticDir = join(webDir, ".next", "static");
+              if (!existsSync(standaloneStaticDir) && existsSync(sourceStaticDir)) {
+                mkdirSync(join(standaloneAppDir, ".next"), { recursive: true });
+                cpSync(sourceStaticDir, standaloneStaticDir, { recursive: true });
+              }
+
               cmd = process.execPath;
               args = [standaloneServer];
               dashboardCwd = standaloneDir;
@@ -247,7 +343,18 @@ export function registerStart(program: Command): void {
               dashSpinner.warn("Dashboard failed to start. Try: cd packages/web && pnpm build");
             });
 
-            dashSpinner.succeed(`Web dashboard starting on http://localhost:${port}`);
+            const dashboardUrl = `http://localhost:${port}`;
+            dashSpinner.succeed(`Web dashboard starting on ${dashboardUrl}`);
+            if (opts.open) {
+              void waitForDashboard(`${dashboardUrl}/api/config`).then((ready) => {
+                if (ready) {
+                  openDashboardInBrowser(dashboardUrl);
+                  return;
+                }
+
+                console.log(chalk.yellow(`Dashboard is still starting. Open ${dashboardUrl} manually if it does not open shortly.`));
+              });
+            }
           } catch {
             dashSpinner.warn("Could not start dashboard.");
           }

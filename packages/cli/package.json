@@ -1,9 +1,10 @@
 {
   "name": "conductor-oss",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "license": "MIT",
   "type": "module",
   "bin": {
+    "conductor-oss": "dist/index.js",
     "conductor": "dist/index.js",
     "co": "dist/index.js"
   },

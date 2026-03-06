@@ -92,10 +92,10 @@ It runs entirely on your machine. No cloud. No database. No SaaS subscription.
 ## Quick Start
 
 ```bash
-# 1. From any terminal, run the guided setup for a repo
-npx conductor-oss@latest setup --path /path/to/your-repo
+# 1. From any terminal, launch Conductor
+npx conductor-oss@latest
 
-# 2. Optional: pin explicit defaults and skip the prompts
+# 2. Optional: preseed a specific repo and install supported tools first
 npx conductor-oss@latest setup --yes \
   --path /path/to/your-repo \
   --project-id my-app \
@@ -113,9 +113,10 @@ npx conductor-oss@latest start
 
 Then in the dashboard:
 
-1. First run opens **Confirm your preferences** (agent, IDE, markdown editor, notifications).
-2. Open **Settings → Repositories** for the exact one-line bootstrap command and repository defaults.
-3. Click **Add Workspace** in the left sidebar if you want to connect more repos from the UI.
+1. `npx conductor-oss@latest` launches Conductor locally and opens the dashboard in your browser.
+2. First run opens the **Setup** wizard for preferences.
+3. If no project exists yet, Conductor immediately opens **Add Workspace** so the user can connect a repo or local folder.
+4. Adding a project writes `CONDUCTOR.md` and a repo-local `conductor.yaml`, then keeps that YAML in sync when dashboard settings or agent selections change.
 
 Open `CONDUCTOR.md` in your editor (or Obsidian), write a task in **Ready to Dispatch**, save — done.
 
@@ -169,13 +170,23 @@ This mirrors the practical part of Vibe Kanban's remote workflow: tunnel the UI,
 
 ### Guided setup behavior
 
-`co setup` is the default onboarding path for product and design teams:
+`npx conductor-oss@latest` is the default onboarding path for product and design teams:
 
-- checks whether `git`, `tmux`, `gh`, your chosen agent CLI, and selected apps are already available
-- installs supported missing tools automatically when possible
-- opens GitHub CLI browser auth when a repo connection is needed
+- starts Conductor in a clean home workspace and opens the dashboard immediately
+- shows the product-facing preferences flow first, without requiring repo flags up front
+- opens **Add Workspace** right after preferences when there are no configured projects
+- writes `CONDUCTOR.md` and repo-local `conductor.yaml` when a project is added
+- keeps repo-local YAML synced when preferences, repository settings, or dashboard agent selections change
+
+`co setup` remains available as the repo-preseed path:
+
+- uses the terminal only as a launcher, then opens the real onboarding flow in the dashboard
 - writes `CONDUCTOR.md` and `conductor.yaml` into the selected repository
-- starts Conductor in that repository automatically
+- starts Conductor in that repository automatically and opens the browser to the setup wizard
+- lets the user choose preferences and review repository defaults in the dashboard
+- checks `git`, `tmux`, `gh`, your chosen agent CLI, and selected apps
+- installs supported missing tools automatically when `--yes` is used
+- opens GitHub CLI browser auth when a repo connection is needed and `--yes` is used
 
 Today the smoothest auto-install path is macOS with Homebrew. On other systems, Conductor still guides the user but may leave a few tools as manual installs.
 
@@ -454,9 +465,9 @@ When running the standalone webhook command, the listener defaults to port `4748
 ## CLI Reference
 
 ```bash
-co setup [--path <repo>] [--yes] [--agent <agent>] [--ide <editor>] [--markdown-editor <app>] # Guided setup with readiness checks + installs
+co setup [--path <repo>] [--yes] [--agent <agent>] [--ide <editor>] [--markdown-editor <app>] # Scaffold repo, launch dashboard, open setup wizard
 co init [--project-id <id>] [--repo <owner/repo>] [--agent <agent>] # Scaffold CONDUCTOR.md + conductor.yaml with repo-aware defaults
-co start [--no-dashboard] [--no-watcher] [--port <port>] [--workspace <path>] # Start orchestrator
+co start [--no-dashboard] [--no-watcher] [--open] [--port <port>] [--workspace <path>] # Start orchestrator
 co watch                               # Run board watcher only
 co doctor                              # Diagnose board parsing/dispatch issues
 co list [--all] [--json] [project]     # List all sessions

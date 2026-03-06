@@ -10,6 +10,7 @@ import { writeFileSync, existsSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import chalk from "chalk";
 import type { Command } from "commander";
+import { buildConductorBoard, buildConductorYaml } from "@conductor-oss/core";
 
 export type InitOptions = {
   force?: boolean;
@@ -37,38 +38,6 @@ export type InitProjectConfig = {
   defaultWorkingDirectory: string | null;
   dashboardUrl: string | null;
 };
-
-export function buildConductorBoard(projectId: string, displayName: string): string {
-  return `# ${displayName}
-
-> 🤖 Conductor — AI agent orchestrator. Write tasks here, agents do the work.
-> Tags: \`#agent/claude-code\` · \`#agent/codex\` · \`#agent/gemini\` · \`#agent/amp\` · \`#agent/cursor-cli\` · \`#agent/opencode\` · \`#agent/droid\` · \`#agent/qwen-code\` · \`#agent/ccr\` · \`#agent/github-copilot\` · \`#project/${projectId}\` · \`#type/feature\` · \`#priority/high\`
-
-## Inbox
-
-> Drop rough ideas here. Conductor auto-tags them within 20s.
-
-## Ready to Dispatch
-
-> Move tagged tasks here to dispatch an agent.
-
-## Dispatching
-
-## In Progress
-
-## Review
-
-> Agent finished — review the PR, then move to Done.
-
-## Done
-
-## Blocked
-`;
-}
-
-function yamlString(value: string): string {
-  return JSON.stringify(value);
-}
 
 function slugifyProjectId(value: string): string {
   const normalized = value
@@ -114,68 +83,6 @@ function detectDefaultBranch(repoPath: string): string | null {
   }
 
   return runGit(repoPath, ["branch", "--show-current"]);
-}
-
-export function buildConductorYaml(config: InitProjectConfig): string {
-  const lines = [
-    "# Conductor Configuration",
-    "# Docs: https://github.com/charannyk06/conductor-oss",
-    "",
-    "port: 4747",
-    "",
-    "preferences:",
-    "  onboardingAcknowledged: false",
-    `  codingAgent: ${yamlString(config.agent)}`,
-    `  ide: ${yamlString(config.ide)}`,
-    `  markdownEditor: ${yamlString(config.markdownEditor)}`,
-    "  notifications:",
-    "    soundEnabled: true",
-    "    soundFile: abstract-sound-4",
-  ];
-
-  if (config.dashboardUrl) {
-    lines.push("", `dashboardUrl: ${yamlString(config.dashboardUrl)}`);
-  }
-
-  lines.push(
-    "",
-    "projects:",
-    `  ${config.projectId}:`,
-    `    name: ${yamlString(config.displayName)}`,
-    `    path: ${yamlString(config.path)}`,
-    `    repo: ${yamlString(config.repo)}`,
-    `    agent: ${yamlString(config.agent)}`,
-    `    defaultBranch: ${yamlString(config.defaultBranch)}`,
-    "    agentConfig:",
-    '      model: "claude-sonnet-4-6"',
-    '      permissions: "skip"',
-  );
-
-  if (config.defaultWorkingDirectory) {
-    lines.push(`    defaultWorkingDirectory: ${yamlString(config.defaultWorkingDirectory)}`);
-  }
-
-  lines.push(
-    '    workspace: "worktree"',
-    '    runtime: "tmux"',
-    '    scm: "github"',
-    "",
-    "# Add more projects below:",
-    "# another-project:",
-    '#   path: "~/projects/another"',
-    '#   repo: "your-org/another"',
-    '#   agent: "codex"',
-    "#   agentConfig:",
-    '#     model: "o4-mini"',
-    "",
-    "# Optional: Discord notifications",
-    "# plugins:",
-    "#   discord:",
-    '#     channelId: "YOUR_CHANNEL_ID"',
-    '#     tokenEnvVar: "DISCORD_BOT_TOKEN"',
-  );
-
-  return `${lines.join("\n")}\n`;
 }
 
 export function resolveInitProjectConfig(cwd: string, options: InitOptions): InitProjectConfig {
@@ -232,7 +139,16 @@ export function runInitScaffold(cwd: string, opts: InitOptions): {
   }
 
   if (!existsSync(configPath) || opts.force) {
-    writeFileSync(configPath, buildConductorYaml(project), "utf-8");
+    writeFileSync(configPath, buildConductorYaml({
+      dashboardUrl: project.dashboardUrl,
+      preferences: {
+        onboardingAcknowledged: false,
+        codingAgent: project.agent,
+        ide: project.ide,
+        markdownEditor: project.markdownEditor,
+      },
+      projects: [project],
+    }), "utf-8");
     console.log(chalk.green("✔") + "  Created conductor.yaml");
     created++;
   } else {

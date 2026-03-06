@@ -148,7 +148,7 @@ export const manifest = {
   name: "amp",
   slot: "agent" as const,
   description: "Agent plugin: Amp CLI",
-  version: "0.2.2",
+  version: "0.2.3",
 };
 
 function createAgent(): Agent {

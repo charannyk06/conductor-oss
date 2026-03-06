@@ -45,7 +45,7 @@ export const manifest = {
   name: "tmux",
   slot: "runtime" as const,
   description: "Runtime plugin: tmux sessions",
-  version: "0.2.2",
+  version: "0.2.3",
 };
 
 /** Only allow safe characters in session IDs */

@@ -52,6 +52,22 @@ function copyOptionalFile(sourcePath, destinationPath) {
   }
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function copyDirectoryResolvingSymlinks(sourcePath, destinationPath) {
+  mkdirSync(destinationPath, { recursive: true });
+  execFileSync(
+    "sh",
+    [
+      "-lc",
+      `tar -chf - -C ${shellQuote(sourcePath)} . | tar -xf - -C ${shellQuote(destinationPath)}`,
+    ],
+    { stdio: "inherit" },
+  );
+}
+
 function sanitizePublishedPackage(pkg, dependencies) {
   const sanitized = {
     name: pkg.name,
@@ -174,11 +190,13 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   copyOptionalFile(resolve(resolvedRootDir, "LICENSE"), join(outputDir, "LICENSE"));
 
   const webOutputDir = join(outputDir, "web");
-  cpSync(webBundle.standaloneDir, join(webOutputDir, ".next", "standalone"), {
-    recursive: true,
-    dereference: true,
-  });
+  copyDirectoryResolvingSymlinks(webBundle.standaloneDir, join(webOutputDir, ".next", "standalone"));
   cpSync(webBundle.staticDir, join(webOutputDir, ".next", "static"), { recursive: true });
+  cpSync(
+    webBundle.staticDir,
+    join(webOutputDir, ".next", "standalone", "packages", "web", ".next", "static"),
+    { recursive: true },
+  );
   if (existsSync(webBundle.publicDir)) {
     cpSync(webBundle.publicDir, join(webOutputDir, "public"), { recursive: true });
   }

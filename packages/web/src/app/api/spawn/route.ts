@@ -1,9 +1,58 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { getServices } from "@/lib/services";
+import { readFile, writeFile } from "node:fs/promises";
+import { parse, stringify } from "yaml";
+import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { sessionToDashboard } from "@/lib/serialize";
+import { syncProjectLocalConfig } from "@/lib/projectConfigSync";
 
 /** POST /api/spawn -- Spawn a new agent session. */
+
+type MutableConfig = Record<string, unknown>;
+
+function toObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+async function persistSpawnAgentSelection(configPath: string, projectId: string, agent: string): Promise<void> {
+  const originalConfigRaw = await readFile(configPath, "utf8");
+  const parsed = (parse(originalConfigRaw) ?? {}) as MutableConfig;
+  const nextRoot: MutableConfig =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { ...parsed }
+      : {};
+
+  const nextProjects = toObject(nextRoot["projects"]);
+  const existingProject = toObject(nextProjects[projectId]);
+  nextProjects[projectId] = {
+    ...existingProject,
+    agent,
+  };
+  nextRoot["projects"] = nextProjects;
+
+  const nextPreferences = toObject(nextRoot["preferences"]);
+  nextRoot["preferences"] = {
+    ...nextPreferences,
+    codingAgent: agent,
+  };
+
+  const updatedYaml = stringify(nextRoot, { lineWidth: 0 });
+  await writeFile(configPath, updatedYaml, "utf8");
+
+  try {
+    invalidateServicesCache("spawn agent selection updated");
+    const { config: refreshedConfig } = await getServices();
+    await syncProjectLocalConfig(refreshedConfig as unknown as Record<string, unknown>, projectId);
+  } catch (err) {
+    await writeFile(configPath, originalConfigRaw, "utf8");
+    invalidateServicesCache("spawn agent selection rollback");
+    throw err;
+  }
+}
+
 export async function POST(request: NextRequest) {
   const denied = await guardApiAccess();
   if (denied) return denied;
@@ -116,6 +165,14 @@ export async function POST(request: NextRequest) {
         { error: "Either prompt or issueId is required to create a workspace" },
         { status: 400 },
       );
+    }
+
+    if (normalizedAgent && config.configPath) {
+      const currentProjectAgent = config.projects[normalizedProjectId]?.agent;
+      const currentPreferredAgent = config.preferences?.codingAgent;
+      if (normalizedAgent !== currentProjectAgent || normalizedAgent !== currentPreferredAgent) {
+        await persistSpawnAgentSelection(config.configPath, normalizedProjectId, normalizedAgent);
+      }
     }
 
     const session = await sessionManager.spawn({
