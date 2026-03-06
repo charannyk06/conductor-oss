@@ -333,7 +333,21 @@ export async function getDashboardAccess(request?: Request): Promise<DashboardAc
   if (clerkAccess) return clerkAccess;
 
   const requireAuth = access?.requireAuth === true || envRequiresAuth() || hasLegacyAllowListConfigured();
-  if (!isLoopbackHost(host)) {
+
+  // Trust the configured dashboardUrl host (for remote access via tunnels like ngrok).
+  let isTrustedDashboardHost = false;
+  try {
+    const { config } = await getServices();
+    const configuredDashboardUrl = config.dashboardUrl?.trim();
+    if (configuredDashboardUrl) {
+      const dashboardHost = new URL(configuredDashboardUrl).hostname.toLowerCase();
+      isTrustedDashboardHost = host.toLowerCase() === dashboardHost;
+    }
+  } catch {
+    // Ignore config lookup errors and continue with default host checks.
+  }
+
+  if (!isLoopbackHost(host) && !isTrustedDashboardHost) {
     return {
       ok: false,
       authenticated: false,
