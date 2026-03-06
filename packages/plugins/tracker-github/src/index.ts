@@ -161,7 +161,7 @@ export const manifest = {
   name: "github",
   slot: "tracker" as const,
   description: "Tracker plugin: GitHub Issues",
-  version: "0.2.4",
+  version: "0.2.5",
 };
 
 export function create(): Tracker {
