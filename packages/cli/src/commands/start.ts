@@ -154,6 +154,10 @@ export function registerStart(program: Command): void {
         // ---- Start lifecycle manager ----
         const spinner = ora("Starting lifecycle manager").start();
         const core = await import("@conductor-oss/core");
+        core.syncWorkspaceSupportFiles(config, {
+          workspacePath,
+          agentNames: supportedAgents,
+        });
 
         if (typeof core.createLifecycleManager !== "function") {
           spinner.warn("Lifecycle manager not yet implemented in @conductor-oss/core");

@@ -192,7 +192,7 @@ export const manifest = {
   name: "claude-code",
   slot: "agent" as const,
   description: "Agent plugin: Claude Code CLI",
-  version: "0.2.3",
+  version: "0.2.4",
 };
 
 // =============================================================================

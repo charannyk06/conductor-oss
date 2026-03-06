@@ -82,8 +82,13 @@ export {
   createBoardWatcher,
   discoverBoards,
   buildBoardProjectMap,
+  syncWorkspaceSupportFiles,
 } from "./board-watcher.js";
-export type { BoardWatcherConfig, BoardWatcher } from "./board-watcher.js";
+export type {
+  BoardWatcherConfig,
+  BoardWatcher,
+  WorkspaceSupportFilesSyncOptions,
+} from "./board-watcher.js";
 
 // Board diagnostics + doctor helpers
 export {

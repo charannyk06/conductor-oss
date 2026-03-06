@@ -148,7 +148,7 @@ export const manifest = {
   name: "opencode",
   slot: "agent" as const,
   description: "Agent plugin: OpenCode CLI",
-  version: "0.2.3",
+  version: "0.2.4",
 };
 
 function createAgent(): Agent {

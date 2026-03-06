@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse, stringify } from "yaml";
+import { syncWorkspaceSupportFiles } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { syncProjectLocalConfig } from "@/lib/projectConfigSync";
@@ -376,8 +377,11 @@ export async function PUT(request: NextRequest) {
 
     try {
       invalidateServicesCache("repository settings updated");
-      const { config: refreshedConfig } = await getServices();
+      const { config: refreshedConfig, registry } = await getServices();
       await syncProjectLocalConfig(refreshedConfig as unknown as Record<string, unknown>, id);
+      syncWorkspaceSupportFiles(refreshedConfig, {
+        agentNames: registry.list("agent").map((agent) => agent.name),
+      });
     } catch (err) {
       await writeFile(configPath, originalConfigRaw, "utf8");
       invalidateServicesCache("repository settings update rollback");

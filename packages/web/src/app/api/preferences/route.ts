@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { readFile, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
-import type { UserPreferences } from "@conductor-oss/core";
+import { syncWorkspaceSupportFiles, type UserPreferences } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { syncAllProjectLocalConfigs } from "@/lib/projectConfigSync";
@@ -167,8 +167,11 @@ export async function PUT(request: NextRequest) {
 
     try {
       invalidateServicesCache("preferences updated");
-      const { config: refreshedConfig } = await getServices();
+      const { config: refreshedConfig, registry } = await getServices();
       await syncAllProjectLocalConfigs(refreshedConfig as unknown as Record<string, unknown>);
+      syncWorkspaceSupportFiles(refreshedConfig, {
+        agentNames: registry.list("agent").map((agent) => agent.name),
+      });
     } catch (err) {
       await writeFile(configPath, originalConfigRaw, "utf8");
       invalidateServicesCache("preferences update rollback");
