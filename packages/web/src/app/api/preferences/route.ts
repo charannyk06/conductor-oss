@@ -4,7 +4,7 @@ import { parse, stringify } from "yaml";
 import { syncWorkspaceSupportFiles, type UserPreferences } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { syncAllProjectLocalConfigs } from "@/lib/projectConfigSync";
+import { normalizeRootProjectPaths, syncAllProjectLocalConfigs } from "@/lib/projectConfigSync";
 
 export const dynamic = "force-dynamic";
 
@@ -158,6 +158,7 @@ export async function PUT(request: NextRequest) {
     }
 
     nextRoot["preferences"] = nextPreferences;
+    await normalizeRootProjectPaths(nextRoot);
 
     const updatedYaml = stringify(nextRoot, {
       lineWidth: 0,

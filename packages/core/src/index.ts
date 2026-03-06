@@ -76,6 +76,7 @@ export {
   expandHome,
   validateAndStoreOrigin,
 } from "./paths.js";
+export { resolveConfiguredProjectPath } from "./project-paths.js";
 
 // Board watcher -- Obsidian CONDUCTOR.md integration
 export {

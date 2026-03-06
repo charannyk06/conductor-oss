@@ -15,7 +15,7 @@
  * Board columns: Inbox → Ready to Dispatch → Dispatching → In Progress → Review → Done → Blocked
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, statSync, readdirSync, mkdirSync, watch as fsWatch } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, existsSync, realpathSync, statSync, readdirSync, mkdirSync, watch as fsWatch } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -2211,7 +2211,7 @@ export function discoverBoards(
         isAbsolutePath(resolvedPattern),
       );
       for (const match of matches) {
-        boards.add(match);
+        boards.add(canonicalizeExistingPath(match));
       }
     }
     return [...boards];
@@ -2231,9 +2231,10 @@ function discoverBoardsLegacy(workspacePath: string, config?: OrchestratorConfig
 
   const addBoard = (path: string): void => {
     if (!existsSync(path)) return;
-    if (seen.has(path)) return;
-    seen.add(path);
-    boards.push(path);
+    const canonicalPath = canonicalizeExistingPath(path);
+    if (seen.has(canonicalPath)) return;
+    seen.add(canonicalPath);
+    boards.push(canonicalPath);
   };
 
   // Workspace-level board
@@ -2314,6 +2315,19 @@ function discoverBoardsLegacy(workspacePath: string, config?: OrchestratorConfig
   }
 
   return boards;
+}
+
+function canonicalizeExistingPath(pathname: string): string {
+  const resolvedPath = resolve(pathname);
+  if (!existsSync(resolvedPath)) {
+    return resolvedPath;
+  }
+
+  try {
+    return realpathSync.native(resolvedPath);
+  } catch {
+    return resolvedPath;
+  }
 }
 
 

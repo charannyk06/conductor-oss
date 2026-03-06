@@ -5,7 +5,7 @@ import { syncWorkspaceSupportFiles } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { sessionToDashboard } from "@/lib/serialize";
-import { syncProjectLocalConfig } from "@/lib/projectConfigSync";
+import { normalizeRootProjectPaths, syncProjectLocalConfig } from "@/lib/projectConfigSync";
 
 /** POST /api/spawn -- Spawn a new agent session. */
 
@@ -39,6 +39,7 @@ async function persistSpawnAgentSelection(configPath: string, projectId: string,
     ...nextPreferences,
     codingAgent: agent,
   };
+  await normalizeRootProjectPaths(nextRoot);
 
   const updatedYaml = stringify(nextRoot, { lineWidth: 0 });
   await writeFile(configPath, updatedYaml, "utf8");

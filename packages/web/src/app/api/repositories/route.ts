@@ -9,7 +9,7 @@ import { parse, stringify } from "yaml";
 import { syncWorkspaceSupportFiles } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { syncProjectLocalConfig } from "@/lib/projectConfigSync";
+import { normalizeRootProjectPaths, syncProjectLocalConfig } from "@/lib/projectConfigSync";
 
 export const dynamic = "force-dynamic";
 
@@ -371,6 +371,7 @@ export async function PUT(request: NextRequest) {
 
     nextProjects[id] = nextProject;
     nextRoot["projects"] = nextProjects;
+    await normalizeRootProjectPaths(nextRoot);
 
     const updatedYaml = stringify(nextRoot, { lineWidth: 0 });
     await writeFile(configPath, updatedYaml, "utf8");

@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OrchestratorConfig } from "../types.js";
-import { syncWorkspaceSupportFiles } from "../board-watcher.js";
+import { discoverBoards, syncWorkspaceSupportFiles } from "../board-watcher.js";
 
 function createTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -109,6 +109,27 @@ test("syncWorkspaceSupportFiles writes placeholder project tags before first pro
     assert.match(tags, /#project\/my-project/);
     assert.match(snippets, /my-project/);
   } finally {
+    rmSync(workspacePath, { recursive: true, force: true });
+  }
+});
+
+test("discoverBoards deduplicates canonical and symlinked board paths", () => {
+  const workspacePath = createTempDir("conductor-board-dedupe-workspace-");
+  const aliasRoot = createTempDir("conductor-board-dedupe-alias-");
+  const aliasWorkspacePath = join(aliasRoot, "workspace-link");
+  const projectPath = join(workspacePath, "projects", "demo");
+
+  try {
+    symlinkSync(workspacePath, aliasWorkspacePath);
+    mkdirSync(projectPath, { recursive: true });
+    writeFileSync(join(projectPath, "CONDUCTOR.md"), "# Demo Board\n\n## Inbox\n", { encoding: "utf8", flag: "w" });
+
+    const config = createConfig(workspacePath, projectPath);
+    const boards = discoverBoards(aliasWorkspacePath, config);
+
+    assert.equal(boards.length, 1);
+  } finally {
+    rmSync(aliasRoot, { recursive: true, force: true });
     rmSync(workspacePath, { recursive: true, force: true });
   }
 });
