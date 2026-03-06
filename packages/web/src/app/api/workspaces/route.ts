@@ -9,12 +9,13 @@ import {
   buildConductorBoard,
   buildProjectConfigRecord,
   generateSessionPrefix,
-  getDefaultAgentModel,
+  normalizeProjectConfigMap,
   syncWorkspaceSupportFiles,
 } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { normalizeRootProjectPaths, syncProjectLocalConfig } from "@/lib/projectConfigSync";
+import { getResolvedDefaultAgentModel, getResolvedDefaultAgentReasoningEffort } from "@/lib/runtimeAgentModels";
 
 const execFileAsync = promisify(execFile);
 
@@ -199,10 +200,7 @@ async function getOriginRepo(path: string): Promise<string | null> {
 }
 
 function toProjectMap(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  return { ...(value as Record<string, unknown>) };
+  return normalizeProjectConfigMap(value);
 }
 
 function deriveDisplayName(projectId: string): string {
@@ -220,6 +218,7 @@ function buildProjectPayload(args: {
   defaultBranch: string;
   agent: string;
   agentModel?: string | null;
+  agentReasoningEffort?: string | null;
   sessionPrefix: string;
   useWorktree: boolean;
 }): Record<string, unknown> {
@@ -231,6 +230,7 @@ function buildProjectPayload(args: {
     defaultBranch: args.defaultBranch,
     agent: args.agent,
     agentModel: args.agentModel ?? null,
+    agentReasoningEffort: args.agentReasoningEffort ?? null,
     sessionPrefix: args.sessionPrefix,
     workspace: args.useWorktree ? "worktree" : "local",
     runtime: "tmux",
@@ -440,7 +440,12 @@ export async function POST(request: NextRequest) {
       const defaultBranch = requestedDefaultBranchRaw ?? detectedDefaultBranch;
       const repoValue = extractRepoNameFromGitUrl(gitUrl) ?? gitUrl;
       const sessionPrefix = createUniqueSessionPrefix(targetPath, config.projects);
-      const agentModel = getDefaultAgentModel(requestedAgent, config.preferences?.modelAccess ?? null);
+      const agentModel = await getResolvedDefaultAgentModel(requestedAgent, config.preferences?.modelAccess ?? null);
+      const agentReasoningEffort = await getResolvedDefaultAgentReasoningEffort(
+        requestedAgent,
+        config.preferences?.modelAccess ?? null,
+        agentModel,
+      );
 
       await writeProjectToConfig({
         configPath,
@@ -452,6 +457,7 @@ export async function POST(request: NextRequest) {
           defaultBranch,
           agent: requestedAgent,
           agentModel,
+          agentReasoningEffort,
           sessionPrefix,
           useWorktree,
         }),
@@ -531,7 +537,12 @@ export async function POST(request: NextRequest) {
 
     const repoValue = (await getOriginRepo(localPath)) ?? `local-${projectId}`;
     const sessionPrefix = createUniqueSessionPrefix(localPath, config.projects);
-    const agentModel = getDefaultAgentModel(requestedAgent, config.preferences?.modelAccess ?? null);
+    const agentModel = await getResolvedDefaultAgentModel(requestedAgent, config.preferences?.modelAccess ?? null);
+    const agentReasoningEffort = await getResolvedDefaultAgentReasoningEffort(
+      requestedAgent,
+      config.preferences?.modelAccess ?? null,
+      agentModel,
+    );
 
     await writeProjectToConfig({
       configPath,
@@ -543,6 +554,7 @@ export async function POST(request: NextRequest) {
         defaultBranch,
         agent: requestedAgent,
         agentModel,
+        agentReasoningEffort,
         sessionPrefix,
         useWorktree,
       }),

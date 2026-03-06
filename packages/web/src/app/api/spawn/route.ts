@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { readFile, writeFile } from "node:fs/promises";
 import { parse, stringify } from "yaml";
-import { syncWorkspaceSupportFiles } from "@conductor-oss/core";
+import { normalizeProjectConfigMap, syncWorkspaceSupportFiles } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { sessionToDashboard } from "@/lib/serialize";
@@ -26,7 +26,7 @@ async function persistSpawnAgentSelection(configPath: string, projectId: string,
       ? { ...parsed }
       : {};
 
-  const nextProjects = toObject(nextRoot["projects"]);
+  const nextProjects = normalizeProjectConfigMap(nextRoot["projects"]);
   const existingProject = toObject(nextProjects[projectId]);
   nextProjects[projectId] = {
     ...existingProject,
@@ -109,6 +109,14 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const reasoningEffort = body.reasoningEffort;
+  if (reasoningEffort !== undefined && reasoningEffort !== null && typeof reasoningEffort !== "string") {
+    return NextResponse.json(
+      { error: "reasoningEffort must be a string if provided" },
+      { status: 400 },
+    );
+  }
+
   const profile = body.profile;
   if (profile !== undefined && profile !== null && typeof profile !== "string") {
     return NextResponse.json(
@@ -145,6 +153,9 @@ export async function POST(request: NextRequest) {
     : undefined;
   const normalizedModel = typeof model === "string" && model.trim().length > 0
     ? model.trim()
+    : undefined;
+  const normalizedReasoningEffort = typeof reasoningEffort === "string" && reasoningEffort.trim().length > 0
+    ? reasoningEffort.trim().toLowerCase()
     : undefined;
   const normalizedProfile = typeof profile === "string" && profile.trim().length > 0
     ? profile.trim()
@@ -186,6 +197,7 @@ export async function POST(request: NextRequest) {
       prompt: normalizedPrompt,
       agent: normalizedAgent,
       model: normalizedModel,
+      reasoningEffort: normalizedReasoningEffort,
       profile: normalizedProfile,
       branch: normalizedBranch,
       baseBranch: normalizedBaseBranch,

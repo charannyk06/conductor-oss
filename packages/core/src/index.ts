@@ -12,6 +12,7 @@ export * from "./types.js";
 export {
   loadConfig,
   loadConfigWithPath,
+  normalizeProjectConfigMap,
   validateConfig,
   getDefaultConfig,
   findConfig,

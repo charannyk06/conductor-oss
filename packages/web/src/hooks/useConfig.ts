@@ -11,6 +11,7 @@ export interface ConfigProject {
   description: string | null;
   agent: string;
   agentModel: string | null;
+  agentReasoningEffort: string | null;
 }
 
 interface UseConfigReturn {
@@ -36,6 +37,9 @@ function normalizeProject(
       : "qwen-code",
     agentModel: typeof raw?.["agentModel"] === "string" && raw["agentModel"].trim().length > 0
       ? raw["agentModel"]
+      : null,
+    agentReasoningEffort: typeof raw?.["agentReasoningEffort"] === "string" && raw["agentReasoningEffort"].trim().length > 0
+      ? raw["agentReasoningEffort"]
       : null,
   };
 }

@@ -136,6 +136,8 @@ export interface SessionSpawnConfig {
   agent?: string;
   /** Override the model for this session (e.g. from #model/ card tag). */
   model?: string;
+  /** Override reasoning depth for this session when the target CLI supports it. */
+  reasoningEffort?: string;
   /** Logical task identifier shared across attempts. */
   taskId?: string;
   /** Attempt identifier for this specific run. */
@@ -205,6 +207,7 @@ export interface AgentLaunchConfig {
   prompt?: string;
   permissions?: "skip" | "default";
   model?: string;
+  reasoningEffort?: string;
   systemPrompt?: string;
   systemPromptFile?: string;
   /** Image/file attachments from the task card. */
@@ -466,15 +469,20 @@ export interface AgentModelOption {
   access: AgentModelAccess[];
 }
 
+export type AgentReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
+export interface AgentReasoningOption {
+  id: AgentReasoningEffort | string;
+  label: string;
+  description: string;
+}
+
 export interface AgentModelCatalog {
   agent: SupportedModelAgent;
   label: string;
   accessKey: keyof ModelAccessPreferences;
   defaultAccess: AgentModelAccess;
-  defaultModelByAccess: Partial<Record<AgentModelAccess, string>>;
-  customModelPlaceholder: string;
   accessOptions: AgentModelAccessOption[];
-  models: AgentModelOption[];
 }
 
 const DEFAULT_MODEL_ACCESS_PREFERENCES: Required<ModelAccessPreferences> = {
@@ -490,12 +498,6 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
     label: "Claude Code",
     accessKey: "claudeCode",
     defaultAccess: "pro",
-    defaultModelByAccess: {
-      pro: "claude-sonnet-4-5",
-      max: "claude-opus-4-1",
-      api: "claude-sonnet-4-5",
-    },
-    customModelPlaceholder: "claude-sonnet-4-5",
     accessOptions: [
       {
         id: "pro",
@@ -513,43 +515,12 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
         description: "Use direct Anthropic API credentials instead of a Claude subscription.",
       },
     ],
-    models: [
-      {
-        id: "claude-sonnet-4-5",
-        label: "Claude Sonnet 4.5",
-        description: "Latest Claude Code Sonnet recommendation for most coding work.",
-        access: ["pro", "max", "api"],
-      },
-      {
-        id: "claude-sonnet-4-0",
-        label: "Claude Sonnet 4",
-        description: "Previous Sonnet generation kept for compatibility.",
-        access: ["pro", "max", "api"],
-      },
-      {
-        id: "claude-opus-4-1",
-        label: "Claude Opus 4.1",
-        description: "Higher-capability Claude Code option available on Max or API access.",
-        access: ["max", "api"],
-      },
-      {
-        id: "claude-opus-4-0",
-        label: "Claude Opus 4",
-        description: "Older Opus generation retained for explicit overrides.",
-        access: ["max", "api"],
-      },
-    ],
   },
   codex: {
     agent: "codex",
     label: "Codex",
     accessKey: "codex",
     defaultAccess: "chatgpt",
-    defaultModelByAccess: {
-      chatgpt: "gpt-5.2-codex",
-      api: "gpt-5.2-codex",
-    },
-    customModelPlaceholder: "gpt-5.2-codex",
     accessOptions: [
       {
         id: "chatgpt",
@@ -562,43 +533,12 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
         description: "Use direct OpenAI API credentials when Codex is pointed at the API.",
       },
     ],
-    models: [
-      {
-        id: "gpt-5.2-codex",
-        label: "GPT-5.2 Codex",
-        description: "Latest Codex model available in the current OpenAI model lineup.",
-        access: ["chatgpt", "api"],
-      },
-      {
-        id: "gpt-5.1-codex-max",
-        label: "GPT-5.1 Codex Max",
-        description: "Higher-reasoning ChatGPT Codex option documented in the Codex help center.",
-        access: ["chatgpt"],
-      },
-      {
-        id: "gpt-5.1-codex-mini",
-        label: "GPT-5.1 Codex Mini",
-        description: "Lower-latency ChatGPT Codex option for lighter interactive work.",
-        access: ["chatgpt"],
-      },
-      {
-        id: "gpt-5.1-codex",
-        label: "GPT-5.1 Codex",
-        description: "API-facing Codex model retained for compatibility with existing setups.",
-        access: ["api"],
-      },
-    ],
   },
   gemini: {
     agent: "gemini",
     label: "Gemini",
     accessKey: "gemini",
     defaultAccess: "oauth",
-    defaultModelByAccess: {
-      oauth: "gemini-2.5-pro",
-      api: "gemini-2.5-pro",
-    },
-    customModelPlaceholder: "gemini-2.5-pro",
     accessOptions: [
       {
         id: "oauth",
@@ -611,37 +551,12 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
         description: "Use a Gemini API key or Vertex AI project for broader model control.",
       },
     ],
-    models: [
-      {
-        id: "gemini-2.5-pro",
-        label: "Gemini 2.5 Pro",
-        description: "Default Gemini CLI coding model and the safest built-in option.",
-        access: ["oauth", "api"],
-      },
-      {
-        id: "gemini-2.5-flash",
-        label: "Gemini 2.5 Flash",
-        description: "Lower-latency Gemini option typically used with API-key setups.",
-        access: ["api"],
-      },
-      {
-        id: "gemini-2.5-flash-lite",
-        label: "Gemini 2.5 Flash-Lite",
-        description: "Cheaper Gemini API option for lightweight automation or quick checks.",
-        access: ["api"],
-      },
-    ],
   },
   "qwen-code": {
     agent: "qwen-code",
     label: "Qwen Code",
     accessKey: "qwenCode",
     defaultAccess: "oauth",
-    defaultModelByAccess: {
-      oauth: "qwen3.5-plus",
-      api: "qwen3-coder-plus",
-    },
-    customModelPlaceholder: "qwen3-coder-plus",
     accessOptions: [
       {
         id: "oauth",
@@ -652,20 +567,6 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
         id: "api",
         label: "DashScope / Custom API",
         description: "Use DashScope or another OpenAI-compatible endpoint configured for Qwen Code.",
-      },
-    ],
-    models: [
-      {
-        id: "qwen3.5-plus",
-        label: "Qwen3.5 Plus",
-        description: "Latest bundled Qwen OAuth default documented in Qwen Code updates.",
-        access: ["oauth", "api"],
-      },
-      {
-        id: "qwen3-coder-plus",
-        label: "Qwen3 Coder Plus",
-        description: "Coding-focused Qwen model documented in the Qwen Code provider guide.",
-        access: ["oauth", "api"],
       },
     ],
   },
@@ -713,25 +614,36 @@ export function resolveAgentModelAccess(
   return catalog.defaultAccess;
 }
 
+/**
+ * Models and reasoning options are runtime-discovered from the installed CLI.
+ * The core package only owns access-mode metadata.
+ */
 export function getAvailableAgentModels(
-  agent: string,
-  preferences?: ModelAccessPreferences | null,
+  _agent: string,
+  _preferences?: ModelAccessPreferences | null,
 ): AgentModelOption[] {
-  const catalog = getAgentModelCatalog(agent);
-  const access = resolveAgentModelAccess(agent, preferences);
-  if (!catalog || !access) return [];
-
-  return catalog.models.filter((model) => model.access.includes(access));
+  return [];
 }
 
 export function getDefaultAgentModel(
-  agent: string,
-  preferences?: ModelAccessPreferences | null,
+  _agent: string,
+  _preferences?: ModelAccessPreferences | null,
 ): string | null {
-  const catalog = getAgentModelCatalog(agent);
-  const access = resolveAgentModelAccess(agent, preferences);
-  if (!catalog || !access) return null;
-  return catalog.defaultModelByAccess[access] ?? null;
+  return null;
+}
+
+export function getAvailableAgentReasoningEfforts(
+  _agent: string,
+  _preferences?: ModelAccessPreferences | null,
+): AgentReasoningOption[] {
+  return [];
+}
+
+export function getDefaultAgentReasoningEffort(
+  _agent: string,
+  _preferences?: ModelAccessPreferences | null,
+): string | null {
+  return null;
 }
 
 export interface UserPreferences {
@@ -823,6 +735,7 @@ export interface DefaultPlugins {
 export interface AgentProfile {
   agent?: string;
   model?: string;
+  reasoningEffort?: string;
   permissions?: "skip" | "default";
 }
 
@@ -907,6 +820,7 @@ export interface NotifierConfig {
 export interface AgentSpecificConfig {
   permissions?: "skip" | "default";
   model?: string;
+  reasoningEffort?: string;
   [key: string]: unknown;
 }
 
@@ -964,6 +878,8 @@ export interface SessionMetadata {
   cost?: string;
   /** Model used by the session's agent plugin. */
   model?: string;
+  /** Reasoning effort used by the session's agent plugin. */
+  reasoningEffort?: string;
   /** Agent execution permission mode. */
   permissions?: "skip" | "default";
   /** Logical task identifier shared across retries/attempts. */
@@ -993,6 +909,7 @@ export interface SessionMetadata {
 export interface RetryConfig {
   agent?: string;
   model?: string;
+  reasoningEffort?: string;
   baseBranch?: string;
   profile?: string;
 }
@@ -1003,6 +920,7 @@ export interface AttemptSummary {
   status: SessionStatus;
   agent?: string;
   model?: string;
+  reasoningEffort?: string;
   branch?: string | null;
   createdAt: Date;
 }

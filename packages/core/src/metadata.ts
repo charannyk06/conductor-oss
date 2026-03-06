@@ -134,6 +134,7 @@ export function writeMetadata(
   if (metadata.prDraft) data["prDraft"] = metadata.prDraft;
   if (metadata.cost) data["cost"] = metadata.cost;
   if (metadata.model) data["model"] = metadata.model;
+  if (metadata.reasoningEffort) data["reasoningEffort"] = metadata.reasoningEffort;
   if (metadata.permissions) data["permissions"] = metadata.permissions;
   if (metadata.taskId) data["taskId"] = metadata.taskId;
   if (metadata.attemptId) data["attemptId"] = metadata.attemptId;

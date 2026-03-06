@@ -6,6 +6,7 @@ import { createServices, loadConfig } from "../services.js";
 interface RetryOptions {
   agent?: string;
   model?: string;
+  reasoningEffort?: string;
   baseBranch?: string;
   profile?: string;
 }
@@ -17,6 +18,7 @@ export function registerRetry(program: Command): void {
     .argument("<sessionOrTask>", "Session ID (pp-foo-1) or task ID (t-xxxx)")
     .option("--agent <name>", "Override agent plugin for the new attempt")
     .option("--model <name>", "Override model for the new attempt")
+    .option("--reasoning-effort <level>", "Override reasoning effort for the new attempt")
     .option("--base-branch <name>", "Override base branch for the new attempt")
     .option("--profile <name>", "Use a named project profile (fast/deep/safe/auto)")
     .action(async (sessionOrTask: string, opts: RetryOptions) => {
@@ -27,13 +29,14 @@ export function registerRetry(program: Command): void {
         const manager = sessionManager as unknown as {
           retry: (
             target: string,
-            options?: { agent?: string; model?: string; baseBranch?: string; profile?: string },
+            options?: { agent?: string; model?: string; reasoningEffort?: string; baseBranch?: string; profile?: string },
           ) => Promise<{ id: string; projectId: string; branch: string | null; metadata: Record<string, string> }>;
         };
 
         const next = await manager.retry(sessionOrTask, {
           agent: opts.agent,
           model: opts.model,
+          reasoningEffort: opts.reasoningEffort?.trim().toLowerCase() || undefined,
           baseBranch: opts.baseBranch,
           profile: opts.profile,
         });

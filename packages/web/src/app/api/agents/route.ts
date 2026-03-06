@@ -7,6 +7,8 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { getServices } from "@/lib/services";
 import { guardApiAccess } from "@/lib/auth";
+import { type RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
+import { getRuntimeAgentModelCatalog } from "@/lib/runtimeAgentModels";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +20,10 @@ type AgentInfo = {
   version: string | null;
   homepage: string | null;
   iconUrl: string | null;
+  installed: boolean;
+  configured: boolean;
+  ready: boolean;
+  runtimeModelCatalog?: RuntimeAgentModelCatalog | null;
 };
 
 type AgentHint = {
@@ -346,7 +352,11 @@ async function detectVersion(command: string): Promise<string | null> {
   }
 }
 
-function collectConfiguredAgents(config: { projects: Record<string, { agent?: string }> }): string[] {
+function collectConfiguredAgents(config: {
+  projects: Record<string, { agent?: string }>;
+  preferences?: { codingAgent?: string | null };
+  defaults?: { agent?: string | null };
+}): string[] {
   const names = new Set<string>();
   for (const project of Object.values(config.projects)) {
     if (!project?.agent) continue;
@@ -354,6 +364,14 @@ function collectConfiguredAgents(config: { projects: Record<string, { agent?: st
     if (normalized) {
       names.add(normalized);
     }
+  }
+  const preferredAgent = resolveCanonicalAgentName(config.preferences?.codingAgent ?? "");
+  if (preferredAgent) {
+    names.add(preferredAgent);
+  }
+  const defaultAgent = resolveCanonicalAgentName(config.defaults?.agent ?? "");
+  if (defaultAgent) {
+    names.add(defaultAgent);
   }
   return [...names];
 }
@@ -422,6 +440,9 @@ async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
           version,
           homepage: info.homepage,
           iconUrl: info.iconUrl,
+          installed: true,
+          configured: false,
+          ready: true,
         });
         continue;
       }
@@ -462,10 +483,14 @@ export async function GET() {
         version: manifest.version ?? null,
         homepage: hint?.homepage ?? null,
         iconUrl: hint?.iconUrl ?? null,
+        installed: false,
+        configured: false,
+        ready: false,
       });
     }
 
     const configuredAgentNames = collectConfiguredAgents(config);
+    const configuredAgentSet = new Set(configuredAgentNames.map((name) => normalizeAgentName(name)));
 
     for (const agentName of configuredAgentNames) {
       const key = normalizeAgentName(agentName);
@@ -479,12 +504,16 @@ export async function GET() {
           version: null,
           homepage: hint?.homepage ?? null,
           iconUrl: hint?.iconUrl ?? null,
+          installed: false,
+          configured: true,
+          ready: false,
         });
         continue;
       }
 
       const existing = dedupe.get(key);
       if (!existing) continue;
+      existing.configured = true;
       if (!existing.description && hint?.description) {
         existing.description = hint.description;
       }
@@ -508,9 +537,16 @@ export async function GET() {
       if (!key) continue;
       const existing = dedupe.get(key);
       if (!existing) {
-        dedupe.set(key, discovered);
+        dedupe.set(key, {
+          ...discovered,
+          installed: true,
+          configured: configuredAgentSet.has(key),
+          ready: true,
+        });
         continue;
       }
+      existing.installed = true;
+      existing.ready = true;
       if (!existing.version && discovered.version) {
         existing.version = discovered.version;
       }
@@ -522,6 +558,15 @@ export async function GET() {
       }
       if (!existing.iconUrl && discovered.iconUrl) {
         existing.iconUrl = discovered.iconUrl;
+      }
+    }
+
+    for (const agentKey of ["claude-code", "codex", "gemini", "qwen-code"] as const) {
+      const runtimeCatalog = await getRuntimeAgentModelCatalog(agentKey);
+      if (!runtimeCatalog) continue;
+      const entry = dedupe.get(agentKey);
+      if (entry) {
+        entry.runtimeModelCatalog = runtimeCatalog;
       }
     }
 

@@ -14,6 +14,7 @@ import { createServices, loadConfig } from "../services.js";
 interface SpawnOptions {
   agent?: string;
   model?: string;
+  reasoningEffort?: string;
   branch?: string;
   prompt?: string;
 }
@@ -29,6 +30,7 @@ export function registerSpawn(program: Command): void {
       "Override agent plugin (e.g. claude-code, codex, gemini, amp, cursor-cli, opencode, droid, qwen-code, ccr, github-copilot, openai-codex, google-gemini, open-code)",
     )
     .option("--model <name>", "Override model (e.g. o4-mini, claude-opus-4-6)")
+    .option("--reasoning-effort <level>", "Override reasoning effort when the target CLI supports it")
     .option("--branch <name>", "Override branch name")
     .option("--prompt <text>", "Explicit prompt (if issueOrPrompt is an issue)")
     .action(async (project: string, issueOrPrompt: string | undefined, opts: SpawnOptions) => {
@@ -56,6 +58,7 @@ export function registerSpawn(program: Command): void {
         branch: opts.branch,
         agent: opts.agent,
         model: opts.model,
+        reasoningEffort: opts.reasoningEffort?.trim().toLowerCase() || undefined,
       };
 
       const spinner = ora("Creating session").start();

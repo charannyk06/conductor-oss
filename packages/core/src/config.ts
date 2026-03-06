@@ -61,6 +61,7 @@ const AgentSpecificConfigSchema = z
   .object({
     permissions: z.enum(["skip", "default"]).default("skip"),
     model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
   })
   .passthrough();
 
@@ -68,6 +69,7 @@ const AgentProfileSchema = z
   .object({
     agent: z.string().optional(),
     model: z.string().optional(),
+    reasoningEffort: z.string().optional(),
     permissions: z.enum(["skip", "default"]).optional(),
   })
   .passthrough();
@@ -237,6 +239,100 @@ const ConductorConfigSchema = z.object({
     },
   }),
 });
+
+function asNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function slugifyProjectId(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/\.git$/i, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || "project";
+}
+
+function ensureUniqueProjectKey(baseKey: string, usedKeys: Set<string>): string {
+  if (!usedKeys.has(baseKey)) {
+    usedKeys.add(baseKey);
+    return baseKey;
+  }
+
+  let suffix = 2;
+  while (usedKeys.has(`${baseKey}-${suffix}`)) {
+    suffix += 1;
+  }
+
+  const nextKey = `${baseKey}-${suffix}`;
+  usedKeys.add(nextKey);
+  return nextKey;
+}
+
+function deriveLegacyProjectKey(project: Record<string, unknown>, index: number): string {
+  const explicitId = asNonEmptyString(project["projectId"]) ?? asNonEmptyString(project["id"]);
+  if (explicitId) return slugifyProjectId(explicitId);
+
+  const path = asNonEmptyString(project["path"]);
+  if (path) {
+    const pathBase = basename(path.replace(/[\\/]+$/, ""));
+    if (pathBase.trim().length > 0) return slugifyProjectId(pathBase);
+  }
+
+  const repo = asNonEmptyString(project["repo"]);
+  if (repo) {
+    const repoBase = repo
+      .replace(/\.git$/i, "")
+      .split(/[/:]/)
+      .filter(Boolean)
+      .pop();
+    if (repoBase) return slugifyProjectId(repoBase);
+  }
+
+  const name = asNonEmptyString(project["name"]);
+  if (name) return slugifyProjectId(name);
+
+  return `project-${index + 1}`;
+}
+
+export function normalizeProjectConfigMap(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+
+  if (Array.isArray(value)) {
+    const normalized: Record<string, unknown> = {};
+    const usedKeys = new Set<string>();
+
+    value.forEach((entry, index) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+      const project = { ...(entry as Record<string, unknown>) };
+      const projectKey = ensureUniqueProjectKey(deriveLegacyProjectKey(project, index), usedKeys);
+      delete project["id"];
+      delete project["projectId"];
+      normalized[projectKey] = project;
+    });
+
+    return normalized;
+  }
+
+  if (typeof value !== "object") {
+    return {};
+  }
+
+  return { ...(value as Record<string, unknown>) };
+}
+
+function normalizeConfigInput(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return raw;
+  }
+
+  const normalized = { ...(raw as Record<string, unknown>) };
+  normalized["projects"] = normalizeProjectConfigMap(normalized["projects"]);
+  return normalized;
+}
 
 // =============================================================================
 // CONFIG LOADING
@@ -529,7 +625,7 @@ export function loadConfigWithPath(configPath?: string): {
 
 /** Validate a raw config object */
 export function validateConfig(raw: unknown): OrchestratorConfig {
-  const validated = ConductorConfigSchema.parse(raw);
+  const validated = ConductorConfigSchema.parse(normalizeConfigInput(raw));
 
   let config = validated as OrchestratorConfig;
   config = expandPaths(config);

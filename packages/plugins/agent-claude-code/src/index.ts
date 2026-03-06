@@ -638,9 +638,12 @@ function createClaudeCodeAgent(): Agent {
         parts.push("--dangerously-skip-permissions");
       }
 
-      // Always pass --model; default to opus when not explicitly set
-      const model = config.model ?? "claude-sonnet-4-6";
-      parts.push("--model", shellEscape(model));
+      if (config.model) {
+        parts.push("--model", shellEscape(config.model));
+      }
+      if (config.reasoningEffort) {
+        parts.push("--effort", shellEscape(config.reasoningEffort));
+      }
 
       if (config.systemPromptFile) {
         parts.push("--append-system-prompt", `"$(cat ${shellEscape(config.systemPromptFile)})"`);
@@ -788,8 +791,14 @@ function createClaudeCodeAgent(): Agent {
         parts.push("--dangerously-skip-permissions");
       }
 
-      if (project.agentConfig?.model) {
+      if (session.metadata["model"]) {
+        parts.push("--model", shellEscape(session.metadata["model"]));
+      } else if (project.agentConfig?.model) {
         parts.push("--model", shellEscape(project.agentConfig.model as string));
+      }
+      const reasoningEffort = session.metadata["reasoningEffort"] ?? project.agentConfig?.reasoningEffort;
+      if (reasoningEffort) {
+        parts.push("--effort", shellEscape(reasoningEffort));
       }
 
       return parts.join(" ");

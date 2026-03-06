@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  getAgentModelCatalog,
   getAvailableAgentModels,
+  getAvailableAgentReasoningEfforts,
   getDefaultAgentModel,
+  getDefaultAgentReasoningEffort,
   getDefaultModelAccessPreferences,
   resolveAgentModelAccess,
   supportsAgentModelSelection,
@@ -17,54 +20,37 @@ test("defaults expose model access preferences for supported agents", () => {
   });
 });
 
-test("anthropic Pro access only exposes Sonnet models", () => {
-  const models = getAvailableAgentModels("claude-code", {
-    claudeCode: "pro",
-  }).map((model) => model.id);
+test("agent catalogs only expose access metadata", () => {
+  const codexCatalog = getAgentModelCatalog("codex");
+  assert.ok(codexCatalog);
+  assert.equal(codexCatalog.label, "Codex");
+  assert.deepEqual(
+    codexCatalog.accessOptions.map((option) => option.id),
+    ["chatgpt", "api"],
+  );
 
-  assert.deepEqual(models, [
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-0",
-  ]);
-  assert.equal(getDefaultAgentModel("claude-code", { claudeCode: "pro" }), "claude-sonnet-4-5");
+  const claudeCatalog = getAgentModelCatalog("claude-code");
+  assert.ok(claudeCatalog);
+  assert.deepEqual(
+    claudeCatalog.accessOptions.map((option) => option.id),
+    ["pro", "max", "api"],
+  );
 });
 
-test("anthropic Max access unlocks Opus models", () => {
-  const models = getAvailableAgentModels("claude-code", {
-    claudeCode: "max",
-  }).map((model) => model.id);
-
-  assert.deepEqual(models, [
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-0",
-    "claude-opus-4-1",
-    "claude-opus-4-0",
-  ]);
-  assert.equal(getDefaultAgentModel("claude-code", { claudeCode: "max" }), "claude-opus-4-1");
+test("core no longer exposes hardcoded model or reasoning lists", () => {
+  assert.deepEqual(getAvailableAgentModels("codex", { codex: "chatgpt" }), []);
+  assert.equal(getDefaultAgentModel("codex", { codex: "chatgpt" }), null);
+  assert.deepEqual(getAvailableAgentReasoningEfforts("claude-code", { claudeCode: "max" }), []);
+  assert.equal(getDefaultAgentReasoningEffort("claude-code", { claudeCode: "max" }), null);
 });
 
-test("codex access differentiates chatgpt and api model lists", () => {
-  const chatgptModels = getAvailableAgentModels("codex", {
-    codex: "chatgpt",
-  }).map((model) => model.id);
-  const apiModels = getAvailableAgentModels("codex", {
-    codex: "api",
-  }).map((model) => model.id);
-
-  assert.deepEqual(chatgptModels, [
-    "gpt-5.2-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex-mini",
-  ]);
-  assert.deepEqual(apiModels, [
-    "gpt-5.2-codex",
-    "gpt-5.1-codex",
-  ]);
+test("resolveAgentModelAccess uses the saved preference when valid", () => {
+  assert.equal(resolveAgentModelAccess("codex", { codex: "api" }), "api");
+  assert.equal(resolveAgentModelAccess("claude-code", { claudeCode: "max" }), "max");
 });
 
 test("unsupported agents fall back cleanly", () => {
   assert.equal(supportsAgentModelSelection("amp"), false);
   assert.equal(resolveAgentModelAccess("amp", null), null);
-  assert.deepEqual(getAvailableAgentModels("amp", null), []);
-  assert.equal(getDefaultAgentModel("amp", null), null);
+  assert.equal(getAgentModelCatalog("amp"), null);
 });
