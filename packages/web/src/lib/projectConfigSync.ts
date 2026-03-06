@@ -3,6 +3,7 @@ import { stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import {
   buildConductorYaml,
+  normalizeProjectConfigMap,
   resolveConfiguredProjectPath,
   type ScaffoldProjectConfig,
 } from "@conductor-oss/core";
@@ -80,12 +81,13 @@ function buildProjectScaffold(
     scm: asNonEmptyString(project["scm"]),
     boardDir: asNonEmptyString(project["boardDir"]),
     agentModel: asNonEmptyString(agentConfig["model"]),
+    agentReasoningEffort: asNonEmptyString(agentConfig["reasoningEffort"]),
     agentPermissions: agentConfig["permissions"] === "default" ? "default" : "skip",
   };
 }
 
 export async function normalizeRootProjectPaths(rootConfig: MutableConfig): Promise<void> {
-  const projects = toObject(rootConfig["projects"]);
+  const projects = normalizeProjectConfigMap(rootConfig["projects"]);
 
   for (const [projectId, rawProject] of Object.entries(projects)) {
     const project = toObject(rawProject);
@@ -113,7 +115,7 @@ export async function normalizeRootProjectPaths(rootConfig: MutableConfig): Prom
 }
 
 export async function syncProjectLocalConfig(rootConfig: MutableConfig, projectId: string): Promise<void> {
-  const projects = toObject(rootConfig["projects"]);
+  const projects = normalizeProjectConfigMap(rootConfig["projects"]);
   const project = toObject(projects[projectId]);
   const rawProjectPath = asNonEmptyString(project["path"]);
   if (!rawProjectPath) {
@@ -135,7 +137,7 @@ export async function syncProjectLocalConfig(rootConfig: MutableConfig, projectI
 
 export async function syncAllProjectLocalConfigs(rootConfig: MutableConfig): Promise<void> {
   await normalizeRootProjectPaths(rootConfig);
-  const projects = toObject(rootConfig["projects"]);
+  const projects = normalizeProjectConfigMap(rootConfig["projects"]);
   for (const projectId of Object.keys(projects)) {
     await syncProjectLocalConfig(rootConfig, projectId);
   }

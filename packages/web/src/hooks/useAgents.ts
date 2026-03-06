@@ -1,10 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 
-interface Agent {
+export interface Agent {
   name: string;
   description: string;
+  installed?: boolean;
+  configured?: boolean;
+  ready?: boolean;
+  runtimeModelCatalog?: RuntimeAgentModelCatalog | null;
   [key: string]: unknown;
 }
 

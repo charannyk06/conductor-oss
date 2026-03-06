@@ -4,12 +4,10 @@ import { type FormEvent, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   getAgentModelCatalog,
-  getAvailableAgentModels,
-  getDefaultAgentModel,
   resolveAgentModelAccess,
   supportsAgentModelSelection,
-  type AgentModelCatalog,
   type AgentModelOption,
+  type AgentReasoningOption,
   type DashboardRole,
   type ModelAccessPreferences,
   type TrustedHeaderAccessProvider,
@@ -50,6 +48,13 @@ import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { WorkspaceKanban } from "@/components/board/WorkspaceKanban";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
+import {
+  getRuntimeCatalogDefaultModelForAccess,
+  getRuntimeCatalogDefaultReasoning,
+  getRuntimeCatalogModelsForAccess,
+  getRuntimeCatalogReasoningOptions,
+  type RuntimeAgentModelCatalog,
+} from "@/lib/runtimeAgentModelsShared";
 
 const EXECUTOR_ORDER = [
   "codex",
@@ -174,6 +179,7 @@ type RepositorySettingsPayload = {
   path: string;
   agent: string;
   agentModel: string;
+  agentReasoningEffort: string;
   workspaceMode: string;
   runtimeMode: string;
   scmMode: string;
@@ -191,6 +197,7 @@ type RepositorySettingsPayload = {
 type ModelSelectionState = {
   catalogModel: string;
   customModel: string;
+  reasoningEffort: string;
 };
 
 type PreferencesDialogMode = "onboarding" | "settings";
@@ -374,39 +381,114 @@ function emptyModelSelection(): ModelSelectionState {
   return {
     catalogModel: "",
     customModel: "",
+    reasoningEffort: "",
   };
+}
+
+function getRuntimeModelCatalog(
+  agent: string,
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
+): RuntimeAgentModelCatalog | null {
+  return runtimeModelCatalogs[normalizeAgentName(agent)] ?? null;
+}
+
+function getSelectableAgentModels(
+  agent: string,
+  modelAccess: ModelAccessPreferences,
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
+): AgentModelOption[] {
+  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
+  const access = resolveAgentModelAccess(agent, modelAccess);
+  return getRuntimeCatalogModelsForAccess(runtimeCatalog, access);
+}
+
+function getSelectableAgentReasoningOptions(
+  agent: string,
+  modelAccess: ModelAccessPreferences,
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
+  model: string | null | undefined,
+): AgentReasoningOption[] {
+  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
+  const access = resolveAgentModelAccess(agent, modelAccess);
+  return getRuntimeCatalogReasoningOptions(runtimeCatalog, model, access);
+}
+
+function getSelectableDefaultAgentModel(
+  agent: string,
+  modelAccess: ModelAccessPreferences,
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
+): string {
+  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
+  const access = resolveAgentModelAccess(agent, modelAccess);
+  return getRuntimeCatalogDefaultModelForAccess(runtimeCatalog, access) ?? "";
+}
+
+function getSelectableDefaultReasoningEffort(
+  agent: string,
+  modelAccess: ModelAccessPreferences,
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
+  model: string | null | undefined,
+): string {
+  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
+  const access = resolveAgentModelAccess(agent, modelAccess);
+  return getRuntimeCatalogDefaultReasoning(runtimeCatalog, model, access) ?? "";
+}
+
+function getSelectableModelPlaceholder(
+  agent: string,
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
+): string {
+  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
+  if (runtimeCatalog?.customModelPlaceholder.trim()) {
+    return runtimeCatalog.customModelPlaceholder;
+  }
+  const label = getAgentModelCatalog(agent)?.label ?? "agent";
+  return `Enter exact ${label} model id`;
 }
 
 function buildModelSelection(
   agent: string,
   modelAccess: ModelAccessPreferences,
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
   preferredModel?: string | null,
+  preferredReasoningEffort?: string | null,
 ): ModelSelectionState {
   if (!supportsAgentModelSelection(agent)) {
     return emptyModelSelection();
   }
 
   const trimmedPreferred = preferredModel?.trim() ?? "";
-  const availableModels = getAvailableAgentModels(agent, modelAccess);
-  const defaultModel = getDefaultAgentModel(agent, modelAccess) ?? "";
+  const trimmedPreferredReasoning = preferredReasoningEffort?.trim().toLowerCase() ?? "";
+  const availableModels = getSelectableAgentModels(agent, modelAccess, runtimeModelCatalogs);
+  const defaultModel = getSelectableDefaultAgentModel(agent, modelAccess, runtimeModelCatalogs);
+  const resolveReasoningEffort = (resolvedModel: string | null | undefined): string => {
+    const options = getSelectableAgentReasoningOptions(agent, modelAccess, runtimeModelCatalogs, resolvedModel);
+    if (trimmedPreferredReasoning.length > 0 && options.some((option) => option.id === trimmedPreferredReasoning)) {
+      return trimmedPreferredReasoning;
+    }
+    return getSelectableDefaultReasoningEffort(agent, modelAccess, runtimeModelCatalogs, resolvedModel);
+  };
 
   if (trimmedPreferred.length > 0) {
     if (availableModels.some((model) => model.id === trimmedPreferred)) {
       return {
         catalogModel: trimmedPreferred,
         customModel: "",
+        reasoningEffort: resolveReasoningEffort(trimmedPreferred),
       };
     }
 
     return {
       catalogModel: defaultModel,
       customModel: trimmedPreferred,
+      reasoningEffort: resolveReasoningEffort(trimmedPreferred),
     };
   }
 
   return {
     catalogModel: defaultModel,
     customModel: "",
+    reasoningEffort: resolveReasoningEffort(defaultModel),
   };
 }
 
@@ -415,6 +497,11 @@ function resolveModelSelectionValue(selection: ModelSelectionState): string | un
   if (custom.length > 0) return custom;
   const catalog = selection.catalogModel.trim();
   return catalog.length > 0 ? catalog : undefined;
+}
+
+function resolveReasoningSelectionValue(selection: ModelSelectionState): string | undefined {
+  const reasoningEffort = selection.reasoningEffort.trim().toLowerCase();
+  return reasoningEffort.length > 0 ? reasoningEffort : undefined;
 }
 
 function getAgentModelAccessLabel(agent: string, modelAccess: ModelAccessPreferences): string | null {
@@ -484,6 +571,9 @@ function buildRepositoryBootstrapCommand(
   if (repository.agentModel.trim().length > 0) {
     initArgs.push(`--model ${shellQuote(repository.agentModel.trim())}`);
   }
+  if (repository.agentReasoningEffort.trim().length > 0) {
+    initArgs.push(`--reasoning-effort ${shellQuote(repository.agentReasoningEffort.trim())}`);
+  }
   if (repository.defaultWorkingDirectory.trim().length > 0) {
     initArgs.push(`--default-working-directory ${shellQuote(repository.defaultWorkingDirectory.trim())}`);
   }
@@ -523,12 +613,14 @@ function MarkdownEditorIcon({ editorId }: { editorId: string }) {
 function AgentModelSelector({
   agent,
   modelAccess,
+  runtimeModelCatalogs,
   selection,
   onChange,
   compact = false,
 }: {
   agent: string;
   modelAccess: ModelAccessPreferences;
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   selection: ModelSelectionState;
   onChange: (next: ModelSelectionState) => void;
   compact?: boolean;
@@ -536,25 +628,46 @@ function AgentModelSelector({
   if (!supportsAgentModelSelection(agent)) return null;
 
   const catalog = getAgentModelCatalog(agent);
-  const availableModels = getAvailableAgentModels(agent, modelAccess);
+  const availableModels = getSelectableAgentModels(agent, modelAccess, runtimeModelCatalogs);
+  const resolvedModel = resolveModelSelectionValue(selection) ?? selection.catalogModel;
+  const availableReasoningOptions = getSelectableAgentReasoningOptions(
+    agent,
+    modelAccess,
+    runtimeModelCatalogs,
+    resolvedModel,
+  );
   const accessLabel = getAgentModelAccessLabel(agent, modelAccess);
 
   if (!catalog) return null;
 
   return (
-    <div className={compact ? "grid gap-3 md:grid-cols-2" : "space-y-3"}>
+    <div className={compact ? "grid gap-3 md:grid-cols-3" : "space-y-3"}>
       <label className="block">
         <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Model</span>
         <select
           value={selection.catalogModel}
+          disabled={availableModels.length === 0}
           onChange={(event) => {
+            const nextCatalogModel = event.target.value;
+            const nextReasoningOptions = getSelectableAgentReasoningOptions(
+              agent,
+              modelAccess,
+              runtimeModelCatalogs,
+              nextCatalogModel,
+            );
             onChange({
               ...selection,
-              catalogModel: event.target.value,
+              catalogModel: nextCatalogModel,
+              reasoningEffort: nextReasoningOptions.some((option) => option.id === selection.reasoningEffort)
+                ? selection.reasoningEffort
+                : getSelectableDefaultReasoningEffort(agent, modelAccess, runtimeModelCatalogs, nextCatalogModel),
             });
           }}
-          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
         >
+          {availableModels.length === 0 && (
+            <option value="">No runtime models detected</option>
+          )}
           {availableModels.map((model) => (
             <option key={model.id} value={model.id}>
               {model.label}
@@ -568,21 +681,62 @@ function AgentModelSelector({
         </p>
       </label>
 
+      {availableReasoningOptions.length > 0 && (
+        <label className="block">
+          <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Reasoning Effort</span>
+          <select
+            value={selection.reasoningEffort}
+            onChange={(event) => {
+              onChange({
+                ...selection,
+                reasoningEffort: event.target.value,
+              });
+            }}
+            className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+          >
+            {availableReasoningOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
+            Choose how much deliberate reasoning the CLI should use before it acts.
+          </p>
+        </label>
+      )}
+
       <label className="block">
         <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Custom Model Override</span>
         <input
           value={selection.customModel}
           onChange={(event) => {
+            const nextCustomModel = event.target.value;
+            const nextResolvedModel = nextCustomModel.trim() || selection.catalogModel;
+            const nextReasoningOptions = getSelectableAgentReasoningOptions(
+              agent,
+              modelAccess,
+              runtimeModelCatalogs,
+              nextResolvedModel,
+            );
             onChange({
               ...selection,
-              customModel: event.target.value,
+              customModel: nextCustomModel,
+              reasoningEffort: nextReasoningOptions.some((option) => option.id === selection.reasoningEffort)
+                ? selection.reasoningEffort
+                : getSelectableDefaultReasoningEffort(
+                  agent,
+                  modelAccess,
+                  runtimeModelCatalogs,
+                  nextResolvedModel,
+                ),
             });
           }}
-          placeholder={catalog.customModelPlaceholder}
+          placeholder={getSelectableModelPlaceholder(agent, runtimeModelCatalogs)}
           className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
         />
         <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
-          Optional. Use this if your provider exposes a newer model before Conductor updates its catalog.
+          Optional. Use this to force an exact model id from the installed CLI when you want to override the detected list.
         </p>
       </label>
     </div>
@@ -652,19 +806,50 @@ export default function Home() {
   );
 
   const agentOptions = useMemo(() => {
-    const safeAgents = Array.isArray(agents) ? agents : [];
+    const safeAgents = Array.isArray(agents)
+      ? agents as Array<{ name?: string; ready?: boolean; configured?: boolean; installed?: boolean }>
+      : [];
     const opts = new Set<string>();
+
+    for (const agent of safeAgents) {
+      if (agent.ready && agent.name) {
+        opts.add(agent.name);
+      }
+    }
     for (const project of projects) {
       if (project.agent) opts.add(project.agent);
     }
-    for (const agent of safeAgents) {
-      if (agent.name) opts.add(agent.name);
+    if (preferences?.codingAgent) {
+      opts.add(preferences.codingAgent);
     }
+
     if (opts.size === 0) {
-      ["qwen-code", "claude-code", "codex"].forEach((name) => opts.add(name));
+      for (const agent of safeAgents) {
+        if ((agent.configured || agent.installed) && agent.name) {
+          opts.add(agent.name);
+        }
+      }
+    }
+
+    if (opts.size === 0) {
+      ["claude-code", "codex", "qwen-code"].forEach((name) => opts.add(name));
     }
     return [...opts];
-  }, [agents, projects]);
+  }, [agents, preferences?.codingAgent, projects]);
+
+  const runtimeModelCatalogs = useMemo(() => {
+    const catalogs: Record<string, RuntimeAgentModelCatalog> = {};
+    const safeAgents = Array.isArray(agents)
+      ? agents as Array<{ name?: string; runtimeModelCatalog?: RuntimeAgentModelCatalog | null }>
+      : [];
+
+    for (const agent of safeAgents) {
+      if (!agent.name || !agent.runtimeModelCatalog) continue;
+      catalogs[normalizeAgentName(agent.name)] = agent.runtimeModelCatalog;
+    }
+
+    return catalogs;
+  }, [agents]);
 
   useEffect(() => {
     let cancelled = false;
@@ -734,15 +919,20 @@ export default function Home() {
     const preferredModel = selectedProject && normalizeAgentName(selectedProject.agent) === normalizeAgentName(effectiveAgent)
       ? selectedProject.agentModel
       : null;
+    const preferredReasoningEffort = selectedProject && normalizeAgentName(selectedProject.agent) === normalizeAgentName(effectiveAgent)
+      ? selectedProject.agentReasoningEffort
+      : null;
 
     setLaunchModelSelection(
       buildModelSelection(
         effectiveAgent,
         preferences?.modelAccess ?? normalizeModelAccessPreferences(null),
+        runtimeModelCatalogs,
         preferredModel,
+        preferredReasoningEffort,
       ),
     );
-  }, [preferences?.modelAccess, preferences?.codingAgent, selectedAgent, selectedProject]);
+  }, [preferences?.modelAccess, preferences?.codingAgent, runtimeModelCatalogs, selectedAgent, selectedProject]);
 
   async function handleSavePreferences(
     next: PreferencesPayload,
@@ -808,6 +998,7 @@ export default function Home() {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) return;
     const resolvedModel = resolveModelSelectionValue(launchModelSelection);
+    const resolvedReasoningEffort = resolveReasoningSelectionValue(launchModelSelection);
 
     const projectId = selectedProjectId ?? projects[0]?.id;
     if (!projectId) {
@@ -827,6 +1018,7 @@ export default function Home() {
           prompt: trimmedPrompt,
           agent: selectedAgent || "qwen-code",
           ...(resolvedModel ? { model: resolvedModel } : {}),
+          ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
         }),
       });
 
@@ -975,6 +1167,7 @@ export default function Home() {
                     modelSelection={launchModelSelection}
                     setModelSelection={setLaunchModelSelection}
                     modelAccess={resolvedPreferences.modelAccess}
+                    runtimeModelCatalogs={runtimeModelCatalogs}
                     agentOptions={agentOptions}
                     projectLabel={selectedProjectId ?? "No project selected"}
                     hasProject={Boolean(selectedProjectId)}
@@ -1009,7 +1202,9 @@ export default function Home() {
         creating={preferencesSaving}
         error={preferencesError}
         current={resolvedPreferences}
+        projectCount={projects.length}
         agentOptions={agentOptions}
+        runtimeModelCatalogs={runtimeModelCatalogs}
         onRepositoriesChanged={refreshConfig}
         onOnboardingComplete={({ needsProject }) => {
           if (needsProject) {
@@ -1808,6 +2003,7 @@ function CreateWorkspacePanel({
   modelSelection,
   setModelSelection,
   modelAccess,
+  runtimeModelCatalogs,
   agentOptions,
   projectLabel,
   hasProject,
@@ -1823,6 +2019,7 @@ function CreateWorkspacePanel({
   modelSelection: ModelSelectionState;
   setModelSelection: (next: ModelSelectionState) => void;
   modelAccess: ModelAccessPreferences;
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   agentOptions: string[];
   projectLabel: string;
   hasProject: boolean;
@@ -1911,6 +2108,7 @@ function CreateWorkspacePanel({
               <AgentModelSelector
                 agent={selectedAgent}
                 modelAccess={modelAccess}
+                runtimeModelCatalogs={runtimeModelCatalogs}
                 selection={modelSelection}
                 onChange={setModelSelection}
                 compact
@@ -1986,7 +2184,9 @@ function SettingsDialog({
   creating,
   error,
   current,
+  projectCount,
   agentOptions,
+  runtimeModelCatalogs,
   onRepositoriesChanged,
   onOnboardingComplete,
   onClose,
@@ -1997,7 +2197,9 @@ function SettingsDialog({
   creating: boolean;
   error: string | null;
   current: PreferencesPayload;
+  projectCount: number;
   agentOptions: string[];
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   onRepositoriesChanged?: () => Promise<void>;
   onOnboardingComplete?: (result: { needsProject: boolean }) => void;
   onClose: () => void;
@@ -2145,6 +2347,7 @@ function SettingsDialog({
           path: repositoryDraft.path,
           agent: repositoryDraft.agent,
           agentModel: resolveModelSelectionValue(repositoryModelSelection) ?? "",
+          agentReasoningEffort: resolveReasoningSelectionValue(repositoryModelSelection) ?? "",
           defaultWorkingDirectory: repositoryDraft.defaultWorkingDirectory,
           defaultBranch: repositoryDraft.defaultBranch,
           devServerScript: repositoryDraft.devServerScript,
@@ -2267,15 +2470,18 @@ function SettingsDialog({
     setSoundFile(current.notifications.soundFile);
     setRepositoryBranchOptions([]);
     setRepositoryBranchesError(null);
+    setRepositoriesError(null);
     setRepositoryModelSelection(emptyModelSelection());
     setAccessError(null);
   }, [open]);
 
   useEffect(() => {
     if (!open) return;
-    void loadRepositories();
+    if (mode === "settings" || activeTab === "repositories") {
+      void loadRepositories();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [activeTab, mode, open]);
 
   useEffect(() => {
     if (!open || mode === "onboarding") return;
@@ -2294,7 +2500,13 @@ function SettingsDialog({
     if (!selected) return;
     setRepositoryDraft(hydrateRepositoryDraft(selected));
     setRepositoryModelSelection(
-      buildModelSelection(selected.agent, modelAccess, selected.agentModel),
+      buildModelSelection(
+        selected.agent,
+        modelAccess,
+        runtimeModelCatalogs,
+        selected.agentModel,
+        selected.agentReasoningEffort,
+      ),
     );
     setRepositoryBranchOptions([]);
     setRepositoryBranchesError(null);
@@ -2302,10 +2514,9 @@ function SettingsDialog({
       void detectRepositoryBranches(selected.path, selected.defaultBranch);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelAccess, open, repositories, selectedRepositoryId]);
+  }, [modelAccess, open, repositories, runtimeModelCatalogs, selectedRepositoryId]);
 
-  const onboardingShouldShowRepositoryStep = mode === "onboarding"
-    && (repositoriesLoading || repositories.length > 0);
+  const onboardingShouldShowRepositoryStep = mode === "onboarding" && projectCount > 0;
 
   const visibleTabs = useMemo(() => {
     if (mode === "onboarding") {
@@ -2370,7 +2581,11 @@ function SettingsDialog({
       && accessSettings.trustedHeaders.audience.trim().length > 0
     )
   );
-  const dialogError = isRepositoriesTab ? repositoriesError : isOrganizationTab ? accessError : error;
+  const dialogError = isRepositoriesTab
+    ? repositoriesError
+    : isOrganizationTab
+      ? accessError
+      : error;
   const accessRoleFields: Array<{
     label: string;
     key: keyof AccessSettingsPayload["roles"];
@@ -2387,6 +2602,7 @@ function SettingsDialog({
     ? buildRepositoryBootstrapCommand({
         ...repositoryDraft,
         agentModel: resolveModelSelectionValue(repositoryModelSelection) ?? "",
+        agentReasoningEffort: resolveReasoningSelectionValue(repositoryModelSelection) ?? "",
       }, {
         ide,
         markdownEditor,
@@ -2425,7 +2641,7 @@ function SettingsDialog({
     if (repositoriesLoading) return;
     if (!onboardingHasRepositoryStep) {
       await handleSubmitPreferences(true, { closeDialog: true });
-      onOnboardingComplete?.({ needsProject: repositories.length === 0 });
+      onOnboardingComplete?.({ needsProject: projectCount === 0 });
       return;
     }
 
@@ -2846,7 +3062,7 @@ function SettingsDialog({
                             onChange={(event) => {
                               const nextAgent = event.target.value;
                               setRepositoryDraft((prev) => prev ? { ...prev, agent: nextAgent } : prev);
-                              setRepositoryModelSelection(buildModelSelection(nextAgent, modelAccess, null));
+                              setRepositoryModelSelection(buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null));
                             }}
                             className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                           >
@@ -2864,6 +3080,7 @@ function SettingsDialog({
                             <AgentModelSelector
                               agent={repositoryDraft.agent}
                               modelAccess={modelAccess}
+                              runtimeModelCatalogs={runtimeModelCatalogs}
                               selection={repositoryModelSelection}
                               onChange={setRepositoryModelSelection}
                             />

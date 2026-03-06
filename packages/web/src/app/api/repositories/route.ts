@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse, stringify } from "yaml";
-import { syncWorkspaceSupportFiles } from "@conductor-oss/core";
+import { normalizeProjectConfigMap, syncWorkspaceSupportFiles } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { normalizeRootProjectPaths, syncProjectLocalConfig } from "@/lib/projectConfigSync";
@@ -25,6 +25,7 @@ type RepositoryPatchBody = {
   path?: unknown;
   agent?: unknown;
   agentModel?: unknown;
+  agentReasoningEffort?: unknown;
   defaultWorkingDirectory?: unknown;
   defaultBranch?: unknown;
   devServerScript?: unknown;
@@ -47,10 +48,7 @@ function toObject(value: unknown): Record<string, unknown> {
 }
 
 function toProjectMap(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  return { ...(value as Record<string, unknown>) };
+  return normalizeProjectConfigMap(value);
 }
 
 function expandHome(value: string): string {
@@ -224,6 +222,7 @@ async function serializeRepository(projectId: string, project: Record<string, un
     path,
     agent: asNonEmptyString(project["agent"]) ?? "claude-code",
     agentModel: asNonEmptyString(agentConfig["model"]) ?? "",
+    agentReasoningEffort: asNonEmptyString(agentConfig["reasoningEffort"]) ?? "",
     workspaceMode: asNonEmptyString(project["workspace"]) ?? "worktree",
     runtimeMode: asNonEmptyString(project["runtime"]) ?? "tmux",
     scmMode: asNonEmptyString(project["scm"]) ?? "github",
@@ -307,6 +306,7 @@ export async function PUT(request: NextRequest) {
     const path = asNonEmptyString(body.path);
     const agent = asNonEmptyString(body.agent) ?? asNonEmptyString(existingProject["agent"]) ?? "claude-code";
     const agentModel = asNonEmptyString(body.agentModel);
+    const agentReasoningEffort = asNonEmptyString(body.agentReasoningEffort);
     const defaultBranch = asNonEmptyString(body.defaultBranch) ?? "main";
     const defaultWorkingDirectory = normalizeWorkingDirectory(asNonEmptyString(body.defaultWorkingDirectory));
 
@@ -323,17 +323,21 @@ export async function PUT(request: NextRequest) {
     nextProject["agent"] = agent;
     nextProject["defaultBranch"] = defaultBranch;
     const nextAgentConfig = toObject(nextProject["agentConfig"]);
+    const updatedAgentConfig = { ...nextAgentConfig };
     if (agentModel) {
-      nextProject["agentConfig"] = {
-        ...nextAgentConfig,
-        model: agentModel,
-      };
-    } else if ("model" in nextAgentConfig) {
-      const { model: _removedModel, ...rest } = nextAgentConfig;
-      nextProject["agentConfig"] = rest;
-      if (Object.keys(rest).length === 0) {
-        delete nextProject["agentConfig"];
-      }
+      updatedAgentConfig.model = agentModel;
+    } else {
+      delete updatedAgentConfig.model;
+    }
+    if (agentReasoningEffort) {
+      updatedAgentConfig.reasoningEffort = agentReasoningEffort;
+    } else {
+      delete updatedAgentConfig.reasoningEffort;
+    }
+    if (Object.keys(updatedAgentConfig).length > 0) {
+      nextProject["agentConfig"] = updatedAgentConfig;
+    } else {
+      delete nextProject["agentConfig"];
     }
 
     if (defaultWorkingDirectory) {

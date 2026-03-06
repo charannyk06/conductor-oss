@@ -33,6 +33,7 @@ export type ScaffoldProjectConfig = {
   scm?: string | null;
   boardDir?: string | null;
   agentModel?: string | null;
+  agentReasoningEffort?: string | null;
   agentPermissions?: "skip" | "default";
 };
 
@@ -120,6 +121,13 @@ export function buildProjectConfigRecord(project: ScaffoldProjectConfig): Record
     nextProject["agentConfig"] = {
       ...(nextProject["agentConfig"] as Record<string, unknown>),
       model: project.agentModel.trim(),
+    };
+  }
+
+  if (project.agentReasoningEffort?.trim()) {
+    nextProject["agentConfig"] = {
+      ...(nextProject["agentConfig"] as Record<string, unknown>),
+      reasoningEffort: project.agentReasoningEffort.trim(),
     };
   }
 

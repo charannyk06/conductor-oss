@@ -68,6 +68,7 @@ export async function GET() {
         description: (project as { description?: string }).description ?? null,
         agent: (project as { agent?: string }).agent ?? "claude-code",
         agentModel: (project as { agentConfig?: { model?: string } }).agentConfig?.model ?? null,
+        agentReasoningEffort: (project as { agentConfig?: { reasoningEffort?: string } }).agentConfig?.reasoningEffort ?? null,
       };
     });
     return NextResponse.json({ projects });

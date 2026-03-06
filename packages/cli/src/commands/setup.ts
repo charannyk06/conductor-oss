@@ -439,6 +439,8 @@ export function registerSetup(program: Command): void {
     .option("--repo <owner/repo>", "GitHub repository slug. Auto-detected from origin if omitted.")
     .option("--path <path>", "Repository path. Defaults to the current working directory.")
     .option("--agent <agent>", "Default coding agent")
+    .option("--model <name>", "Default model written into conductor.yaml")
+    .option("--reasoning-effort <level>", "Default reasoning effort written into conductor.yaml")
     .option("--default-branch <branch>", "Default target branch. Auto-detected if omitted.")
     .option("--default-working-directory <path>", "Relative directory inside the repository where agents start")
     .option("--dashboard-url <url>", "Public dashboard URL written into conductor.yaml")

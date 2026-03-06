@@ -602,6 +602,9 @@ function createCodexAgent(): Agent {
       if (config.model) {
         parts.push("--model", shellEscape(config.model));
       }
+      if (config.reasoningEffort) {
+        parts.push("-c", shellEscape(`model_reasoning_effort="${config.reasoningEffort}"`));
+      }
 
       // Permission mode:
       // - skip => --yolo (no sandbox, no approval prompts)
@@ -802,6 +805,10 @@ function createCodexAgent(): Agent {
         parts.push("--model", shellEscape(project.agentConfig.model as string));
       } else if (data.model) {
         parts.push("--model", shellEscape(data.model));
+      }
+      const reasoningEffort = session.metadata["reasoningEffort"] ?? project.agentConfig?.reasoningEffort;
+      if (reasoningEffort) {
+        parts.push("-c", shellEscape(`model_reasoning_effort="${reasoningEffort}"`));
       }
 
       parts.push(shellEscape(data.threadId));

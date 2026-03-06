@@ -28,15 +28,17 @@ test("buildConductorYaml persists model access preferences and project default m
         agent: "codex",
         defaultBranch: "main",
         agentModel: "gpt-5.2-codex",
+        agentReasoningEffort: "xhigh",
       },
     ],
   })) as {
     preferences?: { modelAccess?: { codex?: string } };
-    projects?: Record<string, { agentConfig?: { model?: string } }>;
+    projects?: Record<string, { agentConfig?: { model?: string; reasoningEffort?: string } }>;
   };
 
   assert.equal(parsed.preferences?.modelAccess?.codex, "api");
   assert.equal(parsed.projects?.["repo"]?.agentConfig?.model, "gpt-5.2-codex");
+  assert.equal(parsed.projects?.["repo"]?.agentConfig?.reasoningEffort, "xhigh");
 });
 
 test("buildConductorYaml includes organization-friendly access defaults", () => {

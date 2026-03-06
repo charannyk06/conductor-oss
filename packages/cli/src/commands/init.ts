@@ -20,6 +20,7 @@ export type InitOptions = {
   path?: string;
   agent?: string;
   model?: string;
+  reasoningEffort?: string;
   ide?: string;
   markdownEditor?: string;
   defaultBranch?: string;
@@ -34,6 +35,7 @@ export type InitProjectConfig = {
   path: string;
   agent: string;
   agentModel: string | null;
+  agentReasoningEffort: string | null;
   ide: string;
   markdownEditor: string;
   defaultBranch: string;
@@ -97,6 +99,7 @@ export function resolveInitProjectConfig(cwd: string, options: InitOptions): Ini
   const projectId = options.projectId?.trim() || slugifyProjectId(repoSlug.split("/").pop() || detectedName);
   const agent = options.agent?.trim() || "claude-code";
   const agentModel = options.model?.trim() || null;
+  const agentReasoningEffort = options.reasoningEffort?.trim().toLowerCase() || null;
   const ide = options.ide?.trim() || "vscode";
   const markdownEditor = options.markdownEditor?.trim() || "obsidian";
   const defaultBranch = options.defaultBranch?.trim() || detectedBranch || "main";
@@ -110,6 +113,7 @@ export function resolveInitProjectConfig(cwd: string, options: InitOptions): Ini
     path: repoPath,
     agent,
     agentModel,
+    agentReasoningEffort,
     ide,
     markdownEditor,
     defaultBranch,
@@ -173,6 +177,7 @@ export function registerInit(program: Command): void {
     .option("--path <path>", "Repository path. Defaults to the current working directory.")
     .option("--agent <agent>", "Default coding agent", "claude-code")
     .option("--model <name>", "Default model written into conductor.yaml")
+    .option("--reasoning-effort <level>", "Default reasoning effort written into conductor.yaml")
     .option("--ide <editor>", "Preferred code editor", "vscode")
     .option("--markdown-editor <editor>", "Preferred markdown app", "obsidian")
     .option("--default-branch <branch>", "Default target branch. Auto-detected if omitted.")

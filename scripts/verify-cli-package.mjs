@@ -210,6 +210,7 @@ async function clickButtonByText(page, label) {
 
 async function fillInput(page, selector, value) {
   const isMac = process.platform === "darwin";
+  await page.waitForSelector(selector, { timeout: 20_000 });
   await page.click(selector, { clickCount: 3 });
   await page.keyboard.down(isMac ? "Meta" : "Control");
   await page.keyboard.press("A");
@@ -314,6 +315,7 @@ async function verifyConfiguredWorkspaceOnboarding(baseUrl) {
       () => document.body?.innerText?.includes("Step 2 of 2"),
       { timeout: 10_000 },
     );
+    await page.waitForSelector('input[placeholder="e.g., your-org/your-repo"]', { timeout: 20_000 });
 
     await fillInput(page, 'input[placeholder="e.g., your-org/your-repo"]', "example/release-smoke-onboarded");
     await clickButtonByText(page, "Finish Setup");
@@ -723,6 +725,74 @@ async function verifyConfiguredWorkspaceFlow(installDir, tempDirs) {
   }
 }
 
+async function verifyLegacyProjectArrayOnboardingFlow(installDir, tempDirs) {
+  const legacyWorkspace = createTempDir("conductor-cli-legacy-", tempDirs);
+  const baseUrl = "http://127.0.0.1:4112";
+  const configPath = join(legacyWorkspace, "conductor.yaml");
+
+  writeFileSync(
+    configPath,
+    [
+      "port: 4112",
+      "preferences:",
+      "  onboardingAcknowledged: false",
+      "  codingAgent: claude-code",
+      "  ide: vscode",
+      "  markdownEditor: obsidian",
+      "projects: []",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(join(legacyWorkspace, "CONDUCTOR.md"), "# Legacy Workspace\n", "utf8");
+
+  const dashboard = spawnInstalledCli(installDir, [
+    "start",
+    "--no-watcher",
+    "--port",
+    "4112",
+    "--workspace",
+    legacyWorkspace,
+  ], {
+    env: {
+      ...process.env,
+      CONDUCTOR_WORKSPACE: legacyWorkspace,
+      CO_CONFIG_PATH: configPath,
+    },
+  });
+
+  try {
+    await waitForDashboard(`${baseUrl}/api/config`, 20_000);
+    await verifyDashboardAssets(baseUrl);
+    await verifyFirstRunOnboarding(baseUrl);
+
+    await waitForCondition("legacy onboarding preferences to persist", async () => {
+      const { response, payload } = await fetchJson(`${baseUrl}/api/preferences`);
+      if (!response.ok) return false;
+
+      const preferences = payload?.preferences;
+      return preferences?.onboardingAcknowledged === true
+        && preferences?.codingAgent === "claude-code"
+        && preferences?.ide === "cursor"
+        && preferences?.markdownEditor === "notion"
+        && preferences?.notifications?.soundEnabled === false
+        && preferences?.remoteSshHost === "conductor-dev"
+        && preferences?.remoteSshUser === "pm";
+    });
+
+    const persistedConfig = readTextFile(configPath);
+    if (!persistedConfig.includes("projects: {}")) {
+      throw new Error("legacy project array config was not normalized to an empty project map");
+    }
+
+    if (dashboard.child.exitCode !== null && dashboard.child.exitCode !== 0) {
+      throw new Error(`legacy project-array dashboard exited early with code ${dashboard.child.exitCode}\n${dashboard.getLogs()}`);
+    }
+  } finally {
+    await stopProcess(dashboard.child);
+  }
+}
+
 const rootDir = resolve(process.cwd());
 const tempDirs = [];
 const packDir = createTempDir("conductor-cli-pack-", tempDirs);
@@ -780,6 +850,7 @@ try {
 
   await verifyBrowserFirstLauncherFlow(installDir, tempDirs);
   await verifyConfiguredWorkspaceFlow(installDir, tempDirs);
+  await verifyLegacyProjectArrayOnboardingFlow(installDir, tempDirs);
 
   console.log("release preflight passed");
 } catch (error) {

@@ -437,6 +437,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     profileName?: string;
     agentName: string;
     model?: string;
+    reasoningEffort?: string;
     permissions: "skip" | "default";
   } {
     const profileName = spawnConfig.profile ?? project.defaultProfile;
@@ -444,11 +445,18 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const agentName = normalizeAgentName(
       spawnConfig.agent ?? profile?.agent ?? project.agent ?? config.defaults.agent,
     );
+    const projectDefaultAgent = normalizeAgentName(project.agent ?? config.defaults.agent);
+    const usesProjectAgentDefaults = agentName === projectDefaultAgent;
     const model = spawnConfig.model
       ?? (!spawnConfig.agent ? profile?.model : undefined)
-      ?? project.agentConfig?.model;
-    const permissions = profile?.permissions ?? project.agentConfig?.permissions ?? "skip";
-    return { profileName, agentName, model, permissions };
+      ?? (usesProjectAgentDefaults ? project.agentConfig?.model : undefined);
+    const reasoningEffort = spawnConfig.reasoningEffort
+      ?? (!spawnConfig.agent ? profile?.reasoningEffort : undefined)
+      ?? (usesProjectAgentDefaults ? project.agentConfig?.reasoningEffort : undefined);
+    const permissions = profile?.permissions
+      ?? (usesProjectAgentDefaults ? project.agentConfig?.permissions : undefined)
+      ?? "skip";
+    return { profileName, agentName, model, reasoningEffort, permissions };
   }
 
   const devServerByProject = new Map<string, { process: ChildProcess; logPath: string }>();
@@ -864,6 +872,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       prompt: composedPrompt ?? spawnConfig.prompt,
       permissions: profileSelection.permissions,
       model: profileSelection.model,
+      reasoningEffort: profileSelection.reasoningEffort,
       attachments: spawnConfig.attachments,
       mcpServers: resolvedMcpServers,
       workspacePath: agentWorkspacePath,
@@ -945,6 +954,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         project: spawnConfig.projectId,
         agent: plugins.agent.name,
         model: profileSelection.model,
+        reasoningEffort: profileSelection.reasoningEffort,
         permissions: profileSelection.permissions,
         profile: profileSelection.profileName,
         taskId,
@@ -1338,6 +1348,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       prompt: source.issueId ? sourceLoc.raw["prompt"] ?? undefined : prompt,
       agent: options?.agent ?? sourceLoc.raw["agent"] ?? undefined,
       model: options?.model ?? sourceLoc.raw["model"] ?? undefined,
+      reasoningEffort: options?.reasoningEffort ?? sourceLoc.raw["reasoningEffort"] ?? undefined,
       baseBranch: options?.baseBranch ?? sourceLoc.raw["branch"] ?? source.branch ?? undefined,
       profile: options?.profile ?? sourceLoc.raw["profile"] ?? undefined,
       taskId,
@@ -1374,6 +1385,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       status: session.status,
       agent: session.metadata["agent"],
       model: session.metadata["model"],
+      reasoningEffort: session.metadata["reasoningEffort"],
       branch: session.branch,
       createdAt: session.createdAt,
     }));
@@ -1467,6 +1479,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         prDraft: raw["prDraft"],
         cost: raw["cost"],
         model: raw["model"],
+        reasoningEffort: raw["reasoningEffort"],
         permissions: raw["permissions"] as "skip" | "default" | undefined,
         taskId: raw["taskId"],
         attemptId: raw["attemptId"],
@@ -1564,6 +1577,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         ?? project.agentConfig?.permissions
         ?? "skip",
       model: raw["model"] ?? project.agentConfig?.model,
+      reasoningEffort: raw["reasoningEffort"] ?? project.agentConfig?.reasoningEffort,
       mcpServers: restoreMcpServers,
       workspacePath: agentWorkspacePath,
     };
