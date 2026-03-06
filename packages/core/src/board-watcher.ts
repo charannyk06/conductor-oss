@@ -1392,26 +1392,63 @@ export interface BoardWatcher {
 }
 
 /**
- * Sync CONDUCTOR-TAGS.md and .vscode/conductor.code-snippets from current config.
- * Called on startup — auto-updates when projects are added to conductor.yaml.
+ * Options for syncing workspace support files used by note-takers and editors.
  */
-function syncTagsFile(config: OrchestratorConfig, agentNames: readonly string[] = FALLBACK_WATCHER_AGENTS): void {
-  const workspace = process.env["CONDUCTOR_WORKSPACE"] ?? process.cwd();
+export interface WorkspaceSupportFilesSyncOptions {
+  workspacePath?: string;
+  boardPaths?: string[];
+  agentNames?: readonly string[];
+  supportDirectories?: string[];
+}
+
+function resolveSupportDirectories(
+  config: OrchestratorConfig,
+  options: WorkspaceSupportFilesSyncOptions,
+): string[] {
+  const roots = new Set<string>();
+  const workspace = options.workspacePath
+    ?? process.env["CONDUCTOR_WORKSPACE"]
+    ?? (config.configPath ? dirname(config.configPath) : process.cwd());
+
+  roots.add(resolve(workspace));
+
+  for (const project of Object.values(config.projects)) {
+    if (typeof project.path !== "string" || project.path.trim().length === 0) continue;
+    roots.add(resolve(project.path));
+  }
+
+  for (const boardPath of options.boardPaths ?? []) {
+    roots.add(resolve(dirname(boardPath)));
+  }
+
+  for (const supportDirectory of options.supportDirectories ?? []) {
+    if (supportDirectory.trim().length === 0) continue;
+    roots.add(resolve(supportDirectory));
+  }
+
+  return [...roots];
+}
+
+function buildConductorTagsContent(config: OrchestratorConfig, agentNames: readonly string[]): string {
   const projectIds = Object.keys(config.projects).sort();
   const agents = uniqueAgents(agentNames.length > 0 ? agentNames : FALLBACK_WATCHER_AGENTS);
-  const projectChoices = projectIds.join(",");
-  const agentChoices = agents.join(",");
+  const projectChoices = projectIds.length > 0 ? projectIds.join(",") : "my-project";
+  const agentChoices = agents.length > 0 ? agents.join(",") : "codex,claude-code,gemini";
 
   // Build the markdown tag lines (one tag per project)
-  const projectTagSeeds = projectIds.map((id) => "#project/" + id).join(" ");
+  const projectTagSeeds = projectIds.length > 0
+    ? projectIds.map((id) => "#project/" + id).join(" ")
+    : "#project/my-project";
   const agentTagSeeds = agents.map((a) => "#agent/" + a).join(" ");
 
   // Build table rows for projects
-  const projectTableRows = projectIds.map((id) => {
-    const p = config.projects[id] as unknown as Record<string, unknown>;
-    const desc = (p["description"] as string | undefined) ?? id;
-    return "| `#project/" + id + "` | " + desc + " |";
-  }).join("\n");
+  const projectTableRows = projectIds.length > 0
+    ? projectIds.map((id) => {
+        const p = config.projects[id] as unknown as Record<string, unknown>;
+        const desc = (p["description"] as string | undefined) ?? id;
+        return "| `#project/" + id + "` | " + desc + " |";
+      }).join("\n")
+    : "| `#project/my-project` | Replace this after adding your first project |";
 
   const agentTableRows = agents
     .map((id) => `| \`#agent/${id}\` | ${id} agent plugin |`)
@@ -1430,7 +1467,7 @@ function syncTagsFile(config: OrchestratorConfig, agentNames: readonly string[] 
     "  - priority/high", "  - priority/medium", "  - priority/low",
   ].join("\n");
 
-  const tagsContent = [
+  return [
     "---",
     "tags:",
     allTagsFrontmatter,
@@ -1499,17 +1536,15 @@ function syncTagsFile(config: OrchestratorConfig, agentNames: readonly string[] 
     "#priority/high #priority/medium #priority/low",
     "",
   ].join("\n");
+}
 
-  const tagsPath = join(workspace, "CONDUCTOR-TAGS.md");
-  try {
-    writeFileSync(tagsPath, tagsContent, "utf-8");
-    console.log("[board-watcher] Tags synced: " + projectIds.length + " projects → CONDUCTOR-TAGS.md");
-  } catch {
-    // Non-fatal
-  }
+function buildConductorCodeSnippets(config: OrchestratorConfig, agentNames: readonly string[]): Record<string, unknown> {
+  const projectIds = Object.keys(config.projects).sort();
+  const agents = uniqueAgents(agentNames.length > 0 ? agentNames : FALLBACK_WATCHER_AGENTS);
+  const projectChoices = projectIds.length > 0 ? projectIds.join(",") : "my-project";
+  const agentChoices = agents.length > 0 ? agents.join(",") : "codex,claude-code,gemini";
 
-  // VS Code snippets
-  const snippets = {
+  return {
     "Conductor Project Tag": {
       prefix: "#project",
       body: ["#project/${1|" + projectChoices + "|}"],
@@ -1538,13 +1573,48 @@ function syncTagsFile(config: OrchestratorConfig, agentNames: readonly string[] 
         description: "Full Conductor task with all tags",
       },
   };
+}
 
-  const vscodeDir = join(workspace, ".vscode");
-  try {
-    mkdirSync(vscodeDir, { recursive: true });
-    writeFileSync(join(vscodeDir, "conductor.code-snippets"), JSON.stringify(snippets, null, 2), "utf-8");
-  } catch {
-    // Non-fatal
+/**
+ * Sync CONDUCTOR-TAGS.md and .vscode/conductor.code-snippets to every relevant
+ * workspace/project directory from the current config.
+ */
+export function syncWorkspaceSupportFiles(
+  config: OrchestratorConfig,
+  options: WorkspaceSupportFilesSyncOptions = {},
+): void {
+  const agentNames = uniqueAgents(options.agentNames ?? FALLBACK_WATCHER_AGENTS);
+  const supportDirectories = resolveSupportDirectories(config, options);
+  const projectIds = Object.keys(config.projects).sort();
+  const tagsContent = buildConductorTagsContent(config, agentNames);
+  const snippetsJson = JSON.stringify(buildConductorCodeSnippets(config, agentNames), null, 2);
+
+  let syncedCount = 0;
+
+  for (const supportDirectory of supportDirectories) {
+    try {
+      if (!existsSync(supportDirectory) || !statSync(supportDirectory).isDirectory()) {
+        continue;
+      }
+
+      writeFileSync(join(supportDirectory, "CONDUCTOR-TAGS.md"), tagsContent, "utf-8");
+      const vscodeDir = join(supportDirectory, ".vscode");
+      mkdirSync(vscodeDir, { recursive: true });
+      writeFileSync(join(vscodeDir, "conductor.code-snippets"), snippetsJson, "utf-8");
+      syncedCount += 1;
+    } catch {
+      // Non-fatal.
+    }
+  }
+
+  if (syncedCount > 0) {
+    console.log(
+      "[board-watcher] Support files synced: "
+      + syncedCount
+      + " location(s), "
+      + projectIds.length
+      + " projects",
+    );
   }
 }
 
@@ -2026,10 +2096,11 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         }
       }
 
-      // Sync tags file on startup (auto-updates CONDUCTOR-TAGS.md + VS Code snippets)
-      syncTagsFile(config, supportedAgents);
-
-      // Sync tags file on startup (CONDUCTOR-TAGS.md + VS Code snippets)
+      syncWorkspaceSupportFiles(config, {
+        workspacePath,
+        boardPaths,
+        agentNames: supportedAgents,
+      });
 
       // Run initial inbox enhancement 3s after startup
       setTimeout(() => {

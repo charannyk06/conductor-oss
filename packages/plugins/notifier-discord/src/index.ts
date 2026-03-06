@@ -18,7 +18,7 @@ export const manifest = {
   name: "discord",
   slot: "notifier" as const,
   description: "Notifier plugin: Discord via REST API",
-  version: "0.2.3",
+  version: "0.2.4",
 };
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,12 @@ import { homedir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
-import { buildConductorBoard, buildProjectConfigRecord, generateSessionPrefix } from "@conductor-oss/core";
+import {
+  buildConductorBoard,
+  buildProjectConfigRecord,
+  generateSessionPrefix,
+  syncWorkspaceSupportFiles,
+} from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { syncProjectLocalConfig } from "@/lib/projectConfigSync";
@@ -451,8 +456,11 @@ export async function POST(request: NextRequest) {
         displayName: deriveDisplayName(projectId),
       });
       {
-        const { config: refreshedConfig } = await getServices();
+        const { config: refreshedConfig, registry } = await getServices();
         await syncProjectLocalConfig(refreshedConfig as unknown as Record<string, unknown>, projectId);
+        syncWorkspaceSupportFiles(refreshedConfig, {
+          agentNames: registry.list("agent").map((agent) => agent.name),
+        });
       }
 
       return NextResponse.json(
@@ -537,8 +545,11 @@ export async function POST(request: NextRequest) {
       displayName: deriveDisplayName(projectId),
     });
     {
-      const { config: refreshedConfig } = await getServices();
+      const { config: refreshedConfig, registry } = await getServices();
       await syncProjectLocalConfig(refreshedConfig as unknown as Record<string, unknown>, projectId);
+      syncWorkspaceSupportFiles(refreshedConfig, {
+        agentNames: registry.list("agent").map((agent) => agent.name),
+      });
     }
 
     return NextResponse.json(

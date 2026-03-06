@@ -364,14 +364,33 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
 
     const projectBoardPath = join(projectDir, "CONDUCTOR.md");
     const projectConfigPath = join(projectDir, "conductor.yaml");
+    const projectTagsPath = join(projectDir, "CONDUCTOR-TAGS.md");
+    const projectSnippetsPath = join(projectDir, ".vscode", "conductor.code-snippets");
+    const workspaceTagsPath = join(bootstrapWorkspace, "CONDUCTOR-TAGS.md");
+    const workspaceSnippetsPath = join(bootstrapWorkspace, ".vscode", "conductor.code-snippets");
 
     await waitForCondition("project scaffolding to be written", async () => {
-      return existsSync(projectBoardPath) && existsSync(projectConfigPath);
+      return existsSync(projectBoardPath)
+        && existsSync(projectConfigPath)
+        && existsSync(projectTagsPath)
+        && existsSync(projectSnippetsPath)
+        && existsSync(workspaceTagsPath)
+        && existsSync(workspaceSnippetsPath);
     });
 
     const boardContents = readFileSync(projectBoardPath, "utf8");
     if (!boardContents.includes(`#project/${createdProjectId}`)) {
       throw new Error("generated CONDUCTOR.md is missing the project tag");
+    }
+
+    const projectTags = readTextFile(projectTagsPath);
+    if (!projectTags.includes(`#project/${createdProjectId}`)) {
+      throw new Error("generated CONDUCTOR-TAGS.md is missing the project tag");
+    }
+
+    const projectSnippets = readTextFile(projectSnippetsPath);
+    if (!projectSnippets.includes(createdProjectId)) {
+      throw new Error("generated VS Code snippets are missing the project id");
     }
 
     await waitForCondition("repo-local config to reflect onboarding preferences", async () => {

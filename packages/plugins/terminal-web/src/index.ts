@@ -16,7 +16,7 @@ export const manifest = {
   name: "web",
   slot: "terminal" as const,
   description: "Terminal plugin: web terminal via browser",
-  version: "0.2.3",
+  version: "0.2.4",
 };
 
 export function create(config?: Record<string, unknown>): Terminal {
