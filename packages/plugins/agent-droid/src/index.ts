@@ -148,7 +148,7 @@ export const manifest = {
   name: "droid",
   slot: "agent" as const,
   description: "Agent plugin: Factory Droid CLI",
-  version: "0.2.4",
+  version: "0.2.5",
 };
 
 function createAgent(): Agent {
