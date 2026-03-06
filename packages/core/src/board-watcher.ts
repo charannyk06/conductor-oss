@@ -299,7 +299,7 @@ function inferProject(text: string, boardProjectId: string | undefined, boardPro
   return boardProjects[0] ?? "my-app";
 }
 
-function inferAgent(text: string, supportedAgents: readonly string[]): string {
+function inferAgent(text: string, supportedAgents: readonly string[], projectAgent?: string): string {
   const tagged = parseTags(text)["agent"];
   if (tagged) return resolveSupportedAgent(tagged, supportedAgents);
   const lower = text.toLowerCase();
@@ -319,6 +319,8 @@ function inferAgent(text: string, supportedAgents: readonly string[]): string {
   if (copilotKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("github-copilot", supportedAgents);
   const ccrKeywords = ["ccr", "claude code router", "claude-code-router"];
   if (ccrKeywords.some((k) => lower.includes(k))) return resolveSupportedAgent("ccr", supportedAgents);
+  // Use the project's configured agent as fallback instead of the first supported agent
+  if (projectAgent) return resolveSupportedAgent(projectAgent, supportedAgents);
   return supportedAgents[0] ?? normalizeAgentName("codex", FALLBACK_WATCHER_AGENTS);
 }
 
@@ -348,6 +350,7 @@ function enhanceTaskHeuristically(
   boardProjectId: string | undefined,
   boardProjects: string[],
   supportedAgents: readonly string[],
+  projectAgent?: string,
 ): string | null {
   const normalized = stripTags(rawTask).replace(/^\s*[\-*•]\s*/, "").replace(/^\s*\[\s?\]\s*/, "").replace(/\s+/g, " ").trim();
   if (!normalized) return null;
@@ -375,11 +378,16 @@ function enhanceTaskHeuristically(
   }
 
   const project = inferProject(rawTask, boardProjectId, boardProjects);
-  const agent = inferAgent(rawTask, supportedAgents);
+  const agent = inferAgent(rawTask, supportedAgents, projectAgent);
   const type = inferType(rawTask);
   const priority = inferPriority(rawTask);
 
-  return `- [ ] ${normalized} #agent/${agent} #project/${project} #type/${type} #priority/${priority}`;
+  // Preserve any extra tags from the original text (e.g. #model/o4-mini, #issue/42)
+  const preservedTags = (rawTask.match(/#([\w-]+)\/([\w.\-]+)/g) ?? [])
+    .filter((tag) => !tag.startsWith("#agent/") && !tag.startsWith("#project/") && !tag.startsWith("#type/") && !tag.startsWith("#priority/"));
+  const extraTags = preservedTags.length > 0 ? " " + preservedTags.join(" ") : "";
+
+  return `- [ ] ${normalized} #agent/${agent} #project/${project} #type/${type} #priority/${priority}${extraTags}`;
 }
 
 /** Enhance rough Inbox tasks in-place. Never moves columns — user reviews then moves to Ready to Dispatch. */
@@ -450,11 +458,15 @@ async function enhanceInbox(
 
   for (const entry of entries) {
     if (hasProperTags(entry.text)) continue;
+    const projectAgent = boardProjectId
+      ? (config.projects[boardProjectId] as { agent?: string })?.agent
+      : undefined;
     const enhanced = enhanceTaskHeuristically(
       entry.text,
       boardProjectId,
       boardProjects,
       supportedAgents,
+      projectAgent,
     );
     if (!enhanced) continue;
     if (updatedContent.includes(entry.block)) {
