@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { packCliReleasePackage } from "./cli-release-stage.mjs";
 
@@ -29,6 +29,40 @@ function escapeRegExp(value) {
 
 function yamlContainsProject(content, projectId) {
   return new RegExp(`(^|\\n)  ${escapeRegExp(projectId)}:`, "m").test(content);
+}
+
+function replaceProjectPathInYaml(content, projectId, nextPath) {
+  const lines = content.split("\n");
+  let inProject = false;
+  let replaced = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^  [^:\n]+:\s*$/.test(line)) {
+      inProject = line.trim() === `${projectId}:`;
+      continue;
+    }
+
+    if (!inProject) {
+      continue;
+    }
+
+    if (/^    [^:\n]+:/.test(line) && line.trimStart().startsWith("path:")) {
+      lines[index] = `    path: ${nextPath}`;
+      replaced = true;
+      break;
+    }
+
+    if (/^  [^:\n]+:\s*$/.test(line)) {
+      inProject = false;
+    }
+  }
+
+  if (!replaced) {
+    throw new Error(`Failed to replace path for project ${projectId}`);
+  }
+
+  return lines.join("\n");
 }
 
 function spawnInstalledCli(installDir, args, options = {}) {
@@ -299,6 +333,7 @@ async function verifyDashboardReadyState(baseUrl) {
 async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
   const homeDir = createTempDir("conductor-cli-home-", tempDirs);
   const projectDir = createTempDir("conductor-cli-project-", tempDirs);
+  const canonicalProjectDir = realpathSync.native(projectDir);
   const baseUrl = "http://127.0.0.1:4747";
 
   const launcher = spawnInstalledCli(installDir, [], {
@@ -402,7 +437,7 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
         && projectYaml.includes("soundEnabled: false")
         && projectYaml.includes("remoteSshHost: conductor-dev")
         && projectYaml.includes("remoteSshUser: pm")
-        && projectYaml.includes(`path: ${projectDir}`)
+        && projectYaml.includes(`path: ${canonicalProjectDir}`)
         && projectYaml.includes("agent: claude-code");
     });
 
@@ -415,6 +450,15 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
     if (!repository) {
       throw new Error("new project was not exposed through /api/repositories");
     }
+
+    const legacyMarkdownPath = join(dirname(projectDir), "ABA-Copilot.md");
+    writeFileSync(legacyMarkdownPath, "# legacy board pointer\n", "utf8");
+    const rewrittenBootstrapConfig = replaceProjectPathInYaml(
+      readTextFile(bootstrapConfigPath),
+      createdProjectId,
+      legacyMarkdownPath,
+    );
+    writeFileSync(bootstrapConfigPath, rewrittenBootstrapConfig, "utf8");
 
     const updateRepositoryResult = await fetchJson(`${baseUrl}/api/repositories`, {
       method: "PUT",
@@ -446,7 +490,9 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
       const projectYaml = readTextFile(projectConfigPath);
       return yamlContainsProject(projectYaml, createdProjectId)
         && projectYaml.includes("repo: example/browser-first-smoke")
-        && projectYaml.includes("defaultWorkingDirectory: app");
+        && projectYaml.includes("defaultWorkingDirectory: app")
+        && projectYaml.includes(`path: ${canonicalProjectDir}`)
+        && !projectYaml.includes(`path: ${legacyMarkdownPath}`);
     });
 
     const updatePreferencesResult = await fetchJson(`${baseUrl}/api/preferences`, {
@@ -503,7 +549,9 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
       const projectYaml = readTextFile(projectConfigPath);
       return projectYaml.includes("codingAgent: codex")
         && yamlContainsProject(projectYaml, createdProjectId)
-        && projectYaml.includes("agent: codex");
+        && projectYaml.includes("agent: codex")
+        && projectYaml.includes(`path: ${canonicalProjectDir}`)
+        && !projectYaml.includes(`path: ${legacyMarkdownPath}`);
     });
 
     const createdSessionId = spawnResult.payload?.session?.id;
@@ -516,7 +564,10 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
     }
 
     const bootstrapConfig = readTextFile(bootstrapConfigPath);
-    if (!yamlContainsProject(bootstrapConfig, createdProjectId) || !bootstrapConfig.includes(`path: ${projectDir}`)) {
+    if (
+      !yamlContainsProject(bootstrapConfig, createdProjectId) ||
+      !bootstrapConfig.includes(`path: ${canonicalProjectDir}`)
+    ) {
       throw new Error("home workspace config did not retain the created project");
     }
 

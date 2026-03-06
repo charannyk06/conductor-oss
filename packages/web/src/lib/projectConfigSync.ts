@@ -1,7 +1,11 @@
 import { join, resolve } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { buildConductorYaml, type ScaffoldProjectConfig } from "@conductor-oss/core";
+import {
+  buildConductorYaml,
+  resolveConfiguredProjectPath,
+  type ScaffoldProjectConfig,
+} from "@conductor-oss/core";
 
 type MutableConfig = Record<string, unknown>;
 
@@ -25,6 +29,14 @@ function expandHome(value: string): string {
   return resolve(value);
 }
 
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function normalizePreferences(value: unknown) {
   const root = toObject(value);
   const notifications = toObject(root["notifications"]);
@@ -45,14 +57,18 @@ function normalizePreferences(value: unknown) {
   };
 }
 
-function buildProjectScaffold(projectId: string, project: Record<string, unknown>): ScaffoldProjectConfig {
+function buildProjectScaffold(
+  projectId: string,
+  project: Record<string, unknown>,
+  projectPath: string,
+): ScaffoldProjectConfig {
   const agentConfig = toObject(project["agentConfig"]);
 
   return {
     projectId,
     displayName: asNonEmptyString(project["name"]) ?? projectId,
     repo: asNonEmptyString(project["repo"]) ?? `local-${projectId}`,
-    path: expandHome(asNonEmptyString(project["path"]) ?? projectId),
+    path: projectPath,
     agent: asNonEmptyString(project["agent"]) ?? "claude-code",
     defaultBranch: asNonEmptyString(project["defaultBranch"]) ?? "main",
     defaultWorkingDirectory: asNonEmptyString(project["defaultWorkingDirectory"]),
@@ -66,11 +82,43 @@ function buildProjectScaffold(projectId: string, project: Record<string, unknown
   };
 }
 
+export async function normalizeRootProjectPaths(rootConfig: MutableConfig): Promise<void> {
+  const projects = toObject(rootConfig["projects"]);
+
+  for (const [projectId, rawProject] of Object.entries(projects)) {
+    const project = toObject(rawProject);
+    const rawProjectPath = asNonEmptyString(project["path"]);
+    if (!rawProjectPath) {
+      continue;
+    }
+
+    const resolvedProjectPath = resolveConfiguredProjectPath(
+      rawProjectPath,
+      asNonEmptyString(project["repo"]),
+    );
+
+    if (!await isDirectory(resolvedProjectPath)) {
+      continue;
+    }
+
+    projects[projectId] = {
+      ...project,
+      path: resolvedProjectPath,
+    };
+  }
+
+  rootConfig["projects"] = projects;
+}
+
 export async function syncProjectLocalConfig(rootConfig: MutableConfig, projectId: string): Promise<void> {
   const projects = toObject(rootConfig["projects"]);
   const project = toObject(projects[projectId]);
-  const projectPath = asNonEmptyString(project["path"]);
-  if (!projectPath) {
+  const rawProjectPath = asNonEmptyString(project["path"]);
+  if (!rawProjectPath) {
+    return;
+  }
+  const projectPath = resolveConfiguredProjectPath(rawProjectPath, asNonEmptyString(project["repo"]));
+  if (!await isDirectory(projectPath)) {
     return;
   }
 
@@ -78,13 +126,13 @@ export async function syncProjectLocalConfig(rootConfig: MutableConfig, projectI
     port: typeof rootConfig["port"] === "number" ? rootConfig["port"] : 4747,
     dashboardUrl: asNonEmptyString(rootConfig["dashboardUrl"]),
     preferences: normalizePreferences(rootConfig["preferences"]),
-    projects: [buildProjectScaffold(projectId, project)],
+    projects: [buildProjectScaffold(projectId, project, projectPath)],
   });
-
-  await writeFile(join(expandHome(projectPath), "conductor.yaml"), yaml, "utf8");
+  await writeFile(join(projectPath, "conductor.yaml"), yaml, "utf8");
 }
 
 export async function syncAllProjectLocalConfigs(rootConfig: MutableConfig): Promise<void> {
+  await normalizeRootProjectPaths(rootConfig);
   const projects = toObject(rootConfig["projects"]);
   for (const projectId of Object.keys(projects)) {
     await syncProjectLocalConfig(rootConfig, projectId);

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { BoardConfigEntry, ColumnAliasesConfig, OrchestratorConfig } from "./types.js";
 import {
@@ -44,7 +44,16 @@ const MAX_LOG_BYTES = 1_000_000;
 const LOG_ROTATIONS = 3;
 
 function normalizePath(pathname: string): string {
-  return pathname.replace(/\\/g, "/");
+  return canonicalizeExistingPath(pathname).replace(/\\/g, "/");
+}
+
+function canonicalizeExistingPath(pathname: string): string {
+  if (!existsSync(pathname)) return pathname;
+  try {
+    return realpathSync.native(pathname);
+  } catch {
+    return pathname;
+  }
 }
 
 function ensureParent(pathname: string): void {

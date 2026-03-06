@@ -13,7 +13,7 @@ import {
 } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { syncProjectLocalConfig } from "@/lib/projectConfigSync";
+import { normalizeRootProjectPaths, syncProjectLocalConfig } from "@/lib/projectConfigSync";
 
 const execFileAsync = promisify(execFile);
 
@@ -282,6 +282,7 @@ async function writeProjectToConfig(args: {
   const nextProjects = toProjectMap(nextRoot.projects);
   nextProjects[args.projectId] = args.projectData;
   nextRoot.projects = nextProjects;
+  await normalizeRootProjectPaths(nextRoot);
 
   const updatedYaml = stringify(nextRoot, {
     lineWidth: 0,

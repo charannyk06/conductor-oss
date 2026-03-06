@@ -17,6 +17,7 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import type { OrchestratorConfig } from "./types.js";
 import { generateSessionPrefix } from "./paths.js";
+import { resolveConfiguredProjectPath } from "./project-paths.js";
 
 // =============================================================================
 // ZOD SCHEMAS
@@ -214,7 +215,7 @@ function expandHome(filepath: string): string {
 /** Expand all path fields in the config */
 function expandPaths(config: OrchestratorConfig): OrchestratorConfig {
   for (const project of Object.values(config.projects)) {
-    project.path = expandHome(project.path);
+    project.path = resolveConfiguredProjectPath(project.path, project.repo);
     if (project.devServer?.cwd) {
       project.devServer.cwd = expandHome(project.devServer.cwd);
     }
