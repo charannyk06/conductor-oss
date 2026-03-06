@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { stringify } from "yaml";
 import { generateSessionPrefix } from "./paths.js";
+import { getDefaultModelAccessPreferences, type ModelAccessPreferences } from "./types.js";
 
 export type ScaffoldNotificationPreferences = {
   soundEnabled?: boolean;
@@ -14,6 +15,7 @@ export type ScaffoldPreferencesConfig = {
   remoteSshHost?: string | null;
   remoteSshUser?: string | null;
   markdownEditor?: string;
+  modelAccess?: ModelAccessPreferences;
   notifications?: ScaffoldNotificationPreferences;
 };
 
@@ -37,6 +39,18 @@ export type ScaffoldProjectConfig = {
 export type ConductorYamlScaffoldConfig = {
   port?: number;
   dashboardUrl?: string | null;
+  access?: {
+    requireAuth?: boolean;
+    defaultRole?: "viewer" | "operator" | "admin";
+    trustedHeaders?: {
+      enabled?: boolean;
+      provider?: "generic" | "cloudflare-access";
+      emailHeader?: string;
+      jwtHeader?: string;
+      teamDomain?: string;
+      audience?: string;
+    };
+  };
   preferences?: ScaffoldPreferencesConfig;
   projects?: ScaffoldProjectConfig[];
 };
@@ -114,13 +128,31 @@ export function buildProjectConfigRecord(project: ScaffoldProjectConfig): Record
 
 export function buildConductorYaml(config: ConductorYamlScaffoldConfig = {}): string {
   const preferences = config.preferences ?? {};
+  const port = config.port ?? 4747;
+  const dashboardUrl = config.dashboardUrl?.trim() || `http://localhost:${port}`;
+  const modelAccess = {
+    ...getDefaultModelAccessPreferences(),
+    ...(preferences.modelAccess ?? {}),
+  };
   const root: Record<string, unknown> = {
-    port: config.port ?? 4747,
+    port,
+    dashboardUrl,
+    access: {
+      requireAuth: config.access?.requireAuth === true,
+      defaultRole: config.access?.defaultRole ?? "operator",
+      trustedHeaders: {
+        enabled: config.access?.trustedHeaders?.enabled === true,
+        provider: config.access?.trustedHeaders?.provider?.trim() || "cloudflare-access",
+        emailHeader: config.access?.trustedHeaders?.emailHeader?.trim() || "Cf-Access-Authenticated-User-Email",
+        jwtHeader: config.access?.trustedHeaders?.jwtHeader?.trim() || "Cf-Access-Jwt-Assertion",
+      },
+    },
     preferences: {
       onboardingAcknowledged: preferences.onboardingAcknowledged === true,
       codingAgent: preferences.codingAgent?.trim() || "claude-code",
       ide: preferences.ide?.trim() || "vscode",
       markdownEditor: preferences.markdownEditor?.trim() || "obsidian",
+      modelAccess,
       notifications: {
         soundEnabled: preferences.notifications?.soundEnabled !== false,
         soundFile: preferences.notifications?.soundFile === null
@@ -137,12 +169,15 @@ export function buildConductorYaml(config: ConductorYamlScaffoldConfig = {}): st
   if (preferences.remoteSshUser?.trim()) {
     (root["preferences"] as Record<string, unknown>)["remoteSshUser"] = preferences.remoteSshUser.trim();
   }
-  if (config.dashboardUrl?.trim()) {
-    root["dashboardUrl"] = config.dashboardUrl.trim();
-  }
-
   const projects = config.projects ?? [];
   const projectMap = root["projects"] as Record<string, unknown>;
+  const trustedHeaders = ((root["access"] as Record<string, unknown>)["trustedHeaders"] ?? {}) as Record<string, unknown>;
+  if (config.access?.trustedHeaders?.teamDomain?.trim()) {
+    trustedHeaders["teamDomain"] = config.access.trustedHeaders.teamDomain.trim();
+  }
+  if (config.access?.trustedHeaders?.audience?.trim()) {
+    trustedHeaders["audience"] = config.access.trustedHeaders.audience.trim();
+  }
   for (const project of projects) {
     projectMap[project.projectId] = buildProjectConfigRecord(project);
   }

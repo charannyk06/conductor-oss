@@ -36,7 +36,7 @@ async function isGitRepo(path: string): Promise<boolean> {
 }
 
 export async function GET(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
 
   const rawPath = request.nextUrl.searchParams.get("path");

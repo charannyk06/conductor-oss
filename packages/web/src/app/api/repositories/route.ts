@@ -24,6 +24,7 @@ type RepositoryPatchBody = {
   repo?: unknown;
   path?: unknown;
   agent?: unknown;
+  agentModel?: unknown;
   defaultWorkingDirectory?: unknown;
   defaultBranch?: unknown;
   devServerScript?: unknown;
@@ -208,6 +209,7 @@ async function suggestRepoPath(projectPath: string, repoValue?: string | null): 
 async function serializeRepository(projectId: string, project: Record<string, unknown>) {
   const path = asNonEmptyString(project["path"]) ?? "";
   const repo = asNonEmptyString(project["repo"]) ?? "";
+  const agentConfig = toObject(project["agentConfig"]);
   const expandedPath = path ? expandHome(path) : "";
   const pathExists = expandedPath ? existsSync(expandedPath) : false;
   const gitRepository = expandedPath ? await isGitRepository(expandedPath) : false;
@@ -221,6 +223,7 @@ async function serializeRepository(projectId: string, project: Record<string, un
     repo,
     path,
     agent: asNonEmptyString(project["agent"]) ?? "claude-code",
+    agentModel: asNonEmptyString(agentConfig["model"]) ?? "",
     workspaceMode: asNonEmptyString(project["workspace"]) ?? "worktree",
     runtimeMode: asNonEmptyString(project["runtime"]) ?? "tmux",
     scmMode: asNonEmptyString(project["scm"]) ?? "github",
@@ -241,7 +244,7 @@ async function serializeRepository(projectId: string, project: Record<string, un
 }
 
 export async function GET() {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   try {
@@ -262,7 +265,7 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;
@@ -303,6 +306,7 @@ export async function PUT(request: NextRequest) {
     const repo = asNonEmptyString(body.repo);
     const path = asNonEmptyString(body.path);
     const agent = asNonEmptyString(body.agent) ?? asNonEmptyString(existingProject["agent"]) ?? "claude-code";
+    const agentModel = asNonEmptyString(body.agentModel);
     const defaultBranch = asNonEmptyString(body.defaultBranch) ?? "main";
     const defaultWorkingDirectory = normalizeWorkingDirectory(asNonEmptyString(body.defaultWorkingDirectory));
 
@@ -318,6 +322,19 @@ export async function PUT(request: NextRequest) {
     nextProject["path"] = expandHome(path);
     nextProject["agent"] = agent;
     nextProject["defaultBranch"] = defaultBranch;
+    const nextAgentConfig = toObject(nextProject["agentConfig"]);
+    if (agentModel) {
+      nextProject["agentConfig"] = {
+        ...nextAgentConfig,
+        model: agentModel,
+      };
+    } else if ("model" in nextAgentConfig) {
+      const { model: _removedModel, ...rest } = nextAgentConfig;
+      nextProject["agentConfig"] = rest;
+      if (Object.keys(rest).length === 0) {
+        delete nextProject["agentConfig"];
+      }
+    }
 
     if (defaultWorkingDirectory) {
       nextProject["defaultWorkingDirectory"] = defaultWorkingDirectory;

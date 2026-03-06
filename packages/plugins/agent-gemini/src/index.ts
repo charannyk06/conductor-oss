@@ -80,7 +80,7 @@ export const manifest = {
   name: "gemini",
   slot: "agent" as const,
   description: "Agent plugin: Google Gemini CLI",
-  version: "0.2.5",
+  version: "0.2.6",
 };
 
 // =============================================================================

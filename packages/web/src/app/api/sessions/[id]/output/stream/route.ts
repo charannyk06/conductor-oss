@@ -14,7 +14,7 @@ export async function GET(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ): Promise<Response> {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
   const params = await context.params;

@@ -2,6 +2,18 @@
 
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import {
+  getAgentModelCatalog,
+  getAvailableAgentModels,
+  getDefaultAgentModel,
+  resolveAgentModelAccess,
+  supportsAgentModelSelection,
+  type AgentModelCatalog,
+  type AgentModelOption,
+  type DashboardRole,
+  type ModelAccessPreferences,
+  type TrustedHeaderAccessProvider,
+} from "@conductor-oss/core/types";
 import type { IconType } from "react-icons";
 import { SiNotion, SiObsidian } from "react-icons/si";
 import { VscVscode } from "react-icons/vsc";
@@ -37,6 +49,7 @@ import { SessionDetail } from "@/components/sessions/SessionDetail";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { WorkspaceKanban } from "@/components/board/WorkspaceKanban";
+import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 
 const EXECUTOR_ORDER = [
   "codex",
@@ -112,10 +125,40 @@ type PreferencesPayload = {
   remoteSshHost: string;
   remoteSshUser: string;
   markdownEditor: string;
+  modelAccess: ModelAccessPreferences;
   notifications: {
     soundEnabled: boolean;
     soundFile: string | null;
   };
+};
+
+type AccessIdentitySummary = {
+  authenticated: boolean;
+  role: DashboardRole | null;
+  email: string | null;
+  provider: string | null;
+};
+
+type AccessSettingsPayload = {
+  requireAuth: boolean;
+  defaultRole: DashboardRole;
+  trustedHeaders: {
+    enabled: boolean;
+    provider: TrustedHeaderAccessProvider;
+    emailHeader: string;
+    jwtHeader: string;
+    teamDomain: string;
+    audience: string;
+  };
+  roles: {
+    viewers: string;
+    operators: string;
+    admins: string;
+    viewerDomains: string;
+    operatorDomains: string;
+    adminDomains: string;
+  };
+  current: AccessIdentitySummary;
 };
 
 type RepositoryPathHealth = {
@@ -130,6 +173,7 @@ type RepositorySettingsPayload = {
   repo: string;
   path: string;
   agent: string;
+  agentModel: string;
   workspaceMode: string;
   runtimeMode: string;
   scmMode: string;
@@ -142,6 +186,11 @@ type RepositorySettingsPayload = {
   archiveScript: string;
   copyFiles: string;
   pathHealth: RepositoryPathHealth;
+};
+
+type ModelSelectionState = {
+  catalogModel: string;
+  customModel: string;
 };
 
 type PreferencesDialogMode = "onboarding" | "settings";
@@ -164,7 +213,7 @@ type SettingsTab = {
 const SETTINGS_TABS: SettingsTab[] = [
   { id: "general", label: "General", icon: Settings2, implemented: false },
   { id: "repositories", label: "Repositories", icon: FolderGit2, implemented: true },
-  { id: "organization", label: "Organization Settings", icon: Building2, implemented: false },
+  { id: "organization", label: "Organization Settings", icon: Building2, implemented: true },
   { id: "projects", label: "Projects", icon: FolderKanban, implemented: false },
   { id: "agents", label: "Agents", icon: Bot, implemented: false },
   { id: "mcp", label: "MCP Servers", icon: PlugZap, implemented: false },
@@ -239,6 +288,7 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
     remoteSshHost,
     remoteSshUser,
     markdownEditor,
+    modelAccess: normalizeModelAccessPreferences(payload["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
       soundFile: soundFileRaw === null
@@ -248,6 +298,131 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
           : "abstract-sound-4",
     },
   };
+}
+
+function normalizeMultilineList(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (typeof value !== "string") return "";
+  return value
+    .split(/[\n,]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSettingsPayload {
+  const payload = toObject(value);
+  const trustedHeaders = toObject(payload["trustedHeaders"]);
+  const roles = toObject(payload["roles"]);
+  const current = toObject(summary);
+  const defaultRoleRaw = payload["defaultRole"];
+  const defaultRole: DashboardRole =
+    defaultRoleRaw === "viewer" || defaultRoleRaw === "admin" || defaultRoleRaw === "operator"
+      ? defaultRoleRaw
+      : "operator";
+  const currentRoleRaw = current["role"];
+
+  return {
+    requireAuth: payload["requireAuth"] === true,
+    defaultRole,
+    trustedHeaders: {
+      enabled: trustedHeaders["enabled"] === true,
+      provider: trustedHeaders["provider"] === "generic" ? "generic" : "cloudflare-access",
+      emailHeader: typeof trustedHeaders["emailHeader"] === "string" && trustedHeaders["emailHeader"].trim().length > 0
+        ? trustedHeaders["emailHeader"].trim()
+        : "Cf-Access-Authenticated-User-Email",
+      jwtHeader: typeof trustedHeaders["jwtHeader"] === "string" && trustedHeaders["jwtHeader"].trim().length > 0
+        ? trustedHeaders["jwtHeader"].trim()
+        : "Cf-Access-Jwt-Assertion",
+      teamDomain: typeof trustedHeaders["teamDomain"] === "string" && trustedHeaders["teamDomain"].trim().length > 0
+        ? trustedHeaders["teamDomain"].trim()
+        : "",
+      audience: typeof trustedHeaders["audience"] === "string" && trustedHeaders["audience"].trim().length > 0
+        ? trustedHeaders["audience"].trim()
+        : "",
+    },
+    roles: {
+      viewers: normalizeMultilineList(roles["viewers"]),
+      operators: normalizeMultilineList(roles["operators"]),
+      admins: normalizeMultilineList(roles["admins"]),
+      viewerDomains: normalizeMultilineList(roles["viewerDomains"]),
+      operatorDomains: normalizeMultilineList(roles["operatorDomains"]),
+      adminDomains: normalizeMultilineList(roles["adminDomains"]),
+    },
+    current: {
+      authenticated: current["authenticated"] === true,
+      role: currentRoleRaw === "viewer" || currentRoleRaw === "operator" || currentRoleRaw === "admin"
+        ? currentRoleRaw
+        : null,
+      email: typeof current["email"] === "string" && current["email"].trim().length > 0
+        ? current["email"].trim()
+        : null,
+      provider: typeof current["provider"] === "string" && current["provider"].trim().length > 0
+        ? current["provider"].trim()
+        : null,
+    },
+  };
+}
+
+function emptyModelSelection(): ModelSelectionState {
+  return {
+    catalogModel: "",
+    customModel: "",
+  };
+}
+
+function buildModelSelection(
+  agent: string,
+  modelAccess: ModelAccessPreferences,
+  preferredModel?: string | null,
+): ModelSelectionState {
+  if (!supportsAgentModelSelection(agent)) {
+    return emptyModelSelection();
+  }
+
+  const trimmedPreferred = preferredModel?.trim() ?? "";
+  const availableModels = getAvailableAgentModels(agent, modelAccess);
+  const defaultModel = getDefaultAgentModel(agent, modelAccess) ?? "";
+
+  if (trimmedPreferred.length > 0) {
+    if (availableModels.some((model) => model.id === trimmedPreferred)) {
+      return {
+        catalogModel: trimmedPreferred,
+        customModel: "",
+      };
+    }
+
+    return {
+      catalogModel: defaultModel,
+      customModel: trimmedPreferred,
+    };
+  }
+
+  return {
+    catalogModel: defaultModel,
+    customModel: "",
+  };
+}
+
+function resolveModelSelectionValue(selection: ModelSelectionState): string | undefined {
+  const custom = selection.customModel.trim();
+  if (custom.length > 0) return custom;
+  const catalog = selection.catalogModel.trim();
+  return catalog.length > 0 ? catalog : undefined;
+}
+
+function getAgentModelAccessLabel(agent: string, modelAccess: ModelAccessPreferences): string | null {
+  const catalog = getAgentModelCatalog(agent);
+  const access = resolveAgentModelAccess(agent, modelAccess);
+  if (!catalog || !access) return null;
+
+  return catalog.accessOptions.find((option) => option.id === access)?.label ?? null;
 }
 
 const MARKDOWN_EDITOR_ICON_CLASS = "block h-4 w-4 shrink-0";
@@ -306,6 +481,9 @@ function buildRepositoryBootstrapCommand(
   if (repository.defaultBranch.trim().length > 0) {
     initArgs.push(`--default-branch ${shellQuote(repository.defaultBranch.trim())}`);
   }
+  if (repository.agentModel.trim().length > 0) {
+    initArgs.push(`--model ${shellQuote(repository.agentModel.trim())}`);
+  }
   if (repository.defaultWorkingDirectory.trim().length > 0) {
     initArgs.push(`--default-working-directory ${shellQuote(repository.defaultWorkingDirectory.trim())}`);
   }
@@ -342,6 +520,75 @@ function MarkdownEditorIcon({ editorId }: { editorId: string }) {
   return <Icon className={iconSpec.className} />;
 }
 
+function AgentModelSelector({
+  agent,
+  modelAccess,
+  selection,
+  onChange,
+  compact = false,
+}: {
+  agent: string;
+  modelAccess: ModelAccessPreferences;
+  selection: ModelSelectionState;
+  onChange: (next: ModelSelectionState) => void;
+  compact?: boolean;
+}) {
+  if (!supportsAgentModelSelection(agent)) return null;
+
+  const catalog = getAgentModelCatalog(agent);
+  const availableModels = getAvailableAgentModels(agent, modelAccess);
+  const accessLabel = getAgentModelAccessLabel(agent, modelAccess);
+
+  if (!catalog) return null;
+
+  return (
+    <div className={compact ? "grid gap-3 md:grid-cols-2" : "space-y-3"}>
+      <label className="block">
+        <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Model</span>
+        <select
+          value={selection.catalogModel}
+          onChange={(event) => {
+            onChange({
+              ...selection,
+              catalogModel: event.target.value,
+            });
+          }}
+          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+        >
+          {availableModels.map((model) => (
+            <option key={model.id} value={model.id}>
+              {model.label}
+            </option>
+          ))}
+        </select>
+        <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
+          {accessLabel
+            ? `Filtered for ${accessLabel}.`
+            : "Filtered for your current access preference."} Leave custom override blank to use this selection.
+        </p>
+      </label>
+
+      <label className="block">
+        <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Custom Model Override</span>
+        <input
+          value={selection.customModel}
+          onChange={(event) => {
+            onChange({
+              ...selection,
+              customModel: event.target.value,
+            });
+          }}
+          placeholder={catalog.customModelPlaceholder}
+          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+        />
+        <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
+          Optional. Use this if your provider exposes a newer model before Conductor updates its catalog.
+        </p>
+      </label>
+    </div>
+  );
+}
+
 export default function Home() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const { sessions, error: sessionsError, refresh: refreshSessions } = useSessions(selectedProjectId);
@@ -353,6 +600,7 @@ export default function Home() {
 
   const [prompt, setPrompt] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("");
+  const [launchModelSelection, setLaunchModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
@@ -397,6 +645,10 @@ export default function Home() {
   const selectedSession = useMemo(
     () => dashboardSessions.find((s) => s.id === selectedSessionId) ?? null,
     [dashboardSessions, selectedSessionId],
+  );
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
   );
 
   const agentOptions = useMemo(() => {
@@ -477,6 +729,21 @@ export default function Home() {
     }
   }, [agentOptions, selectedAgent]);
 
+  useEffect(() => {
+    const effectiveAgent = selectedAgent || selectedProject?.agent || preferences?.codingAgent || "qwen-code";
+    const preferredModel = selectedProject && normalizeAgentName(selectedProject.agent) === normalizeAgentName(effectiveAgent)
+      ? selectedProject.agentModel
+      : null;
+
+    setLaunchModelSelection(
+      buildModelSelection(
+        effectiveAgent,
+        preferences?.modelAccess ?? normalizeModelAccessPreferences(null),
+        preferredModel,
+      ),
+    );
+  }, [preferences?.modelAccess, preferences?.codingAgent, selectedAgent, selectedProject]);
+
   async function handleSavePreferences(
     next: PreferencesPayload,
     options?: { closeDialog?: boolean },
@@ -540,6 +807,7 @@ export default function Home() {
   async function handleCreateSession() {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) return;
+    const resolvedModel = resolveModelSelectionValue(launchModelSelection);
 
     const projectId = selectedProjectId ?? projects[0]?.id;
     if (!projectId) {
@@ -558,6 +826,7 @@ export default function Home() {
           projectId,
           prompt: trimmedPrompt,
           agent: selectedAgent || "qwen-code",
+          ...(resolvedModel ? { model: resolvedModel } : {}),
         }),
       });
 
@@ -703,6 +972,9 @@ export default function Home() {
                     setPrompt={setPrompt}
                     selectedAgent={selectedAgent || resolvedPreferences.codingAgent || "qwen-code"}
                     setSelectedAgent={setSelectedAgent}
+                    modelSelection={launchModelSelection}
+                    setModelSelection={setLaunchModelSelection}
+                    modelAccess={resolvedPreferences.modelAccess}
                     agentOptions={agentOptions}
                     projectLabel={selectedProjectId ?? "No project selected"}
                     hasProject={Boolean(selectedProjectId)}
@@ -1533,6 +1805,9 @@ function CreateWorkspacePanel({
   setPrompt,
   selectedAgent,
   setSelectedAgent,
+  modelSelection,
+  setModelSelection,
+  modelAccess,
   agentOptions,
   projectLabel,
   hasProject,
@@ -1545,6 +1820,9 @@ function CreateWorkspacePanel({
   setPrompt: (value: string) => void;
   selectedAgent: string;
   setSelectedAgent: (value: string) => void;
+  modelSelection: ModelSelectionState;
+  setModelSelection: (next: ModelSelectionState) => void;
+  modelAccess: ModelAccessPreferences;
   agentOptions: string[];
   projectLabel: string;
   hasProject: boolean;
@@ -1627,6 +1905,18 @@ function CreateWorkspacePanel({
               className="min-h-[48px] w-full resize-none bg-transparent text-[16px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
             />
           </div>
+
+          {supportsAgentModelSelection(selectedAgent) && (
+            <div className="border-t border-[var(--vk-border)] px-2 py-2">
+              <AgentModelSelector
+                agent={selectedAgent}
+                modelAccess={modelAccess}
+                selection={modelSelection}
+                onChange={setModelSelection}
+                compact
+              />
+            </div>
+          )}
 
           <div className="flex flex-col gap-2 border-t border-[var(--vk-border)] px-2 py-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center text-[14px] text-[var(--vk-text-normal)]">
@@ -1719,6 +2009,7 @@ function SettingsDialog({
   const [remoteSshHost, setRemoteSshHost] = useState(current.remoteSshHost);
   const [remoteSshUser, setRemoteSshUser] = useState(current.remoteSshUser);
   const [markdownEditor, setMarkdownEditor] = useState(current.markdownEditor);
+  const [modelAccess, setModelAccess] = useState<ModelAccessPreferences>(current.modelAccess);
   const [soundEnabled, setSoundEnabled] = useState(current.notifications.soundEnabled);
   const [soundFile, setSoundFile] = useState<string | null>(current.notifications.soundFile);
   const [repositories, setRepositories] = useState<RepositorySettingsPayload[]>([]);
@@ -1727,12 +2018,17 @@ function SettingsDialog({
   const [repositoriesError, setRepositoriesError] = useState<string | null>(null);
   const [selectedRepositoryId, setSelectedRepositoryId] = useState("");
   const [repositoryDraft, setRepositoryDraft] = useState<RepositorySettingsPayload | null>(null);
+  const [repositoryModelSelection, setRepositoryModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
   const [repositoryBranchOptions, setRepositoryBranchOptions] = useState<string[]>([]);
   const [repositoryBranchesLoading, setRepositoryBranchesLoading] = useState(false);
   const [repositoryBranchesError, setRepositoryBranchesError] = useState<string | null>(null);
   const [repositoryFolderPickerOpen, setRepositoryFolderPickerOpen] = useState(false);
+  const [accessSettings, setAccessSettings] = useState<AccessSettingsPayload>(() => normalizeAccessSettings(null));
+  const [accessLoading, setAccessLoading] = useState(false);
+  const [accessSaving, setAccessSaving] = useState(false);
+  const [accessError, setAccessError] = useState<string | null>(null);
 
-  const isBusy = creating || repositoriesSaving;
+  const isBusy = creating || repositoriesSaving || accessSaving;
 
   function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySettingsPayload {
     return {
@@ -1743,6 +2039,13 @@ function SettingsDialog({
         suggestedPath: value.pathHealth.suggestedPath,
       },
     };
+  }
+
+  function parseMultilineRoleList(value: string): string[] {
+    return value
+      .split(/\n+/g)
+      .map((item) => item.trim())
+      .filter(Boolean);
   }
 
   async function loadRepositories(preferredRepositoryId?: string): Promise<void> {
@@ -1771,6 +2074,7 @@ function SettingsDialog({
       setRepositories([]);
       setSelectedRepositoryId("");
       setRepositoryDraft(null);
+      setRepositoryModelSelection(emptyModelSelection());
       setRepositoriesError(err instanceof Error ? err.message : "Failed to load repositories");
     } finally {
       setRepositoriesLoading(false);
@@ -1840,6 +2144,7 @@ function SettingsDialog({
           repo: repositoryDraft.repo,
           path: repositoryDraft.path,
           agent: repositoryDraft.agent,
+          agentModel: resolveModelSelectionValue(repositoryModelSelection) ?? "",
           defaultWorkingDirectory: repositoryDraft.defaultWorkingDirectory,
           defaultBranch: repositoryDraft.defaultBranch,
           devServerScript: repositoryDraft.devServerScript,
@@ -1882,6 +2187,73 @@ function SettingsDialog({
     }
   }
 
+  async function loadAccessSettings(): Promise<void> {
+    setAccessLoading(true);
+    setAccessError(null);
+    try {
+      const res = await fetch("/api/access");
+      const data = (await res.json().catch(() => null)) as
+        | { access?: unknown; current?: unknown; error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(data?.error ?? `Failed to load organization settings (${res.status})`);
+      }
+      setAccessSettings(normalizeAccessSettings(data?.access, data?.current));
+    } catch (err) {
+      setAccessSettings(normalizeAccessSettings(null));
+      setAccessError(err instanceof Error ? err.message : "Failed to load organization settings");
+    } finally {
+      setAccessLoading(false);
+    }
+  }
+
+  async function handleSaveAccess(): Promise<boolean> {
+    if (accessSaving) return false;
+
+    setAccessSaving(true);
+    setAccessError(null);
+    try {
+      const res = await fetch("/api/access", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requireAuth: accessSettings.requireAuth,
+          defaultRole: accessSettings.defaultRole,
+          trustedHeaders: {
+            enabled: accessSettings.trustedHeaders.enabled,
+            provider: accessSettings.trustedHeaders.provider,
+            emailHeader: accessSettings.trustedHeaders.emailHeader,
+            jwtHeader: accessSettings.trustedHeaders.jwtHeader,
+            teamDomain: accessSettings.trustedHeaders.teamDomain,
+            audience: accessSettings.trustedHeaders.audience,
+          },
+          roles: {
+            viewers: parseMultilineRoleList(accessSettings.roles.viewers),
+            operators: parseMultilineRoleList(accessSettings.roles.operators),
+            admins: parseMultilineRoleList(accessSettings.roles.admins),
+            viewerDomains: parseMultilineRoleList(accessSettings.roles.viewerDomains),
+            operatorDomains: parseMultilineRoleList(accessSettings.roles.operatorDomains),
+            adminDomains: parseMultilineRoleList(accessSettings.roles.adminDomains),
+          },
+        }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { access?: unknown; current?: unknown; error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(data?.error ?? `Failed to save organization settings (${res.status})`);
+      }
+
+      setAccessSettings(normalizeAccessSettings(data?.access, data?.current));
+      return true;
+    } catch (err) {
+      setAccessError(err instanceof Error ? err.message : "Failed to save organization settings");
+      return false;
+    } finally {
+      setAccessSaving(false);
+    }
+  }
+
   useEffect(() => {
     if (!open) return;
     setActiveTab("preferences");
@@ -1890,10 +2262,13 @@ function SettingsDialog({
     setRemoteSshHost(current.remoteSshHost);
     setRemoteSshUser(current.remoteSshUser);
     setMarkdownEditor(current.markdownEditor);
+    setModelAccess(current.modelAccess);
     setSoundEnabled(current.notifications.soundEnabled);
     setSoundFile(current.notifications.soundFile);
     setRepositoryBranchOptions([]);
     setRepositoryBranchesError(null);
+    setRepositoryModelSelection(emptyModelSelection());
+    setAccessError(null);
   }, [open]);
 
   useEffect(() => {
@@ -1903,21 +2278,31 @@ function SettingsDialog({
   }, [open]);
 
   useEffect(() => {
+    if (!open || mode === "onboarding") return;
+    void loadAccessSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, open]);
+
+  useEffect(() => {
     if (!open) return;
     if (!selectedRepositoryId) {
       setRepositoryDraft(null);
+      setRepositoryModelSelection(emptyModelSelection());
       return;
     }
     const selected = repositories.find((item) => item.id === selectedRepositoryId);
     if (!selected) return;
     setRepositoryDraft(hydrateRepositoryDraft(selected));
+    setRepositoryModelSelection(
+      buildModelSelection(selected.agent, modelAccess, selected.agentModel),
+    );
     setRepositoryBranchOptions([]);
     setRepositoryBranchesError(null);
     if (selected.path.trim().length > 0) {
       void detectRepositoryBranches(selected.path, selected.defaultBranch);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, repositories, selectedRepositoryId]);
+  }, [modelAccess, open, repositories, selectedRepositoryId]);
 
   const onboardingShouldShowRepositoryStep = mode === "onboarding"
     && (repositoriesLoading || repositories.length > 0);
@@ -1935,8 +2320,10 @@ function SettingsDialog({
   const isOnboarding = mode === "onboarding";
   const isPreferencesTab = activeTabItem.id === "preferences";
   const isRepositoriesTab = activeTabItem.id === "repositories";
+  const isOrganizationTab = activeTabItem.id === "organization";
   const onboardingStepIndex = visibleTabs.findIndex((tab) => tab.id === activeTabItem.id) + 1;
   const onboardingHasRepositoryStep = visibleTabs.some((tab) => tab.id === "repositories");
+  const accessCanEdit = accessSettings.current.role === "admin";
 
   const orderedAgentOptions = useMemo(() => {
     const opts = new Set(agentOptions);
@@ -1955,6 +2342,16 @@ function SettingsDialog({
     });
   }, [agentOptions, codingAgent]);
 
+  function handleModelAccessChange(agent: string, nextAccess: string) {
+    const catalog = getAgentModelCatalog(agent);
+    if (!catalog) return;
+
+    setModelAccess((prev) => ({
+      ...prev,
+      [catalog.accessKey]: nextAccess,
+    } as ModelAccessPreferences));
+  }
+
   if (!open) return null;
 
   const canSubmitPreferences = codingAgent.trim().length > 0
@@ -1965,8 +2362,32 @@ function SettingsDialog({
     && repositoryDraft.repo.trim().length > 0
     && repositoryDraft.path.trim().length > 0
     && repositoryDraft.defaultBranch.trim().length > 0;
+  const canSaveAccess = accessCanEdit && !accessLoading && (
+    !accessSettings.trustedHeaders.enabled
+    || accessSettings.trustedHeaders.provider === "generic"
+    || (
+      accessSettings.trustedHeaders.teamDomain.trim().length > 0
+      && accessSettings.trustedHeaders.audience.trim().length > 0
+    )
+  );
+  const dialogError = isRepositoriesTab ? repositoriesError : isOrganizationTab ? accessError : error;
+  const accessRoleFields: Array<{
+    label: string;
+    key: keyof AccessSettingsPayload["roles"];
+    placeholder: string;
+  }> = [
+    { label: "Viewer Emails", key: "viewers", placeholder: "alice@example.com" },
+    { label: "Operator Emails", key: "operators", placeholder: "builder@example.com" },
+    { label: "Admin Emails", key: "admins", placeholder: "owner@example.com" },
+    { label: "Viewer Domains", key: "viewerDomains", placeholder: "guests.example.com" },
+    { label: "Operator Domains", key: "operatorDomains", placeholder: "eng.example.com" },
+    { label: "Admin Domains", key: "adminDomains", placeholder: "admins.example.com" },
+  ];
   const repositoryBootstrapCommand = repositoryDraft
-    ? buildRepositoryBootstrapCommand(repositoryDraft, {
+    ? buildRepositoryBootstrapCommand({
+        ...repositoryDraft,
+        agentModel: resolveModelSelectionValue(repositoryModelSelection) ?? "",
+      }, {
         ide,
         markdownEditor,
       })
@@ -1984,6 +2405,7 @@ function SettingsDialog({
       remoteSshHost: remoteSshHost.trim(),
       remoteSshUser: remoteSshUser.trim(),
       markdownEditor: markdownEditor.trim(),
+      modelAccess,
       notifications: {
         soundEnabled,
         soundFile: resolvedSoundFile,
@@ -2125,6 +2547,44 @@ function SettingsDialog({
                             <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{getAgentLabel(agent)}</span>
                             {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
                           </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+
+                  <section className="space-y-3">
+                    <div className="space-y-1">
+                      <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Model Access</h4>
+                      <p className="text-[12px] text-[var(--vk-text-muted)]">
+                        Tell Conductor which account mode each agent is using so the model dropdown only shows options
+                        that make sense for that login path.
+                      </p>
+                    </div>
+                    <div className="grid gap-3">
+                      {orderedAgentOptions.filter((agent) => supportsAgentModelSelection(agent)).map((agent) => {
+                        const catalog = getAgentModelCatalog(agent);
+                        if (!catalog) return null;
+                        const selectedAccess = resolveAgentModelAccess(agent, modelAccess) ?? catalog.defaultAccess;
+                        return (
+                          <label key={agent} className="block rounded-[4px] border border-[var(--vk-border)] px-3 py-3">
+                            <span className="mb-1 block text-[13px] font-medium text-[var(--vk-text-normal)]">
+                              {catalog.label}
+                            </span>
+                            <select
+                              value={selectedAccess}
+                              onChange={(event) => handleModelAccessChange(agent, event.target.value)}
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                            >
+                              {catalog.accessOptions.map((option) => (
+                                <option key={option.id} value={option.id}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            <p className="mt-1.5 text-[11px] text-[var(--vk-text-muted)]">
+                              {catalog.accessOptions.find((option) => option.id === selectedAccess)?.description}
+                            </p>
+                          </label>
                         );
                       })}
                     </div>
@@ -2383,7 +2843,11 @@ function SettingsDialog({
                           <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Default Agent</span>
                           <select
                             value={repositoryDraft.agent}
-                            onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, agent: event.target.value } : prev)}
+                            onChange={(event) => {
+                              const nextAgent = event.target.value;
+                              setRepositoryDraft((prev) => prev ? { ...prev, agent: nextAgent } : prev);
+                              setRepositoryModelSelection(buildModelSelection(nextAgent, modelAccess, null));
+                            }}
                             className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                           >
                             {orderedAgentOptions.map((agent) => (
@@ -2394,6 +2858,17 @@ function SettingsDialog({
                           </select>
                           <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">Used by the one-line bootstrap and as the project default when tasks dispatch.</p>
                         </label>
+
+                        {supportsAgentModelSelection(repositoryDraft.agent) && (
+                          <div className="rounded-[4px] border border-[var(--vk-border)] px-3 py-3">
+                            <AgentModelSelector
+                              agent={repositoryDraft.agent}
+                              modelAccess={modelAccess}
+                              selection={repositoryModelSelection}
+                              onChange={setRepositoryModelSelection}
+                            />
+                          </div>
+                        )}
 
                         <label className="block">
                           <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Repository Path</span>
@@ -2586,6 +3061,262 @@ function SettingsDialog({
                     </>
                   )}
                 </div>
+              ) : isOrganizationTab ? (
+                <div className="space-y-5">
+                  <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.06)] px-4 py-3">
+                    <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Security-First Remote Access</h4>
+                    <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                      The dashboard stays bound to localhost. For phone and team access, put a verified edge
+                      identity layer like Cloudflare Access in front of it, then map authenticated users into
+                      viewer, operator, or admin roles here.
+                    </p>
+                  </section>
+
+                  {accessLoading ? (
+                    <section className="flex items-center gap-2 rounded-[6px] border border-[var(--vk-border)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Loading organization access settings...
+                    </section>
+                  ) : (
+                    <>
+                      <section className="grid gap-3 lg:grid-cols-3">
+                        <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                          <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                            Current Identity
+                          </span>
+                          <p className="mt-2 text-[14px] text-[var(--vk-text-normal)]">
+                            {accessSettings.current.email ?? "Anonymous local session"}
+                          </p>
+                        </div>
+                        <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                          <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                            Effective Role
+                          </span>
+                          <p className="mt-2 text-[14px] text-[var(--vk-text-normal)]">
+                            {accessSettings.current.role ?? "No access"}
+                          </p>
+                        </div>
+                        <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                          <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                            Auth Provider
+                          </span>
+                          <p className="mt-2 text-[14px] text-[var(--vk-text-normal)]">
+                            {accessSettings.current.provider ?? "Local only"}
+                          </p>
+                        </div>
+                      </section>
+
+                      {!accessCanEdit && (
+                        <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(80,80,80,0.18)] px-4 py-3">
+                          <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                            You can review organization security here, but only an admin session can save changes.
+                            Use the built-in unlock link, a local admin session, or an admin identity from your edge
+                            auth provider to modify access rules.
+                          </p>
+                        </section>
+                      )}
+
+                      <section className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
+                        <div className="space-y-1">
+                          <h5 className="text-[18px] leading-[20px] text-[var(--vk-text-strong)]">Baseline Access Rules</h5>
+                          <p className="text-[12px] text-[var(--vk-text-muted)]">
+                            Require authentication for every dashboard request and decide what authenticated users get
+                            by default before explicit role bindings are applied.
+                          </p>
+                        </div>
+
+                        <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)]">
+                          <input
+                            type="checkbox"
+                            checked={accessSettings.requireAuth}
+                            onChange={(event) => setAccessSettings((prev) => ({
+                              ...prev,
+                              requireAuth: event.target.checked,
+                            }))}
+                            disabled={!accessCanEdit || accessSaving}
+                            className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
+                          />
+                          <span>Require authentication even on localhost</span>
+                        </label>
+
+                        <label className="block">
+                          <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Default Role</span>
+                          <select
+                            value={accessSettings.defaultRole}
+                            onChange={(event) => setAccessSettings((prev) => ({
+                              ...prev,
+                              defaultRole: event.target.value as DashboardRole,
+                            }))}
+                            disabled={!accessCanEdit || accessSaving}
+                            className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                          >
+                            <option value="viewer">Viewer</option>
+                            <option value="operator">Operator</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                            This applies after identity verification when no explicit email or domain binding matches.
+                          </p>
+                        </label>
+                      </section>
+
+                      <section className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
+                        <div className="space-y-1">
+                          <h5 className="text-[18px] leading-[20px] text-[var(--vk-text-strong)]">Verified Edge Auth</h5>
+                          <p className="text-[12px] text-[var(--vk-text-muted)]">
+                            Recommended for secure public phone access and free team collaboration. Conductor verifies
+                            the Cloudflare Access JWT instead of trusting a raw email header.
+                          </p>
+                        </div>
+
+                        <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)]">
+                          <input
+                            type="checkbox"
+                            checked={accessSettings.trustedHeaders.enabled}
+                            onChange={(event) => setAccessSettings((prev) => ({
+                              ...prev,
+                              trustedHeaders: {
+                                ...prev.trustedHeaders,
+                                enabled: event.target.checked,
+                              },
+                            }))}
+                            disabled={!accessCanEdit || accessSaving}
+                            className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
+                          />
+                          <span>Enable verified Cloudflare Access authentication</span>
+                        </label>
+
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Provider</span>
+                            <select
+                              value={accessSettings.trustedHeaders.provider}
+                              onChange={(event) => setAccessSettings((prev) => ({
+                                ...prev,
+                                trustedHeaders: {
+                                  ...prev.trustedHeaders,
+                                  provider: event.target.value as TrustedHeaderAccessProvider,
+                                },
+                              }))}
+                              disabled={!accessCanEdit || accessSaving}
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                            >
+                              <option value="cloudflare-access">Cloudflare Access (verified JWT)</option>
+                              <option value="generic">Generic header passthrough (advanced)</option>
+                            </select>
+                          </label>
+
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Identity Email Header</span>
+                            <input
+                              value={accessSettings.trustedHeaders.emailHeader}
+                              onChange={(event) => setAccessSettings((prev) => ({
+                                ...prev,
+                                trustedHeaders: {
+                                  ...prev.trustedHeaders,
+                                  emailHeader: event.target.value,
+                                },
+                              }))}
+                              disabled={!accessCanEdit || accessSaving}
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                            />
+                          </label>
+
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">JWT Assertion Header</span>
+                            <input
+                              value={accessSettings.trustedHeaders.jwtHeader}
+                              onChange={(event) => setAccessSettings((prev) => ({
+                                ...prev,
+                                trustedHeaders: {
+                                  ...prev.trustedHeaders,
+                                  jwtHeader: event.target.value,
+                                },
+                              }))}
+                              disabled={!accessCanEdit || accessSaving}
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                            />
+                          </label>
+
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Cloudflare Team Domain</span>
+                            <input
+                              value={accessSettings.trustedHeaders.teamDomain}
+                              onChange={(event) => setAccessSettings((prev) => ({
+                                ...prev,
+                                trustedHeaders: {
+                                  ...prev.trustedHeaders,
+                                  teamDomain: event.target.value,
+                                },
+                              }))}
+                              disabled={!accessCanEdit || accessSaving}
+                              placeholder="your-team.cloudflareaccess.com"
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                            />
+                          </label>
+
+                          <label className="block lg:col-span-2">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Cloudflare Access Audience</span>
+                            <input
+                              value={accessSettings.trustedHeaders.audience}
+                              onChange={(event) => setAccessSettings((prev) => ({
+                                ...prev,
+                                trustedHeaders: {
+                                  ...prev.trustedHeaders,
+                                  audience: event.target.value,
+                                },
+                              }))}
+                              disabled={!accessCanEdit || accessSaving}
+                              placeholder="Copy the AUD value from your Cloudflare Access application"
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                            />
+                          </label>
+                        </div>
+
+                        {accessSettings.trustedHeaders.provider === "generic" && (
+                          <p className="rounded-[4px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-3 py-2 text-[12px] leading-5 text-[var(--vk-red)]">
+                            Generic header passthrough is only safe when your reverse proxy strips user-supplied headers
+                            and injects identity itself. Conductor blocks this mode by default unless
+                            `CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS=true` is also set.
+                          </p>
+                        )}
+                      </section>
+
+                      <section className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
+                        <div className="space-y-1">
+                          <h5 className="text-[18px] leading-[20px] text-[var(--vk-text-strong)]">Role Bindings</h5>
+                          <p className="text-[12px] text-[var(--vk-text-muted)]">
+                            Map verified team identities into least-privilege roles. `viewer` can inspect work, `operator`
+                            can control agents, and `admin` can change global settings.
+                          </p>
+                        </div>
+
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          {accessRoleFields.map(({ label, key, placeholder }) => (
+                            <label key={key} className="block">
+                              <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">{label}</span>
+                              <textarea
+                                rows={4}
+                                value={accessSettings.roles[key]}
+                                onChange={(event) => setAccessSettings((prev) => ({
+                                  ...prev,
+                                  roles: {
+                                    ...prev.roles,
+                                    [key]: event.target.value,
+                                  },
+                                }))}
+                                disabled={!accessCanEdit || accessSaving}
+                                placeholder={placeholder}
+                                className="w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                              />
+                              <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">One entry per line.</p>
+                            </label>
+                          ))}
+                        </div>
+                      </section>
+                    </>
+                  )}
+                </div>
               ) : (
                 <section className="space-y-3">
                   <h4 className="text-[16px] font-medium text-[var(--vk-text-strong)]">{activeTabItem.label}</h4>
@@ -2605,23 +3336,29 @@ function SettingsDialog({
 
             <footer className="flex flex-col gap-3 border-t border-[var(--vk-border)] px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
               <div className="min-w-0">
-                {(isRepositoriesTab ? repositoriesError : error) && (
+                {dialogError && (
                   <p className="truncate rounded-[4px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-2 py-1 text-[12px] text-[var(--vk-red)]">
-                    {isRepositoriesTab ? repositoriesError : error}
+                    {dialogError}
                   </p>
                 )}
-                {!error && !repositoriesError && isPreferencesTab && (
+                {!dialogError && isPreferencesTab && (
                   <p className="text-[11px] text-[var(--vk-text-muted)]">
                     {isOnboarding
                       ? "Finish setup once here. You can change these preferences any time from Settings."
                       : "Preferences are saved to your conductor config and applied immediately."}
                   </p>
                 )}
-                {!error && !repositoriesError && isRepositoriesTab && (
+                {!dialogError && isRepositoriesTab && (
                   <p className="text-[11px] text-[var(--vk-text-muted)]">
                     {isOnboarding
                       ? "These defaults will be used the first time workspaces and tasks are created for this repo."
                       : "Repository settings are saved to your conductor config and used for future workspaces."}
+                  </p>
+                )}
+                {!dialogError && isOrganizationTab && (
+                  <p className="text-[11px] text-[var(--vk-text-muted)]">
+                    Organization access settings are written into `conductor.yaml`. Use admin role bindings for full
+                    control, operator bindings for day-to-day agent usage, and viewer bindings for read-only access.
                   </p>
                 )}
               </div>
@@ -2678,6 +3415,23 @@ function SettingsDialog({
                         Saving...
                       </>
                     ) : "Save Repository"}
+                  </button>
+                )}
+                {isOrganizationTab && !isOnboarding && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleSaveAccess();
+                    }}
+                    disabled={!canSaveAccess || accessSaving}
+                    className="inline-flex h-9 items-center rounded-[4px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  >
+                    {accessSaving ? (
+                      <>
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        Saving...
+                      </>
+                    ) : "Save Access"}
                   </button>
                 )}
                 {isOnboarding && (

@@ -148,7 +148,7 @@ export const manifest = {
   name: "ccr",
   slot: "agent" as const,
   description: "Agent plugin: Claude Code Router",
-  version: "0.2.5",
+  version: "0.2.6",
 };
 
 function createAgent(): Agent {

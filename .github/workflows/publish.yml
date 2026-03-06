@@ -1,0 +1,45 @@
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (for example v0.2.5)"
+        required: true
+
+concurrency:
+  group: publish
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Download release tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
+        run: |
+          mkdir -p .release-downloads
+          gh release download "$RELEASE_TAG" --pattern "*.tgz" --dir .release-downloads
+          ls -la .release-downloads
+
+      - name: Publish verified tarball
+        run: npm publish .release-downloads/*.tgz --access public --provenance

@@ -22,7 +22,7 @@ export const manifest = {
   name: "desktop",
   slot: "notifier" as const,
   description: "Notifier plugin: desktop notifications (macOS + Linux)",
-  version: "0.2.5",
+  version: "0.2.6",
 };
 
 const PLATFORM = platform();

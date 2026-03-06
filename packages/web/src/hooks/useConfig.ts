@@ -10,6 +10,7 @@ export interface ConfigProject {
   boardFile?: string | null;
   description: string | null;
   agent: string;
+  agentModel: string | null;
 }
 
 interface UseConfigReturn {
@@ -33,6 +34,9 @@ function normalizeProject(
     agent: typeof raw?.["agent"] === "string" && raw["agent"].trim().length > 0
       ? raw["agent"]
       : "qwen-code",
+    agentModel: typeof raw?.["agentModel"] === "string" && raw["agentModel"].trim().length > 0
+      ? raw["agentModel"]
+      : null,
   };
 }
 

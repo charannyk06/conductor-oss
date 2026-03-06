@@ -428,6 +428,312 @@ export interface NotificationPreferences {
   soundFile: string | null;
 }
 
+export const SUPPORTED_MODEL_AGENTS = [
+  "claude-code",
+  "codex",
+  "gemini",
+  "qwen-code",
+] as const;
+
+export type SupportedModelAgent = (typeof SUPPORTED_MODEL_AGENTS)[number];
+export type ClaudeModelAccess = "pro" | "max" | "api";
+export type CodexModelAccess = "chatgpt" | "api";
+export type GeminiModelAccess = "oauth" | "api";
+export type QwenModelAccess = "oauth" | "api";
+export type AgentModelAccess =
+  | ClaudeModelAccess
+  | CodexModelAccess
+  | GeminiModelAccess
+  | QwenModelAccess;
+
+export interface ModelAccessPreferences {
+  claudeCode?: ClaudeModelAccess;
+  codex?: CodexModelAccess;
+  gemini?: GeminiModelAccess;
+  qwenCode?: QwenModelAccess;
+}
+
+export interface AgentModelAccessOption {
+  id: AgentModelAccess;
+  label: string;
+  description: string;
+}
+
+export interface AgentModelOption {
+  id: string;
+  label: string;
+  description: string;
+  access: AgentModelAccess[];
+}
+
+export interface AgentModelCatalog {
+  agent: SupportedModelAgent;
+  label: string;
+  accessKey: keyof ModelAccessPreferences;
+  defaultAccess: AgentModelAccess;
+  defaultModelByAccess: Partial<Record<AgentModelAccess, string>>;
+  customModelPlaceholder: string;
+  accessOptions: AgentModelAccessOption[];
+  models: AgentModelOption[];
+}
+
+const DEFAULT_MODEL_ACCESS_PREFERENCES: Required<ModelAccessPreferences> = {
+  claudeCode: "pro",
+  codex: "chatgpt",
+  gemini: "oauth",
+  qwenCode: "oauth",
+};
+
+const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
+  "claude-code": {
+    agent: "claude-code",
+    label: "Claude Code",
+    accessKey: "claudeCode",
+    defaultAccess: "pro",
+    defaultModelByAccess: {
+      pro: "claude-sonnet-4-5",
+      max: "claude-opus-4-1",
+      api: "claude-sonnet-4-5",
+    },
+    customModelPlaceholder: "claude-sonnet-4-5",
+    accessOptions: [
+      {
+        id: "pro",
+        label: "Claude Pro",
+        description: "Shows the current Sonnet models that Claude Code documents for Pro usage.",
+      },
+      {
+        id: "max",
+        label: "Claude Max",
+        description: "Unlocks both Sonnet and Opus model choices in Claude Code.",
+      },
+      {
+        id: "api",
+        label: "Anthropic API",
+        description: "Use direct Anthropic API credentials instead of a Claude subscription.",
+      },
+    ],
+    models: [
+      {
+        id: "claude-sonnet-4-5",
+        label: "Claude Sonnet 4.5",
+        description: "Latest Claude Code Sonnet recommendation for most coding work.",
+        access: ["pro", "max", "api"],
+      },
+      {
+        id: "claude-sonnet-4-0",
+        label: "Claude Sonnet 4",
+        description: "Previous Sonnet generation kept for compatibility.",
+        access: ["pro", "max", "api"],
+      },
+      {
+        id: "claude-opus-4-1",
+        label: "Claude Opus 4.1",
+        description: "Higher-capability Claude Code option available on Max or API access.",
+        access: ["max", "api"],
+      },
+      {
+        id: "claude-opus-4-0",
+        label: "Claude Opus 4",
+        description: "Older Opus generation retained for explicit overrides.",
+        access: ["max", "api"],
+      },
+    ],
+  },
+  codex: {
+    agent: "codex",
+    label: "Codex",
+    accessKey: "codex",
+    defaultAccess: "chatgpt",
+    defaultModelByAccess: {
+      chatgpt: "gpt-5.2-codex",
+      api: "gpt-5.2-codex",
+    },
+    customModelPlaceholder: "gpt-5.2-codex",
+    accessOptions: [
+      {
+        id: "chatgpt",
+        label: "ChatGPT Plan",
+        description: "Use the ChatGPT-backed Codex login flow for paid ChatGPT workspaces.",
+      },
+      {
+        id: "api",
+        label: "OpenAI API",
+        description: "Use direct OpenAI API credentials when Codex is pointed at the API.",
+      },
+    ],
+    models: [
+      {
+        id: "gpt-5.2-codex",
+        label: "GPT-5.2 Codex",
+        description: "Latest Codex model available in the current OpenAI model lineup.",
+        access: ["chatgpt", "api"],
+      },
+      {
+        id: "gpt-5.1-codex-max",
+        label: "GPT-5.1 Codex Max",
+        description: "Higher-reasoning ChatGPT Codex option documented in the Codex help center.",
+        access: ["chatgpt"],
+      },
+      {
+        id: "gpt-5.1-codex-mini",
+        label: "GPT-5.1 Codex Mini",
+        description: "Lower-latency ChatGPT Codex option for lighter interactive work.",
+        access: ["chatgpt"],
+      },
+      {
+        id: "gpt-5.1-codex",
+        label: "GPT-5.1 Codex",
+        description: "API-facing Codex model retained for compatibility with existing setups.",
+        access: ["api"],
+      },
+    ],
+  },
+  gemini: {
+    agent: "gemini",
+    label: "Gemini",
+    accessKey: "gemini",
+    defaultAccess: "oauth",
+    defaultModelByAccess: {
+      oauth: "gemini-2.5-pro",
+      api: "gemini-2.5-pro",
+    },
+    customModelPlaceholder: "gemini-2.5-pro",
+    accessOptions: [
+      {
+        id: "oauth",
+        label: "Google Login",
+        description: "Use the built-in Google account flow that Gemini CLI ships with.",
+      },
+      {
+        id: "api",
+        label: "Gemini API",
+        description: "Use a Gemini API key or Vertex AI project for broader model control.",
+      },
+    ],
+    models: [
+      {
+        id: "gemini-2.5-pro",
+        label: "Gemini 2.5 Pro",
+        description: "Default Gemini CLI coding model and the safest built-in option.",
+        access: ["oauth", "api"],
+      },
+      {
+        id: "gemini-2.5-flash",
+        label: "Gemini 2.5 Flash",
+        description: "Lower-latency Gemini option typically used with API-key setups.",
+        access: ["api"],
+      },
+      {
+        id: "gemini-2.5-flash-lite",
+        label: "Gemini 2.5 Flash-Lite",
+        description: "Cheaper Gemini API option for lightweight automation or quick checks.",
+        access: ["api"],
+      },
+    ],
+  },
+  "qwen-code": {
+    agent: "qwen-code",
+    label: "Qwen Code",
+    accessKey: "qwenCode",
+    defaultAccess: "oauth",
+    defaultModelByAccess: {
+      oauth: "qwen3.5-plus",
+      api: "qwen3-coder-plus",
+    },
+    customModelPlaceholder: "qwen3-coder-plus",
+    accessOptions: [
+      {
+        id: "oauth",
+        label: "Qwen OAuth",
+        description: "Use Qwen Code's built-in browser login and bundled provider defaults.",
+      },
+      {
+        id: "api",
+        label: "DashScope / Custom API",
+        description: "Use DashScope or another OpenAI-compatible endpoint configured for Qwen Code.",
+      },
+    ],
+    models: [
+      {
+        id: "qwen3.5-plus",
+        label: "Qwen3.5 Plus",
+        description: "Latest bundled Qwen OAuth default documented in Qwen Code updates.",
+        access: ["oauth", "api"],
+      },
+      {
+        id: "qwen3-coder-plus",
+        label: "Qwen3 Coder Plus",
+        description: "Coding-focused Qwen model documented in the Qwen Code provider guide.",
+        access: ["oauth", "api"],
+      },
+    ],
+  },
+};
+
+function normalizeModelAgent(agent: string): SupportedModelAgent | null {
+  const normalized = agent
+    .trim()
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-");
+  return SUPPORTED_MODEL_AGENTS.includes(normalized as SupportedModelAgent)
+    ? normalized as SupportedModelAgent
+    : null;
+}
+
+export function getDefaultModelAccessPreferences(): Required<ModelAccessPreferences> {
+  return { ...DEFAULT_MODEL_ACCESS_PREFERENCES };
+}
+
+export function supportsAgentModelSelection(agent: string): agent is SupportedModelAgent {
+  return normalizeModelAgent(agent) !== null;
+}
+
+export function getAgentModelCatalog(agent: string): AgentModelCatalog | null {
+  const normalized = normalizeModelAgent(agent);
+  if (!normalized) return null;
+  return AGENT_MODEL_CATALOGS[normalized];
+}
+
+export function resolveAgentModelAccess(
+  agent: string,
+  preferences?: ModelAccessPreferences | null,
+): AgentModelAccess | null {
+  const catalog = getAgentModelCatalog(agent);
+  if (!catalog) return null;
+
+  const selected = preferences?.[catalog.accessKey];
+  if (
+    typeof selected === "string" &&
+    catalog.accessOptions.some((option) => option.id === selected)
+  ) {
+    return selected;
+  }
+
+  return catalog.defaultAccess;
+}
+
+export function getAvailableAgentModels(
+  agent: string,
+  preferences?: ModelAccessPreferences | null,
+): AgentModelOption[] {
+  const catalog = getAgentModelCatalog(agent);
+  const access = resolveAgentModelAccess(agent, preferences);
+  if (!catalog || !access) return [];
+
+  return catalog.models.filter((model) => model.access.includes(access));
+}
+
+export function getDefaultAgentModel(
+  agent: string,
+  preferences?: ModelAccessPreferences | null,
+): string | null {
+  const catalog = getAgentModelCatalog(agent);
+  const access = resolveAgentModelAccess(agent, preferences);
+  if (!catalog || !access) return null;
+  return catalog.defaultModelByAccess[access] ?? null;
+}
+
 export interface UserPreferences {
   /** Whether the interactive first-run setup has been completed. */
   onboardingAcknowledged: boolean;
@@ -441,7 +747,41 @@ export interface UserPreferences {
   remoteSshUser?: string;
   /** Preferred markdown editor for second-brain/context workflows. */
   markdownEditor?: string;
+  /** Preferred account/access mode used to filter agent model choices in the UI. */
+  modelAccess?: ModelAccessPreferences;
   notifications: NotificationPreferences;
+}
+
+export type DashboardRole = "viewer" | "operator" | "admin";
+export type TrustedHeaderAccessProvider = "generic" | "cloudflare-access";
+
+export interface DashboardRoleBindings {
+  viewers?: string[];
+  operators?: string[];
+  admins?: string[];
+  viewerDomains?: string[];
+  operatorDomains?: string[];
+  adminDomains?: string[];
+}
+
+export interface TrustedHeaderAccessConfig {
+  enabled?: boolean;
+  provider?: TrustedHeaderAccessProvider;
+  emailHeader?: string;
+  jwtHeader?: string;
+  teamDomain?: string;
+  audience?: string;
+}
+
+export interface DashboardAccessConfig {
+  /** Require authenticated identity even for local access. */
+  requireAuth?: boolean;
+  /** Default role granted to authenticated users when no explicit binding matches. */
+  defaultRole?: DashboardRole;
+  /** Trust identity headers injected by an upstream edge access layer such as Cloudflare Access. */
+  trustedHeaders?: TrustedHeaderAccessConfig;
+  /** Optional role bindings by email or email domain. */
+  roles?: DashboardRoleBindings;
 }
 
 export interface OrchestratorConfig {
@@ -460,6 +800,7 @@ export interface OrchestratorConfig {
   notificationRouting: Record<EventPriority, string[]>;
   reactions: Record<string, ReactionConfig>;
   webhook?: WebhookConfig;
+  access?: DashboardAccessConfig;
   preferences: UserPreferences;
 }
 

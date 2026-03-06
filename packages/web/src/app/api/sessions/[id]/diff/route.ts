@@ -362,7 +362,7 @@ export async function GET(
   _request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   const { id } = await context.params;

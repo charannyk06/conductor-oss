@@ -4,6 +4,7 @@ import { parse, stringify } from "yaml";
 import { syncWorkspaceSupportFiles, type UserPreferences } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import { normalizeRootProjectPaths, syncAllProjectLocalConfigs } from "@/lib/projectConfigSync";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +18,7 @@ type PreferencesPatchBody = {
   remoteSshHost?: unknown;
   remoteSshUser?: unknown;
   markdownEditor?: unknown;
+  modelAccess?: unknown;
   notifications?: unknown;
 };
 
@@ -48,6 +50,7 @@ function normalizePreferences(
     ...(remoteSshHost ? { remoteSshHost } : {}),
     ...(remoteSshUser ? { remoteSshUser } : {}),
     markdownEditor: asNonEmptyString(root["markdownEditor"]) ?? "obsidian",
+    modelAccess: normalizeModelAccessPreferences(root["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
       soundFile: soundFile === null
@@ -58,7 +61,7 @@ function normalizePreferences(
 }
 
 export async function GET() {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   try {
@@ -73,7 +76,7 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;
@@ -140,6 +143,10 @@ export async function PUT(request: NextRequest) {
     if (body.markdownEditor !== undefined) {
       const value = asNonEmptyString(body.markdownEditor);
       if (value) nextPreferences.markdownEditor = value;
+    }
+
+    if (body.modelAccess !== undefined) {
+      nextPreferences.modelAccess = normalizeModelAccessPreferences(body.modelAccess);
     }
 
     if (body.notifications !== undefined) {

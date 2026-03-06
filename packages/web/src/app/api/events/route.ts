@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
  *   - Closed flag prevents enqueue-after-close errors
  */
 export async function GET(request: Request): Promise<Response> {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
   const encoder = new TextEncoder();

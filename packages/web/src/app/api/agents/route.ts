@@ -108,7 +108,7 @@ const PATH_AGENT_HINTS: AgentHint[] = [
   },
   {
     name: "qwen-code",
-    commands: ["qwen-code"],
+    commands: ["qwen", "qwen-code"],
     aliases: ["qwen", "qwen code", "qwen-code-cli", "qwen_code", "qwen-code"],
     description: "Qwen Code CLI",
     homepage: "https://qwenlm.github.io/announcements/",
@@ -445,7 +445,7 @@ async function collectBinaryAgents(candidates: string[]): Promise<AgentInfo[]> {
 }
 
 export async function GET() {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   try {

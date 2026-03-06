@@ -98,7 +98,7 @@ async function listLocalBranches(path: string): Promise<{ branches: string[]; de
 }
 
 export async function GET(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   const gitUrl = asNonEmpty(request.nextUrl.searchParams.get("gitUrl"));

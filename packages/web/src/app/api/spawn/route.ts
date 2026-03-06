@@ -59,7 +59,7 @@ async function persistSpawnAgentSelection(configPath: string, projectId: string,
 }
 
 export async function POST(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;

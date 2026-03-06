@@ -411,7 +411,7 @@ export const manifest = {
   name: "github",
   slot: "scm" as const,
   description: "SCM plugin: GitHub PRs, CI checks, reviews, merge readiness",
-  version: "0.2.5",
+  version: "0.2.6",
 };
 
 export function create(): SCM {

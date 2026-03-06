@@ -1,4 +1,4 @@
-name: CI
+name: Test
 
 on:
   push:
@@ -12,12 +12,12 @@ concurrency:
 
 jobs:
   build:
-    name: Build & Typecheck (Node ${{ matrix.node-version }})
+    name: Build, Test, and Typecheck (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18, 20, 22]
+        node-version: [20, 22]
 
     steps:
       - name: Checkout
@@ -35,16 +35,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build core & plugins
-        run: pnpm --filter='!@conductor-oss/web' build
+      - name: Build workspace
+        run: pnpm build
 
       - name: Typecheck
-        run: pnpm --filter='!@conductor-oss/web' typecheck
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: |
+          pnpm test
+          pnpm --filter conductor-oss test
 
       - name: Lint
         run: |
           if [ -f ".eslintrc.json" ] || [ -f ".eslintrc.js" ] || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ]; then
-            pnpm --filter='!@conductor-oss/web' lint || true
+            pnpm lint
           else
             echo "No root ESLint config found, skipping lint step"
           fi

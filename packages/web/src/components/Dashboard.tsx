@@ -19,6 +19,7 @@ import type {
   SSESnapshotEvent,
 } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
+import { AgentTileIcon } from "./AgentTileIcon";
 import { TERMINAL_STATUSES } from "@conductor-oss/core/types";
 import { SessionCard } from "./SessionCard";
 import { EmptyState } from "./EmptyState";
@@ -254,56 +255,6 @@ function getProjectFaviconUrls(repo?: string | null, iconUrl?: string | null): s
   }
 }
 
-function getAgentIconUrls(agent: AgentIconSeed): string[] {
-  const urls: string[] = [];
-
-  if (agent.iconUrl) {
-    const direct = agent.iconUrl.trim();
-    if (direct) {
-      urls.push(direct);
-    }
-  }
-
-  const simpleIconCandidates = [
-    asSimpleIconSlug(agent.label),
-    asSimpleIconSlug(agent.launchName),
-    asSimpleIconSlug(agent.launchName).replace(/-cli$/u, ""),
-  ].filter((slug) => slug.length > 0);
-  for (const slug of simpleIconCandidates) {
-    urls.push(`https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/${slug}.svg`);
-  }
-
-  if (!agent.homepage) return urls;
-
-  try {
-    const homepageUrl = new URL(agent.homepage);
-    const homepageOrigin = `${homepageUrl.origin}`;
-    urls.push(`https://www.google.com/s2/favicons?sz=64&domain_url=${encodeURIComponent(homepageOrigin)}`);
-    urls.push(`https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(homepageUrl.hostname)}`);
-    const gitHubRepo = parseGithubRepo(agent.homepage);
-    if (gitHubRepo) {
-      const owner = encodeURIComponent(gitHubRepo.owner);
-      const project = encodeURIComponent(gitHubRepo.name);
-      urls.push(`https://opengraph.githubassets.com/1/${owner}/${project}`);
-      const repoFiles = [
-        ".github/logo.png",
-        ".github/favicon.png",
-        ".github/logo.svg",
-        "assets/logo.png",
-        "assets/favicon.png",
-        "logo.png",
-        "favicon.png",
-        "logo.svg",
-      ];
-      urls.push(...repoFiles.map((file) => `https://raw.githubusercontent.com/${owner}/${project}/HEAD/${file}`));
-    }
-  } catch {
-    // Ignore malformed homepages.
-  }
-
-  return [...new Set(urls)];
-}
-
 function getProjectAbbrev(projectId: string): string {
   const parts = projectId.split(/[-_\s/]+/).filter(Boolean);
   if (parts.length === 1) {
@@ -329,82 +280,16 @@ function DefaultProjectIcon({ projectId, color }: { projectId: string; color: st
   );
 }
 
-function DefaultAgentIcon({
-  label,
-  color,
-  className = "h-5 w-5",
-}: {
-  label: string;
-  color: string;
-  className?: string;
-}) {
-  const fallback = getProjectAbbrev(label);
-  return (
-    <span
-      className={`flex ${className} shrink-0 items-center justify-center rounded-sm text-[10px] font-semibold text-white`}
-      style={{ backgroundColor: color }}
-      aria-hidden="true"
-    >
-      {fallback}
-    </span>
-  );
-}
-
-function getSeededColor(seed: string): string {
-  const FALLBACK_COLORS = [
-    "#14b8a6",
-    "#22c55e",
-    "#84cc16",
-    "#eab308",
-    "#f97316",
-    "#f43f5e",
-    "#a855f7",
-    "#ec4899",
-    "#06b6d4",
-    "#0ea5e9",
-  ];
-  let hash = 0;
-  for (let i = 0; i < seed.length; i += 1) {
-    hash = (hash * 31 + seed.charCodeAt(i)) % 360;
-  }
-  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length] ?? "#6b7280";
-}
-
 function AgentIcon({ agent, className = "h-5 w-5" }: { agent: AgentIconSeed; className?: string }) {
-  const [iconErrorIndex, setIconErrorIndex] = useState(0);
-  const [isLoaded, setIsLoaded] = useState(false);
-  const iconUrls = useMemo(() => getAgentIconUrls(agent), [agent.iconUrl, agent.homepage, agent.label, agent.launchName]);
-  const color = useMemo(
-    () => getSeededColor(`${agent.label}-${agent.launchName}`),
-    [agent.label, agent.launchName],
-  );
-
-  useEffect(() => {
-    setIconErrorIndex(0);
-    setIsLoaded(false);
-  }, [iconUrls]);
-  useEffect(() => setIsLoaded(false), [iconErrorIndex]);
-
-  const shouldUseFallback =
-    !iconUrls.length || iconErrorIndex >= iconUrls.length || !iconUrls[iconErrorIndex];
-
-  if (shouldUseFallback) {
-    return <DefaultAgentIcon className={className} label={agent.label} color={color} />;
-  }
-
   return (
-    <span className="relative inline-flex">
-      {!isLoaded && <DefaultAgentIcon className={className} label={agent.label} color={color} />}
-      <img
-        src={iconUrls[iconErrorIndex]}
-        alt={`${agent.label} icon`}
-        className={`${className} shrink-0 rounded-sm border border-[var(--color-border-subtle)] bg-white object-contain ${isLoaded ? "inline-flex" : "hidden"}`}
-        onError={() => {
-          setIconErrorIndex((current) => current + 1);
-          setIsLoaded(false);
+    <span className="inline-flex rounded-sm border border-[var(--color-border-subtle)] bg-white p-[1px]">
+      <AgentTileIcon
+        seed={{
+          label: agent.label,
+          homepage: agent.homepage,
+          iconUrl: agent.iconUrl,
         }}
-        onLoad={() => setIsLoaded(true)}
-        loading="lazy"
+        className={className}
       />
     </span>
   );
@@ -450,7 +335,7 @@ const KNOWN_AGENTS: KnownAgent[] = [
     description: "OpenAI Codex CLI",
     homepage: "https://github.com/openai/codex",
     iconUrl: "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openai.svg",
-    installHint: "npm install -g @openai/codex-cli",
+    installHint: "npm install -g @openai/codex",
     launchCommand: "codex",
     capabilities: ["chat", "review", "terminal"],
   },
@@ -555,7 +440,8 @@ const KNOWN_AGENTS: KnownAgent[] = [
     aliases: ["qwen code", "qwen_code", "qwen", "qwen-code", "qwen-code-cli"],
     description: "Qwen Code CLI",
     homepage: "https://qwenlm.github.io/announcements/",
-    launchCommand: "qwen-code",
+    installHint: "npm install -g @qwen-code/qwen-code@latest",
+    launchCommand: "qwen",
     capabilities: ["chat", "review", "reasoning", "analysis"],
   },
 ];

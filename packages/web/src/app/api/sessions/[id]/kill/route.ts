@@ -9,7 +9,7 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;

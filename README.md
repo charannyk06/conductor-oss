@@ -157,7 +157,12 @@ If you edit `conductor.yaml` while the dashboard is already running:
 
 ### Remote access
 
-For browser access from another device, keep using a tunnel or reverse proxy such as ngrok or Cloudflare Tunnel. Conductor's dashboard is still just a web app that needs an externally reachable URL.
+For browser access from another device, keep using a tunnel or reverse proxy such as Cloudflare Tunnel. Conductor's dashboard still needs an externally reachable URL, but it now binds to `127.0.0.1` by default and can protect remote sessions with either:
+
+- built-in unlock-link auth for single-operator phone control
+- verified edge auth such as Cloudflare Access for team access and role-based control
+
+Open **Settings > Organization Settings** to configure viewer/operator/admin bindings and the Cloudflare Access team domain + audience used for JWT verification.
 
 You can also add Remote-SSH editor deep links for remote worktrees:
 
@@ -203,13 +208,14 @@ Today the smoothest auto-install path is macOS with Homebrew. On other systems, 
 
 ```bash
 npm install -g @anthropic-ai/claude-code     # Claude Code
-npm install -g @openai/codex-cli             # OpenAI Codex
+npm install -g @openai/codex                 # OpenAI Codex
 npm install -g @google/gemini-cli            # Gemini CLI
+npm install -g @qwen-code/qwen-code@latest   # Qwen Code
 
 # Optional / alternate agent CLIs (install as available in your environment)
-# amp, cursor-cli (or cursor), opencode, droid, qwen-code, ccr, github-copilot
+# amp, cursor-cli (or cursor), opencode, droid, ccr, github-copilot
 # You can also point each plugin at a custom binary using:
-# AMP_BIN, CURSOR_CLI_BIN, OPEN_CODE_BIN, DROID_BIN, QWEN_CODE_BIN, CCR_BIN, GITHUB_COPILOT_BIN
+# AMP_BIN, CURSOR_CLI_BIN, OPEN_CODE_BIN, DROID_BIN, QWEN_BIN, QWEN_CODE_BIN, CCR_BIN, GITHUB_COPILOT_BIN
 ```
 
 ---
@@ -301,7 +307,7 @@ Aliases are normalized and resolved to the dedicated native plugin ID before dis
 | No database — flat file state only | ✅ |
 | Git worktree isolation per task | ✅ |
 | Discord + desktop notifications | ✅ |
-| Clerk authentication for dashboard (optional) | ✅ |
+| Built-in remote auth, optional Clerk, and verified edge auth | ✅ |
 
 ---
 
@@ -331,6 +337,23 @@ columnAliases:
   ready: ["Ready to Dispatch", "Ready"]
   review: ["Review", "In Review"]
   done: ["Done"]
+
+# Optional: security / org access controls
+access:
+  requireAuth: false
+  defaultRole: operator
+  trustedHeaders:
+    enabled: false
+    provider: cloudflare-access
+    emailHeader: Cf-Access-Authenticated-User-Email
+    jwtHeader: Cf-Access-Jwt-Assertion
+    teamDomain: your-team.cloudflareaccess.com
+    audience: your-cloudflare-access-audience
+  roles:
+    admins: ["lead@example.com"]
+    operators: ["dev1@example.com", "dev2@example.com"]
+    viewers: ["pm@example.com"]
+    operatorDomains: ["engineering.example.com"]
 
 # Optional: dashboard first-run + settings preferences
 preferences:
@@ -526,7 +549,7 @@ which cursor
 which cursor-cli
 which opencode
 which droid
-which qwen-code
+which qwen
 which ccr
 which github-copilot
 ```

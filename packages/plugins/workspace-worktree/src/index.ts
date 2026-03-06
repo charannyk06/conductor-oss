@@ -41,7 +41,7 @@ export const manifest = {
   name: "worktree",
   slot: "workspace" as const,
   description: "Workspace plugin: git worktrees",
-  version: "0.2.5",
+  version: "0.2.6",
 };
 
 /** Run a git command in a given directory */
