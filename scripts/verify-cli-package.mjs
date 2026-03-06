@@ -163,10 +163,29 @@ async function verifyDashboardAssets(baseUrl) {
 
 async function withBrowser(run) {
   const { default: puppeteer } = await import("puppeteer");
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
+  let browser;
+
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!browserInstallAttempted && message.includes("Could not find Chrome")) {
+      browserInstallAttempted = true;
+      execFileSync("pnpm", ["exec", "puppeteer", "browsers", "install", "chrome"], {
+        cwd: rootDir,
+        stdio: "inherit",
+      });
+      browser = await puppeteer.launch({
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      });
+    } else {
+      throw error;
+    }
+  }
 
   try {
     return await run(browser);
@@ -709,6 +728,7 @@ const tempDirs = [];
 const packDir = createTempDir("conductor-cli-pack-", tempDirs);
 const installDir = createTempDir("conductor-cli-install-", tempDirs);
 let exitCode = 0;
+let browserInstallAttempted = false;
 
 try {
   const { tarballPath } = packCliReleasePackage({ rootDir, packDestination: packDir });
