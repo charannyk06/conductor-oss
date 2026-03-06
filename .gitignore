@@ -29,3 +29,6 @@ orchestrator/
 /sessions/
 *.log
 CONDUCTOR-TAGS.md
+
+# Release artifacts
+.release-artifacts/
