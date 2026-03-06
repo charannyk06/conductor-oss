@@ -44,7 +44,7 @@ async function assertGhAuthenticated(): Promise<void> {
 }
 
 export async function GET(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "operator");
   if (denied) return denied;
 
   const query = request.nextUrl.searchParams.get("q")?.trim().toLowerCase() ?? "";

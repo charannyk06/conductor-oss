@@ -1,4 +1,4 @@
-name: Release Packages
+name: Create Release
 
 on:
   push:
@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
 
     steps:
       - name: Checkout
@@ -33,7 +32,6 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -63,6 +61,11 @@ jobs:
         if: steps.changesets.outputs.has_changesets == 'true'
         run: pnpm release:verify
 
+      - name: Pack release artifact
+        if: steps.changesets.outputs.has_changesets == 'true'
+        id: pack
+        run: pnpm release:pack
+
       - name: Commit release versions
         if: steps.changesets.outputs.has_changesets == 'true'
         run: |
@@ -71,12 +74,19 @@ jobs:
           git add -A
           git commit -m "chore: release packages [skip ci]"
 
-      - name: Publish packages
+      - name: Create tag
         if: steps.changesets.outputs.has_changesets == 'true'
-        run: pnpm release:publish
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: git tag "${{ steps.pack.outputs.tag_name }}"
 
-      - name: Push release commit and tags
+      - name: Push release commit and tag
         if: steps.changesets.outputs.has_changesets == 'true'
         run: git push origin HEAD:main --follow-tags
+
+      - name: Create GitHub release with verified tarball
+        if: steps.changesets.outputs.has_changesets == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.pack.outputs.tag_name }}" "${{ steps.pack.outputs.tarball_path }}" \
+            --title "${{ steps.pack.outputs.tag_name }}" \
+            --notes "Verified release for ${{ steps.pack.outputs.package_name }} ${{ steps.pack.outputs.version }}"

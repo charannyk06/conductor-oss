@@ -383,7 +383,7 @@ function buildTaskLine(params: {
 
 /** GET /api/boards?projectId=<id> -- Return parsed kanban board for a project. */
 export async function GET(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   const projectId = asNonEmptyString(request.nextUrl.searchParams.get("projectId"));
@@ -436,7 +436,7 @@ export async function GET(request: NextRequest) {
  * Body: { projectId, title, description?, contextNotes?, attachments?, agent, role?, type?, priority? }
  */
 export async function POST(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;

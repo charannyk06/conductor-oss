@@ -9,6 +9,7 @@ import {
   buildConductorBoard,
   buildProjectConfigRecord,
   generateSessionPrefix,
+  getDefaultAgentModel,
   syncWorkspaceSupportFiles,
 } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
@@ -218,6 +219,7 @@ function buildProjectPayload(args: {
   repo: string;
   defaultBranch: string;
   agent: string;
+  agentModel?: string | null;
   sessionPrefix: string;
   useWorktree: boolean;
 }): Record<string, unknown> {
@@ -228,6 +230,7 @@ function buildProjectPayload(args: {
     repo: args.repo,
     defaultBranch: args.defaultBranch,
     agent: args.agent,
+    agentModel: args.agentModel ?? null,
     sessionPrefix: args.sessionPrefix,
     workspace: args.useWorktree ? "worktree" : "local",
     runtime: "tmux",
@@ -322,7 +325,7 @@ export const dynamic = "force-dynamic";
  * Returns all configured projects/workspaces from conductor.yaml.
  */
 export async function GET() {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   try {
@@ -349,7 +352,7 @@ export async function GET() {
  * Supports both remote git clone and local/non-git folders.
  */
 export async function POST(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;
@@ -437,6 +440,7 @@ export async function POST(request: NextRequest) {
       const defaultBranch = requestedDefaultBranchRaw ?? detectedDefaultBranch;
       const repoValue = extractRepoNameFromGitUrl(gitUrl) ?? gitUrl;
       const sessionPrefix = createUniqueSessionPrefix(targetPath, config.projects);
+      const agentModel = getDefaultAgentModel(requestedAgent, config.preferences?.modelAccess ?? null);
 
       await writeProjectToConfig({
         configPath,
@@ -447,6 +451,7 @@ export async function POST(request: NextRequest) {
           repo: repoValue,
           defaultBranch,
           agent: requestedAgent,
+          agentModel,
           sessionPrefix,
           useWorktree,
         }),
@@ -526,6 +531,7 @@ export async function POST(request: NextRequest) {
 
     const repoValue = (await getOriginRepo(localPath)) ?? `local-${projectId}`;
     const sessionPrefix = createUniqueSessionPrefix(localPath, config.projects);
+    const agentModel = getDefaultAgentModel(requestedAgent, config.preferences?.modelAccess ?? null);
 
     await writeProjectToConfig({
       configPath,
@@ -536,6 +542,7 @@ export async function POST(request: NextRequest) {
         repo: repoValue,
         defaultBranch,
         agent: requestedAgent,
+        agentModel,
         sessionPrefix,
         useWorktree,
       }),

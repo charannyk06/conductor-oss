@@ -44,7 +44,7 @@ function resolveBoardFile(
 
 /** GET /api/config -- Return configured projects and their board paths. */
 export async function GET() {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
   try {
     const { config } = await getServices();
@@ -67,6 +67,7 @@ export async function GET() {
         ),
         description: (project as { description?: string }).description ?? null,
         agent: (project as { agent?: string }).agent ?? "claude-code",
+        agentModel: (project as { agentConfig?: { model?: string } }).agentConfig?.model ?? null,
       };
     });
     return NextResponse.json({ projects });

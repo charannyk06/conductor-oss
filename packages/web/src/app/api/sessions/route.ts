@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 /** GET /api/sessions -- list current sessions for the dashboard. */
 export async function GET(request: NextRequest) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   try {

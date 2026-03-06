@@ -20,10 +20,12 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const BINS = ["qwen-code"] as const;
+const BINS = ["qwen", "qwen-code"] as const;
+const PROCESS_NAMES = ["qwen", "qwen-code"] as const;
 
 function findAgentBin(): string {
   const candidates = [
+    process.env["QWEN_BIN"],
     process.env["QWEN_CODE_BIN"],
     ...BINS.flatMap((name) => [
       `/opt/homebrew/bin/${name}`,
@@ -95,7 +97,6 @@ function escapeRegExpValue(value: string): string {
 }
 
 async function processMatchesRuntime(handle: RuntimeHandle): Promise<number | null> {
-  const processName = "qwen-code";
   try {
     if (handle.runtimeName === "tmux" && handle.id) {
       const { stdout: ttyOut } = await execFileAsync(
@@ -114,8 +115,8 @@ async function processMatchesRuntime(handle: RuntimeHandle): Promise<number | nu
         timeout: 30_000,
       });
       const ttySet = new Set(ttys.map((t) => t.replace(/^\/dev\//, "")));
-      const escapedProcess = escapeRegExpValue(processName);
-      const processRe = new RegExp(`(?:^|/)${escapedProcess}(?:\\s|$)`);
+      const escapedProcess = PROCESS_NAMES.map((name) => escapeRegExpValue(name)).join("|");
+      const processRe = new RegExp(`(?:^|/)(?:${escapedProcess})(?:\\s|$)`);
 
       for (const line of psOut.split("\n")) {
         const cols = line.trimStart().split(/\s+/);
@@ -148,17 +149,20 @@ export const manifest = {
   name: "qwen-code",
   slot: "agent" as const,
   description: "Agent plugin: Qwen Code CLI",
-  version: "0.2.5",
+  version: "0.2.6",
 };
 
 function createAgent(): Agent {
   return {
     name: "qwen-code",
-    processName: "qwen-code",
+    processName: "qwen",
     promptDelivery: "inline",
 
     getLaunchCommand(config: AgentLaunchConfig): string {
       const parts: string[] = [AGENT_BIN];
+      if (config.model) {
+        parts.push("--model", shellEscape(config.model));
+      }
       if (config.prompt) {
         parts.push(shellEscape(config.prompt));
       }

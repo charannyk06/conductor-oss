@@ -52,6 +52,24 @@ function copyOptionalFile(sourcePath, destinationPath) {
   }
 }
 
+function shouldIncludeDistEntry(sourcePath) {
+  const normalized = sourcePath.replace(/\\/g, "/");
+  return !(
+    normalized.includes("/__tests__/") ||
+    normalized.endsWith(".test.js") ||
+    normalized.endsWith(".test.js.map") ||
+    normalized.endsWith(".test.d.ts") ||
+    normalized.endsWith(".test.d.ts.map")
+  );
+}
+
+function copyDistDirectory(sourcePath, destinationPath) {
+  cpSync(sourcePath, destinationPath, {
+    recursive: true,
+    filter: shouldIncludeDistEntry,
+  });
+}
+
 function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
@@ -147,7 +165,7 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
 
     const sanitizedManifest = sanitizePublishedPackage(sourceManifest, dependencies);
     writeJson(join(packageStageDir, "package.json"), sanitizedManifest);
-    cpSync(sourceDistDir, join(packageStageDir, "dist"), { recursive: true });
+    copyDistDirectory(sourceDistDir, join(packageStageDir, "dist"));
 
     const tarballName = execFileSync("npm", ["pack", "--silent", "--pack-destination", tarballRoot], {
       cwd: packageStageDir,
@@ -185,7 +203,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     stagingRoot: internalStagingRoot,
   });
 
-  cpSync(resolve(resolvedRootDir, "packages", "cli", "dist"), join(outputDir, "dist"), { recursive: true });
+  copyDistDirectory(resolve(resolvedRootDir, "packages", "cli", "dist"), join(outputDir, "dist"));
   copyOptionalFile(resolve(resolvedRootDir, "README.md"), join(outputDir, "README.md"));
   copyOptionalFile(resolve(resolvedRootDir, "LICENSE"), join(outputDir, "LICENSE"));
 

@@ -9,16 +9,17 @@ type SetupOptions = InitOptions & {
   ide?: string;
   markdownEditor?: string;
   start?: boolean;
+  tunnel?: boolean;
   yes?: boolean;
 };
 
-type InstallCommand = {
+export type InstallCommand = {
   label: string;
   cmd: string;
   args: string[];
 };
 
-type SetupCheck = {
+export type SetupCheck = {
   id: string;
   label: string;
   description: string;
@@ -26,6 +27,20 @@ type SetupCheck = {
   detail: string;
   install?: InstallCommand;
   authCommand?: InstallCommand;
+  postInstallAuthCommand?: InstallCommand;
+};
+
+export type AgentSetupConfig = {
+  commands: string[];
+  installPackage?: string;
+  installLabel?: string;
+  requiredNodeMajor?: number;
+  postInstallAuthCommand?: InstallCommand;
+};
+
+export type TunnelSetupConfig = {
+  commands: string[];
+  install?: InstallCommand;
 };
 
 function commandExists(command: string): boolean {
@@ -76,30 +91,85 @@ function buildNpmInstall(label: string, pkg: string): InstallCommand | undefined
   return { label, cmd: "npm", args: ["install", "-g", pkg] };
 }
 
+function getNodeMajorVersion(): number | null {
+  const major = Number.parseInt(process.versions.node.split(".")[0] ?? "", 10);
+  return Number.isFinite(major) ? major : null;
+}
+
 function detectGitHubAuth(): boolean {
   if (!commandExists("gh")) return false;
   const result = spawnSync("gh", ["auth", "status", "--hostname", "github.com"], { stdio: "ignore" });
   return result.status === 0;
 }
 
-function buildAgentCheck(agent: string): SetupCheck {
+export function buildAgentCheck(agent: string): SetupCheck {
   const normalized = agent.trim();
-  const byAgent: Record<string, { commands: string[]; install?: InstallCommand }> = {
+  const currentNodeMajor = getNodeMajorVersion();
+  const hasNpm = commandExists("npm");
+  const config = resolveAgentSetupConfig(normalized);
+
+  const installed = config.commands.some((command) => commandExists(command));
+  const installBlockedByNode = !installed
+    && !!config.requiredNodeMajor
+    && (!currentNodeMajor || currentNodeMajor < config.requiredNodeMajor);
+  const install = !installed && !installBlockedByNode && config.installPackage && hasNpm
+    ? buildNpmInstall(config.installLabel ?? `Install ${normalized}`, config.installPackage)
+    : undefined;
+
+  let detail = "Ready";
+  if (!installed) {
+    if (installBlockedByNode) {
+      detail = `Missing. Requires Node.js ${config.requiredNodeMajor}+ before Conductor can install it.`;
+    } else if (config.installPackage && !hasNpm) {
+      detail = "Missing. Install npm first to let Conductor set this up automatically.";
+    } else if (install) {
+      detail = config.postInstallAuthCommand
+        ? "Missing. Conductor can install it and launch browser sign-in."
+        : "Missing. Conductor can install it for you.";
+    } else {
+      detail = "Missing. Automatic installation is not available yet for this tool.";
+    }
+  }
+
+  return {
+    id: `agent:${normalized}`,
+    label: `AI assistant: ${normalized}`,
+    description: "Used to handle product and engineering tasks inside Conductor.",
+    installed,
+    detail,
+    install,
+    postInstallAuthCommand: !installed ? config.postInstallAuthCommand : undefined,
+  };
+}
+
+export function resolveAgentSetupConfig(agent: string): AgentSetupConfig {
+  const normalized = agent.trim();
+  const byAgent: Record<string, AgentSetupConfig> = {
     "claude-code": {
       commands: ["claude-code", "claude", "cc"],
-      install: buildNpmInstall("Install Claude Code", "@anthropic-ai/claude-code"),
+      installPackage: "@anthropic-ai/claude-code",
+      installLabel: "Install Claude Code",
     },
     codex: {
       commands: ["codex"],
-      install: buildNpmInstall("Install OpenAI Codex", "@openai/codex-cli"),
+      installPackage: "@openai/codex",
+      installLabel: "Install OpenAI Codex",
+      postInstallAuthCommand: {
+        label: "Connect OpenAI Codex",
+        cmd: "codex",
+        args: ["login"],
+      },
     },
     gemini: {
       commands: ["gemini"],
-      install: buildNpmInstall("Install Gemini CLI", "@google/gemini-cli"),
+      installPackage: "@google/gemini-cli",
+      installLabel: "Install Gemini CLI",
+      requiredNodeMajor: 20,
     },
     "github-copilot": {
       commands: ["github-copilot", "copilot", "gh-copilot"],
-      install: buildNpmInstall("Install GitHub Copilot CLI", "@githubnext/github-copilot-cli"),
+      installPackage: "@githubnext/github-copilot-cli",
+      installLabel: "Install GitHub Copilot CLI",
     },
     "cursor-cli": {
       commands: ["cursor-cli", "cursor"],
@@ -114,28 +184,22 @@ function buildAgentCheck(agent: string): SetupCheck {
       commands: ["droid"],
     },
     "qwen-code": {
-      commands: ["qwen-code"],
+      commands: ["qwen", "qwen-code"],
+      installPackage: "@qwen-code/qwen-code@latest",
+      installLabel: "Install Qwen Code",
+      requiredNodeMajor: 20,
+      postInstallAuthCommand: {
+        label: "Connect Qwen Code",
+        cmd: "qwen",
+        args: [],
+      },
     },
     ccr: {
       commands: ["ccr"],
     },
   };
 
-  const config = byAgent[normalized] ?? { commands: [normalized] };
-  const installed = config.commands.some((command) => commandExists(command));
-
-  return {
-    id: `agent:${normalized}`,
-    label: `AI assistant: ${normalized}`,
-    description: "Used to handle product and engineering tasks inside Conductor.",
-    installed,
-    detail: installed
-      ? "Ready"
-      : config.install
-        ? "Missing. Conductor can install it for you."
-        : "Missing. Automatic installation is not available yet for this tool.",
-    install: !installed ? config.install : undefined,
-  };
+  return byAgent[normalized] ?? { commands: [normalized] };
 }
 
 function buildIdeCheck(ide: string): SetupCheck | null {
@@ -221,7 +285,44 @@ function buildMarkdownCheck(editor: string): SetupCheck | null {
   };
 }
 
-function buildBaseChecks(agent: string, ide: string, markdownEditor: string): SetupCheck[] {
+export function resolveTunnelSetupConfig(provider: string): TunnelSetupConfig {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "cloudflare") {
+    return {
+      commands: ["cloudflared"],
+      install: buildPackageInstall("Install Cloudflare Tunnel", "cloudflared", "cloudflared"),
+    };
+  }
+
+  return {
+    commands: [normalized],
+  };
+}
+
+export function buildTunnelCheck(provider: string): SetupCheck {
+  const config = resolveTunnelSetupConfig(provider);
+  const installed = config.commands.some((command) => commandExists(command));
+
+  return {
+    id: `tunnel:${provider}`,
+    label: "Public dashboard tunnel",
+    description: "Exposes the dashboard on a free public URL for remote device access.",
+    installed,
+    detail: installed
+      ? "Ready"
+      : config.install
+        ? "Missing. Conductor can install a free Cloudflare Quick Tunnel for you."
+        : "Missing. Install a supported tunnel binary manually.",
+    install: !installed ? config.install : undefined,
+  };
+}
+
+function buildBaseChecks(
+  agent: string,
+  ide: string,
+  markdownEditor: string,
+  options?: { tunnel?: boolean; tunnelProvider?: string },
+): SetupCheck[] {
   const checks: SetupCheck[] = [
     {
       id: "git",
@@ -270,6 +371,10 @@ function buildBaseChecks(agent: string, ide: string, markdownEditor: string): Se
   const markdownCheck = buildMarkdownCheck(markdownEditor);
   if (markdownCheck) checks.push(markdownCheck);
 
+  if (options?.tunnel) {
+    checks.push(buildTunnelCheck(options.tunnelProvider ?? "cloudflare"));
+  }
+
   return checks;
 }
 
@@ -283,11 +388,16 @@ function printChecks(checks: SetupCheck[]): void {
   }
 }
 
-function rerunChecks(agent: string, ide: string, markdownEditor: string): SetupCheck[] {
-  return buildBaseChecks(agent, ide, markdownEditor);
+function rerunChecks(
+  agent: string,
+  ide: string,
+  markdownEditor: string,
+  options?: { tunnel?: boolean; tunnelProvider?: string },
+): SetupCheck[] {
+  return buildBaseChecks(agent, ide, markdownEditor, options);
 }
 
-function startConductor(projectPath: string, configPath: string): void {
+function startConductor(projectPath: string, configPath: string, options?: { tunnel?: boolean }): void {
   const cliEntrypoint = process.argv[1];
   if (!cliEntrypoint || cliEntrypoint.endsWith(".ts")) {
     console.log();
@@ -299,7 +409,14 @@ function startConductor(projectPath: string, configPath: string): void {
   console.log(chalk.bold("Opening Conductor in your browser..."));
   execFileSync(
     process.execPath,
-    [cliEntrypoint, "start", "--workspace", projectPath, "--open"],
+    [
+      cliEntrypoint,
+      "start",
+      "--workspace",
+      projectPath,
+      "--open",
+      ...(options?.tunnel ? ["--tunnel"] : []),
+    ],
     {
       cwd: projectPath,
       stdio: "inherit",
@@ -327,6 +444,7 @@ export function registerSetup(program: Command): void {
     .option("--dashboard-url <url>", "Public dashboard URL written into conductor.yaml")
     .option("--ide <editor>", "Preferred code editor")
     .option("--markdown-editor <editor>", "Preferred markdown app")
+    .option("--tunnel", "Install and launch a free public Cloudflare tunnel for remote access")
     .option("--yes", "Install what is missing without asking for confirmation")
     .option("--no-start", "Do not start Conductor after setup completes")
     .action(async (opts: SetupOptions) => {
@@ -335,12 +453,16 @@ export function registerSetup(program: Command): void {
         const agent = opts.agent?.trim() || "claude-code";
         const ide = opts.ide?.trim() || "vscode";
         const markdownEditor = opts.markdownEditor?.trim() || "obsidian";
+        const tunnelEnabled = opts.tunnel === true;
 
         console.log();
         console.log(chalk.bold("Conductor Setup"));
         console.log(chalk.dim("We’ll scaffold this repo, launch the dashboard, and let the browser finish the guided setup."));
 
-        let checks = rerunChecks(agent, ide, markdownEditor);
+        let checks = rerunChecks(agent, ide, markdownEditor, {
+          tunnel: tunnelEnabled,
+          tunnelProvider: "cloudflare",
+        });
         printChecks(checks);
 
         if (opts.yes) {
@@ -350,9 +472,17 @@ export function registerSetup(program: Command): void {
             console.log();
             console.log(chalk.bold(check.install.label));
             runCommand(check.install);
+            if (check.postInstallAuthCommand) {
+              console.log();
+              console.log(chalk.bold(check.postInstallAuthCommand.label));
+              runCommand(check.postInstallAuthCommand);
+            }
           }
 
-          checks = rerunChecks(agent, ide, markdownEditor);
+          checks = rerunChecks(agent, ide, markdownEditor, {
+            tunnel: tunnelEnabled,
+            tunnelProvider: "cloudflare",
+          });
           const pendingAuth = checks.filter((check) => !check.installed && check.authCommand);
           for (const check of pendingAuth) {
             if (!check.authCommand) continue;
@@ -362,7 +492,10 @@ export function registerSetup(program: Command): void {
           }
         }
 
-        checks = rerunChecks(agent, ide, markdownEditor);
+        checks = rerunChecks(agent, ide, markdownEditor, {
+          tunnel: tunnelEnabled,
+          tunnelProvider: "cloudflare",
+        });
         printChecks(checks);
 
         console.log();
@@ -392,7 +525,7 @@ export function registerSetup(program: Command): void {
         }
 
         if (opts.start !== false) {
-          startConductor(project.path, configPath);
+          startConductor(project.path, configPath, { tunnel: tunnelEnabled });
           return;
         }
 

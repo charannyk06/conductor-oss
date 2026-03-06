@@ -1,6 +1,6 @@
 {
   "name": "conductor-oss",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -10,8 +10,9 @@
   },
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "dev": "tsx src/index.ts",
+    "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },

@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 /** GET /api/health/boards -- watcher board parse/health snapshot. */
 export async function GET() {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   try {

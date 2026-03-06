@@ -1,6 +1,6 @@
 {
   "name": "@conductor-oss/core",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,7 @@
     "./types": "./dist/types.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts",
     "clean": "rm -rf dist"

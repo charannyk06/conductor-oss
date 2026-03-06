@@ -15,7 +15,7 @@ import { resolve, join, basename } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import type { OrchestratorConfig } from "./types.js";
+import { getDefaultModelAccessPreferences, type OrchestratorConfig } from "./types.js";
 import { generateSessionPrefix } from "./paths.js";
 import { resolveConfiguredProjectPath } from "./project-paths.js";
 
@@ -159,6 +159,13 @@ const NotificationPreferencesSchema = z.object({
   soundFile: z.string().nullable().default("abstract-sound-4"),
 });
 
+const ModelAccessPreferencesSchema = z.object({
+  claudeCode: z.enum(["pro", "max", "api"]).optional(),
+  codex: z.enum(["chatgpt", "api"]).optional(),
+  gemini: z.enum(["oauth", "api"]).optional(),
+  qwenCode: z.enum(["oauth", "api"]).optional(),
+});
+
 const UserPreferencesSchema = z.object({
   onboardingAcknowledged: z.boolean().default(false),
   codingAgent: z.string().optional(),
@@ -166,10 +173,39 @@ const UserPreferencesSchema = z.object({
   remoteSshHost: z.string().optional(),
   remoteSshUser: z.string().optional(),
   markdownEditor: z.string().optional(),
+  modelAccess: ModelAccessPreferencesSchema.default(getDefaultModelAccessPreferences()),
   notifications: NotificationPreferencesSchema.default({
     soundEnabled: true,
     soundFile: "abstract-sound-4",
   }),
+});
+
+const DashboardRoleSchema = z.enum(["viewer", "operator", "admin"]);
+const TrustedHeaderAccessProviderSchema = z.enum(["generic", "cloudflare-access"]);
+
+const DashboardRoleBindingsSchema = z.object({
+  viewers: z.array(z.string()).optional(),
+  operators: z.array(z.string()).optional(),
+  admins: z.array(z.string()).optional(),
+  viewerDomains: z.array(z.string()).optional(),
+  operatorDomains: z.array(z.string()).optional(),
+  adminDomains: z.array(z.string()).optional(),
+});
+
+const TrustedHeaderAccessConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: TrustedHeaderAccessProviderSchema.default("cloudflare-access"),
+  emailHeader: z.string().default("Cf-Access-Authenticated-User-Email"),
+  jwtHeader: z.string().default("Cf-Access-Jwt-Assertion"),
+  teamDomain: z.string().optional(),
+  audience: z.string().optional(),
+});
+
+const DashboardAccessConfigSchema = z.object({
+  requireAuth: z.boolean().default(false),
+  defaultRole: DashboardRoleSchema.optional(),
+  trustedHeaders: TrustedHeaderAccessConfigSchema.optional(),
+  roles: DashboardRoleBindingsSchema.optional(),
 });
 
 const ConductorConfigSchema = z.object({
@@ -191,8 +227,10 @@ const ConductorConfigSchema = z.object({
   }),
   reactions: z.record(z.string(), ReactionConfigSchema).default({}),
   webhook: WebhookConfigSchema.optional(),
+  access: DashboardAccessConfigSchema.optional(),
   preferences: UserPreferencesSchema.default({
     onboardingAcknowledged: false,
+    modelAccess: getDefaultModelAccessPreferences(),
     notifications: {
       soundEnabled: true,
       soundFile: "abstract-sound-4",

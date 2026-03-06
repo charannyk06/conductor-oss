@@ -1,13 +1,13 @@
 {
   "name": "@conductor-oss/plugin-agent-qwen-code",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },

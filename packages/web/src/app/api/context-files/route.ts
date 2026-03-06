@@ -147,7 +147,7 @@ async function collectContextFiles(params: {
 
 /** GET /api/context-files?projectId=<id> -- List likely context/attachment files for task composer. */
 export async function GET(request: Request) {
-  const denied = await guardApiAccess();
+  const denied = await guardApiAccess(undefined, "viewer");
   if (denied) return denied;
 
   try {

@@ -6,6 +6,7 @@ import {
   resolveConfiguredProjectPath,
   type ScaffoldProjectConfig,
 } from "@conductor-oss/core";
+import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 
 type MutableConfig = Record<string, unknown>;
 
@@ -48,6 +49,7 @@ function normalizePreferences(value: unknown) {
     remoteSshHost: asNonEmptyString(root["remoteSshHost"]),
     remoteSshUser: asNonEmptyString(root["remoteSshUser"]),
     markdownEditor: asNonEmptyString(root["markdownEditor"]) ?? "obsidian",
+    modelAccess: normalizeModelAccessPreferences(root["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
       soundFile: notifications["soundFile"] === null

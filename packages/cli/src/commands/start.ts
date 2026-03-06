@@ -9,7 +9,8 @@
  * The web dashboard provides a browser UI for monitoring and interaction.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -18,6 +19,138 @@ import ora from "ora";
 import type { Command } from "commander";
 import { buildConductorBoard, buildConductorYaml } from "@conductor-oss/core";
 import { createServices, loadConfig } from "../services.js";
+
+function commandExists(command: string): boolean {
+  const checker = process.platform === "win32" ? "where" : "which";
+  const result = spawnSync(checker, [command], { stdio: "ignore" });
+  return result.status === 0;
+}
+
+export function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === "127.0.0.1"
+    || normalized === "localhost"
+    || normalized === "::1"
+    || normalized === "[::1]";
+}
+
+export function buildRemoteUnlockUrl(baseUrl: string, accessToken: string): string {
+  const unlockUrl = new URL("/auth/grant", baseUrl);
+  unlockUrl.searchParams.set("token", accessToken);
+  return unlockUrl.toString();
+}
+
+type BuiltinRemoteAuth = {
+  accessToken: string;
+  sessionSecret: string;
+};
+
+type TrustedHeaderAuth = {
+  enabled: boolean;
+  provider: "generic" | "cloudflare-access";
+  emailHeader: string;
+  jwtHeader: string;
+  teamDomain: string | null;
+  audience: string | null;
+};
+
+function resolveBuiltinRemoteAuth(enabled: boolean): BuiltinRemoteAuth | null {
+  if (!enabled) return null;
+
+  const accessToken = process.env["CONDUCTOR_REMOTE_ACCESS_TOKEN"]?.trim()
+    || randomBytes(24).toString("base64url");
+  const sessionSecret = process.env["CONDUCTOR_REMOTE_SESSION_SECRET"]?.trim()
+    || randomBytes(32).toString("base64url");
+
+  return {
+    accessToken,
+    sessionSecret,
+  };
+}
+
+function resolveTrustedHeaderAuth(config: {
+  access?: {
+    trustedHeaders?: {
+      enabled?: boolean;
+      provider?: "generic" | "cloudflare-access";
+      emailHeader?: string;
+      jwtHeader?: string;
+      teamDomain?: string;
+      audience?: string;
+    };
+  };
+}): TrustedHeaderAuth {
+  return {
+    enabled: config.access?.trustedHeaders?.enabled === true,
+    provider: config.access?.trustedHeaders?.provider === "generic" ? "generic" : "cloudflare-access",
+    emailHeader: config.access?.trustedHeaders?.emailHeader?.trim() || "Cf-Access-Authenticated-User-Email",
+    jwtHeader: config.access?.trustedHeaders?.jwtHeader?.trim() || "Cf-Access-Jwt-Assertion",
+    teamDomain: config.access?.trustedHeaders?.teamDomain?.trim() || null,
+    audience: config.access?.trustedHeaders?.audience?.trim() || null,
+  };
+}
+
+export function extractCloudflareTunnelUrl(output: string): string | null {
+  const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+  return match?.[0] ?? null;
+}
+
+function startCloudflareQuickTunnel(localUrl: string): {
+  process: ChildProcess;
+  url: Promise<string>;
+} {
+  const tunnelProcess = spawn(
+    "cloudflared",
+    ["tunnel", "--no-autoupdate", "--url", localUrl],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+      },
+    },
+  );
+
+  const url = new Promise<string>((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      rejectPromise(new Error("Timed out waiting for Cloudflare Quick Tunnel URL"));
+    }, 30_000);
+
+    const handleOutput = (chunk: Buffer | string) => {
+      if (settled) return;
+      const nextUrl = extractCloudflareTunnelUrl(chunk.toString());
+      if (!nextUrl) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolvePromise(nextUrl);
+    };
+
+    tunnelProcess.stdout?.on("data", handleOutput);
+    tunnelProcess.stderr?.on("data", handleOutput);
+    tunnelProcess.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      rejectPromise(error);
+    });
+    tunnelProcess.on("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      rejectPromise(
+        new Error(`cloudflared exited before announcing a tunnel URL (${signal ?? code ?? "unknown"})`),
+      );
+    });
+  });
+
+  return {
+    process: tunnelProcess,
+    url,
+  };
+}
 
 function openDashboardInBrowser(url: string): void {
   const opener = process.platform === "darwin" ? "open" : "xdg-open";
@@ -32,8 +165,8 @@ async function waitForDashboard(url: string, timeoutMs = 15_000): Promise<boolea
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     try {
-      const response = await fetch(url);
-      if (response.ok) {
+      const response = await fetch(url, { redirect: "manual" });
+      if (response.status > 0 && response.status < 500) {
         return true;
       }
     } catch {
@@ -83,9 +216,11 @@ export function registerStart(program: Command): void {
     .option("--no-dashboard", "Skip starting the web dashboard")
     .option("--no-watcher", "Skip starting the board watcher")
     .option("--open", "Open the dashboard in your default browser")
+    .option("--tunnel", "Expose the dashboard on a free public Cloudflare Quick Tunnel")
+    .option("--host <host>", "Dashboard bind host. Defaults to 127.0.0.1 for local-only access")
     .option("-p, --port <port>", "Dashboard port override")
     .option("-w, --workspace <path>", "Obsidian workspace path")
-      .action(async (opts: { dashboard?: boolean; watcher?: boolean; open?: boolean; port?: string; workspace?: string }) => {
+      .action(async (opts: { dashboard?: boolean; watcher?: boolean; open?: boolean; tunnel?: boolean; host?: string; port?: string; workspace?: string }) => {
       try {
         const explicitWorkspaceHint = opts.workspace ?? process.env["CONDUCTOR_WORKSPACE"];
         let config;
@@ -215,6 +350,17 @@ export function registerStart(program: Command): void {
 
         // ---- Start web dashboard ----
         let dashboardProcess: ChildProcess | null = null;
+        let publicDashboardUrl: string | null = null;
+        let unlockDashboardUrl: string | null = null;
+        const bindHost = opts.host?.trim() || "127.0.0.1";
+        const externalAccessRequested = opts.tunnel === true || !isLoopbackHost(bindHost);
+        const clerkConfigured = Boolean(
+          process.env["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"] && process.env["CLERK_SECRET_KEY"],
+        );
+        const trustedHeaderAuth = resolveTrustedHeaderAuth(config);
+        const builtinRemoteAuth = resolveBuiltinRemoteAuth(
+          externalAccessRequested && !clerkConfigured,
+        );
 
         if (opts.dashboard !== false) {
           const dashSpinner = ora("Starting web dashboard").start();
@@ -314,7 +460,7 @@ export function registerStart(program: Command): void {
                 "run",
                 "start",
                 "--hostname",
-                "0.0.0.0",
+                bindHost,
                 "--port",
                 String(port),
               ];
@@ -324,7 +470,7 @@ export function registerStart(program: Command): void {
                 "run",
                 "dev",
                 "--hostname",
-                "0.0.0.0",
+                bindHost,
                 "--port",
                 String(port),
               ];
@@ -337,9 +483,39 @@ export function registerStart(program: Command): void {
               env: {
                 ...process.env,
                 PORT: String(port),
-                HOSTNAME: "0.0.0.0",
+                HOSTNAME: bindHost,
                 CONDUCTOR_WORKSPACE: workspacePath,
                 CO_CONFIG_PATH: config.configPath,
+                ...(builtinRemoteAuth
+                  ? {
+                      CONDUCTOR_REMOTE_ACCESS_TOKEN: builtinRemoteAuth.accessToken,
+                      CONDUCTOR_REMOTE_SESSION_SECRET: builtinRemoteAuth.sessionSecret,
+                    }
+                  : {}),
+                ...(trustedHeaderAuth.enabled
+                  ? {
+                      CONDUCTOR_TRUST_AUTH_HEADERS: "true",
+                      CONDUCTOR_TRUST_AUTH_PROVIDER: trustedHeaderAuth.provider,
+                      CONDUCTOR_TRUST_AUTH_EMAIL_HEADER: trustedHeaderAuth.emailHeader,
+                      CONDUCTOR_TRUST_AUTH_JWT_HEADER: trustedHeaderAuth.jwtHeader,
+                      ...(trustedHeaderAuth.teamDomain
+                        ? { CONDUCTOR_CLOUDFLARE_ACCESS_TEAM_DOMAIN: trustedHeaderAuth.teamDomain }
+                        : {}),
+                      ...(trustedHeaderAuth.audience
+                        ? { CONDUCTOR_CLOUDFLARE_ACCESS_AUDIENCE: trustedHeaderAuth.audience }
+                        : {}),
+                    }
+                  : {}),
+                ...(config.access?.requireAuth
+                  ? {
+                      CONDUCTOR_REQUIRE_AUTH: "true",
+                    }
+                  : {}),
+                ...(config.access?.defaultRole
+                  ? {
+                      CONDUCTOR_ACCESS_DEFAULT_ROLE: config.access.defaultRole,
+                    }
+                  : {}),
               },
             });
 
@@ -347,17 +523,55 @@ export function registerStart(program: Command): void {
               dashSpinner.warn("Dashboard failed to start. Try: cd packages/web && pnpm build");
             });
 
-            const dashboardUrl = `http://localhost:${port}`;
+            const dashboardInternalUrl = `http://127.0.0.1:${port}`;
+            const dashboardUrl = isLoopbackHost(bindHost)
+              ? `http://localhost:${port}`
+              : `http://${bindHost}:${port}`;
+            if (builtinRemoteAuth) {
+              unlockDashboardUrl = buildRemoteUnlockUrl(dashboardUrl, builtinRemoteAuth.accessToken);
+            }
             dashSpinner.succeed(`Web dashboard starting on ${dashboardUrl}`);
-            if (opts.open) {
-              void waitForDashboard(`${dashboardUrl}/api/config`).then((ready) => {
-                if (ready) {
-                  openDashboardInBrowser(dashboardUrl);
-                  return;
-                }
 
-                console.log(chalk.yellow(`Dashboard is still starting. Open ${dashboardUrl} manually if it does not open shortly.`));
-              });
+            if (opts.tunnel) {
+              const tunnelSpinner = ora("Starting Cloudflare Quick Tunnel").start();
+              if (!commandExists("cloudflared")) {
+                tunnelSpinner.warn("cloudflared is not installed. Re-run `co setup --yes --tunnel` to automate public URL setup.");
+              } else if (await waitForDashboard(dashboardInternalUrl)) {
+                try {
+                  const tunnel = startCloudflareQuickTunnel(dashboardInternalUrl);
+                  shutdownTasks.push(() => {
+                    if (tunnel.process.exitCode === null) {
+                      tunnel.process.kill("SIGTERM");
+                    }
+                  });
+                  publicDashboardUrl = await tunnel.url;
+                  config.dashboardUrl = publicDashboardUrl;
+                  if (builtinRemoteAuth) {
+                    unlockDashboardUrl = buildRemoteUnlockUrl(publicDashboardUrl, builtinRemoteAuth.accessToken);
+                  }
+                  tunnelSpinner.succeed(`Public dashboard available at ${publicDashboardUrl}`);
+                } catch (error) {
+                  tunnelSpinner.warn(`Cloudflare Quick Tunnel failed: ${error}`);
+                }
+              } else {
+                tunnelSpinner.warn("Dashboard was not ready in time for tunnel startup.");
+              }
+            }
+
+            if (opts.open) {
+              const preferredUrl = unlockDashboardUrl ?? publicDashboardUrl ?? dashboardUrl;
+              if (preferredUrl) {
+                openDashboardInBrowser(preferredUrl);
+              } else {
+                void waitForDashboard(dashboardInternalUrl).then((ready) => {
+                  if (ready) {
+                    openDashboardInBrowser(dashboardUrl);
+                    return;
+                  }
+
+                  console.log(chalk.yellow(`Dashboard is still starting. Open ${dashboardUrl} manually if it does not open shortly.`));
+                });
+              }
             }
           } catch {
             dashSpinner.warn("Could not start dashboard.");
@@ -387,7 +601,38 @@ export function registerStart(program: Command): void {
         console.log(chalk.bold.green("Conductor is running."));
         console.log(chalk.dim(`  Config:    ${config.configPath}`));
         if (opts.dashboard !== false) {
-          console.log(chalk.dim(`  Dashboard: http://localhost:${port}`));
+          const dashboardSummaryUrl = isLoopbackHost(bindHost)
+            ? `http://localhost:${port}`
+            : `http://${bindHost}:${port}`;
+          console.log(chalk.dim(`  Dashboard: ${dashboardSummaryUrl}`));
+          if (publicDashboardUrl) {
+            console.log(chalk.dim(`  Public:    ${publicDashboardUrl}`));
+          }
+          if (unlockDashboardUrl) {
+            console.log(chalk.dim(`  Unlock:    ${unlockDashboardUrl}`));
+            console.log(chalk.dim("  Security:  Share the unlock link only with devices that should control this session."));
+          }
+          if (trustedHeaderAuth.enabled) {
+            if (
+              trustedHeaderAuth.provider === "cloudflare-access"
+              && trustedHeaderAuth.teamDomain
+              && trustedHeaderAuth.audience
+            ) {
+              console.log(
+                chalk.dim(
+                  `  Edge Auth: Cloudflare Access via ${trustedHeaderAuth.teamDomain} (${trustedHeaderAuth.emailHeader})`,
+                ),
+              );
+            } else if (trustedHeaderAuth.provider === "cloudflare-access") {
+              console.log(
+                chalk.dim(
+                  "  Edge Auth: Cloudflare Access is enabled but still needs team domain and audience configuration.",
+                ),
+              );
+            } else {
+              console.log(chalk.dim(`  Edge Auth: generic trusted header ${trustedHeaderAuth.emailHeader}`));
+            }
+          }
         }
         if (opts.watcher !== false) {
           console.log(chalk.dim("  Watcher:   Obsidian CONDUCTOR.md boards"));

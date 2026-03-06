@@ -1,6 +1,6 @@
 {
   "name": "@conductor-oss/plugin-notifier-discord",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "license": "MIT",
   "type": "module",
