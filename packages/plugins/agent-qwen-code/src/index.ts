@@ -148,7 +148,7 @@ export const manifest = {
   name: "qwen-code",
   slot: "agent" as const,
   description: "Agent plugin: Qwen Code CLI",
-  version: "0.2.2",
+  version: "0.2.3",
 };
 
 function createAgent(): Agent {

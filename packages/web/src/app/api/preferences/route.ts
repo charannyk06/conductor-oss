@@ -4,6 +4,7 @@ import { parse, stringify } from "yaml";
 import type { UserPreferences } from "@conductor-oss/core";
 import { getServices, invalidateServicesCache } from "@/lib/services";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { syncAllProjectLocalConfigs } from "@/lib/projectConfigSync";
 
 export const dynamic = "force-dynamic";
 
@@ -166,7 +167,8 @@ export async function PUT(request: NextRequest) {
 
     try {
       invalidateServicesCache("preferences updated");
-      await getServices();
+      const { config: refreshedConfig } = await getServices();
+      await syncAllProjectLocalConfigs(refreshedConfig as unknown as Record<string, unknown>);
     } catch (err) {
       await writeFile(configPath, originalConfigRaw, "utf8");
       invalidateServicesCache("preferences update rollback");

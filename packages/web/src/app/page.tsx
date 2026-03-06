@@ -154,12 +154,14 @@ type SettingsTabId =
   | "mcp"
   | "preferences";
 
-const SETTINGS_TABS: Array<{
+type SettingsTab = {
   id: SettingsTabId;
   label: string;
   icon: LucideIcon;
   implemented: boolean;
-}> = [
+};
+
+const SETTINGS_TABS: SettingsTab[] = [
   { id: "general", label: "General", icon: Settings2, implemented: false },
   { id: "repositories", label: "Repositories", icon: FolderGit2, implemented: true },
   { id: "organization", label: "Organization Settings", icon: Building2, implemented: false },
@@ -167,6 +169,11 @@ const SETTINGS_TABS: Array<{
   { id: "agents", label: "Agents", icon: Bot, implemented: false },
   { id: "mcp", label: "MCP Servers", icon: PlugZap, implemented: false },
   { id: "preferences", label: "Preferences", icon: SlidersHorizontal, implemented: true },
+];
+
+const ONBOARDING_TABS: SettingsTab[] = [
+  { id: "preferences", label: "Preferences", icon: SlidersHorizontal, implemented: true },
+  { id: "repositories", label: "Repository", icon: FolderGit2, implemented: true },
 ];
 
 const IDE_OPTIONS = [
@@ -357,6 +364,7 @@ export default function Home() {
   const [preferencesSaving, setPreferencesSaving] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [preferencesDialogOpen, setPreferencesDialogOpen] = useState(false);
+  const [pendingWorkspaceSetup, setPendingWorkspaceSetup] = useState(false);
 
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const workspaceError = createError ?? configError ?? sessionsError ?? preferencesError;
@@ -469,7 +477,10 @@ export default function Home() {
     }
   }, [agentOptions, selectedAgent]);
 
-  async function handleSavePreferences(next: PreferencesPayload) {
+  async function handleSavePreferences(
+    next: PreferencesPayload,
+    options?: { closeDialog?: boolean },
+  ) {
     setPreferencesSaving(true);
     setPreferencesError(null);
     try {
@@ -487,7 +498,9 @@ export default function Home() {
       const normalized = normalizePreferences(data?.preferences, next.codingAgent || "qwen-code");
       setPreferences(normalized);
       setSelectedAgent(normalized.codingAgent);
-      setPreferencesDialogOpen(false);
+      if (options?.closeDialog !== false) {
+        setPreferencesDialogOpen(false);
+      }
     } catch (err) {
       setPreferencesError(err instanceof Error ? err.message : "Failed to save preferences");
       throw err;
@@ -517,6 +530,12 @@ export default function Home() {
     setNewWorkspaceOpen(true);
     syncSidebarForViewport();
   };
+
+  useEffect(() => {
+    if (!pendingWorkspaceSetup || preferencesDialogOpen) return;
+    setPendingWorkspaceSetup(false);
+    openWorkspaceDialog();
+  }, [pendingWorkspaceSetup, preferencesDialogOpen]);
 
   async function handleCreateSession() {
     const trimmedPrompt = prompt.trim();
@@ -720,6 +739,11 @@ export default function Home() {
         current={resolvedPreferences}
         agentOptions={agentOptions}
         onRepositoriesChanged={refreshConfig}
+        onOnboardingComplete={({ needsProject }) => {
+          if (needsProject) {
+            setPendingWorkspaceSetup(true);
+          }
+        }}
         onClose={() => {
           if (preferencesSaving || onboardingRequired) return;
           setPreferencesDialogOpen(false);
@@ -1674,6 +1698,7 @@ function SettingsDialog({
   current,
   agentOptions,
   onRepositoriesChanged,
+  onOnboardingComplete,
   onClose,
   onSave,
 }: {
@@ -1684,8 +1709,9 @@ function SettingsDialog({
   current: PreferencesPayload;
   agentOptions: string[];
   onRepositoriesChanged?: () => Promise<void>;
+  onOnboardingComplete?: (result: { needsProject: boolean }) => void;
   onClose: () => void;
-  onSave: (next: PreferencesPayload) => Promise<void>;
+  onSave: (next: PreferencesPayload, options?: { closeDialog?: boolean }) => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("preferences");
   const [codingAgent, setCodingAgent] = useState(current.codingAgent);
@@ -1798,9 +1824,9 @@ function SettingsDialog({
     }
   }
 
-  async function handleSaveRepository(): Promise<void> {
-    if (!repositoryDraft || repositoriesSaving) return;
-    if (repositoryDraft.repo.trim().length === 0 || repositoryDraft.path.trim().length === 0) return;
+  async function handleSaveRepository(): Promise<boolean> {
+    if (!repositoryDraft || repositoriesSaving) return false;
+    if (repositoryDraft.repo.trim().length === 0 || repositoryDraft.path.trim().length === 0) return false;
 
     setRepositoriesSaving(true);
     setRepositoriesError(null);
@@ -1847,8 +1873,10 @@ function SettingsDialog({
       if (onRepositoriesChanged) {
         await onRepositoriesChanged();
       }
+      return true;
     } catch (err) {
       setRepositoriesError(err instanceof Error ? err.message : "Failed to save repository settings");
+      return false;
     } finally {
       setRepositoriesSaving(false);
     }
@@ -1866,16 +1894,16 @@ function SettingsDialog({
     setSoundFile(current.notifications.soundFile);
     setRepositoryBranchOptions([]);
     setRepositoryBranchesError(null);
-  }, [current, open]);
+  }, [open]);
 
   useEffect(() => {
-    if (!open || mode !== "settings") return;
+    if (!open) return;
     void loadRepositories();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode]);
+  }, [open]);
 
   useEffect(() => {
-    if (!open || mode !== "settings") return;
+    if (!open) return;
     if (!selectedRepositoryId) {
       setRepositoryDraft(null);
       return;
@@ -1889,18 +1917,26 @@ function SettingsDialog({
       void detectRepositoryBranches(selected.path, selected.defaultBranch);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, repositories, selectedRepositoryId]);
+  }, [open, repositories, selectedRepositoryId]);
+
+  const onboardingShouldShowRepositoryStep = mode === "onboarding"
+    && (repositoriesLoading || repositories.length > 0);
 
   const visibleTabs = useMemo(() => {
     if (mode === "onboarding") {
-      return SETTINGS_TABS.filter((tab) => tab.id === "preferences");
+      return onboardingShouldShowRepositoryStep
+        ? ONBOARDING_TABS
+        : ONBOARDING_TABS.filter((tab) => tab.id === "preferences");
     }
     return SETTINGS_TABS;
-  }, [mode]);
+  }, [mode, onboardingShouldShowRepositoryStep]);
 
   const activeTabItem = visibleTabs.find((tab) => tab.id === activeTab) ?? visibleTabs[0] ?? SETTINGS_TABS[0];
+  const isOnboarding = mode === "onboarding";
   const isPreferencesTab = activeTabItem.id === "preferences";
   const isRepositoriesTab = activeTabItem.id === "repositories";
+  const onboardingStepIndex = visibleTabs.findIndex((tab) => tab.id === activeTabItem.id) + 1;
+  const onboardingHasRepositoryStep = visibleTabs.some((tab) => tab.id === "repositories");
 
   const orderedAgentOptions = useMemo(() => {
     const opts = new Set(agentOptions);
@@ -1936,14 +1972,13 @@ function SettingsDialog({
       })
     : "";
 
-  async function handleSubmitPreferences() {
-    if (!canSubmitPreferences || creating) return;
+  function buildNextPreferences(acknowledgeOnboarding: boolean): PreferencesPayload {
     const resolvedSoundFile = soundEnabled
       ? soundFile ?? NOTIFICATION_SOUND_OPTIONS[0]?.id ?? "abstract-sound-4"
       : null;
 
-    await onSave({
-      onboardingAcknowledged: mode === "onboarding" ? true : current.onboardingAcknowledged,
+    return {
+      onboardingAcknowledged: acknowledgeOnboarding ? true : current.onboardingAcknowledged,
       codingAgent: codingAgent.trim(),
       ide: ide.trim(),
       remoteSshHost: remoteSshHost.trim(),
@@ -1953,7 +1988,37 @@ function SettingsDialog({
         soundEnabled,
         soundFile: resolvedSoundFile,
       },
-    });
+    };
+  }
+
+  async function handleSubmitPreferences(
+    acknowledgeOnboarding: boolean,
+    options?: { closeDialog?: boolean },
+  ) {
+    if (!canSubmitPreferences || creating) return;
+    await onSave(buildNextPreferences(acknowledgeOnboarding), options);
+  }
+
+  async function handleOnboardingContinue() {
+    if (repositoriesLoading) return;
+    if (!onboardingHasRepositoryStep) {
+      await handleSubmitPreferences(true, { closeDialog: true });
+      onOnboardingComplete?.({ needsProject: repositories.length === 0 });
+      return;
+    }
+
+    await handleSubmitPreferences(false, { closeDialog: false });
+    setActiveTab("repositories");
+  }
+
+  async function handleFinishOnboarding() {
+    if (isRepositoriesTab) {
+      const saved = await handleSaveRepository();
+      if (!saved) return;
+    }
+
+    await handleSubmitPreferences(true, { closeDialog: true });
+    onOnboardingComplete?.({ needsProject: false });
   }
 
   return (
@@ -1972,7 +2037,9 @@ function SettingsDialog({
         >
           <aside className="flex w-full shrink-0 flex-col border-b border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)] sm:w-[224px] sm:border-b-0 sm:border-r">
             <header className="border-b border-[var(--vk-border)] px-4 py-3 sm:py-4">
-              <h2 className="text-[22px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">Settings</h2>
+              <h2 className="text-[22px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
+                {isOnboarding ? "Setup" : "Settings"}
+              </h2>
             </header>
             <nav className="flex gap-1 overflow-x-auto p-2 sm:block sm:space-y-1 sm:overflow-auto">
               {visibleTabs.map((tab) => {
@@ -2000,9 +2067,20 @@ function SettingsDialog({
 
           <div className="flex min-w-0 flex-1 flex-col">
             <header className="flex items-center justify-between border-b border-[var(--vk-border)] px-4 py-3 sm:py-4">
-              <h3 className="text-[20px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
-                {mode === "onboarding" && isPreferencesTab ? "2. Confirm your preferences" : activeTabItem.label}
-              </h3>
+              <div>
+                <h3 className="text-[20px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
+                  {isOnboarding
+                    ? isPreferencesTab
+                      ? "Choose your preferences"
+                      : "Review repository defaults"
+                    : activeTabItem.label}
+                </h3>
+                {isOnboarding && (
+                  <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                    Step {onboardingStepIndex} of {visibleTabs.length}
+                  </p>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={onClose}
@@ -2017,6 +2095,15 @@ function SettingsDialog({
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-6 sm:py-4">
               {isPreferencesTab ? (
                 <div className="space-y-5">
+                  {isOnboarding && (
+                    <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.08)] px-4 py-3">
+                      <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
+                        Conductor is already running locally. Finish setup here in the dashboard, then you can start using
+                        chat and boards immediately.
+                      </p>
+                    </section>
+                  )}
+
                   <section className="space-y-2">
                     <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Choose Your Coding Agent</h4>
                     <p className="text-[12px] text-[var(--vk-text-muted)]">Select the default coding agent configuration.</p>
@@ -2179,45 +2266,63 @@ function SettingsDialog({
               ) : isRepositoriesTab ? (
                 <div className="space-y-5">
                   <section className="space-y-1">
-                    <h4 className="text-[24px] leading-[24px] text-[var(--vk-text-strong)]">Repository Configuration</h4>
+                    <h4 className="text-[24px] leading-[24px] text-[var(--vk-text-strong)]">
+                      {isOnboarding ? "Repository Defaults" : "Repository Configuration"}
+                    </h4>
                     <p className="text-[14px] text-[var(--vk-text-muted)]">
-                      Configure scripts and defaults used whenever this repository is selected for workspaces.
+                      {isOnboarding
+                        ? "Review the repository Conductor will use for this workspace. You can edit advanced scripts later from Settings."
+                        : "Configure scripts and defaults used whenever this repository is selected for workspaces."}
                     </p>
                   </section>
 
-                  <section className="space-y-2">
+                  {(mode === "settings" || repositories.length > 1) && (
+                    <section className="space-y-2">
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Select Repository</span>
+                        <select
+                          value={selectedRepositoryId}
+                          onChange={(event) => setSelectedRepositoryId(event.target.value)}
+                          disabled={repositoriesLoading || repositories.length === 0 || isBusy}
+                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
+                        >
+                          {repositories.length === 0 && <option value="">No repositories configured</option>}
+                          {repositories.map((repository) => (
+                            <option key={repository.id} value={repository.id}>
+                              {repository.displayName}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <p className="text-[12px] text-[var(--vk-text-muted)]">
+                        Select a repository to view and edit its configuration.
+                      </p>
+                      {repositoriesLoading && (
+                        <p className="text-[12px] text-[var(--vk-text-muted)]">Loading repositories...</p>
+                      )}
+                    </section>
+                  )}
+
+                  {isOnboarding && repositories.length === 1 && repositoryDraft && (
                     <label className="block">
-                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Select Repository</span>
-                      <select
-                        value={selectedRepositoryId}
-                        onChange={(event) => setSelectedRepositoryId(event.target.value)}
-                        disabled={repositoriesLoading || repositories.length === 0 || isBusy}
-                        className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
-                      >
-                        {repositories.length === 0 && <option value="">No repositories configured</option>}
-                        {repositories.map((repository) => (
-                          <option key={repository.id} value={repository.id}>
-                            {repository.displayName}
-                          </option>
-                        ))}
-                      </select>
+                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Detected Repository</span>
+                      <div className="rounded-[4px] border border-[var(--vk-border)] bg-[rgba(15,15,15,0.52)] px-3 py-3 text-[13px] text-[var(--vk-text-normal)]">
+                        {repositoryDraft.displayName}
+                        <span className="ml-2 text-[var(--vk-text-muted)]">{repositoryDraft.path}</span>
+                      </div>
                     </label>
-                    <p className="text-[12px] text-[var(--vk-text-muted)]">
-                      Select a repository to view and edit its configuration.
-                    </p>
-                    {repositoriesLoading && (
-                      <p className="text-[12px] text-[var(--vk-text-muted)]">Loading repositories...</p>
-                    )}
-                  </section>
+                  )}
 
                   {repositoryDraft && (
                     <>
-                      <section className="space-y-3 border-t border-[var(--vk-border)] pt-4">
+                      {mode === "settings" && (
+                        <section className="space-y-3 border-t border-[var(--vk-border)] pt-4">
                         <div className="space-y-1">
-                          <h5 className="text-[22px] leading-[22px] text-[var(--vk-text-strong)]">One-Line Bootstrap</h5>
+                          <h5 className="text-[22px] leading-[22px] text-[var(--vk-text-strong)]">Repo-Preseed Bootstrap</h5>
                           <p className="text-[13px] text-[var(--vk-text-muted)]">
-                            Run this from any terminal to launch a PM-friendly guided setup. It checks the machine,
-                            installs supported tools, connects GitHub, writes the repo defaults below, and starts Conductor.
+                            Use this when you already know the target repository and want one command to prefill it. The
+                            default first-run path is still `npx conductor-oss@latest`, which opens the dashboard and lets
+                            the user choose preferences before adding a project.
                           </p>
                         </div>
 
@@ -2241,11 +2346,13 @@ function SettingsDialog({
 
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="text-[12px] text-[var(--vk-text-muted)]">
-                            This command uses your selected agent, editor, and notes app. Best on macOS with Homebrew. GitHub sign-in still opens a browser so the user can approve access.
+                            This command uses your selected agent, editor, and notes app. Best on macOS with Homebrew.
+                            GitHub sign-in still opens a browser so the user can approve access.
                           </p>
                           <CopySnippetButton value={repositoryBootstrapCommand} idleLabel="Copy Setup Command" />
                         </div>
-                      </section>
+                        </section>
+                      )}
 
                       <section className="space-y-3 border-t border-[var(--vk-border)] pt-4">
                         <h5 className="text-[22px] leading-[22px] text-[var(--vk-text-strong)]">General Settings</h5>
@@ -2397,7 +2504,8 @@ function SettingsDialog({
                         </label>
                       </section>
 
-                      <section className="space-y-3 border-t border-[var(--vk-border)] pt-4">
+                      {mode === "settings" && (
+                        <section className="space-y-3 border-t border-[var(--vk-border)] pt-4">
                         <h5 className="text-[22px] leading-[22px] text-[var(--vk-text-strong)]">Scripts & Configuration</h5>
                         <p className="text-[13px] text-[var(--vk-text-muted)]">
                           Configure dev server, setup, cleanup, archive, and file-copy behavior for this repository.
@@ -2473,7 +2581,8 @@ function SettingsDialog({
                             Comma-separated relative file paths or glob patterns copied from the repo to each worktree.
                           </p>
                         </label>
-                      </section>
+                        </section>
+                      )}
                     </>
                   )}
                 </div>
@@ -2503,19 +2612,21 @@ function SettingsDialog({
                 )}
                 {!error && !repositoriesError && isPreferencesTab && (
                   <p className="text-[11px] text-[var(--vk-text-muted)]">
-                    {mode === "onboarding"
-                      ? "These preferences can be changed any time from Settings."
+                    {isOnboarding
+                      ? "Finish setup once here. You can change these preferences any time from Settings."
                       : "Preferences are saved to your conductor config and applied immediately."}
                   </p>
                 )}
                 {!error && !repositoriesError && isRepositoriesTab && (
                   <p className="text-[11px] text-[var(--vk-text-muted)]">
-                    Repository settings are saved to your conductor config and used for future workspaces.
+                    {isOnboarding
+                      ? "These defaults will be used the first time workspaces and tasks are created for this repo."
+                      : "Repository settings are saved to your conductor config and used for future workspaces."}
                   </p>
                 )}
               </div>
               <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
-                {mode === "settings" && (
+                {!isOnboarding && (
                   <button
                     type="button"
                     onClick={onClose}
@@ -2525,10 +2636,22 @@ function SettingsDialog({
                     Close
                   </button>
                 )}
-                {isPreferencesTab && (
+                {isOnboarding && isRepositoriesTab && (
                   <button
                     type="button"
-                    onClick={handleSubmitPreferences}
+                    onClick={() => setActiveTab("preferences")}
+                    disabled={isBusy}
+                    className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  >
+                    Back
+                  </button>
+                )}
+                {isPreferencesTab && !isOnboarding && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleSubmitPreferences(current.onboardingAcknowledged, { closeDialog: true });
+                    }}
                     disabled={!canSubmitPreferences || creating}
                     className="inline-flex h-9 items-center rounded-[4px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
                   >
@@ -2537,10 +2660,10 @@ function SettingsDialog({
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                         Saving...
                       </>
-                    ) : mode === "onboarding" ? "Continue" : "Save"}
+                    ) : "Save"}
                   </button>
                 )}
-                {isRepositoriesTab && mode === "settings" && (
+                {isRepositoriesTab && !isOnboarding && (
                   <button
                     type="button"
                     onClick={() => {
@@ -2555,6 +2678,31 @@ function SettingsDialog({
                         Saving...
                       </>
                     ) : "Save Repository"}
+                  </button>
+                )}
+                {isOnboarding && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void (isPreferencesTab ? handleOnboardingContinue() : handleFinishOnboarding());
+                    }}
+                    disabled={
+                      isPreferencesTab
+                        ? !canSubmitPreferences || creating || repositoriesLoading
+                        : !canSaveRepository || isBusy
+                    }
+                    className="inline-flex h-9 items-center rounded-[4px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  >
+                    {isBusy || (isPreferencesTab && repositoriesLoading) ? (
+                      <>
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        {isPreferencesTab && repositoriesLoading ? "Loading..." : "Saving..."}
+                      </>
+                    ) : isPreferencesTab ? (
+                      onboardingHasRepositoryStep ? "Continue" : "Finish Setup"
+                    ) : (
+                      "Finish Setup"
+                    )}
                   </button>
                 )}
               </div>

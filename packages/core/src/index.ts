@@ -18,6 +18,18 @@ export {
   findConfigFile,
 } from "./config.js";
 
+// Scaffolding helpers
+export {
+  buildConductorBoard,
+  buildConductorYaml,
+  buildProjectConfigRecord,
+} from "./scaffold.js";
+export type {
+  ConductorYamlScaffoldConfig,
+  ScaffoldPreferencesConfig,
+  ScaffoldProjectConfig,
+} from "./scaffold.js";
+
 // Plugin registry
 export { createPluginRegistry } from "./plugin-registry.js";
 

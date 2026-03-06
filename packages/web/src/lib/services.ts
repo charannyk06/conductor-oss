@@ -208,7 +208,10 @@ function findConfigFromWorkspace(workspace?: string): string | undefined {
 function getConfigStateFromEnv(): { path: string | undefined } {
   const envConfigPath = normalizeConfigPath(process.env["CO_CONFIG_PATH"]);
   const workspaceConfigPath = findConfigFromWorkspace(process.env["CONDUCTOR_WORKSPACE"]);
-  const homeWorkspaceConfig = normalizeConfigPath(`${homedir()}/.openclaw/workspace/conductor.yaml`);
+  const homeWorkspaceConfigCandidate = normalizeConfigPath(`${homedir()}/.openclaw/workspace/conductor.yaml`);
+  const homeWorkspaceConfig = homeWorkspaceConfigCandidate && existsSync(homeWorkspaceConfigCandidate)
+    ? homeWorkspaceConfigCandidate
+    : undefined;
 
   return {
     path: envConfigPath ||

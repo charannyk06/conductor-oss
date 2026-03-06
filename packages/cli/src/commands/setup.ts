@@ -1,5 +1,4 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { createInterface } from "node:readline/promises";
 import { homedir } from "node:os";
 import process from "node:process";
 import chalk from "chalk";
@@ -28,40 +27,6 @@ type SetupCheck = {
   install?: InstallCommand;
   authCommand?: InstallCommand;
 };
-
-type SelectOption = {
-  value: string;
-  label: string;
-};
-
-const AGENT_OPTIONS: SelectOption[] = [
-  { value: "claude-code", label: "Claude Code" },
-  { value: "codex", label: "OpenAI Codex" },
-  { value: "gemini", label: "Gemini CLI" },
-  { value: "github-copilot", label: "GitHub Copilot" },
-  { value: "cursor-cli", label: "Cursor Agent" },
-  { value: "amp", label: "Amp" },
-  { value: "opencode", label: "OpenCode" },
-  { value: "droid", label: "Droid" },
-  { value: "qwen-code", label: "Qwen Code" },
-  { value: "ccr", label: "CCR" },
-];
-
-const IDE_OPTIONS: SelectOption[] = [
-  { value: "vscode", label: "VS Code" },
-  { value: "vscode-insiders", label: "VS Code Insiders" },
-  { value: "cursor", label: "Cursor" },
-  { value: "zed", label: "Zed" },
-  { value: "custom", label: "I already have something else" },
-];
-
-const MARKDOWN_EDITOR_OPTIONS: SelectOption[] = [
-  { value: "obsidian", label: "Obsidian" },
-  { value: "notion", label: "Notion" },
-  { value: "logseq", label: "Logseq" },
-  { value: "typora", label: "Typora" },
-  { value: "custom", label: "I already have something else" },
-];
 
 function commandExists(command: string): boolean {
   const result = spawnSync("sh", ["-lc", `command -v ${command}`], { stdio: "ignore" });
@@ -308,32 +273,6 @@ function buildBaseChecks(agent: string, ide: string, markdownEditor: string): Se
   return checks;
 }
 
-async function askYesNo(question: string, defaultValue = true): Promise<boolean> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const suffix = defaultValue ? "[Y/n]" : "[y/N]";
-  const answer = (await rl.question(`${question} ${suffix} `)).trim().toLowerCase();
-  rl.close();
-  if (!answer) return defaultValue;
-  return answer === "y" || answer === "yes";
-}
-
-async function selectOption(question: string, options: SelectOption[], fallback: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  console.log();
-  console.log(chalk.bold(question));
-  options.forEach((option, index) => {
-    const isDefault = option.value === fallback;
-    console.log(`  ${index + 1}. ${option.label}${isDefault ? chalk.dim(" (recommended)") : ""}`);
-  });
-  const answer = (await rl.question("Choose a number and press Enter: ")).trim();
-  rl.close();
-  const selected = Number.parseInt(answer, 10);
-  if (Number.isFinite(selected) && selected >= 1 && selected <= options.length) {
-    return options[selected - 1]?.value ?? fallback;
-  }
-  return fallback;
-}
-
 function printChecks(checks: SetupCheck[]): void {
   console.log();
   console.log(chalk.bold("Machine readiness"));
@@ -352,15 +291,15 @@ function startConductor(projectPath: string, configPath: string): void {
   const cliEntrypoint = process.argv[1];
   if (!cliEntrypoint || cliEntrypoint.endsWith(".ts")) {
     console.log();
-    console.log(chalk.yellow("Setup finished. Run `co start` to launch Conductor."));
+    console.log(chalk.yellow("Setup finished. Run `co start --open` to launch Conductor."));
     return;
   }
 
   console.log();
-  console.log(chalk.bold("Launching Conductor..."));
+  console.log(chalk.bold("Opening Conductor in your browser..."));
   execFileSync(
     process.execPath,
-    [cliEntrypoint, "start", "--workspace", projectPath],
+    [cliEntrypoint, "start", "--workspace", projectPath, "--open"],
     {
       cwd: projectPath,
       stdio: "inherit",
@@ -393,41 +332,33 @@ export function registerSetup(program: Command): void {
     .action(async (opts: SetupOptions) => {
       try {
         const cwd = process.cwd();
-        const agent = opts.agent?.trim() || await selectOption("Which AI assistant should Conductor use by default?", AGENT_OPTIONS, "claude-code");
-        const ide = opts.ide?.trim() || await selectOption("Which code editor should open when someone reviews work?", IDE_OPTIONS, "vscode");
-        const markdownEditor = opts.markdownEditor?.trim() || await selectOption("Which notes app should Conductor expect for docs and context?", MARKDOWN_EDITOR_OPTIONS, "obsidian");
+        const agent = opts.agent?.trim() || "claude-code";
+        const ide = opts.ide?.trim() || "vscode";
+        const markdownEditor = opts.markdownEditor?.trim() || "obsidian";
 
         console.log();
         console.log(chalk.bold("Conductor Setup"));
-        console.log(chalk.dim("We’ll check your machine, install what is missing, scaffold the workspace, and start Conductor."));
+        console.log(chalk.dim("We’ll scaffold this repo, launch the dashboard, and let the browser finish the guided setup."));
 
         let checks = rerunChecks(agent, ide, markdownEditor);
         printChecks(checks);
 
-        const installableChecks = checks.filter((check) => !check.installed && check.install);
-        if (installableChecks.length > 0) {
-          const shouldInstall = opts.yes || await askYesNo("Install the missing tools automatically?", true);
-          if (shouldInstall) {
-            for (const check of installableChecks) {
-              if (!check.install) continue;
-              console.log();
-              console.log(chalk.bold(check.install.label));
-              runCommand(check.install);
-            }
+        if (opts.yes) {
+          const installableChecks = checks.filter((check) => !check.installed && check.install);
+          for (const check of installableChecks) {
+            if (!check.install) continue;
+            console.log();
+            console.log(chalk.bold(check.install.label));
+            runCommand(check.install);
           }
-        }
 
-        checks = rerunChecks(agent, ide, markdownEditor);
-        const pendingAuth = checks.filter((check) => !check.installed && check.authCommand);
-        if (pendingAuth.length > 0) {
-          const shouldConnect = opts.yes || await askYesNo("Connect GitHub in your browser now?", true);
-          if (shouldConnect) {
-            for (const check of pendingAuth) {
-              if (!check.authCommand) continue;
-              console.log();
-              console.log(chalk.bold(check.authCommand.label));
-              runCommand(check.authCommand);
-            }
+          checks = rerunChecks(agent, ide, markdownEditor);
+          const pendingAuth = checks.filter((check) => !check.installed && check.authCommand);
+          for (const check of pendingAuth) {
+            if (!check.authCommand) continue;
+            console.log();
+            console.log(chalk.bold(check.authCommand.label));
+            runCommand(check.authCommand);
           }
         }
 
@@ -441,6 +372,7 @@ export function registerSetup(program: Command): void {
           for (const check of remainingManual) {
             console.log(`  - ${check.label}: ${check.detail}`);
           }
+          console.log(chalk.dim("You can keep going. Finish the product-facing setup in the dashboard after it opens."));
         }
 
         console.log();
@@ -461,7 +393,11 @@ export function registerSetup(program: Command): void {
 
         if (opts.start !== false) {
           startConductor(project.path, configPath);
+          return;
         }
+
+        console.log();
+        console.log(chalk.dim(`Next step: co start --workspace ${project.path} --open`));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error(chalk.red(`Setup failed: ${message}`));
