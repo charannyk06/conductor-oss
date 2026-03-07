@@ -109,7 +109,7 @@ jobs:
               for (const depType of ['dependencies', 'devDependencies', 'peerDependencies']) {
                 if (!pkg[depType]) continue;
                 for (const [name, ver] of Object.entries(pkg[depType])) {
-                  if (name.startsWith('@conductor-oss/') && !ver.startsWith('file:') && !ver.startsWith('workspace:')) {
+                  if (name.startsWith('@conductor-oss/') && !ver.startsWith('file:')) {
                     pkg[depType][name] = '${{ steps.version.outputs.new_version }}';
                   }
                 }
