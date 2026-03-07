@@ -23,13 +23,13 @@ interface SessionDetailProps {
 type SessionTab = "overview" | "chat" | "diff";
 
 function resolveSessionTab(value: string | null): SessionTab {
-  if (value === "chat" || value === "diff") {
+  if (value === "overview" || value === "chat" || value === "diff") {
     return value;
   }
   if (value === "terminal") {
     return "chat";
   }
-  return "overview";
+  return "chat";
 }
 
 export function SessionDetail({ sessionId }: SessionDetailProps) {

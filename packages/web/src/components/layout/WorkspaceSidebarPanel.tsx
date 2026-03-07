@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { DashboardSession } from "@/lib/types";
@@ -18,10 +19,11 @@ interface WorkspaceSidebarPanelProps {
   sessions: DashboardSession[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
+  onArchiveSession?: (sessionId: string) => Promise<void> | void;
   onCreateWorkspace: () => void;
 }
 
-export function WorkspaceSidebarPanel({
+export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
   orgLabel,
   projects,
   selectedProjectId,
@@ -29,13 +31,14 @@ export function WorkspaceSidebarPanel({
   sessions,
   selectedSessionId,
   onSelectSession,
+  onArchiveSession,
   onCreateWorkspace,
 }: WorkspaceSidebarPanelProps) {
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[var(--vk-bg-panel)]">
       <section className="flex h-[57px] items-center border-b border-[var(--vk-border)] px-4">
         <p className="truncate text-[15px] font-medium leading-[21px] text-[var(--vk-text-strong)]">
-            {orgLabel}
+          {orgLabel}
         </p>
         <button
           type="button"
@@ -80,10 +83,11 @@ export function WorkspaceSidebarPanel({
           sessions={sessions}
           selectedId={selectedSessionId}
           onSelect={onSelectSession}
+          onArchive={onArchiveSession}
           onCreateWorkspace={onCreateWorkspace}
           showHeader={false}
         />
       </section>
     </div>
   );
-}
+});

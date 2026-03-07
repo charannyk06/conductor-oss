@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ChevronDown,
@@ -19,6 +19,8 @@ import {
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
+import { TERMINAL_STATUSES, type SSESnapshotEvent } from "@/lib/types";
 
 type ReviewDiffKind = "meta" | "hunk" | "context" | "add" | "remove" | "info";
 type ReviewDiffSource = "working-tree" | "remote-pr" | "not-found";
@@ -105,6 +107,8 @@ const EMPTY_PAYLOAD: ReviewDiffPayload = {
   files: [],
   untracked: [],
 };
+const ACTIVE_DIFF_REFRESH_MS = 15_000;
+const HIDDEN_DIFF_REFRESH_MS = 30_000;
 
 function coerceStatus(value: unknown): ReviewDiffStatus {
   if (
@@ -328,6 +332,58 @@ function formatGeneratedAt(value: string): string {
   });
 }
 
+function stringArrayEqual(left: string[], right: string[]): boolean {
+  if (left === right) return true;
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function diffPayloadEqual(left: ReviewDiffPayload, right: ReviewDiffPayload): boolean {
+  if (
+    left.hasDiff !== right.hasDiff ||
+    left.generatedAt !== right.generatedAt ||
+    left.source !== right.source ||
+    left.truncated !== right.truncated ||
+    !stringArrayEqual(left.untracked, right.untracked) ||
+    left.files.length !== right.files.length
+  ) {
+    return false;
+  }
+
+  for (let fileIndex = 0; fileIndex < left.files.length; fileIndex += 1) {
+    const leftFile = left.files[fileIndex];
+    const rightFile = right.files[fileIndex];
+    if (
+      leftFile.path !== rightFile.path ||
+      leftFile.status !== rightFile.status ||
+      leftFile.additions !== rightFile.additions ||
+      leftFile.deletions !== rightFile.deletions ||
+      Boolean(leftFile.untracked) !== Boolean(rightFile.untracked) ||
+      leftFile.lines.length !== rightFile.lines.length
+    ) {
+      return false;
+    }
+
+    for (let lineIndex = 0; lineIndex < leftFile.lines.length; lineIndex += 1) {
+      const leftLine = leftFile.lines[lineIndex];
+      const rightLine = rightFile.lines[lineIndex];
+      if (
+        leftLine.kind !== rightLine.kind ||
+        leftLine.oldLine !== rightLine.oldLine ||
+        leftLine.newLine !== rightLine.newLine ||
+        leftLine.text !== rightLine.text
+      ) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 export function SessionDiff({ sessionId }: SessionDiffProps) {
   const encodedSessionId = encodeURIComponent(sessionId);
   const [payload, setPayload] = useState<ReviewDiffPayload>(EMPTY_PAYLOAD);
@@ -359,6 +415,8 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
 
   const mountedRef = useRef(true);
   const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const snapshotSignatureRef = useRef<string | null>(null);
+  const terminalRef = useRef(false);
 
   const parsedFiles = useCallback((data: ReviewDiffPayload) => normalizeDiffFiles(data), []);
 
@@ -418,7 +476,7 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
       };
 
       const nextFiles = parsedFiles(nextPayload);
-      setPayload(nextPayload);
+      setPayload((current) => (diffPayloadEqual(current, nextPayload) ? current : nextPayload));
       setSelectedPath((current) =>
         current && nextFiles.some((file) => file.path === current)
           ? current
@@ -541,17 +599,65 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
 
   useEffect(() => {
     mountedRef.current = true;
+    snapshotSignatureRef.current = null;
+    terminalRef.current = false;
     void fetchDiff();
-    const intervalId = window.setInterval(() => {
-      if (mountedRef.current) void fetchDiff();
-    }, 6000);
+    const unsubscribe = subscribeToSnapshotEvents((event: SSESnapshotEvent) => {
+      if (!mountedRef.current) return;
+      const matchingSession = event.sessions.find((value) => value.id === sessionId);
+      if (!matchingSession) return;
+      terminalRef.current = TERMINAL_STATUSES.has(matchingSession.status);
+      const signature = `${matchingSession.status}:${matchingSession.lastActivityAt}`;
+      if (snapshotSignatureRef.current === signature) {
+        return;
+      }
+      snapshotSignatureRef.current = signature;
+      void fetchDiff();
+    });
+
+    let timeoutId: number | null = null;
+    const scheduleRefresh = () => {
+      const delay = document.visibilityState === "visible" && !terminalRef.current
+        ? ACTIVE_DIFF_REFRESH_MS
+        : HIDDEN_DIFF_REFRESH_MS;
+      timeoutId = window.setTimeout(async () => {
+        if (!mountedRef.current) return;
+        await fetchDiff();
+        if (mountedRef.current) {
+          scheduleRefresh();
+        }
+      }, delay);
+    };
+    scheduleRefresh();
+
+    const refresh = () => {
+      snapshotSignatureRef.current = null;
+      void fetchDiff();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refresh();
+      }
+    };
+
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       mountedRef.current = false;
-      window.clearInterval(intervalId);
+      unsubscribe();
+      if (timeoutId != null) {
+        window.clearTimeout(timeoutId);
+      }
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [fetchDiff]);
+  }, [fetchDiff, sessionId]);
 
   useEffect(() => {
+    snapshotSignatureRef.current = null;
+    terminalRef.current = false;
+    setLoading(true);
     setSidebarView("changes");
     setWorkspaceSearch("");
     setSelectedWorkspacePath(null);
@@ -580,21 +686,36 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
     void fetchWorkspaceFileContent(selectedWorkspacePath);
   }, [fetchWorkspaceFileContent, selectedWorkspacePath, sidebarView]);
 
-  const allFiles = normalizeDiffFiles(payload);
+  const allFiles = useMemo(() => normalizeDiffFiles(payload), [payload]);
   const fileSearchValue = fileSearch.trim().toLowerCase();
-  const filteredFiles = fileSearchValue.length === 0
-    ? allFiles
-    : allFiles.filter((file) => file.path.toLowerCase().includes(fileSearchValue));
-  const tree = buildFileTree(filteredFiles);
-  const totalAdds = allFiles.reduce((sum, file) => sum + Math.max(0, file.additions), 0);
-  const totalDeletes = allFiles.reduce((sum, file) => sum + Math.max(0, file.deletions), 0);
-  const selectedFile = selectedPath
-    ? allFiles.find((file) => file.path === selectedPath) ?? null
-    : (allFiles[0] ?? null);
+  const filteredFiles = useMemo(
+    () => (fileSearchValue.length === 0
+      ? allFiles
+      : allFiles.filter((file) => file.path.toLowerCase().includes(fileSearchValue))),
+    [allFiles, fileSearchValue],
+  );
+  const tree = useMemo(() => buildFileTree(filteredFiles), [filteredFiles]);
+  const totalAdds = useMemo(
+    () => allFiles.reduce((sum, file) => sum + Math.max(0, file.additions), 0),
+    [allFiles],
+  );
+  const totalDeletes = useMemo(
+    () => allFiles.reduce((sum, file) => sum + Math.max(0, file.deletions), 0),
+    [allFiles],
+  );
+  const selectedFile = useMemo(
+    () => (selectedPath
+      ? allFiles.find((file) => file.path === selectedPath) ?? null
+      : (allFiles[0] ?? null)),
+    [allFiles, selectedPath],
+  );
   const workspaceSearchValue = workspaceSearch.trim().toLowerCase();
-  const filteredWorkspaceFiles = workspaceSearchValue.length === 0
-    ? workspaceFiles
-    : workspaceFiles.filter((path) => path.toLowerCase().includes(workspaceSearchValue));
+  const filteredWorkspaceFiles = useMemo(
+    () => (workspaceSearchValue.length === 0
+      ? workspaceFiles
+      : workspaceFiles.filter((path) => path.toLowerCase().includes(workspaceSearchValue))),
+    [workspaceFiles, workspaceSearchValue],
+  );
 
   function handleSelectFile(path: string) {
     setSelectedPath(path);

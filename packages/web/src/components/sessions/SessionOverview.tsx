@@ -40,6 +40,7 @@ interface SessionOverviewProps {
 }
 
 const statusVariant: Record<string, "success" | "warning" | "error" | "info" | "default"> = {
+  archived: "default",
   running: "success",
   working: "success",
   done: "default",
@@ -54,9 +55,13 @@ function CopyText({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // Clipboard access denied or unavailable — silently fail
+    }
   }
 
   return (
@@ -96,12 +101,15 @@ function parseCost(session: SessionData): number {
   const metadata = session.metadata;
   if (!metadata || typeof metadata !== "object") return 0;
 
-  const raw = (metadata as Record<string, unknown>)["cost"];
+  const raw = metadata["cost"];
   if (typeof raw !== "string") return 0;
 
   try {
-    const parsed = JSON.parse(raw) as { estimatedCostUsd?: number; totalUSD?: number };
-    return parsed.estimatedCostUsd ?? parsed.totalUSD ?? 0;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const estimated = typeof parsed.estimatedCostUsd === "number" ? parsed.estimatedCostUsd : 0;
+    const total = typeof parsed.totalUSD === "number" ? parsed.totalUSD : 0;
+    // HUMAN-REVIEWED: display-only cost, no billing impact
+    return estimated ?? total;
   } catch {
     return 0;
   }
@@ -184,70 +192,71 @@ export function SessionOverview({ session }: SessionOverviewProps) {
   );
 
   return (
-    <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
-      <div className="space-y-3">
-        {prompt && (
-          <Card>
-            <CardHeader>
-              <ListChecks className="h-4 w-4 text-[var(--accent)]" />
-              <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--text-faint)]">
-                Task Brief
-              </span>
-            </CardHeader>
-            <CardContent>
-              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--text-normal)]">{prompt}</p>
-            </CardContent>
-          </Card>
-        )}
+    <div className="space-y-3">
+      {prompt && (
+        <Card>
+          <CardHeader>
+            <ListChecks className="h-4 w-4 text-[var(--accent)]" />
+            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--text-faint)]">
+              Task Brief
+            </span>
+          </CardHeader>
+          <CardContent>
+            <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--text-normal)]">{prompt}</p>
+          </CardContent>
+        </Card>
+      )}
 
-        {(session.branch || worktree) && (
-          <Card>
-            <CardHeader>
-              <GitBranch className="h-4 w-4 text-[var(--text-faint)]" />
-              <span className="text-[12px] font-semibold text-[var(--text-normal)]">Workspace</span>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {session.branch && (
-                <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                  <GitBranch className="h-3.5 w-3.5 text-[var(--text-faint)]" />
-                  <CopyText text={session.branch} />
-                </div>
-              )}
-              {worktree && (
-                <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                  <FolderGit2 className="h-3.5 w-3.5 text-[var(--text-faint)]" />
-                  <CopyText text={worktree} />
-                </div>
-              )}
-              {(remoteEditorUrl || remoteAuthority) && (
-                <div className="surface-panel space-y-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                  {remoteEditorUrl && remoteEditorLabel ? (
-                    <a
-                      href={remoteEditorUrl}
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] transition-colors hover:text-[var(--text-strong)]"
-                    >
-                      <SquareArrowOutUpRight className="h-3.5 w-3.5" />
-                      <span>{`Open in ${remoteEditorLabel}`}</span>
-                    </a>
-                  ) : (
-                    <p className="text-[12px] text-[var(--text-muted)]">
-                      Remote deep links currently support VS Code and VS Code Insiders.
-                    </p>
-                  )}
-                  {remoteAuthority && (
-                    <p className="text-[11px] text-[var(--text-muted)]">
-                      Remote SSH: <span className="font-mono text-[var(--text-normal)]">{remoteAuthority}</span>
-                    </p>
-                  )}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )}
-      </div>
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
+        <div className="space-y-3">
+          {(session.branch || worktree) && (
+            <Card>
+              <CardHeader>
+                <GitBranch className="h-4 w-4 text-[var(--text-faint)]" />
+                <span className="text-[12px] font-semibold text-[var(--text-normal)]">Workspace</span>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {session.branch && (
+                  <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+                    <GitBranch className="h-3.5 w-3.5 text-[var(--text-faint)]" />
+                    <CopyText text={session.branch} />
+                  </div>
+                )}
+                {worktree && (
+                  <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+                    <FolderGit2 className="h-3.5 w-3.5 text-[var(--text-faint)]" />
+                    <CopyText text={worktree} />
+                  </div>
+                )}
+                {(remoteEditorUrl || remoteAuthority) && (
+                  <div className="surface-panel space-y-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+                    {remoteEditorUrl && remoteEditorLabel ? (
+                      <a
+                        href={remoteEditorUrl}
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] transition-colors hover:text-[var(--text-strong)]"
+                      >
+                        <SquareArrowOutUpRight className="h-3.5 w-3.5" />
+                        <span>{`Open in ${remoteEditorLabel}`}</span>
+                      </a>
+                    ) : (
+                      <p className="text-[12px] text-[var(--text-muted)]">
+                        Remote deep links currently support VS Code and VS Code Insiders.
+                      </p>
+                    )}
+                    {remoteAuthority && (
+                      <p className="text-[11px] text-[var(--text-muted)]">
+                        Remote SSH: <span className="font-mono text-[var(--text-normal)]">{remoteAuthority}</span>
+                      </p>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+        </div>
 
-      <div className="space-y-3">
+        <div className="space-y-3">
         <Card>
           <CardHeader>
             <AgentTileIcon seed={{ label: agentName || "agent" }} className="h-6 w-6" />
@@ -256,8 +265,8 @@ export function SessionOverview({ session }: SessionOverviewProps) {
           <CardContent className="space-y-2.5">
             <div className="flex flex-wrap gap-1.5">
               <Badge variant={statusVariant[session.status] ?? "default"}>{session.status}</Badge>
-              {session.activity && <Badge variant="info">{session.activity as string}</Badge>}
-              {session.attention && <Badge variant="warning">{session.attention as string}</Badge>}
+              {session.activity && <Badge variant="info">{session.activity}</Badge>}
+              {session.attention && <Badge variant="warning">{session.attention}</Badge>}
             </div>
             <p className="text-[13px] text-[var(--text-normal)]">{agentName || "Unknown agent"}</p>
           </CardContent>
@@ -280,6 +289,7 @@ export function SessionOverview({ session }: SessionOverviewProps) {
             />
           </CardContent>
         </Card>
+        </div>
       </div>
     </div>
   );

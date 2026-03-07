@@ -1,33 +1,32 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Search } from "lucide-react";
+import { useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { Archive, Search } from "lucide-react";
 import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { cn } from "@/lib/cn";
-import { AgentTileIcon } from "@/components/AgentTileIcon";
 
 interface SidebarProps {
   sessions: DashboardSession[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onArchive?: (id: string) => Promise<void> | void;
   onCreateWorkspace?: () => void;
   showHeader?: boolean;
 }
 
-interface GroupConfig {
-  id: "needs_attention" | "running" | "idle";
-  title: string;
-}
-
-const GROUPS: GroupConfig[] = [
-  { id: "needs_attention", title: "Needs Attention" },
-  { id: "running", title: "Running" },
-  { id: "idle", title: "Idle" },
-];
+const SESSION_ICON_DOTS = [
+  { top: 0, left: 1, delay: "0ms", opacity: 1 },
+  { top: 0, left: 9, delay: "120ms", opacity: 0.9 },
+  { top: 6, left: 1, delay: "240ms", opacity: 0.8 },
+  { top: 6, left: 9, delay: "360ms", opacity: 0.7 },
+  { top: 12, left: 1, delay: "480ms", opacity: 0.6 },
+  { top: 12, left: 9, delay: "600ms", opacity: 0.45 },
+] as const;
 
 function formatAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
+  if (diffMs < 0 || !Number.isFinite(diffMs)) return "now";
   const minutes = Math.floor(diffMs / 60_000);
   if (minutes < 1) return "now";
   if (minutes < 60) return `${minutes}m ago`;
@@ -37,81 +36,178 @@ function formatAge(isoDate: string): string {
   return `${days}d ago`;
 }
 
-function classify(attention: AttentionLevel): GroupConfig["id"] {
-  if (attention === "respond" || attention === "review" || attention === "merge") return "needs_attention";
-  if (attention === "working") return "running";
-  return "idle";
+function getSessionLabel(session: DashboardSession): string {
+  const worktree = session.metadata["worktree"]?.trim() ?? "";
+  if (!worktree) return "local";
+  const normalized = worktree.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized.includes("/worktrees/") ? "worktree" : "local";
 }
 
-function parseCostUsd(session: DashboardSession): string | null {
-  const raw = session.metadata?.["cost"];
-  if (!raw) return null;
+function getSessionSubtitle(session: DashboardSession): string {
+  const branch = session.branch?.trim();
+  if (branch) return branch;
 
-  try {
-    const parsed = JSON.parse(raw) as { estimatedCostUsd?: number; totalUSD?: number };
-    const value = parsed.estimatedCostUsd ?? parsed.totalUSD;
-    if (!value || value <= 0) return null;
-    return `$${value.toFixed(2)}`;
-  } catch {
-    return null;
+  const summary = session.summary?.trim() || session.metadata["summary"]?.trim();
+  if (summary) return summary;
+
+  if (session.status?.trim()) {
+    return session.status.replace(/[_-]+/g, " ");
+  }
+
+  return session.id.slice(0, 8);
+}
+
+function parseDiffStats(session: DashboardSession): { additions: number; deletions: number } | null {
+  const candidates = [
+    session.metadata["lastStderr"],
+    session.metadata["summary"],
+    session.summary,
+  ];
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const match = candidate.match(/(\d+)\s+insertions?\(\+\),\s+(\d+)\s+deletions?\(-\)/i);
+    if (!match) continue;
+    const additions = Number.parseInt(match[1] ?? "0", 10);
+    const deletions = Number.parseInt(match[2] ?? "0", 10);
+    if (Number.isFinite(additions) && Number.isFinite(deletions)) {
+      return { additions, deletions };
+    }
+  }
+
+  return null;
+}
+
+function getStatusBadge(session: DashboardSession, level: AttentionLevel): { label: string; className: string } {
+  const summary = `${session.summary ?? ""} ${session.metadata["summary"] ?? ""}`.toLowerCase();
+
+  if (session.status === "killed" || summary.includes("interrupted")) {
+    return {
+      label: "Interrupted",
+      className: "text-[var(--vk-orange)]",
+    };
+  }
+
+  switch (level) {
+    case "merge":
+      return {
+        label: "Ready",
+        className: "text-[var(--vk-green)]",
+      };
+    case "respond":
+      return {
+        label: "Needs input",
+        className: "text-[var(--vk-red)]",
+      };
+    case "review":
+      return {
+        label: "Review",
+        className: "text-[var(--vk-orange)]",
+      };
+    case "working":
+      return {
+        label: "Running",
+        className: "text-[#4e87f3]",
+      };
+    case "done":
+      return {
+        label: "Done",
+        className: "text-[var(--vk-text-muted)]",
+      };
+    default:
+      return {
+        label: "Queued",
+        className: "text-[var(--vk-text-muted)]",
+      };
   }
 }
 
-function getAttentionColor(level: AttentionLevel): string {
-  if (level === "merge") return "var(--vk-green)";
-  if (level === "respond") return "var(--vk-red)";
-  if (level === "review") return "var(--vk-orange)";
-  if (level === "working") return "#4e87f3";
-  return "var(--vk-text-muted)";
+function SessionRuntimeIcon({ running }: { running: boolean }) {
+  return (
+    <span className="mt-1 inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--vk-orange)]">
+      <span className="relative h-[12px] w-[10px]">
+        {SESSION_ICON_DOTS.map((dot, index) => (
+          <span
+            key={index}
+            className={cn(
+              "absolute h-[2px] w-[2px] rounded-full bg-current",
+              running && "animate-pulse",
+            )}
+            style={{
+              top: `${Math.round(dot.top * 0.75)}px`,
+              left: `${Math.round(dot.left * 0.75)}px`,
+              opacity: dot.opacity,
+              animationDelay: dot.delay,
+            }}
+          />
+        ))}
+      </span>
+    </span>
+  );
 }
 
 export function Sidebar({
   sessions,
   selectedId,
   onSelect,
+  onArchive,
   onCreateWorkspace,
   showHeader = true,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
-  const [collapsed, setCollapsed] = useState<Record<GroupConfig["id"], boolean>>({
-    needs_attention: false,
-    running: false,
-    idle: false,
-  });
+  const [archivingId, setArchivingId] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return sessions;
+    const visibleSessions = sessions.filter((session) => session.status !== "archived");
+    if (!search.trim()) return visibleSessions;
     const q = search.toLowerCase();
 
-    return sessions.filter((session) => {
+    return visibleSessions.filter((session) => {
       const summary = session.summary ?? "";
+      const branch = session.branch ?? "";
+      const agent = session.metadata["agent"] ?? "";
+      const label = getSessionLabel(session);
+      const subtitle = getSessionSubtitle(session);
       return (
         session.id.toLowerCase().includes(q) ||
         session.projectId.toLowerCase().includes(q) ||
-        summary.toLowerCase().includes(q)
+        summary.toLowerCase().includes(q) ||
+        branch.toLowerCase().includes(q) ||
+        agent.toLowerCase().includes(q) ||
+        label.toLowerCase().includes(q) ||
+        subtitle.toLowerCase().includes(q)
       );
     });
   }, [search, sessions]);
 
-  const grouped = useMemo(() => {
-    const result: Record<GroupConfig["id"], DashboardSession[]> = {
-      needs_attention: [],
-      running: [],
-      idle: [],
-    };
-
-    for (const session of filtered) {
-      result[classify(getAttentionLevel(session))].push(session);
+  const handleSessionKeyDown = (event: KeyboardEvent<HTMLDivElement>, sessionId: string) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onSelect(sessionId);
     }
+  };
 
-    for (const key of Object.keys(result) as GroupConfig["id"][]) {
-      result[key].sort(
-        (a, b) =>
-          new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime(),
-      );
+  const handleArchive = async (event: MouseEvent<HTMLButtonElement>, sessionId: string) => {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!onArchive || archivingId === sessionId) return;
+    setArchivingId(sessionId);
+    try {
+      await onArchive(sessionId);
+    } catch (error) {
+      console.error("Failed to archive session", error);
+      setArchiveError(sessionId);
+      window.setTimeout(() => setArchiveError(null), 3000);
+    } finally {
+      setArchivingId((current) => (current === sessionId ? null : current));
     }
+  };
 
-    return result;
+  const orderedSessions = useMemo(() => {
+    return [...filtered].sort(
+      (a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime(),
+    );
   }, [filtered]);
 
   return (
@@ -144,77 +240,79 @@ export function Sidebar({
         </label>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {GROUPS.map((group) => {
-          const items = grouped[group.id];
-          const isCollapsed = collapsed[group.id];
+      <div className="flex-1 overflow-y-auto px-2 pb-2">
+        {orderedSessions.length === 0 ? (
+          <p className="px-2 py-2 text-[14px] text-[var(--vk-text-muted)]">No sessions</p>
+        ) : (
+          <div className="space-y-2">
+            {orderedSessions.map((session) => {
+              const level = getAttentionLevel(session);
+              const diffStats = parseDiffStats(session);
+              const statusBadge = getStatusBadge(session, level);
+              const isSelected = session.id === selectedId;
+              const isRunning = level === "working";
+              const isArchiving = archivingId === session.id;
+              const hasArchiveError = archiveError === session.id;
 
-          return (
-            <section key={group.id} className="pt-1">
-              <button
-                type="button"
-                className="flex h-8 w-full items-center px-2 text-left"
-                onClick={() => setCollapsed((prev) => ({ ...prev, [group.id]: !prev[group.id] }))}
-              >
-                <span className="text-[16px] text-[var(--vk-text-normal)]">{group.title}</span>
-                <span className="ml-auto text-[var(--vk-text-muted)]">
-                  {isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                </span>
-              </button>
-
-              {!isCollapsed && (
-                <div>
-                  {items.length === 0 && (
-                    <p className="px-2 py-1 text-[14px] text-[var(--vk-text-muted)]">No workspaces</p>
+              return (
+                <div
+                  key={session.id}
+                  onClick={() => onSelect(session.id)}
+                  onKeyDown={(event) => handleSessionKeyDown(event, session.id)}
+                  role="button"
+                  tabIndex={0}
+                  className={cn(
+                    "group flex w-full items-start gap-3 rounded-[8px] border px-3 py-3 text-left transition-colors",
+                    isSelected
+                      ? "border-[rgba(234,122,42,0.28)] bg-[rgba(255,255,255,0.08)]"
+                      : "border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] hover:bg-[var(--vk-bg-hover)]",
                   )}
-                  {items.map((session) => {
-                    const level = getAttentionLevel(session);
-                    const cost = parseCostUsd(session);
-                    const isSelected = session.id === selectedId;
-                    const agentName = session.metadata["agent"]?.trim() ?? "";
+                >
+                  <SessionRuntimeIcon running={isRunning} />
 
-                    return (
-                      <button
-                        key={session.id}
-                        type="button"
-                        onClick={() => onSelect(session.id)}
-                        className={cn(
-                          "group flex w-full flex-col px-2 py-1 text-left",
-                          isSelected ? "bg-[var(--vk-bg-hover)]" : "hover:bg-[var(--vk-bg-hover)]",
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-start gap-2">
+                      <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-[var(--vk-text-strong)]">
+                        {getSessionLabel(session)}
+                      </span>
+                      <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium">
+                        {diffStats ? (
+                          <span className="flex items-center gap-2">
+                            <span className="text-[#18c58f]">+{diffStats.additions}</span>
+                            <span className="text-[#f26d6d]">-{diffStats.deletions}</span>
+                          </span>
+                        ) : (
+                          <span className={statusBadge.className}>{statusBadge.label}</span>
                         )}
-                      >
-                        <div className="flex items-center gap-2">
-                          <AgentTileIcon
-                            seed={{ label: agentName || "agent" }}
-                            className="h-6 w-6"
-                          />
-                          <p className="truncate text-[14px] text-[var(--vk-text-normal)]">
-                            {session.summary ?? session.id}
-                          </p>
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-1 text-[14px]">
-                          <span className="text-[var(--vk-text-muted)]">{formatAge(session.lastActivityAt)}</span>
-                          {agentName && (
-                            <span className="truncate text-[11px] text-[var(--vk-text-muted)]">
-                              {agentName}
-                            </span>
-                          )}
-                          {cost && (
-                            <span className="ml-auto text-[11px]" style={{ color: getAttentionColor(level) }}>
-                              {cost}
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                    );
-                  })}
+                      </span>
+                    </span>
+                    <span className="mt-1 block truncate text-[12px] text-[var(--vk-text-muted)]">
+                      {getSessionSubtitle(session)}
+                    </span>
+                  </span>
+                  {onArchive ? (
+                    <button
+                      type="button"
+                      onClick={(event) => void handleArchive(event, session.id)}
+                      disabled={isArchiving}
+                      className={cn(
+                        "mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] transition",
+                        "opacity-70 group-hover:opacity-100 focus-visible:opacity-100",
+                        "hover:border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]",
+                        isArchiving && "cursor-wait opacity-100",
+                      )}
+                      aria-label={`Archive session ${session.id}`}
+                      title={hasArchiveError ? "Archive failed" : "Archive session"}
+                    >
+                      <Archive className={cn("h-3.5 w-3.5", hasArchiveError && "text-red-400")} />
+                    </button>
+                  ) : null}
                 </div>
-              )}
-            </section>
-          );
-        })}
+              );
+            })}
+          </div>
+        )}
       </div>
-
     </div>
   );
 }
