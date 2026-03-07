@@ -64,6 +64,11 @@
     "automation",
     "devtools"
   ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/charannyk06/conductor-oss",
+    "directory": "packages/cli"
+  },
   "homepage": "https://github.com/charannyk06/conductor-oss",
   "bugs": {
     "url": "https://github.com/charannyk06/conductor-oss/issues"
