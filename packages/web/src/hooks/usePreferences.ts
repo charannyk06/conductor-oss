@@ -29,7 +29,7 @@ function normalizePreferences(value: unknown): UserPreferencesResponse {
     onboardingAcknowledged: payload["onboardingAcknowledged"] === true,
     codingAgent: typeof payload["codingAgent"] === "string" && payload["codingAgent"].trim().length > 0
       ? payload["codingAgent"].trim()
-      : "qwen-code",
+      : "claude-code",
     ide: typeof payload["ide"] === "string" && payload["ide"].trim().length > 0
       ? payload["ide"].trim()
       : "vscode",

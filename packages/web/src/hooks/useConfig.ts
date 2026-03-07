@@ -5,11 +5,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 export interface ConfigProject {
   id: string;
   repo: string | null;
+  path: string | null;
   iconUrl: string | null;
   boardDir?: string | null;
   boardFile?: string | null;
   description: string | null;
+  defaultBranch: string;
   agent: string;
+  agentPermissions: string | null;
   agentModel: string | null;
   agentReasoningEffort: string | null;
 }
@@ -28,13 +31,20 @@ function normalizeProject(
   return {
     id,
     repo: typeof raw?.["repo"] === "string" ? raw["repo"] : null,
+    path: typeof raw?.["path"] === "string" ? raw["path"] : null,
     iconUrl: typeof raw?.["iconUrl"] === "string" ? raw["iconUrl"] : null,
     boardDir: typeof raw?.["boardDir"] === "string" ? raw["boardDir"] : null,
     boardFile: typeof raw?.["boardFile"] === "string" ? raw["boardFile"] : null,
     description: typeof raw?.["description"] === "string" ? raw["description"] : null,
+    defaultBranch: typeof raw?.["defaultBranch"] === "string" && raw["defaultBranch"].trim().length > 0
+      ? raw["defaultBranch"]
+      : "main",
     agent: typeof raw?.["agent"] === "string" && raw["agent"].trim().length > 0
       ? raw["agent"]
-      : "qwen-code",
+      : "claude-code",
+    agentPermissions: typeof raw?.["agentPermissions"] === "string" && raw["agentPermissions"].trim().length > 0
+      ? raw["agentPermissions"]
+      : null,
     agentModel: typeof raw?.["agentModel"] === "string" && raw["agentModel"].trim().length > 0
       ? raw["agentModel"]
       : null,
