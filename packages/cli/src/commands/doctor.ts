@@ -6,6 +6,7 @@ import { loadConfig } from "../services.js";
 interface DoctorOptions {
   workspace?: string;
   json?: boolean;
+  fixConfig?: boolean;
 }
 
 export function registerDoctor(program: Command): void {
@@ -14,6 +15,7 @@ export function registerDoctor(program: Command): void {
     .description("Diagnose board watcher parsing/dispatch issues")
     .option("-w, --workspace <path>", "Workspace path (defaults to CONDUCTOR_WORKSPACE)")
     .option("--json", "Output JSON report")
+    .option("--fix-config", "Regenerate drifted project-local conductor.yaml files")
     .action(async (opts: DoctorOptions) => {
       try {
         const config = await loadConfig(opts.workspace);
@@ -156,6 +158,59 @@ export function registerDoctor(program: Command): void {
             const lvl = action.level === "error" ? chalk.red(action.level) : action.level === "debug" ? chalk.dim(action.level) : chalk.green(action.level);
             const board = action.boardPath ? ` ${chalk.cyan(action.boardPath)}` : "";
             console.log(`  ${chalk.dim(action.ts)} ${lvl}${board} ${action.action}`);
+          }
+        }
+
+        // Config drift detection
+        const detectConfigDrift = core["detectConfigDrift"] as
+          | ((cfg: unknown) => Array<{ projectId: string; projectPath: string; localConfigPath: string; status: string; reason?: string; driftedFields?: string[] }>)
+          | undefined;
+        const syncAllProjectConfigs = core["syncAllProjectConfigs"] as
+          | ((cfg: unknown) => { reports: Array<{ projectId: string; status: string; reason?: string }>; fixed: number })
+          | undefined;
+
+        let configDriftReports: Array<{ projectId: string; projectPath: string; localConfigPath: string; status: string; reason?: string; driftedFields?: string[] }> = [];
+
+        if (detectConfigDrift) {
+          configDriftReports = detectConfigDrift(config);
+
+          if (opts.fixConfig && syncAllProjectConfigs) {
+            const syncResult = syncAllProjectConfigs(config);
+            console.log();
+            console.log(chalk.bold("Config Sync"));
+            if (syncResult.fixed > 0) {
+              console.log(chalk.green(`  Fixed ${syncResult.fixed} project-local config(s)`));
+            } else {
+              console.log(chalk.green("  All project-local configs are in sync"));
+            }
+            // Re-detect after fix
+            configDriftReports = detectConfigDrift(config);
+          }
+        }
+
+        console.log();
+        console.log(chalk.bold("Project Config Drift"));
+        if (configDriftReports.length === 0) {
+          console.log(chalk.yellow("  Config drift detection unavailable. Run pnpm build."));
+        } else {
+          for (const drift of configDriftReports) {
+            const statusLabel =
+              drift.status === "ok" ? chalk.green("ok") :
+              drift.status === "missing" ? chalk.yellow("missing") :
+              drift.status === "unmanaged" ? chalk.blue("unmanaged") :
+              chalk.red("drifted");
+            console.log(`  ${statusLabel} ${chalk.cyan(drift.projectId)}`);
+            if (drift.reason) {
+              console.log(`    ${chalk.dim(drift.reason)}`);
+            }
+            if (drift.driftedFields && drift.driftedFields.length > 0) {
+              console.log(`    ${chalk.yellow("changed:")} ${drift.driftedFields.join(", ")}`);
+            }
+          }
+
+          const driftCount = configDriftReports.filter((r) => r.status === "drifted" || r.status === "missing").length;
+          if (driftCount > 0 && !opts.fixConfig) {
+            hints.push(`${driftCount} project config(s) are drifted or missing. Run \`co doctor --fix-config\` to repair.`);
           }
         }
 

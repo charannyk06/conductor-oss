@@ -294,6 +294,14 @@ export function registerStart(program: Command): void {
           agentNames: supportedAgents,
         });
 
+        // Startup config sync: regenerate drifted project-local conductor.yaml mirrors
+        if (typeof core.startupConfigSync === "function") {
+          const syncResult = core.startupConfigSync(config);
+          if (syncResult.fixed > 0) {
+            console.log(chalk.dim(`  Synced ${syncResult.fixed} project-local config(s) from canonical`));
+          }
+        }
+
         if (typeof core.createLifecycleManager !== "function") {
           spinner.warn("Lifecycle manager not yet implemented in @conductor-oss/core");
         } else {

@@ -115,3 +115,29 @@ export {
   parseChecklistItems,
   getUncheckedTasks,
 } from "./board-parser.js";
+
+// Webhook emitter
+export { createWebhookEmitter } from "./webhook-emitter.js";
+export type { WebhookEmitter, WebhookEmitterConfig, WebhookTarget, WebhookMetrics } from "./webhook-emitter.js";
+
+// Event bus
+export { createEventBus } from "./event-bus.js";
+export type { EventBus, EventBusConfig, EventBusMetrics, EventFilter, EventSubscriber } from "./event-bus.js";
+
+// Spawn limiter
+export { createSpawnLimiter } from "./spawn-limiter.js";
+export type { SpawnLimiter, SpawnLimiterConfig, SpawnLimiterMetrics } from "./spawn-limiter.js";
+
+// Config sync and drift detection
+export {
+  detectConfigDrift,
+  syncAllProjectConfigs,
+  startupConfigSync,
+} from "./config-sync.js";
+export type {
+  ConfigDriftReport,
+  ConfigSyncResult,
+} from "./config-sync.js";
+
+// Re-export generation marker from scaffold
+export { GENERATED_MARKER_KEY } from "./scaffold.js";
