@@ -195,8 +195,9 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         id: pack
         run: |
+          set -eo pipefail
           mkdir -p .release-artifacts
-          tarball_path=$(node scripts/pack-cli-release.mjs --pack-destination .release-artifacts)
+          tarball_path=$(node scripts/pack-cli-release.mjs --pack-destination .release-artifacts | tail -n 1)
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
 
       - name: Tag release

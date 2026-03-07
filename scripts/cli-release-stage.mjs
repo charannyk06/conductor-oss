@@ -243,18 +243,19 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
 
   // Install external dependencies and resolve file: tarballs for internal ones.
   // Internal package tarballs reference other internal packages by version number,
-  // which don't exist on npm until after the first publish. Use --install-strategy=shallow
-  // so npm only installs direct dependencies without recursing into sub-deps.
-  // The bundleDependencies field ensures internal packages are packed into the final tarball.
+  // which don't exist on npm until after the first publish. Try a shallow install
+  // first so npm only installs direct dependencies without recursing into sub-deps.
+  // If that still attempts to resolve unpublished internal versions, fall back to
+  // installing only external deps and unpack internal tarballs manually.
   try {
-    execFileSync("npm", ["install", "--omit=dev", "--no-package-lock", "--install-strategy=shallow"], {
+    execFileSync("npm", ["install", "--silent", "--omit=dev", "--no-package-lock", "--install-strategy=shallow"], {
       cwd: outputDir,
-      stdio: "inherit",
+      stdio: ["ignore", "ignore", "pipe"],
     });
   } catch {
     // If shallow install fails (pre-publish), fall back to installing only external deps
     // by temporarily removing internal deps from package.json, installing, then restoring.
-    console.log("Shallow install failed, falling back to manual external-only install...");
+    console.error("Shallow install failed, falling back to manual external-only install...");
     const manifest = readJson(join(outputDir, "package.json"));
     const fullDeps = { ...manifest.dependencies };
     const externalDeps = {};
@@ -266,7 +267,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     manifest.dependencies = externalDeps;
     writeJson(join(outputDir, "package.json"), manifest);
 
-    execFileSync("npm", ["install", "--omit=dev", "--no-package-lock"], {
+    execFileSync("npm", ["install", "--silent", "--omit=dev", "--no-package-lock"], {
       cwd: outputDir,
       stdio: "inherit",
     });
