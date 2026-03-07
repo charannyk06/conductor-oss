@@ -3,6 +3,7 @@ pub mod state;
 
 use anyhow::Result;
 use axum::Router;
+use axum::http::{HeaderValue, Method};
 use conductor_core::{ConductorConfig, EventBus};
 use conductor_db::Database;
 use std::net::{IpAddr, SocketAddr};
@@ -16,7 +17,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .config_path
         .clone()
         .unwrap_or_else(|| config.workspace.join("conductor.yaml"));
-    let state = AppState::new(config_path, config.clone(), db);
+    let state = AppState::new(config_path, config.clone(), db).await;
     state.discover_executors().await;
     state.publish_snapshot().await;
 
@@ -36,7 +37,28 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .merge(routes::notifications::router())
         .merge(routes::auth::router())
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer({
+            let mut origins: Vec<HeaderValue> = vec![
+                "http://localhost:3000".parse::<HeaderValue>().unwrap(),
+                "http://127.0.0.1:3000".parse::<HeaderValue>().unwrap(),
+                format!("http://localhost:{}", config.effective_port()).parse::<HeaderValue>().unwrap(),
+                format!("http://127.0.0.1:{}", config.effective_port()).parse::<HeaderValue>().unwrap(),
+            ];
+            for extra in &config.server.cors_origins {
+                if let Ok(value) = extra.parse::<HeaderValue>() {
+                    origins.push(value);
+                }
+            }
+            CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE, Method::OPTIONS])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::ACCEPT,
+                ])
+                .allow_credentials(true)
+        })
         .layer(TraceLayer::new_for_http());
 
     let host = config.server.host.parse::<IpAddr>().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));

@@ -46,6 +46,9 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Extra CORS origins beyond the default localhost entries.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -53,6 +56,7 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            cors_origins: Vec::new(),
         }
     }
 }
