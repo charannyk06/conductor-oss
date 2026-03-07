@@ -1,13 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
-import { resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
+import { isAbsolute, relative, resolve } from "node:path";
 import { guardApiAccess } from "@/lib/auth";
 
 const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
+
+const ALLOWED_LOCAL_REPO_ROOTS = [homedir(), "/Volumes"];
+const ALLOWED_REMOTE_PROTOCOLS = new Set(["https:", "http:", "ssh:", "git:"]);
 
 function asNonEmpty(value: string | null): string | null {
   if (!value) return null;
@@ -15,11 +19,76 @@ function asNonEmpty(value: string | null): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+class InputError extends Error {}
+
 function expandHome(path: string): string {
   if (path.startsWith("~/")) {
     return resolve(homedir(), path.slice(2));
   }
   return resolve(path);
+}
+
+function isWithinAllowedRoots(path: string): boolean {
+  return ALLOWED_LOCAL_REPO_ROOTS.some((root) => {
+    const rel = relative(root, path);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  });
+}
+
+function normalizeScpStyleRemote(value: string): string | null {
+  const match = value.match(
+    /^(?<user>[A-Za-z0-9._-]+)@(?<host>[A-Za-z0-9.-]+):(?<repo>[A-Za-z0-9._~/-]+(?:\.git)?)$/,
+  );
+  if (!match?.groups) return null;
+  const { user, host, repo } = match.groups;
+  return `ssh://${user}@${host}/${repo}`;
+}
+
+function normalizeGitRemote(rawValue: string): string {
+  if (/[\0\r\n]/.test(rawValue) || rawValue.startsWith("-")) {
+    throw new InputError("Invalid gitUrl");
+  }
+
+  const candidate = normalizeScpStyleRemote(rawValue) ?? rawValue;
+  const url = new URL(candidate);
+
+  if (!ALLOWED_REMOTE_PROTOCOLS.has(url.protocol) || !url.hostname || url.search || url.hash) {
+    throw new InputError("Unsupported gitUrl");
+  }
+
+  if (url.hostname.startsWith("-")) {
+    throw new InputError("Unsupported gitUrl");
+  }
+
+  const normalizedPathname = url.pathname.replace(/\/+$/, "");
+  if (normalizedPathname.length <= 1) {
+    throw new InputError("gitUrl must include a repository path");
+  }
+
+  const normalized = new URL(`${url.protocol}//${url.host}${normalizedPathname}`);
+  if (url.username) {
+    normalized.username = url.username;
+  }
+  return normalized.toString();
+}
+
+async function resolveLocalRepoPath(rawPath: string): Promise<string> {
+  const requestedPath = expandHome(rawPath);
+  if (!isWithinAllowedRoots(requestedPath)) {
+    throw new InputError("Path is outside the allowed repository roots");
+  }
+
+  const canonicalPath = await realpath(requestedPath);
+  if (!isWithinAllowedRoots(canonicalPath)) {
+    throw new InputError("Path is outside the allowed repository roots");
+  }
+
+  const pathStat = await stat(canonicalPath);
+  if (!pathStat.isDirectory()) {
+    throw new InputError("Path must be a directory");
+  }
+
+  return canonicalPath;
 }
 
 function dedupeAndSortBranches(branches: string[]): string[] {
@@ -35,7 +104,7 @@ async function readRemoteDefaultBranch(gitUrl: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["ls-remote", "--symref", gitUrl, "HEAD"],
+      ["ls-remote", "--symref", "--", gitUrl, "HEAD"],
       { timeout: 30_000 },
     );
     const line = stdout
@@ -52,7 +121,7 @@ async function readRemoteDefaultBranch(gitUrl: string): Promise<string | null> {
 async function listRemoteBranches(gitUrl: string): Promise<{ branches: string[]; defaultBranch: string | null }> {
   const { stdout } = await execFileAsync(
     "git",
-    ["ls-remote", "--heads", "--refs", gitUrl],
+    ["ls-remote", "--heads", "--refs", "--", gitUrl],
     { timeout: 30_000 },
   );
 
@@ -76,14 +145,14 @@ async function listRemoteBranches(gitUrl: string): Promise<{ branches: string[];
 async function listLocalBranches(path: string): Promise<{ branches: string[]; defaultBranch: string | null }> {
   const { stdout } = await execFileAsync(
     "git",
-    ["-C", path, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin"],
-    { timeout: 20_000 },
+    ["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin"],
+    { timeout: 20_000, cwd: path },
   );
 
   const defaultBranchRaw = await execFileAsync(
     "git",
-    ["-C", path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    { timeout: 20_000 },
+    ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    { timeout: 20_000, cwd: path },
   ).then((result) => result.stdout.trim()).catch(() => "");
 
   const branches = stdout.split("\n").filter(Boolean);
@@ -110,15 +179,16 @@ export async function GET(request: NextRequest) {
 
   try {
     if (rawPath) {
-      const path = expandHome(rawPath);
+      const path = await resolveLocalRepoPath(rawPath);
       const payload = await listLocalBranches(path);
       return NextResponse.json({ ...payload, source: "local" });
     }
 
-    const payload = await listRemoteBranches(gitUrl!);
+    const payload = await listRemoteBranches(normalizeGitRemote(gitUrl!));
     return NextResponse.json({ ...payload, source: "remote" });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to load branches";
-    return NextResponse.json({ error: message }, { status: 500 });
+    const status = err instanceof InputError ? 400 : 500;
+    return NextResponse.json({ error: message }, { status });
   }
 }
