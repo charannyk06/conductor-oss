@@ -51,7 +51,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Bump version
+      # Build and test BEFORE version bump so workspace:* protocol is intact
+      - name: Build all packages
+        run: pnpm build:release
+
+      - name: Run tests
+        run: |
+          pnpm --filter @conductor-oss/core test
+          pnpm --filter conductor-oss test
+
+      - name: Compute next version
         id: version
         run: |
           current_version=$(node -p "require('./packages/cli/package.json').version")
@@ -80,11 +89,13 @@ jobs:
             else console.log(major + '.' + minor + '.' + (patch+1));
           ")
           echo "New version: $new_version"
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "tag_name=v$new_version" >> "$GITHUB_OUTPUT"
 
-          # Update all package versions using sync script
+      - name: Bump version in package files
+        run: |
           node -e "
             const { readFileSync, writeFileSync } = require('fs');
-            const { join } = require('path');
             const { execSync } = require('child_process');
 
             const packages = execSync('find packages -name package.json -not -path \"*/node_modules/*\" -not -path \"*/.next/*\"', { encoding: 'utf8' })
@@ -93,36 +104,19 @@ jobs:
             for (const pkgPath of packages) {
               const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
               if (pkg.private) continue;
-              pkg.version = '$new_version';
-              // Update internal deps
+              pkg.version = '${{ steps.version.outputs.new_version }}';
+              // Update internal deps (skip workspace: protocol, those are for pnpm only)
               for (const depType of ['dependencies', 'devDependencies', 'peerDependencies']) {
                 if (!pkg[depType]) continue;
                 for (const [name, ver] of Object.entries(pkg[depType])) {
-                  if (name.startsWith('@conductor-oss/') && !ver.startsWith('file:')) {
-                    pkg[depType][name] = '$new_version';
+                  if (name.startsWith('@conductor-oss/') && !ver.startsWith('file:') && !ver.startsWith('workspace:')) {
+                    pkg[depType][name] = '${{ steps.version.outputs.new_version }}';
                   }
                 }
               }
               writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
             }
           "
-
-          # After bumping versions, workspace:* refs have been replaced with exact
-          # version numbers. The lockfile update may fail if internal packages are
-          # not yet published, but that is expected. The release pack script handles
-          # dependency resolution independently via bundled tarballs.
-          pnpm install --no-frozen-lockfile 2>/dev/null || echo "Lockfile update skipped (expected for unpublished internal packages)"
-
-          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
-          echo "tag_name=v$new_version" >> "$GITHUB_OUTPUT"
-
-      - name: Build all packages
-        run: pnpm build:release
-
-      - name: Run tests
-        run: |
-          pnpm --filter @conductor-oss/core test
-          pnpm --filter conductor-oss test
 
       - name: Verify release artifact
         run: pnpm release:verify
