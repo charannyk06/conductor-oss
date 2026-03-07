@@ -10,8 +10,10 @@ const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_LOCAL_REPO_ROOTS = [homedir(), "/Volumes"];
+const HOME_ROOT = homedir();
+const VOLUMES_ROOT = "/Volumes";
 const ALLOWED_REMOTE_PROTOCOLS = new Set(["https:", "http:", "ssh:", "git:"]);
+const SAFE_SEGMENT_PATTERN = /^[^/\\\0\r\n]+$/;
 
 function asNonEmpty(value: string | null): string | null {
   if (!value) return null;
@@ -23,16 +25,16 @@ class InputError extends Error {}
 
 function expandHome(path: string): string {
   if (path.startsWith("~/")) {
-    return resolve(homedir(), path.slice(2));
+    return resolve(HOME_ROOT, path.slice(2));
   }
   return resolve(path);
 }
 
-function isWithinAllowedRoots(path: string): boolean {
-  return ALLOWED_LOCAL_REPO_ROOTS.some((root) => {
-    const rel = relative(root, path);
-    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-  });
+function ensureWithinRoot(root: string, candidatePath: string) {
+  const rel = relative(root, candidatePath);
+  if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+    throw new InputError("Path is outside the allowed repository roots");
+  }
 }
 
 function normalizeScpStyleRemote(value: string): string | null {
@@ -73,22 +75,59 @@ function normalizeGitRemote(rawValue: string): string {
 }
 
 async function resolveLocalRepoPath(rawPath: string): Promise<string> {
-  const requestedPath = expandHome(rawPath);
-  if (!isWithinAllowedRoots(requestedPath)) {
+  const trimmed = rawPath.trim();
+  if (/[\0\r\n]/.test(trimmed)) {
+    throw new InputError("Invalid path");
+  }
+
+  let root: string;
+  let relativePath: string;
+
+  if (trimmed === "~" || trimmed === HOME_ROOT) {
+    root = HOME_ROOT;
+    relativePath = "";
+  } else if (trimmed.startsWith("~/")) {
+    root = HOME_ROOT;
+    relativePath = trimmed.slice(2);
+  } else if (trimmed.startsWith(`${HOME_ROOT}/`)) {
+    root = HOME_ROOT;
+    relativePath = trimmed.slice(HOME_ROOT.length + 1);
+  } else if (trimmed === VOLUMES_ROOT) {
+    root = VOLUMES_ROOT;
+    relativePath = "";
+  } else if (trimmed.startsWith(`${VOLUMES_ROOT}/`)) {
+    root = VOLUMES_ROOT;
+    relativePath = trimmed.slice(VOLUMES_ROOT.length + 1);
+  } else {
     throw new InputError("Path is outside the allowed repository roots");
   }
 
-  const canonicalPath = await realpath(requestedPath);
-  if (!isWithinAllowedRoots(canonicalPath)) {
-    throw new InputError("Path is outside the allowed repository roots");
+  const canonicalRoot = await realpath(root);
+  const segments = relativePath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => {
+      if (!SAFE_SEGMENT_PATTERN.test(segment) || segment === "." || segment === "..") {
+        throw new InputError("Invalid path segment");
+      }
+      return segment;
+    });
+
+  let currentPath = canonicalRoot;
+
+  for (const segment of segments) {
+    const candidatePath = expandHome(resolve(currentPath, segment));
+    const candidateStat = await stat(candidatePath);
+    if (!candidateStat.isDirectory()) {
+      throw new InputError("Path must be a directory");
+    }
+
+    const canonicalCandidate = await realpath(candidatePath);
+    ensureWithinRoot(canonicalRoot, canonicalCandidate);
+    currentPath = canonicalCandidate;
   }
 
-  const pathStat = await stat(canonicalPath);
-  if (!pathStat.isDirectory()) {
-    throw new InputError("Path must be a directory");
-  }
-
-  return canonicalPath;
+  return currentPath;
 }
 
 function dedupeAndSortBranches(branches: string[]): string[] {

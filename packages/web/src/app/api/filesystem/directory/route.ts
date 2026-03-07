@@ -6,7 +6,9 @@ import { guardApiAccess } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_DIRECTORY_ROOTS = [homedir(), "/Volumes"];
+const HOME_ROOT = homedir();
+const VOLUMES_ROOT = "/Volumes";
+const SAFE_SEGMENT_PATTERN = /^[^/\\\0\r\n]+$/;
 
 type DirectoryEntry = {
   name: string;
@@ -17,44 +19,78 @@ type DirectoryEntry = {
 
 class InputError extends Error {}
 
-function isWithinAllowedRoots(path: string): boolean {
-  return ALLOWED_DIRECTORY_ROOTS.some((root) => {
-    const rel = relative(root, path);
-    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-  });
+function ensureWithinRoot(root: string, candidatePath: string) {
+  const rel = relative(root, candidatePath);
+  if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+    throw new InputError("Path is outside the allowed browse roots");
+  }
 }
 
-async function resolveRequestedPath(rawPath: string | null): Promise<string> {
-  let requestedPath = homedir();
-
+function resolveRootSelection(rawPath: string | null): { root: string; relativePath: string } {
   if (!rawPath || rawPath.trim().length === 0) {
-    return requestedPath;
+    return { root: HOME_ROOT, relativePath: "" };
   }
 
   const trimmed = rawPath.trim();
+  if (/[\0\r\n]/.test(trimmed)) {
+    throw new InputError("Invalid path");
+  }
+
+  if (trimmed === "~" || trimmed === HOME_ROOT) {
+    return { root: HOME_ROOT, relativePath: "" };
+  }
+
   if (trimmed.startsWith("~/")) {
-    requestedPath = resolve(homedir(), trimmed.slice(2));
-  } else {
-    requestedPath = resolve(trimmed);
+    return { root: HOME_ROOT, relativePath: trimmed.slice(2) };
   }
 
-  if (!isWithinAllowedRoots(requestedPath)) {
-    throw new InputError("Path is outside the allowed browse roots");
+  if (trimmed.startsWith(`${HOME_ROOT}/`)) {
+    return { root: HOME_ROOT, relativePath: trimmed.slice(HOME_ROOT.length + 1) };
   }
 
-  try {
-    const canonicalPath = await realpath(requestedPath);
-    if (!isWithinAllowedRoots(canonicalPath)) {
-      throw new InputError("Path is outside the allowed browse roots");
-    }
-    return canonicalPath;
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return requestedPath;
-    }
-    throw err;
+  if (trimmed === VOLUMES_ROOT) {
+    return { root: VOLUMES_ROOT, relativePath: "" };
   }
+
+  if (trimmed.startsWith(`${VOLUMES_ROOT}/`)) {
+    return { root: VOLUMES_ROOT, relativePath: trimmed.slice(VOLUMES_ROOT.length + 1) };
+  }
+
+  throw new InputError("Path is outside the allowed browse roots");
+}
+
+function parseSafeSegments(relativePath: string): string[] {
+  return relativePath
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => {
+      if (!SAFE_SEGMENT_PATTERN.test(segment) || segment === "." || segment === "..") {
+        throw new InputError("Invalid path segment");
+      }
+      return segment;
+    });
+}
+
+async function resolveRequestedPath(rawPath: string | null): Promise<string> {
+  const { root, relativePath } = resolveRootSelection(rawPath);
+  const canonicalRoot = await realpath(root);
+  const segments = parseSafeSegments(relativePath);
+
+  let currentPath = canonicalRoot;
+
+  for (const segment of segments) {
+    const candidatePath = resolve(currentPath, segment);
+    const candidateStat = await stat(candidatePath);
+    if (!candidateStat.isDirectory()) {
+      throw new InputError("Path must be a directory");
+    }
+
+    const canonicalCandidate = await realpath(candidatePath);
+    ensureWithinRoot(canonicalRoot, canonicalCandidate);
+    currentPath = canonicalCandidate;
+  }
+
+  return currentPath;
 }
 
 async function isGitRepo(path: string): Promise<boolean> {
