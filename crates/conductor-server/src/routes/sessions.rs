@@ -11,7 +11,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
 use crate::state::{
-    build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState, SpawnRequest,
+    build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState, SessionRecord,
+    SpawnRequest,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -27,6 +28,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/output/stream", get(output_stream))
         .route("/api/sessions/{id}/send", post(send_to_session))
         .route("/api/sessions/{id}/kill", post(kill_session))
+        .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/restore", post(restore_session))
         .route("/api/sessions/{id}/feedback", post(submit_feedback))
         .route("/api/sessions/{id}/actions", post(apply_action))
@@ -147,13 +149,32 @@ async fn get_feed(
     Path(id): Path<String>,
 ) -> ApiResponse {
     match state.get_session(&id).await {
-        Some(session) => ok(json!({
-            "entries": build_normalized_chat_feed(&session),
-            "sessionStatus": session.status,
-            "source": if session.output.is_empty() { "conversation-only" } else { "runtime-output" },
-        })),
+        Some(session) => ok(session_feed_payload(&session)),
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
+}
+
+fn session_feed_payload(session: &SessionRecord) -> Value {
+    let parser_state = session
+        .metadata
+        .get("parserState")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|kind| {
+            json!({
+                "kind": kind,
+                "message": session.metadata.get("parserStateMessage").cloned().unwrap_or_default(),
+                "command": session.metadata.get("parserStateCommand").cloned(),
+            })
+        });
+
+    json!({
+        "entries": build_normalized_chat_feed(session),
+        "sessionStatus": session.status,
+        "parserState": parser_state,
+        "source": if session.output.is_empty() { "conversation-only" } else { "runtime-output" },
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,11 +207,18 @@ async fn output_stream(
     let initial_stream = stream::iter(vec![Ok(SseEvent::default().data(
         json!({ "type": "output", "output": initial_output }).to_string(),
     ))]);
+    // Delta updates: each broadcast carries only the new line, not the full output.
     let updates = BroadcastStream::new(state.output_updates.subscribe()).filter_map(move |result| match result {
-        Ok((session_id, output)) if session_id == id => Some(Ok(SseEvent::default().data(
-            json!({ "type": "output", "output": output }).to_string(),
+        Ok((session_id, delta)) if session_id == id => Some(Ok(SseEvent::default().data(
+            json!({ "type": "delta", "line": delta }).to_string(),
         ))),
-        _ => None,
+        Ok(_) => None,
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(count)) => {
+            tracing::warn!("Output stream SSE lagged by {count} messages");
+            Some(Ok(SseEvent::default().event("refresh").data(
+                json!({ "type": "refresh", "reason": "lagged", "missed": count }).to_string(),
+            )))
+        }
     });
     Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default())
 }
@@ -209,31 +237,44 @@ async fn send_to_session(
     Path(id): Path<String>,
     Json(body): Json<SendBody>,
 ) -> ApiResponse {
-    if body.message.trim().is_empty() && body.attachments.clone().unwrap_or_default().is_empty() {
+    let attachments = body.attachments.unwrap_or_default();
+
+    if body.message.trim().is_empty() && attachments.is_empty() {
         return error(StatusCode::BAD_REQUEST, "Message or attachments are required");
     }
 
-    let mut target_session_id = id.clone();
-    let mut restored_from: Option<String> = None;
     let is_live = state.live_sessions.read().await.contains_key(&id);
 
     if !is_live {
-        let should_restore = state
+        let should_resume = state
             .get_session(&id)
             .await
             .map(|session| {
-                !matches!(
+                matches!(
                     session.status.as_str(),
-                    "merged" | "killed" | "cleanup" | "done" | "terminated"
+                    "needs_input" | "stuck" | "done"
                 )
             })
             .unwrap_or(false);
 
-        if should_restore {
-            match state.restore_session(&id).await {
-                Ok(restored) => {
-                    target_session_id = restored.id.clone();
-                    restored_from = Some(id.clone());
+        if should_resume {
+            match state
+                .resume_session_with_prompt(
+                    &id,
+                    body.message,
+                    attachments,
+                    body.model,
+                    body.reasoning_effort,
+                    "follow_up",
+                )
+                .await
+            {
+                Ok(()) => {
+                    return ok(json!({
+                        "ok": true,
+                        "sessionId": id,
+                        "restoredFrom": Value::Null,
+                    }));
                 }
                 Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
             }
@@ -242,9 +283,9 @@ async fn send_to_session(
 
     match state
         .send_to_session(
-            &target_session_id,
+            &id,
             body.message,
-            body.attachments.unwrap_or_default(),
+            attachments,
             body.model,
             body.reasoning_effort,
             "follow_up",
@@ -253,8 +294,8 @@ async fn send_to_session(
     {
         Ok(()) => ok(json!({
             "ok": true,
-            "sessionId": target_session_id,
-            "restoredFrom": restored_from,
+            "sessionId": id,
+            "restoredFrom": Value::Null,
         })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
@@ -265,6 +306,16 @@ async fn kill_session(
     Path(id): Path<String>,
 ) -> ApiResponse {
     match state.kill_session(&id).await {
+        Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+async fn archive_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    match state.archive_session(&id).await {
         Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
@@ -319,6 +370,10 @@ async fn apply_action(
             Ok(()) => ok(json!({ "ok": true, "action": "kill", "sessionId": id })),
             Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
         },
+        "archive" => match state.archive_session(&id).await {
+            Ok(()) => ok(json!({ "ok": true, "action": "archive", "sessionId": id })),
+            Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+        },
         "send" => match state
             .send_to_session(&id, body.message.unwrap_or_default(), Vec::new(), None, None, "follow_up")
             .await
@@ -345,23 +400,23 @@ async fn send_keys(
         keys
     } else if let Some(special) = body.special {
         match special.as_str() {
-            "Enter" => "".to_string(),
-            "C-c" => {
-                return match state.kill_session(&id).await {
-                    Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
-                    Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
-                }
-            }
+            "Enter" => "\r".to_string(),
+            "Tab" => "\t".to_string(),
+            "Backspace" => "\u{7f}".to_string(),
+            "Escape" => "\u{1b}".to_string(),
+            "ArrowUp" => "\u{1b}[A".to_string(),
+            "ArrowDown" => "\u{1b}[B".to_string(),
+            "ArrowRight" => "\u{1b}[C".to_string(),
+            "ArrowLeft" => "\u{1b}[D".to_string(),
+            "C-c" => "\u{3}".to_string(),
+            "C-d" => "\u{4}".to_string(),
             other => other.to_string(),
         }
     } else {
         return error(StatusCode::BAD_REQUEST, "keys or special is required");
     };
 
-    match state
-        .send_to_session(&id, message, Vec::new(), None, None, "follow_up")
-        .await
-    {
+    match state.send_raw_to_session(&id, message).await {
         Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }

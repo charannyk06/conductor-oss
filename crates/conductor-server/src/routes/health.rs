@@ -1,11 +1,11 @@
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Serialize;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::state::AppState;
-use conductor_db::repo::SessionRepo;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -13,91 +13,64 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/health/sessions", get(session_health))
 }
 
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-    version: String,
-    uptime_secs: u64,
-    executors: usize,
-    event_subscribers: usize,
-}
-
-async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let executors = state.executors.read().await;
-    Json(HealthResponse {
-        status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_secs: 0, // TODO: track startup time
-        executors: executors.len(),
-        event_subscribers: state.event_bus.subscriber_count(),
-    })
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_secs": (chrono::Utc::now() - state.started_at).num_seconds().max(0),
+            "executors": executors.len(),
+            "event_subscribers": state.event_snapshots.receiver_count(),
+        })),
+    )
 }
 
-#[derive(Serialize)]
-struct SessionHealthResponse {
-    total: usize,
-    active: usize,
-    errored: usize,
-    needs_input: usize,
-    sessions: Vec<SessionHealthEntry>,
-}
-
-#[derive(Serialize)]
-struct SessionHealthEntry {
-    id: String,
-    project_id: String,
-    executor: String,
-    state: String,
-    grade: String,
-    idle_secs: i64,
-}
-
-async fn session_health(State(state): State<Arc<AppState>>) -> Json<SessionHealthResponse> {
-    let pool = state.db.pool();
-
-    let sessions = SessionRepo::list(pool, None).await.unwrap_or_default();
-
-    let active = sessions.iter().filter(|s| s.state == "active" || s.state == "idle").count();
-    let errored = sessions.iter().filter(|s| s.state == "errored").count();
-    let needs_input = sessions.iter().filter(|s| s.state == "needs_input").count();
-
-    let entries: Vec<SessionHealthEntry> = sessions
+async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let sessions = state.all_sessions().await;
+    let live_session_ids = state.live_sessions.read().await.keys().cloned().collect::<std::collections::HashSet<_>>();
+    let now = chrono::Utc::now();
+    let metrics = sessions
         .iter()
-        .filter(|s| s.state != "terminated")
-        .map(|s| {
-            let idle_secs = chrono::Utc::now()
-                .signed_duration_since(
-                    chrono::DateTime::parse_from_rfc3339(&s.last_activity_at)
-                        .unwrap_or_else(|_| chrono::Utc::now().into()),
-                )
-                .num_seconds();
-
-            let grade = if s.state == "errored" || s.state == "terminated" {
-                "F"
-            } else if s.state == "needs_input" || idle_secs > 900 {
-                "C"
-            } else if idle_secs > 300 {
-                "B"
+        .map(|session| {
+            let created = chrono::DateTime::parse_from_rfc3339(&session.created_at)
+                .map(|value| value.with_timezone(&chrono::Utc))
+                .unwrap_or(now);
+            let last_activity = chrono::DateTime::parse_from_rfc3339(&session.last_activity_at)
+                .map(|value| value.with_timezone(&chrono::Utc))
+                .unwrap_or(now);
+            let age_ms = (now - created).num_milliseconds();
+            let idle_ms = (now - last_activity).num_milliseconds();
+            let health = if matches!(session.status.as_str(), "stuck" | "errored") {
+                "critical"
+            } else if matches!(session.status.as_str(), "needs_input") {
+                "warning"
             } else {
-                "A"
+                "healthy"
             };
-
-            SessionHealthEntry {
-                id: s.id.clone(),
-                project_id: s.project_id.clone(),
-                executor: s.executor.clone(),
-                state: s.state.clone(),
-                grade: grade.to_string(),
-                idle_secs,
-            }
+            json!({
+                "id": session.id,
+                "projectId": session.project_id,
+                "status": session.status,
+                "activity": session.activity,
+                "health": health,
+                "ageMs": age_ms,
+                "idleMs": idle_ms,
+                "createdAt": session.created_at,
+                "lastActivityAt": session.last_activity_at,
+                "hasRuntime": live_session_ids.contains(&session.id),
+                "hasPR": session.pr.is_some(),
+            })
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    Json(SessionHealthResponse {
-        total: sessions.len(),
-        active,
-        errored,
-        needs_input,
-        sessions: entries,
-    })
+    let summary = json!({
+        "total": metrics.len(),
+        "healthy": metrics.iter().filter(|metric| metric["health"] == "healthy").count(),
+        "warning": metrics.iter().filter(|metric| metric["health"] == "warning").count(),
+        "critical": metrics.iter().filter(|metric| metric["health"] == "critical").count(),
+    });
+
+    (StatusCode::OK, Json(json!({ "metrics": metrics, "summary": summary })))
 }
