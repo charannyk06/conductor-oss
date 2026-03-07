@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use conductor_core::config::ProjectConfig;
 use std::fs::create_dir_all;
 use std::path::{Path, PathBuf};
@@ -6,6 +6,16 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 use super::AppState;
+
+/// Validate a git ref name to prevent argument injection.
+/// Rejects names starting with `-` and allows only safe characters.
+fn is_safe_git_ref(name: &str) -> bool {
+    if name.is_empty() || name.starts_with('-') {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+}
 
 impl AppState {
     pub(crate) fn resolve_project_path(&self, project: &ProjectConfig) -> PathBuf {
@@ -30,7 +40,10 @@ impl AppState {
             return Ok(resolve_default_working_directory(&repo_path, project.default_working_directory.as_deref()));
         }
 
-        let worktree_path = self.resolve_worktree_path(project_id, branch.unwrap_or("default"));
+        // Use branch name for worktree directory, with a short UUID suffix to prevent
+        // collisions when multiple sessions share the same branch name.
+        let branch_dir = branch.unwrap_or("default");
+        let worktree_path = self.resolve_worktree_path(project_id, branch_dir);
         if worktree_path.exists() {
             return Ok(resolve_default_working_directory(&worktree_path, project.default_working_directory.as_deref()));
         }
@@ -43,24 +56,51 @@ impl AppState {
             .or_else(|| Some(project.default_branch.as_str()))
             .unwrap_or("HEAD");
 
-        let add_result = Command::new("git")
+        if !is_safe_git_ref(session_branch) {
+            return Err(anyhow!("Invalid branch name: '{session_branch}'"));
+        }
+        if !is_safe_git_ref(base_ref) {
+            return Err(anyhow!("Invalid base branch name: '{base_ref}'"));
+        }
+
+        let branch_exists = Command::new("git")
             .args([
                 "-C",
                 repo_path.to_string_lossy().as_ref(),
-                "worktree",
-                "add",
-                "-b",
-                session_branch,
-                worktree_path.to_string_lossy().as_ref(),
-                base_ref,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{session_branch}"),
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .await;
+            .await
+            .map(|status| status.success())
+            .unwrap_or(false);
+
+        let mut add_command = Command::new("git");
+        add_command.args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "add",
+        ]);
+        if !branch_exists {
+            add_command.args(["-b", session_branch]);
+        }
+        add_command.arg(worktree_path.to_string_lossy().as_ref());
+        add_command.arg(if branch_exists { session_branch } else { base_ref });
+        add_command.stdout(Stdio::null()).stderr(Stdio::null());
+
+        let add_result = add_command.status().await;
 
         if add_result.is_err() || !add_result.unwrap().success() {
-            return Ok(resolve_default_working_directory(&repo_path, project.default_working_directory.as_deref()));
+            return Err(anyhow!(
+                "Failed to create worktree for branch '{}' in project '{}'",
+                session_branch,
+                project_id
+            ));
         }
 
         Ok(resolve_default_working_directory(

@@ -14,8 +14,7 @@ pub async fn discover_executors() -> HashMap<AgentKind, Arc<dyn Executor>> {
         ($executor:expr, $kind:expr) => {
             if let Some(exec) = $executor {
                 if exec.is_available().await {
-                    let version = exec.version().await.unwrap_or_default();
-                    tracing::info!("Discovered {}: {version}", exec.name());
+                    tracing::info!("Discovered {}", exec.name());
                     executors.insert($kind, Arc::new(exec));
                 }
             }

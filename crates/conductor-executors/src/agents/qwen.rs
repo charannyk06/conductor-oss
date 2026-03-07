@@ -41,11 +41,15 @@ impl Executor for QwenCodeExecutor {
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
         let mut args = vec![];
+        if options.skip_permissions {
+            args.push("--yolo".to_string());
+        }
         if let Some(model) = &options.model {
             args.push("--model".to_string());
             args.push(model.clone());
         }
         args.extend(options.extra_args.clone());
+        args.push("--prompt".to_string());
         args.push(options.prompt.clone());
         args
     }

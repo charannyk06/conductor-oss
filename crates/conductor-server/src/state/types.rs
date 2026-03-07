@@ -1,10 +1,80 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
+use conductor_executors::executor::ExecutorInput;
 use tokio::sync::{mpsc, Mutex};
 
 pub const DEFAULT_SESSION_HISTORY_LIMIT: usize = 2000;
 pub const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
+
+/// Well-known session statuses. Serializes to/from lowercase strings for JSON compatibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Working,
+    Done,
+    Errored,
+    Killed,
+    NeedsInput,
+    Stuck,
+    Archived,
+    Merged,
+    Terminated,
+    Cleanup,
+    /// Catch-all for unknown/legacy status strings.
+    #[serde(untagged)]
+    Other(String),
+}
+
+impl SessionStatus {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Working => "working",
+            Self::Done => "done",
+            Self::Errored => "errored",
+            Self::Killed => "killed",
+            Self::NeedsInput => "needs_input",
+            Self::Stuck => "stuck",
+            Self::Archived => "archived",
+            Self::Merged => "merged",
+            Self::Terminated => "terminated",
+            Self::Cleanup => "cleanup",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Done | Self::Errored | Self::Killed | Self::Archived | Self::Merged | Self::Terminated | Self::Cleanup
+        )
+    }
+}
+
+impl fmt::Display for SessionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for SessionStatus {
+    fn from(value: &str) -> Self {
+        match value {
+            "working" => Self::Working,
+            "done" => Self::Done,
+            "errored" => Self::Errored,
+            "killed" => Self::Killed,
+            "needs_input" => Self::NeedsInput,
+            "stuck" => Self::Stuck,
+            "archived" => Self::Archived,
+            "merged" => Self::Merged,
+            "terminated" => Self::Terminated,
+            "cleanup" => Self::Cleanup,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,35 +150,83 @@ impl SessionRecord {
         prompt: String,
         pid: Option<u32>,
     ) -> Self {
+        Self::builder(id, project_id, agent, prompt)
+            .branch(branch)
+            .issue_id(issue_id)
+            .workspace_path(workspace_path)
+            .model(model)
+            .reasoning_effort(reasoning_effort)
+            .pid(pid)
+            .build()
+    }
+
+    pub fn builder(id: String, project_id: String, agent: String, prompt: String) -> SessionRecordBuilder {
+        SessionRecordBuilder {
+            id,
+            project_id,
+            agent,
+            prompt,
+            branch: None,
+            issue_id: None,
+            workspace_path: None,
+            model: None,
+            reasoning_effort: None,
+            pid: None,
+        }
+    }
+}
+
+pub struct SessionRecordBuilder {
+    id: String,
+    project_id: String,
+    agent: String,
+    prompt: String,
+    branch: Option<String>,
+    issue_id: Option<String>,
+    workspace_path: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    pid: Option<u32>,
+}
+
+impl SessionRecordBuilder {
+    pub fn branch(mut self, value: Option<String>) -> Self { self.branch = value; self }
+    pub fn issue_id(mut self, value: Option<String>) -> Self { self.issue_id = value; self }
+    pub fn workspace_path(mut self, value: Option<String>) -> Self { self.workspace_path = value; self }
+    pub fn model(mut self, value: Option<String>) -> Self { self.model = value; self }
+    pub fn reasoning_effort(mut self, value: Option<String>) -> Self { self.reasoning_effort = value; self }
+    pub fn pid(mut self, value: Option<u32>) -> Self { self.pid = value; self }
+
+    pub fn build(self) -> SessionRecord {
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = HashMap::new();
-        metadata.insert("agent".to_string(), agent.clone());
-        if let Some(model_value) = &model {
+        metadata.insert("agent".to_string(), self.agent.clone());
+        if let Some(model_value) = &self.model {
             metadata.insert("model".to_string(), model_value.clone());
         }
-        if let Some(reasoning) = &reasoning_effort {
+        if let Some(reasoning) = &self.reasoning_effort {
             metadata.insert("reasoningEffort".to_string(), reasoning.clone());
         }
-        if let Some(workspace) = &workspace_path {
+        if let Some(workspace) = &self.workspace_path {
             metadata.insert("worktree".to_string(), workspace.clone());
         }
 
-        Self {
-            id,
-            project_id,
+        SessionRecord {
+            id: self.id,
+            project_id: self.project_id,
             status: "working".to_string(),
             activity: Some("active".to_string()),
-            branch,
-            issue_id,
-            workspace_path,
+            branch: self.branch,
+            issue_id: self.issue_id,
+            workspace_path: self.workspace_path,
             created_at: now.clone(),
             last_activity_at: now,
             summary: None,
-            agent,
-            model,
-            reasoning_effort,
-            prompt,
-            pid,
+            agent: self.agent,
+            model: self.model,
+            reasoning_effort: self.reasoning_effort,
+            prompt: self.prompt,
+            pid: self.pid,
             metadata,
             pr: None,
             conversation: Vec::new(),
@@ -118,7 +236,7 @@ impl SessionRecord {
 }
 
 pub struct LiveSessionHandle {
-    pub input_tx: mpsc::Sender<String>,
+    pub input_tx: mpsc::Sender<ExecutorInput>,
     pub kill_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 

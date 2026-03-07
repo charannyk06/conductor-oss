@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use conductor_core::types::AgentKind;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -62,7 +63,12 @@ impl Executor for CodexExecutor {
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
-        let mut args = vec![];
+        let mut args = vec![
+            "exec".to_string(),
+            "--color".to_string(),
+            "never".to_string(),
+            "--json".to_string(),
+        ];
 
         if options.skip_permissions {
             args.push("--full-auto".to_string());
@@ -75,15 +81,71 @@ impl Executor for CodexExecutor {
 
         args.extend(options.extra_args.clone());
 
-        // Codex takes prompt as positional argument.
+        // codex exec takes the prompt as a positional argument in headless mode.
         args.push(options.prompt.clone());
 
         args
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
-        // Codex outputs JSON-RPC messages.
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
+                match event_type {
+                    "agent_message" => {
+                        if let Some(text) = extract_text(&value) {
+                            return ExecutorOutput::Stdout(text);
+                        }
+                        return ExecutorOutput::Stdout(String::new());
+                    }
+                    "agent_message_delta" | "thread.started" | "turn.started" | "turn.completed" | "task.started" => {
+                        return ExecutorOutput::Stdout(String::new());
+                    }
+                    "item.started" => {
+                        if let Some(item) = value.get("item") {
+                            if item.get("type").and_then(|v| v.as_str()) == Some("command_execution") {
+                                if let Some(command) = item.get("command").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+                                    return ExecutorOutput::Stdout(command.to_string());
+                                }
+                            }
+                            if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
+                                return ExecutorOutput::Stdout("Thinking".to_string());
+                            }
+                        }
+                        return ExecutorOutput::Stdout(String::new());
+                    }
+                    "item.completed" => {
+                        if let Some(item) = value.get("item") {
+                            match item.get("type").and_then(|v| v.as_str()) {
+                                Some("agent_message") => {
+                                    if let Some(text) = extract_text(item) {
+                                        return ExecutorOutput::Stdout(text);
+                                    }
+                                }
+                                Some("reasoning") => return ExecutorOutput::Stdout(String::new()),
+                                Some("command_execution") => return ExecutorOutput::Stdout(String::new()),
+                                _ => {}
+                            }
+                        }
+                        return ExecutorOutput::Stdout(String::new());
+                    }
+                    "error" => {
+                        let error = value
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| value.get("error").and_then(|v| v.as_str()))
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or("Codex failed")
+                            .to_string();
+                        return ExecutorOutput::Failed {
+                            error,
+                            exit_code: Some(1),
+                        };
+                    }
+                    _ => return ExecutorOutput::Stdout(String::new()),
+                }
+            }
+
             if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
                 match method {
                     "message" => {
@@ -95,14 +157,45 @@ impl Executor for CodexExecutor {
                             return ExecutorOutput::Stdout(content.to_string());
                         }
                     }
-                    "done" => {
-                        return ExecutorOutput::Completed { exit_code: 0 };
-                    }
-                    _ => {}
+                    "done" => return ExecutorOutput::Completed { exit_code: 0 },
+                    _ => return ExecutorOutput::Stdout(String::new()),
                 }
             }
+
+            return ExecutorOutput::Stdout(String::new());
         }
 
-        ExecutorOutput::Stdout(line.to_string())
+        ExecutorOutput::Stdout(line.trim().to_string())
+    }
+}
+
+fn extract_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+        return Some(text.to_string());
+    }
+
+    if let Some(message) = value.get("message") {
+        if let Some(text) = extract_text(message) {
+            return Some(text);
+        }
+    }
+
+    let content = value.get("content").and_then(|v| v.as_array())?;
+    let text = content
+        .iter()
+        .filter_map(|item| {
+            item.get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.as_str())
+                .map(str::trim)
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
     }
 }

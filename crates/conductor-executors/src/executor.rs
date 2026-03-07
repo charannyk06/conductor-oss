@@ -30,6 +30,15 @@ pub struct SpawnOptions {
     pub branch: Option<String>,
 }
 
+/// Input sent to a running executor session.
+#[derive(Debug, Clone)]
+pub enum ExecutorInput {
+    /// Send a logical text prompt/line and terminate it.
+    Text(String),
+    /// Send raw terminal bytes encoded as a string verbatim.
+    Raw(String),
+}
+
 /// Output from a running executor.
 #[derive(Debug, Clone)]
 pub enum ExecutorOutput {
@@ -57,7 +66,7 @@ pub struct ExecutorHandle {
     pub output_rx: mpsc::Receiver<ExecutorOutput>,
 
     /// Channel to send input to the agent.
-    pub input_tx: mpsc::Sender<String>,
+    pub input_tx: mpsc::Sender<ExecutorInput>,
 
     /// Kill handle.
     kill_tx: tokio::sync::oneshot::Sender<()>,
@@ -68,7 +77,7 @@ impl ExecutorHandle {
         pid: u32,
         kind: AgentKind,
         output_rx: mpsc::Receiver<ExecutorOutput>,
-        input_tx: mpsc::Sender<String>,
+        input_tx: mpsc::Sender<ExecutorInput>,
         kill_tx: tokio::sync::oneshot::Sender<()>,
     ) -> Self {
         Self {
@@ -82,8 +91,33 @@ impl ExecutorHandle {
 
     /// Send input text to the running agent.
     pub async fn send_input(&self, text: &str) -> Result<()> {
-        self.input_tx.send(text.to_string()).await?;
+        self.input_tx.send(ExecutorInput::Text(text.to_string())).await?;
         Ok(())
+    }
+
+    /// Send raw terminal input to the running agent.
+    pub async fn send_raw_input(&self, text: &str) -> Result<()> {
+        self.input_tx.send(ExecutorInput::Raw(text.to_string())).await?;
+        Ok(())
+    }
+
+    /// Break the handle into parts so the runtime can monitor output separately.
+    pub fn into_parts(
+        self,
+    ) -> (
+        u32,
+        AgentKind,
+        mpsc::Receiver<ExecutorOutput>,
+        mpsc::Sender<ExecutorInput>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        (
+            self.pid,
+            self.kind,
+            self.output_rx,
+            self.input_tx,
+            self.kill_tx,
+        )
     }
 
     /// Kill the running agent process.

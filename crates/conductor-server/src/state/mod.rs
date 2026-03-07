@@ -6,7 +6,7 @@ mod workspace;
 
 pub use helpers::{build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail};
 pub use types::{
-    ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SpawnRequest,
+    ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus, SpawnRequest,
 };
 pub use workspace::{expand_path, resolve_workspace_path};
 
@@ -27,18 +27,18 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub workspace_path: PathBuf,
     pub config: RwLock<ConductorConfig>,
-    #[allow(dead_code)]
     pub db: Database,
     pub executors: RwLock<HashMap<AgentKind, Arc<dyn Executor>>>,
     pub sessions: RwLock<HashMap<String, SessionRecord>>,
     pub live_sessions: RwLock<HashMap<String, Arc<LiveSessionHandle>>>,
     pub event_snapshots: broadcast::Sender<String>,
+    /// Sends (session_id, delta_line) for incremental output updates.
     pub output_updates: broadcast::Sender<(String, String)>,
     pub started_at: DateTime<Utc>,
 }
 
 impl AppState {
-    pub fn new(config_path: PathBuf, config: ConductorConfig, db: Database) -> Arc<Self> {
+    pub async fn new(config_path: PathBuf, config: ConductorConfig, db: Database) -> Arc<Self> {
         let workspace_path = resolve_workspace_path(&config_path, &config.workspace);
         let (event_snapshots, _) = broadcast::channel(256);
         let (output_updates, _) = broadcast::channel(512);
@@ -55,7 +55,7 @@ impl AppState {
             started_at: Utc::now(),
         });
         state.ensure_session_store();
-        state.load_sessions_from_disk();
+        state.load_sessions_from_disk().await;
         state
     }
 
@@ -90,7 +90,10 @@ impl AppState {
 
     pub async fn snapshot_sessions(&self) -> Vec<Value> {
         let sessions = self.sessions.read().await;
-        let mut list: Vec<&SessionRecord> = sessions.values().collect();
+        let mut list: Vec<&SessionRecord> = sessions
+            .values()
+            .filter(|session| session.status != "archived")
+            .collect();
         list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         list.into_iter().map(session_to_dashboard_value).collect()
     }

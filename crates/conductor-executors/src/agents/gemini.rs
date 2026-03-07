@@ -65,7 +65,7 @@ impl Executor for GeminiExecutor {
         let mut args = vec![];
 
         if options.skip_permissions {
-            args.push("--sandbox=none".to_string());
+            args.push("--yolo".to_string());
         }
 
         if let Some(model) = &options.model {
@@ -74,6 +74,7 @@ impl Executor for GeminiExecutor {
         }
 
         args.extend(options.extra_args.clone());
+        args.push("--prompt".to_string());
         args.push(options.prompt.clone());
 
         args
