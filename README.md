@@ -1,27 +1,84 @@
+<div align="center">
+
 # Conductor OSS
 
-Conductor OSS is a local-first dashboard for running coding-agent CLIs in parallel, linking them to board tasks, and managing isolated workspaces from a browser UI.
+**Local-first coding agent orchestration with a board, chat UI, worktree isolation, and resumable multi-session runs.**
 
-It is not a hosted SaaS product. The application runs on your machine, uses the agent CLIs you already install and authenticate, and stores its state locally.
+<br>
+
+[![npm version](https://img.shields.io/npm/v/conductor-oss?style=flat-square&color=0ea5e9)](https://www.npmjs.com/package/conductor-oss)
+[![CI](https://img.shields.io/github/actions/workflow/status/charannyk06/conductor-oss/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e?style=flat-square)](LICENSE)
+[![Bun](https://img.shields.io/badge/bun-1.2+-f59e0b?style=flat-square)](https://bun.sh)
+[![Rust](https://img.shields.io/badge/rust-backend-ce422b?style=flat-square)](https://www.rust-lang.org)
+[![GitHub Stars](https://img.shields.io/github/stars/charannyk06/conductor-oss?style=flat-square&color=facc15)](https://github.com/charannyk06/conductor-oss/stargazers)
+
+</div>
+
+## What is Conductor?
+
+Conductor OSS is a local-first dashboard for controlling coding-agent CLIs from a structured browser UI.
+
+It combines:
+
+- a markdown-native board for tasks and issues
+- a chat-oriented execution surface for agent runs
+- local branch mode or isolated worktree mode
+- multiple concurrent sessions against the same repo
+- a Rust backend with a Bun/Next frontend
+
+Conductor is not a hosted managed agent platform. It runs on your machine, uses your locally installed agent CLIs, and keeps state in your local workspace.
+
+---
+
+## Why Conductor?
+
+| | Manual workflow | Terminal-only agent use | **Conductor OSS** |
+|---|---|---|---|
+| Task tracking | Separate tickets / notes | Separate from execution | **Board-linked tasks and runs** |
+| Session management | Manual tabs and branches | One terminal at a time | **Multiple parallel sessions** |
+| Workspace isolation | Manual branches/worktrees | Manual | **Built-in local/worktree session modes** |
+| Agent UX | Raw CLI only | Raw CLI only | **Structured chat + tool-call UI** |
+| Resume after completion | Manual | Manual | **Session stays resumable until archived** |
+| Storage | Mixed tools | Local shell history | **Local SQLite + board files** |
+| Deployment model | Varies | Local | **Local-first** |
+
+---
+
+## Repository Links
+
+- GitHub Repository: https://github.com/charannyk06/conductor-oss
+- Issues: https://github.com/charannyk06/conductor-oss/issues
+- Pull Requests: https://github.com/charannyk06/conductor-oss/pulls
+- CI: https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml
+- NPM Package: https://www.npmjs.com/package/conductor-oss
+
+---
 
 ## Current product shape
 
-Today the application is built around three ideas:
+The app is currently organized around three core objects:
 
-- `Task`: a board card or issue tracked in `CONDUCTOR.md`
-- `Session`: one run or attempt against that task with a specific agent/model/branch
-- `Workspace`: the local repo or worktree where that session executes
+1. `Task`
+   - a board card or issue tracked in `CONDUCTOR.md`
+2. `Session`
+   - one run or attempt against that task with a specific agent, model, workspace, and branch
+3. `Workspace`
+   - the local repo or worktree used by that run
 
-The current UX supports:
+Current capabilities include:
 
-- multi-session agent work across the same repo
-- local branch mode or isolated git worktree mode
-- board-linked tasks with multiple runs per task
-- resumable chat sessions that stay open until archived
+- board-linked tasks with human-readable task refs
+- multiple runs attached to a single board task
+- local branch mode or worktree isolation mode
+- resumable sessions that remain in `needs_input` after a successful run
+- archive as the explicit cleanup action for a run
 - grouped tool-call rendering in chat
-- model selection per agent
-- local and remote access settings in the dashboard
-- archive/interrupt lifecycle controls for completed or stale runs
+- per-agent model selection
+- local-first execution with installed coding-agent CLIs
+- workspace and remote access configuration in the dashboard
+
+---
 
 ## Architecture
 
@@ -31,13 +88,13 @@ Conductor currently ships as a Rust backend with a Bun/Next.js frontend.
 
 Rust crates under `crates/`:
 
-- `conductor-cli`: app entrypoint and local launcher
-- `conductor-server`: Axum API server and session manager
-- `conductor-executors`: agent adapters and PTY-backed process control
+- `conductor-cli`: local launcher and app entrypoint
+- `conductor-server`: Axum API server, session manager, board/session routes
+- `conductor-executors`: agent adapters and PTY-backed process handling
 - `conductor-db`: local SQLite persistence
-- `conductor-git`: git/worktree helpers
-- `conductor-watcher`: file/session watcher logic
-- `conductor-core`: shared types and core utilities
+- `conductor-git`: git/worktree operations
+- `conductor-watcher`: watcher logic
+- `conductor-core`: shared core types
 
 ### Frontend
 
@@ -45,20 +102,22 @@ Web app under `packages/web/`:
 
 - Next.js 16
 - React 19
-- run with Bun from the workspace root scripts
-- talks to the Rust backend over local HTTP
+- Bun workspace scripts
+- browser UI for board, settings, chat, sessions, and linked runs
 
 ### Persistence
 
-Conductor is local-first, but it is not “no database”.
+Conductor is local-first, but not database-free.
 
-Current state is stored locally in:
+Current state is stored in:
 
-- `.conductor/conductor.db`: SQLite app/session state
-- repository board files such as `CONDUCTOR.md`
-- repo/worktree files in the selected project path
+- `.conductor/conductor.db`: local SQLite state
+- `CONDUCTOR.md`: board/task planning surface
+- workspace and worktree files in the selected project path
 
-## Session model
+---
+
+## Session lifecycle
 
 A session is the unit of execution.
 
@@ -66,23 +125,27 @@ Each session has:
 
 - an agent
 - a model
-- a project/workspace
+- a workspace path
 - a branch or worktree
 - chat history
-- runtime/tool output
+- tool-call history
+- local runtime output
 
-Current lifecycle:
+Current lifecycle behavior:
 
 - active runs stream into the chat view
-- when a run completes successfully, the session moves to `needs_input`
-- replying continues the same session id instead of spawning a duplicate sidebar entry
-- archiving is the explicit cleanup action for the session run
+- tool calls are rendered as grouped structured rows
+- after a successful run, the session moves to `needs_input`
+- replying continues the same session instead of spawning a duplicate session entry
+- archiving is the explicit teardown and cleanup path
+
+---
 
 ## Supported agents
 
 Conductor currently detects and uses agent CLIs that are installed locally.
 
-Commonly supported agents in the current app:
+Common supported agents in the app today:
 
 - Claude Code
 - Codex
@@ -95,39 +158,29 @@ Actual availability depends on what is installed and authenticated on your machi
 
 Notes:
 
-- some CLIs may be present but unusable until you complete their normal terminal auth flow
-- billing/auth restrictions from the upstream provider still apply
-- Conductor does not bypass provider auth, quotas, or subscription limits
+- upstream auth and billing constraints still apply
+- some CLIs may be present but unusable until their normal terminal auth flow is completed
+- Conductor does not bypass provider-side limits, auth, or subscription checks
 
-## Board and task model
+---
+
+## Board model
 
 The board is the planning surface. Sessions are the execution surface.
 
 Current behavior:
 
-- tasks live in the board file and can be edited/moved from the web UI
-- a task can have multiple session runs linked to it
+- tasks live in the board file and can be moved or edited from the web UI
+- a task can link to multiple session runs
 - one run can be marked as the primary linked run
-- board cards surface linked runs and jump directly into chat
+- board cards surface linked runs and jump directly into the session chat
 - task refs are human-readable instead of raw UUID-only identifiers
 
-## Development setup
+---
 
-### Prerequisites
+## Quick Start
 
-Install these locally:
-
-- Bun `>= 1.2`
-- Rust toolchain
-- Git
-- one or more supported coding-agent CLIs
-
-Optional but commonly useful:
-
-- GitHub CLI
-- tmux
-
-### Install
+### Install dependencies
 
 ```bash
 bun install
@@ -162,9 +215,11 @@ bun run dev:backend
 bun run build
 ```
 
+---
+
 ## Workspace scripts
 
-Useful root scripts today:
+Useful root scripts:
 
 ```bash
 bun run dev
@@ -174,6 +229,8 @@ bun run build
 bun run build:frontend
 bun run clean
 ```
+
+---
 
 ## Repository layout
 
@@ -191,14 +248,35 @@ packages/
   plugins/
 ```
 
+---
+
+## Development prerequisites
+
+Install locally:
+
+- Bun `>= 1.2`
+- Rust toolchain
+- Git
+- one or more supported coding-agent CLIs
+
+Common optional tools:
+
+- GitHub CLI
+- tmux
+
+---
+
 ## What the app is optimized for
 
-Conductor is currently best suited for:
+Conductor OSS is currently best suited for:
 
-- local-first development teams or solo operators
-- multiple concurrent coding-agent sessions
-- linking chat execution back to a markdown-native task board
+- local-first development workflows
+- multiple coding-agent sessions against the same repo
+- linking execution back to markdown board tasks
 - isolating risky work in worktrees while keeping review in one dashboard
+- preserving resumable session history instead of treating every run as disposable
+
+---
 
 ## Current limitations
 
@@ -206,10 +284,13 @@ This repo is still evolving quickly.
 
 Important current realities:
 
-- agent behavior is only as reliable as the installed upstream CLI
-- some flows still depend on provider-specific auth or account state
-- the chat view is a structured projection over terminal-backed agent execution
-- UX and rendering details are still actively being tightened
+- reliability depends partly on the installed upstream CLI behavior
+- some providers require normal terminal auth or billing setup before their agent works here
+- the chat view is a structured projection over terminal-backed execution
+- UX and output rendering are still being tightened actively
+- documentation can drift quickly unless it is updated alongside implementation changes
+
+---
 
 ## License
 
