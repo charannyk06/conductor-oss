@@ -2,7 +2,7 @@
 
 # Conductor OSS
 
-**Local-first coding agent orchestration with a board, chat UI, and resumable multi-session runs.**
+**Local-first coding agent orchestration with a board, chat UI, worktree isolation, and resumable multi-session runs.**
 
 <br>
 
@@ -23,7 +23,7 @@ It combines:
 
 - a markdown-native board for tasks and issues
 - a chat-oriented execution surface for agent runs
-- worktree-aware local execution
+- local branch mode or isolated worktree mode
 - multiple concurrent sessions against the same repo
 - a Rust backend with a Bun/Next frontend
 
@@ -62,7 +62,7 @@ The app is currently organized around three core objects:
 1. `Task`
    - a board card or issue tracked in `CONDUCTOR.md`
 2. `Session`
-   - one run/attempt against that task with a specific agent, model, workspace, and branch
+   - one run or attempt against that task with a specific agent, model, workspace, and branch
 3. `Workspace`
    - the local repo or worktree used by that run
 
@@ -76,6 +76,7 @@ Current capabilities include:
 - grouped tool-call rendering in chat
 - per-agent model selection
 - local-first execution with installed coding-agent CLIs
+- workspace and remote access configuration in the dashboard
 
 ---
 
@@ -136,7 +137,7 @@ Current lifecycle behavior:
 - tool calls are rendered as grouped structured rows
 - after a successful run, the session moves to `needs_input`
 - replying continues the same session instead of spawning a duplicate session entry
-- archiving is the explicit teardown/cleanup path
+- archiving is the explicit teardown and cleanup path
 
 ---
 
@@ -284,10 +285,10 @@ This repo is still evolving quickly.
 Important current realities:
 
 - reliability depends partly on the installed upstream CLI behavior
-- some providers require normal terminal auth/billing setup before their agent works here
+- some providers require normal terminal auth or billing setup before their agent works here
 - the chat view is a structured projection over terminal-backed execution
 - UX and output rendering are still being tightened actively
-- documentation and implementation can drift quickly unless kept in sync
+- documentation can drift quickly unless it is updated alongside implementation changes
 
 ---
 
