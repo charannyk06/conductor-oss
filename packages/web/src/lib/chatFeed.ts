@@ -1,4 +1,4 @@
-export type NormalizedChatEntryKind = "assistant" | "status" | "system" | "user";
+export type NormalizedChatEntryKind = "assistant" | "status" | "system" | "user" | "tool";
 
 export interface StoredConversationEntry {
   id?: string | null;
@@ -72,6 +72,7 @@ function toEntryLabel(kind: string | null | undefined, source: string | null | u
 function toEntryKind(kind: string | null | undefined): NormalizedChatEntryKind {
   if (kind === "user_message") return "user";
   if (kind === "system_message") return "system";
+  if (kind === "tool_message") return "tool";
   return "status";
 }
 
@@ -100,6 +101,11 @@ function stripLeadingPromptEcho(output: string, conversation: StoredConversation
   return output;
 }
 
+function isStreamingStatus(status: string | null | undefined): boolean {
+  const normalized = status?.trim().toLowerCase();
+  return normalized === "running" || normalized === "working";
+}
+
 function createAssistantEntry(
   output: string,
   sessionStatus: string | null | undefined,
@@ -110,12 +116,12 @@ function createAssistantEntry(
   return {
     id: makeStableId("assistant", normalizedOutput),
     kind: "assistant",
-    label: sessionStatus === "running" ? "Assistant live output" : "Assistant",
+    label: isStreamingStatus(sessionStatus) ? "Assistant live output" : "Assistant",
     text: normalizedOutput,
     createdAt: null,
     attachments: [],
     source: "runtime-output",
-    streaming: sessionStatus === "running",
+    streaming: isStreamingStatus(sessionStatus),
     metadata: {},
   };
 }
@@ -141,7 +147,7 @@ function createStatusEntry(status: string | null | undefined, summary: string | 
     createdAt: null,
     attachments: [],
     source: "session-status",
-    streaming: normalizedStatus === "running",
+    streaming: isStreamingStatus(normalizedStatus),
     metadata: normalizedStatus ? { status: normalizedStatus } : {},
   };
 }

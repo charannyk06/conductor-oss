@@ -18,6 +18,15 @@ import {
 } from "./runtimeAgentModelsShared";
 
 const execFileAsync = promisify(execFile);
+const RUNTIME_MODEL_CATALOG_TTL_MS = 60_000;
+
+type RuntimeModelCatalogCacheEntry = {
+  value: RuntimeAgentModelCatalog | null;
+  expiresAt: number;
+};
+
+const runtimeModelCatalogCache = new Map<string, RuntimeModelCatalogCacheEntry>();
+const runtimeModelCatalogInflight = new Map<string, Promise<RuntimeAgentModelCatalog | null>>();
 
 type CodexCacheReasoningLevel = {
   effort?: unknown;
@@ -59,6 +68,7 @@ type RecentFileMatchOptions = {
   filenamePattern?: RegExp;
   maxDepth?: number;
   maxFiles?: number;
+  maxDirectories?: number;
 };
 
 const DEFAULT_REASONING_DESCRIPTIONS: Record<string, string> = {
@@ -520,16 +530,23 @@ async function buildClaudeRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalo
 async function collectRecentFiles(rootDir: string, options: RecentFileMatchOptions = {}): Promise<string[]> {
   const maxDepth = options.maxDepth ?? 5;
   const maxFiles = options.maxFiles ?? 24;
+  const maxDirectories = options.maxDirectories ?? 64;
   const extensions = new Set((options.extensions ?? []).map((value) => value.toLowerCase()));
   const files: Array<{ path: string; mtimeMs: number }> = [];
+  let visitedDirectories = 0;
 
   async function walk(currentDir: string, depth: number): Promise<void> {
-    if (depth > maxDepth) return;
+    if (depth > maxDepth || visitedDirectories >= maxDirectories) return;
+    visitedDirectories += 1;
 
     let entries;
     try {
       entries = await readdir(currentDir, { withFileTypes: true });
     } catch {
+      return;
+    }
+
+    if (files.length >= maxFiles * 3 && depth > 1) {
       return;
     }
 
@@ -604,7 +621,7 @@ async function buildGeminiRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalo
   const models = await collectRegexMatchesFromRecentFiles(
     join(homedir(), ".gemini"),
     /"(?:model|modelVersion)"\s*:\s*"([^"]+)"/g,
-    { extensions: [".json", ".jsonl"], filenamePattern: /\.(json|jsonl)$/i, maxDepth: 6, maxFiles: 24 },
+    { extensions: [".json", ".jsonl"], filenamePattern: /\.(json|jsonl)$/i, maxDepth: 4, maxFiles: 12, maxDirectories: 48 },
   );
 
   if (models.length === 0) {
@@ -652,7 +669,7 @@ async function buildQwenRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalog 
   const models = await collectRegexMatchesFromRecentFiles(
     join(homedir(), ".qwen"),
     /"(?:model|modelVersion)"\s*:\s*"([^"]+)"/g,
-    { extensions: [".json", ".jsonl"], filenamePattern: /\.(json|jsonl)$/i, maxDepth: 7, maxFiles: 24 },
+    { extensions: [".json", ".jsonl"], filenamePattern: /\.(json|jsonl)$/i, maxDepth: 5, maxFiles: 12, maxDirectories: 48 },
   );
 
   if (models.length === 0) {
@@ -681,7 +698,7 @@ async function buildQwenRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalog 
   };
 }
 
-export async function getRuntimeAgentModelCatalog(agent: string): Promise<RuntimeAgentModelCatalog | null> {
+async function loadRuntimeAgentModelCatalog(agent: string): Promise<RuntimeAgentModelCatalog | null> {
   const normalizedAgent = agent.trim().toLowerCase();
 
   if (normalizedAgent === "codex") {
@@ -714,6 +731,39 @@ export async function getRuntimeAgentModelCatalog(agent: string): Promise<Runtim
   }
 
   return null;
+}
+
+export async function getRuntimeAgentModelCatalog(agent: string): Promise<RuntimeAgentModelCatalog | null> {
+  const normalizedAgent = agent.trim().toLowerCase();
+  if (!normalizedAgent) {
+    return null;
+  }
+
+  const now = Date.now();
+  const cached = runtimeModelCatalogCache.get(normalizedAgent);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const inFlight = runtimeModelCatalogInflight.get(normalizedAgent);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const promise = loadRuntimeAgentModelCatalog(normalizedAgent)
+    .then((value) => {
+      runtimeModelCatalogCache.set(normalizedAgent, {
+        value,
+        expiresAt: Date.now() + RUNTIME_MODEL_CATALOG_TTL_MS,
+      });
+      return value;
+    })
+    .finally(() => {
+      runtimeModelCatalogInflight.delete(normalizedAgent);
+    });
+
+  runtimeModelCatalogInflight.set(normalizedAgent, promise);
+  return promise;
 }
 
 export async function getResolvedDefaultAgentModel(
