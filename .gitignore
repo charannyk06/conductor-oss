@@ -33,6 +33,12 @@ CONDUCTOR-TAGS.md
 # Release artifacts
 .release-artifacts/
 
+# Playwright
+.playwright-cli/
+
+# Lockfile (use bun.lock)
+pnpm-lock.yaml
+
 # Rust
 /target
 *.db
