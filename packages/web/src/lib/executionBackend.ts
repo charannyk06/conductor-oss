@@ -88,8 +88,8 @@ async function sendLocal(sessionId: string, payload: ExecutorSendRequest): Promi
   const { sessionManager } = await getServices();
   await sessionManager.send(sessionId, trimmedMessage, {
     attachments,
-    model: safeString(payload.model),
-    reasoningEffort: safeString(payload.reasoningEffort),
+    model: safeString(payload.model) ?? undefined,
+    reasoningEffort: safeString(payload.reasoningEffort) ?? undefined,
   });
 }
 

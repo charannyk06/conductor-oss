@@ -16,6 +16,7 @@ import type { NormalizedChatEntry } from "@/lib/chatFeed";
 
 interface ChatPanelProps {
   sessionId: string;
+  agentName?: string | null;
   projectId?: string | null;
   sessionModel?: string | null;
   sessionReasoningEffort?: string | null;
@@ -38,7 +39,7 @@ function getModelOptions(agents: ReturnType<typeof useAgents>["agents"]): ModelO
     const catalog = agent.runtimeModelCatalog;
     if (!catalog || typeof catalog !== "object") continue;
 
-    const modelsByAccess = (catalog as { modelsByAccess?: Record<string, Array<Record<string, unknown>>> }).modelsByAccess;
+    const modelsByAccess = (catalog as unknown as { modelsByAccess?: Record<string, Array<Record<string, unknown>>> }).modelsByAccess;
     if (!modelsByAccess || typeof modelsByAccess !== "object") continue;
 
     for (const modelList of Object.values(modelsByAccess)) {
