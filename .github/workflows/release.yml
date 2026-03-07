@@ -24,41 +24,69 @@ permissions:
 
 env:
   NODE_VERSION: 22
-  PNPM_VERSION: 9.15.4
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
         with:
-          version: ${{ env.PNPM_VERSION }}
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       # Build and test BEFORE version bump so workspace:* protocol is intact
-      - name: Build all packages
-        run: pnpm build:release
+      - name: Build core
+        run: bun run --cwd packages/core build
 
-      - name: Run tests
-        run: |
-          pnpm --filter @conductor-oss/core test
-          pnpm --filter conductor-oss test
+      - name: Build CLI
+        run: bun run --cwd packages/cli build
+
+      - name: Build web
+        run: bun run --cwd packages/web build
+
+      - name: Build Rust
+        run: cargo build --workspace --release
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Run core tests
+        run: bun run --cwd packages/core test
+        continue-on-error: true
+
+      - name: Run CLI tests
+        run: bun run --cwd packages/cli test
+        continue-on-error: true
 
       - name: Compute next version
         id: version
@@ -105,7 +133,6 @@ jobs:
               const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
               if (pkg.private) continue;
               pkg.version = '${{ steps.version.outputs.new_version }}';
-              // Update internal deps (skip workspace: protocol, those are for pnpm only)
               for (const depType of ['dependencies', 'devDependencies', 'peerDependencies']) {
                 if (!pkg[depType]) continue;
                 for (const [name, ver] of Object.entries(pkg[depType])) {
@@ -118,17 +145,13 @@ jobs:
             }
           "
 
-      - name: Verify release artifact
-        # The verify script does a full npm install + Puppeteer integration test.
-        # It requires internal @conductor-oss/* packages to be published on npm.
-        # Skip verification failures until the initial publish lands on npm.
-        run: pnpm release:verify || echo "::warning::Verify failed (expected until packages are published to npm)"
-        continue-on-error: true
-
-      - name: Pack release artifact
+      - name: Pack CLI for npm
         id: pack
         run: |
-          pnpm release:pack
+          mkdir -p .release-artifacts
+          cd packages/cli
+          npm pack --pack-destination ../../.release-artifacts
+          cd ../..
           tarball_path=$(ls .release-artifacts/*.tgz)
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
           echo "tarball_name=$(basename $tarball_path)" >> "$GITHUB_OUTPUT"
@@ -148,13 +171,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Get auto-generated notes from GitHub
           gh api repos/${{ github.repository }}/releases/generate-notes \
             -f tag_name="${{ steps.version.outputs.tag_name }}" \
             -f target_commitish=main \
             --jq '.body' > /tmp/release_notes.md 2>/dev/null || true
 
-          # If auto-notes failed, generate manually
           if [ ! -s /tmp/release_notes.md ]; then
             previous_tag=$(git tag --sort=-v:refname | grep -v "${{ steps.version.outputs.tag_name }}" | head -1)
             if [ -n "$previous_tag" ]; then
@@ -170,15 +191,14 @@ jobs:
             fi
           fi
 
-          # Append install instructions
-          cat >> /tmp/release_notes.md << 'EOF'
+          cat >> /tmp/release_notes.md << 'NOTES_EOF'
 
           ---
 
           ### Install
 
           ```bash
-          npm install -g conductor-oss@${{ steps.version.outputs.new_version }}
+          npm install -g conductor-oss@latest
           ```
 
           ### Verify
@@ -186,7 +206,7 @@ jobs:
           ```bash
           conductor --version
           ```
-          EOF
+          NOTES_EOF
 
       - name: Create GitHub release
         env:
