@@ -64,9 +64,17 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Build and test BEFORE version bump so workspace:* protocol is intact
+      # Build in dependency order BEFORE version bump so workspace:* protocol is intact
       - name: Build core
         run: bun run --cwd packages/core build
+
+      - name: Build plugins
+        run: |
+          for dir in packages/plugins/*/; do
+            if [ -f "$dir/package.json" ]; then
+              bun run --cwd "$dir" build
+            fi
+          done
 
       - name: Build CLI
         run: bun run --cwd packages/cli build
