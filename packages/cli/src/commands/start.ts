@@ -152,13 +152,53 @@ function startCloudflareQuickTunnel(localUrl: string): {
   };
 }
 
-function openDashboardInBrowser(url: string): void {
-  const opener = process.platform === "darwin" ? "open" : "xdg-open";
-  const child = spawn(opener, [url], { stdio: "ignore", detached: true });
+function resolveBrowserOpenCommand(): { command: string; argsPrefix: string[] } | null {
+  if (process.platform === "darwin") {
+    return {
+      command: existsSync("/usr/bin/open") ? "/usr/bin/open" : "open",
+      argsPrefix: [],
+    };
+  }
+
+  if (process.platform === "win32") {
+    return {
+      command: "cmd",
+      argsPrefix: ["/c", "start", ""],
+    };
+  }
+
+  if (existsSync("/usr/bin/xdg-open")) {
+    return {
+      command: "/usr/bin/xdg-open",
+      argsPrefix: [],
+    };
+  }
+
+  if (commandExists("xdg-open")) {
+    return {
+      command: "xdg-open",
+      argsPrefix: [],
+    };
+  }
+
+  return null;
+}
+
+function openDashboardInBrowser(url: string): boolean {
+  const opener = resolveBrowserOpenCommand();
+  if (!opener) {
+    console.log(chalk.yellow(`Could not find a browser opener. Open ${url} manually.`));
+    return false;
+  }
+
+  const child = spawn(opener.command, [...opener.argsPrefix, url], {
+    stdio: "ignore",
+  });
   child.unref();
   child.on("error", () => {
     console.log(chalk.yellow(`Could not open browser automatically. Open ${url} manually.`));
   });
+  return true;
 }
 
 async function waitForDashboard(url: string, timeoutMs = 15_000): Promise<boolean> {
@@ -453,9 +493,14 @@ export function registerStart(program: Command): void {
               const standaloneAppDir = dirname(standaloneServer);
               const standaloneStaticDir = join(standaloneAppDir, ".next", "static");
               const sourceStaticDir = join(webDir, ".next", "static");
+              const standalonePublicDir = join(standaloneAppDir, "public");
+              const sourcePublicDir = join(webDir, "public");
               if (!existsSync(standaloneStaticDir) && existsSync(sourceStaticDir)) {
                 mkdirSync(join(standaloneAppDir, ".next"), { recursive: true });
                 cpSync(sourceStaticDir, standaloneStaticDir, { recursive: true });
+              }
+              if (!existsSync(standalonePublicDir) && existsSync(sourcePublicDir)) {
+                cpSync(sourcePublicDir, standalonePublicDir, { recursive: true });
               }
 
               cmd = process.execPath;
@@ -568,18 +613,17 @@ export function registerStart(program: Command): void {
 
             if (opts.open) {
               const preferredUrl = unlockDashboardUrl ?? publicDashboardUrl ?? dashboardUrl;
-              if (preferredUrl) {
-                openDashboardInBrowser(preferredUrl);
-              } else {
-                void waitForDashboard(dashboardInternalUrl).then((ready) => {
-                  if (ready) {
-                    openDashboardInBrowser(dashboardUrl);
-                    return;
+              void waitForDashboard(dashboardInternalUrl).then((ready) => {
+                if (ready) {
+                  const targetUrl = preferredUrl || dashboardUrl;
+                  if (openDashboardInBrowser(targetUrl)) {
+                    console.log(chalk.bold("Opening Conductor in your browser..."));
                   }
+                  return;
+                }
 
-                  console.log(chalk.yellow(`Dashboard is still starting. Open ${dashboardUrl} manually if it does not open shortly.`));
-                });
-              }
+                console.log(chalk.yellow(`Dashboard is still starting. Open ${dashboardUrl} manually if it does not open shortly.`));
+              });
             }
           } catch {
             dashSpinner.warn("Could not start dashboard.");
