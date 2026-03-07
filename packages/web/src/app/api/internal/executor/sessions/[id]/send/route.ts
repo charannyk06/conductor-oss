@@ -1,6 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { guardApiAccess } from "@/lib/auth";
-import { getExecutionBackend, type ExecutorSendRequest } from "@/lib/executionBackend";
+import { authorizeInternalExecutorRequest, sendLocalExecutionMessage, type ExecutorSendRequest } from "@/lib/executionBackend";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +19,7 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> },
 ) {
-  const denied = await guardApiAccess(undefined, "editor");
+  const denied = authorizeInternalExecutorRequest(request);
   if (denied) return denied;
 
   const params = await context.params;
@@ -39,10 +38,10 @@ export async function POST(
 
   try {
     const payload = normalizePayload(await request.json());
-    await getExecutionBackend().send(sessionId, payload);
+    await sendLocalExecutionMessage(sessionId, payload);
     return NextResponse.json({ ok: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Failed to send message";
+    const message = err instanceof Error ? err.message : "Failed to send execution message";
     const lowered = message.toLowerCase();
     const status = lowered.includes("required") ? 400 : lowered.includes("not found") ? 404 : 500;
     return NextResponse.json({ error: message }, { status });

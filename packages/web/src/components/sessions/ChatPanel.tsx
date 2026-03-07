@@ -1,351 +1,268 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
-  ArrowUp,
-  BookOpen,
   ChevronDown,
-  Eraser,
-  FilePenLine,
-  FilePlus2,
-  Hammer,
-  LoaderCircle,
-  MessageCircleDashed,
+  Loader2,
   Paperclip,
-  Play,
-  ScanSearch,
-  Send,
-  SlidersHorizontal,
-  TerminalSquare,
+  SendHorizontal,
+  Sparkles,
 } from "lucide-react";
-import { Button } from "@/components/ui/Button";
-import { AgentTileIcon } from "@/components/AgentTileIcon";
-import { useSessionOutputStream } from "@/hooks/useSessionOutputStream";
+import { useAgents } from "@/hooks/useAgents";
+import { useSessionFeed } from "@/hooks/useSessionFeed";
+import type { NormalizedChatEntry } from "@/lib/chatFeed";
 
 interface ChatPanelProps {
   sessionId: string;
-  agentName?: string;
+  projectId?: string | null;
+  sessionModel?: string | null;
+  sessionReasoningEffort?: string | null;
 }
 
-interface DiffFile {
-  additions: number;
-  deletions: number;
+interface AttachmentDraft {
+  file: File;
 }
 
-interface DiffPayload {
-  hasDiff?: boolean;
-  files?: DiffFile[];
-  untracked?: string[];
+interface ModelOption {
+  id: string;
+  label: string;
+  helper: string;
 }
 
-interface DiffSummary {
-  hasDiff: boolean;
-  filesChanged: number;
-  additions: number;
-  deletions: number;
-}
+function getModelOptions(agents: ReturnType<typeof useAgents>["agents"]): ModelOption[] {
+  const options = new Map<string, ModelOption>();
 
-const EMPTY_SUMMARY: DiffSummary = {
-  hasDiff: false,
-  filesChanged: 0,
-  additions: 0,
-  deletions: 0,
-};
+  for (const agent of agents) {
+    const catalog = agent.runtimeModelCatalog;
+    if (!catalog || typeof catalog !== "object") continue;
 
-type StreamItemKind = "text" | "thinking" | "command";
-type ToolAction = "search" | "read" | "edit" | "create" | "run";
+    const modelsByAccess = (catalog as { modelsByAccess?: Record<string, Array<Record<string, unknown>>> }).modelsByAccess;
+    if (!modelsByAccess || typeof modelsByAccess !== "object") continue;
 
-interface StreamItem {
-  kind: StreamItemKind;
-  text: string;
-  action?: ToolAction;
-}
-
-const COMMAND_PREFIXES = [
-  "git",
-  "npm",
-  "pnpm",
-  "yarn",
-  "npx",
-  "node",
-  "python",
-  "pip",
-  "uv",
-  "cargo",
-  "go",
-  "docker",
-  "kubectl",
-  "helm",
-  "ls",
-  "cd",
-  "cat",
-  "sed",
-  "awk",
-  "rg",
-  "grep",
-  "find",
-  "touch",
-  "mkdir",
-  "cp",
-  "mv",
-  "rm",
-  "echo",
-  "pwd",
-  "whoami",
-  "curl",
-  "wget",
-  "tail",
-  "head",
-  "wc",
-  "sort",
-  "uniq",
-  "tr",
-  "xargs",
-  "make",
-  "just",
-  "bun",
-  "deno",
-  "tmux",
-] as const;
-
-const TOOL_LINE_PREFIXES: Array<{ prefix: string; action: ToolAction }> = [
-  { prefix: "searched for ", action: "search" },
-  { prefix: "searching for ", action: "search" },
-  { prefix: "read ", action: "read" },
-  { prefix: "opened ", action: "read" },
-  { prefix: "edited ", action: "edit" },
-  { prefix: "updated ", action: "edit" },
-  { prefix: "created ", action: "create" },
-  { prefix: "applied patch", action: "edit" },
-  { prefix: "ran ", action: "run" },
-  { prefix: "running ", action: "run" },
-  { prefix: "wrote ", action: "edit" },
-];
-
-function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
-}
-
-function normalizeOutputLine(rawLine: string): string {
-  return stripAnsi(rawLine).replace(/\t/g, "  ").trim();
-}
-
-function stripPromptPrefix(line: string): string {
-  return line.replace(/^\s*(?:[^$>#%\n]{0,120}\s+)?(?:[$>#%]\s+)+/, "").trim();
-}
-
-function stripLeadingDecorators(line: string): string {
-  return line.replace(/^[^a-zA-Z0-9]+/, "").trim();
-}
-
-function isThinkingLine(line: string): boolean {
-  const normalized = stripLeadingDecorators(line).trim().toLowerCase();
-  return (
-    normalized === "thinking"
-    || normalized === "thinking..."
-    || normalized === "analyzing"
-    || normalized === "analyzing..."
-  );
-}
-
-function parseToolLine(line: string): { action: ToolAction; text: string } | null {
-  const stripped = stripLeadingDecorators(stripPromptPrefix(line));
-  const normalized = stripped.toLowerCase();
-  const match = TOOL_LINE_PREFIXES.find((item) => normalized.startsWith(item.prefix));
-  if (!match) return null;
-  return {
-    action: match.action,
-    text: stripped,
-  };
-}
-
-function isCommandLine(line: string): boolean {
-  const normalized = stripLeadingDecorators(stripPromptPrefix(line)).toLowerCase();
-  if (!normalized) return false;
-  return COMMAND_PREFIXES.some(
-    (prefix) => normalized === prefix || normalized.startsWith(`${prefix} `),
-  );
-}
-
-function parseStreamItems(raw: string): StreamItem[] {
-  const lines = raw.split(/\r?\n/).slice(-1400);
-  const items: StreamItem[] = [];
-  const textBuffer: string[] = [];
-
-  const flushTextBuffer = () => {
-    if (textBuffer.length === 0) return;
-    const text = textBuffer.join("\n").trim();
-    textBuffer.length = 0;
-    if (!text) return;
-    items.push({ kind: "text", text });
-  };
-
-  for (const rawLine of lines) {
-    const line = normalizeOutputLine(rawLine);
-    if (!line) {
-      flushTextBuffer();
-      continue;
+    for (const modelList of Object.values(modelsByAccess)) {
+      if (!Array.isArray(modelList)) continue;
+      for (const model of modelList) {
+        const id = typeof model.id === "string" ? model.id.trim() : "";
+        if (!id || options.has(id)) continue;
+        const label = typeof model.label === "string" && model.label.trim().length > 0 ? model.label.trim() : id;
+        const helper = typeof agent.name === "string" && agent.name.trim().length > 0 ? agent.name.trim() : "Runtime catalog";
+        options.set(id, { id, label, helper });
+      }
     }
-
-    if (isThinkingLine(line)) {
-      flushTextBuffer();
-      items.push({ kind: "thinking", text: "Thinking" });
-      continue;
-    }
-
-    const toolLine = parseToolLine(line);
-    if (toolLine) {
-      flushTextBuffer();
-      items.push({ kind: "command", text: toolLine.text, action: toolLine.action });
-      continue;
-    }
-
-    if (isCommandLine(line)) {
-      flushTextBuffer();
-      items.push({ kind: "command", text: stripLeadingDecorators(stripPromptPrefix(line)) });
-      continue;
-    }
-
-    textBuffer.push(line);
   }
 
-  flushTextBuffer();
-  return items.slice(-180);
+  return [...options.values()].sort((left, right) => left.label.localeCompare(right.label));
 }
 
-function summarizeDiff(payload: DiffPayload): DiffSummary {
-  const files = Array.isArray(payload.files) ? payload.files : [];
-  const untracked = Array.isArray(payload.untracked) ? payload.untracked : [];
-  const filesChanged = files.length + untracked.length;
-  const additions = files.reduce((sum, file) => sum + Math.max(0, file.additions), 0);
-  const deletions = files.reduce((sum, file) => sum + Math.max(0, file.deletions), 0);
-  const hasDiff = Boolean(payload.hasDiff) || filesChanged > 0;
-
-  return {
-    hasDiff,
-    filesChanged,
-    additions,
-    deletions,
-  };
+function formatTimestamp(value: string | null): string | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return null;
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(timestamp));
 }
 
-export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
-  const encodedSessionId = encodeURIComponent(sessionId);
-  const [input, setInput] = useState("");
+function entryChrome(entry: NormalizedChatEntry): {
+  container: string;
+  bubble: string;
+  prose: string;
+  meta: string;
+} {
+  switch (entry.kind) {
+    case "user":
+      return {
+        container: "items-end",
+        bubble: "max-w-[85%] rounded-[24px] rounded-br-md border border-white/10 bg-white/[0.08] px-5 py-4 text-white shadow-[0_24px_80px_rgba(0,0,0,0.22)] backdrop-blur",
+        prose: "prose prose-invert prose-pre:overflow-x-auto prose-code:text-zinc-100 prose-p:text-zinc-100 max-w-none text-[15px] leading-7",
+        meta: "text-right text-[11px] uppercase tracking-[0.18em] text-zinc-500",
+      };
+    case "assistant":
+      return {
+        container: "items-start",
+        bubble: "max-w-[88%] rounded-[28px] rounded-tl-md border border-white/10 bg-[#11131a]/95 px-6 py-5 text-white shadow-[0_36px_90px_rgba(0,0,0,0.3)]",
+        prose: "prose prose-invert prose-headings:text-zinc-100 prose-p:text-zinc-200 prose-strong:text-white prose-code:text-zinc-100 prose-pre:overflow-x-auto prose-li:text-zinc-200 max-w-none text-[15px] leading-7",
+        meta: "text-left text-[11px] uppercase tracking-[0.18em] text-zinc-500",
+      };
+    case "system":
+      return {
+        container: "items-center",
+        bubble: "max-w-[92%] rounded-full border border-emerald-500/20 bg-emerald-500/[0.08] px-4 py-2 text-emerald-100",
+        prose: "max-w-none text-center text-[12px] leading-6 text-emerald-100",
+        meta: "text-center text-[11px] uppercase tracking-[0.18em] text-emerald-400/80",
+      };
+    default:
+      return {
+        container: "items-center",
+        bubble: "max-w-[92%] rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-zinc-300",
+        prose: "max-w-none text-center text-[12px] leading-6 text-zinc-300",
+        meta: "text-center text-[11px] uppercase tracking-[0.18em] text-zinc-500",
+      };
+  }
+}
+
+function extractAttachmentPath(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const nested = record.attachment && typeof record.attachment === "object"
+    ? record.attachment as Record<string, unknown>
+    : null;
+
+  for (const candidate of [
+    record.absolutePath,
+    record.path,
+    record.filePath,
+    nested?.absolutePath,
+    nested?.path,
+    nested?.filePath,
+  ]) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
+async function uploadAttachments(files: File[]): Promise<string[]> {
+  if (!files.length) return [];
+
+  const uploadedPaths = await Promise.all(files.map(async (file) => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const response = await fetch("/api/attachments", {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to upload ${file.name}`);
+    }
+
+    const payload = await response.json();
+    const absolutePath = extractAttachmentPath(payload);
+    if (!absolutePath) {
+      throw new Error(`Attachment response for ${file.name} did not include a file path`);
+    }
+
+    return absolutePath;
+  }));
+
+  return uploadedPaths.filter(Boolean);
+}
+
+function FeedCard({ entry }: { entry: NormalizedChatEntry }) {
+  const styles = entryChrome(entry);
+  const timestamp = formatTimestamp(entry.createdAt);
+
+  return (
+    <div className={`flex w-full flex-col gap-2 ${styles.container}`}>
+      <div className={styles.meta}>
+        <span>{entry.label}</span>
+        {timestamp ? <span className="ml-2 normal-case tracking-normal text-zinc-500">{timestamp}</span> : null}
+        {entry.streaming ? <span className="ml-2 normal-case tracking-normal text-zinc-400">live</span> : null}
+      </div>
+      <div className={styles.bubble}>
+        {entry.kind === "assistant" || entry.kind === "user" ? (
+          <ReactMarkdown
+            className={styles.prose}
+            remarkPlugins={[remarkGfm]}
+            components={{
+              a: ({ ...props }) => <a {...props} target="_blank" rel="noreferrer" className="text-sky-300 underline" />,
+            }}
+          >
+            {entry.text}
+          </ReactMarkdown>
+        ) : (
+          <p className={styles.prose}>{entry.text}</p>
+        )}
+        {entry.attachments.length > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {entry.attachments.map((attachment) => (
+              <span
+                key={attachment}
+                className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] text-zinc-300"
+              >
+                {attachment.split("/").pop()}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function ChatPanel({
+  sessionId,
+  projectId,
+  sessionModel,
+  sessionReasoningEffort,
+}: ChatPanelProps) {
+  const { agents } = useAgents();
+  const { entries, error, loading, refresh } = useSessionFeed(sessionId);
+  const modelOptions = useMemo(() => getModelOptions(agents), [agents]);
+
+  const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const [diffSummary, setDiffSummary] = useState<DiffSummary>(EMPTY_SUMMARY);
-  const [diffError, setDiffError] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [isPinnedToLatest, setIsPinnedToLatest] = useState(true);
-  const mountedRef = useRef(true);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState(sessionModel?.trim() || "");
+  const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
 
-  const {
-    output,
-    connected,
-    error: streamError,
-    refresh,
-  } = useSessionOutputStream(sessionId, { lines: 900, pollIntervalMs: 2000 });
-
-  const streamItems = useMemo(() => parseStreamItems(output), [output]);
-
-  const isNearBottom = useCallback((element: HTMLDivElement, threshold = 44) => {
-    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-    return distance <= threshold;
-  }, []);
-
-  const scrollToBottom = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    setIsPinnedToLatest(true);
-  }, []);
+  const endRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
-    const handleScroll = () => {
-      setIsPinnedToLatest(isNearBottom(el));
-    };
-
-    handleScroll();
-    el.addEventListener("scroll", handleScroll, { passive: true });
-    return () => {
-      el.removeEventListener("scroll", handleScroll);
-    };
-  }, [isNearBottom]);
+    setSelectedModel(sessionModel?.trim() || "");
+  }, [sessionModel]);
 
   useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !isPinnedToLatest) return;
-    el.scrollTop = el.scrollHeight;
-  }, [isPinnedToLatest, streamItems]);
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [entries, sending]);
 
-  useEffect(() => {
-    setIsPinnedToLatest(true);
-  }, [sessionId]);
-
-  const fetchDiffSummary = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/sessions/${encodedSessionId}/diff`);
-      if (!res.ok) {
-        if (res.status === 404) {
-          if (!mountedRef.current) return;
-          setDiffSummary(EMPTY_SUMMARY);
-          setDiffError(null);
-          return;
-        }
-        throw new Error(`Failed to fetch diff: ${res.status}`);
-      }
-
-      const payload = (await res.json()) as DiffPayload;
-      if (!mountedRef.current) return;
-      setDiffSummary(summarizeDiff(payload));
-      setDiffError(null);
-    } catch (err) {
-      if (!mountedRef.current) return;
-      setDiffSummary(EMPTY_SUMMARY);
-      setDiffError(err instanceof Error ? err.message : "Failed to load diff summary");
-    }
-  }, [encodedSessionId]);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    void fetchDiffSummary();
-    const interval = window.setInterval(() => {
-      if (mountedRef.current) void fetchDiffSummary();
-    }, 4000);
-
-    return () => {
-      mountedRef.current = false;
-      window.clearInterval(interval);
-    };
-  }, [fetchDiffSummary]);
+  const selectedModelLabel = useMemo(() => {
+    if (!selectedModel) return "Model";
+    return modelOptions.find((option) => option.id === selectedModel)?.label ?? selectedModel;
+  }, [modelOptions, selectedModel]);
 
   async function handleSend() {
-    const message = input.trim();
-    if (!message) return;
+    const trimmedMessage = message.trim();
+    if (!trimmedMessage && attachments.length === 0) return;
 
     setSending(true);
     setSendError(null);
 
     try {
-      const res = await fetch(`/api/sessions/${encodedSessionId}/send`, {
+      const attachmentPaths = await uploadAttachments(attachments.map((attachment) => attachment.file));
+
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          message: trimmedMessage,
+          attachments: attachmentPaths,
+          model: selectedModel || null,
+          reasoningEffort: sessionReasoningEffort || null,
+          projectId: projectId || null,
+        }),
       });
 
-      if (!res.ok) {
-        throw new Error(`Send failed: ${res.status}`);
+      if (!response.ok) {
+        throw new Error(`Failed to send message: ${response.status}`);
       }
 
-      setInput("");
-      window.setTimeout(() => {
-        void refresh();
-      }, 300);
+      setMessage("");
+      setAttachments([]);
+      await refresh();
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to send message");
     } finally {
@@ -353,204 +270,177 @@ export function ChatPanel({ sessionId, agentName }: ChatPanelProps) {
     }
   }
 
-  const placeholderText = useMemo(() => {
-    if (sending) return "Sending message...";
-    return "Continue working on this task...";
-  }, [sending]);
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void handleSend();
+    }
+  }
 
-  const combinedError = sendError ?? streamError ?? diffError;
-  const controlButtonClass = "inline-flex h-[29px] min-w-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[#1c1c1c] px-2 text-[var(--vk-text-muted)] transition-colors hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]";
+  function handleAttachmentChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+
+    setAttachments((current) => {
+      const next = [
+        ...current,
+        ...files.map((file) => ({ file })),
+      ];
+      return next;
+    });
+
+    event.target.value = "";
+  }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="relative min-h-0 flex-1">
-        <div
-          ref={scrollRef}
-          className="h-full overflow-y-auto px-3 py-3 sm:px-4 sm:py-4"
-        >
-          {streamItems.length === 0 && (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-              <MessageCircleDashed className="h-6 w-6 text-[var(--text-faint)]" />
-              <p className="text-[13px] text-[var(--text-muted)]">No output yet</p>
-            </div>
-          )}
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(72,114,255,0.14),_transparent_34%),linear-gradient(180deg,_#0f1015_0%,_#090a0d_100%)] text-white">
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-5xl flex-col px-4 pb-6 pt-5 sm:px-6 lg:px-8">
+        <div className="flex-1 overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 pb-6 pt-4">
+            {loading && entries.length === 0 ? (
+              <div className="flex items-center justify-center gap-3 rounded-full border border-white/10 bg-white/[0.04] px-5 py-3 text-sm text-zinc-300">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Loading session conversation</span>
+              </div>
+            ) : null}
 
-          {streamItems.length > 0 && (
-            <div className="space-y-3">
-              {streamItems.map((item, index) => {
-                if (item.kind === "thinking") {
-                  return (
-                    <article
-                      key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
-                      className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
-                    >
-                      <LoaderCircle className="h-[15px] w-[15px]" />
-                      <span>{item.text}</span>
-                    </article>
-                  );
-                }
+            {!loading && entries.length === 0 ? (
+              <div className="rounded-[32px] border border-white/10 bg-white/[0.03] px-7 py-8 text-center text-zinc-300 shadow-[0_36px_100px_rgba(0,0,0,0.24)]">
+                <p className="text-sm uppercase tracking-[0.28em] text-zinc-500">Chat</p>
+                <h2 className="mt-3 font-mono text-2xl text-white">Session feed is ready</h2>
+                <p className="mt-3 text-sm leading-7 text-zinc-400">
+                  Send a follow-up to create the next execution turn. The panel now reads a normalized conversation feed instead of a raw terminal transcript.
+                </p>
+              </div>
+            ) : null}
 
-                if (item.kind === "command") {
-                  const iconClass = "h-[15px] w-[15px]";
-                  const CommandIcon = item.action === "search"
-                    ? ScanSearch
-                    : item.action === "read"
-                      ? BookOpen
-                      : item.action === "edit"
-                        ? FilePenLine
-                        : item.action === "create"
-                          ? FilePlus2
-                          : item.action === "run"
-                            ? Hammer
-                            : TerminalSquare;
-                  return (
-                    <article
-                      key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}
-                      className="flex items-center gap-2 text-[14px] leading-[21px] text-[#8f8f8f]"
-                    >
-                      <span className="relative inline-flex h-[20px] w-[20px] items-center justify-center text-[var(--vk-text-muted)]">
-                        <CommandIcon className={iconClass} />
-                        <span className="absolute -bottom-[2px] -left-[1px] h-[6px] w-[6px] rounded-full bg-[var(--vk-green)]" />
-                      </span>
-                      <span className="whitespace-pre-wrap break-words">{item.text}</span>
-                    </article>
-                  );
-                }
+            {entries.map((entry) => <FeedCard key={entry.id} entry={entry} />)}
 
-                return (
-                  <article key={`${index}-${item.kind}-${item.text.slice(0, 24)}`}>
-                    <pre className="whitespace-pre-wrap break-words font-sans text-[16px] leading-[24px] text-[#c4c4c4]">
-                      {item.text}
-                    </pre>
-                  </article>
-                );
-              })}
-            </div>
-          )}
+            {error ? (
+              <div className="rounded-full border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-center text-sm text-rose-100">
+                {error}
+              </div>
+            ) : null}
+
+            {sendError ? (
+              <div className="rounded-full border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-center text-sm text-rose-100">
+                {sendError}
+              </div>
+            ) : null}
+
+            <div ref={endRef} />
+          </div>
         </div>
 
-        {!isPinnedToLatest && streamItems.length > 0 && (
-          <div className="pointer-events-none absolute bottom-3 right-3 z-10">
-            <button
-              type="button"
-              className="pointer-events-auto inline-flex h-8 items-center gap-1 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2.5 text-[11px] text-[var(--vk-text-normal)] shadow-[0_8px_24px_rgba(0,0,0,0.4)] hover:bg-[var(--vk-bg-hover)]"
-              onClick={scrollToBottom}
-            >
-              <ArrowUp className="h-3.5 w-3.5" />
-              Latest
-            </button>
-          </div>
-        )}
-      </div>
-
-      <div className="border-t border-[var(--vk-border)] px-3 pb-3 pt-2">
-        <div className="rounded-[3px] border border-[var(--vk-border)] bg-[#1c1c1c]">
-          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--vk-border)] px-2 py-2 sm:flex-nowrap">
-            <div className="flex min-h-[29px] flex-1 items-center gap-2 overflow-hidden">
-              {diffSummary.hasDiff ? (
-                <div className="inline-flex min-h-[29px] items-center gap-1.5 rounded-[3px] bg-[#292929] px-2 text-[14px] leading-[21px] text-[#c4c4c4]">
-                  <span>{diffSummary.filesChanged} files changed</span>
-                  <span className="text-[var(--vk-green)]">+{diffSummary.additions}</span>
-                  <span className="text-[var(--vk-red)]">-{diffSummary.deletions}</span>
-                </div>
-              ) : agentName ? (
-                <div className="inline-flex min-h-[29px] items-center gap-1.5 rounded-[3px] border border-[var(--vk-border)] px-2 text-[13px] text-[var(--vk-text-normal)]">
-                  <AgentTileIcon seed={{ label: agentName }} className="h-6 w-6" />
-                  <span className="max-w-[180px] truncate">{agentName}</span>
-                </div>
-              ) : (
-                <span className="text-[13px] text-[var(--vk-text-muted)]">No file changes yet</span>
-              )}
+        <div className="mx-auto mt-4 w-full max-w-4xl">
+          {attachments.length > 0 ? (
+            <div className="mb-3 flex flex-wrap gap-2">
+              {attachments.map((attachment, index) => (
+                <button
+                  key={`${attachment.file.name}-${index}`}
+                  type="button"
+                  onClick={() => {
+                    setAttachments((current) => {
+                      const next = [...current];
+                      next.splice(index, 1);
+                      return next;
+                    });
+                  }}
+                  className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-xs text-zinc-300 transition hover:bg-white/[0.08]"
+                >
+                  {attachment.file.name}
+                </button>
+              ))}
             </div>
+          ) : null}
 
-            <div className="flex items-center gap-1.5">
-              <span
-                className={`h-2 w-2 rounded-full ${connected ? "bg-[var(--vk-green)]" : "bg-[var(--vk-text-muted)]"}`}
-                title={connected ? "Live output streaming" : "Reconnecting to output stream"}
-              />
-
-              <button
-                type="button"
-                className={controlButtonClass}
-                aria-label="Jump to latest output"
-                onClick={scrollToBottom}
-              >
-                <ArrowUp className="h-[15px] w-[15px]" />
-              </button>
-
-              {agentName && (
-                <span className="hidden h-[25px] w-[25px] items-center justify-center overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] sm:inline-flex">
-                  <AgentTileIcon seed={{ label: agentName }} className="h-8 w-8" />
-                </span>
-              )}
-
-              <button type="button" className={controlButtonClass} aria-label="Chat settings">
-                <SlidersHorizontal className="h-[15px] w-[15px]" />
-              </button>
-
-              <button type="button" className={`${controlButtonClass} gap-1 text-[14px] leading-[21px]`}>
-                <span>Latest</span>
-                <ChevronDown className="h-[10px] w-[10px]" />
-              </button>
-            </div>
-          </div>
-
-          <div className="px-2 pt-2">
+          <div className="relative overflow-hidden rounded-[30px] border border-white/10 bg-[#0f1118]/95 shadow-[0_34px_90px_rgba(0,0,0,0.35)]">
             <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void handleSend();
-                }
-              }}
-              disabled={sending}
-              rows={1}
-              placeholder={placeholderText}
-              className="min-h-[24px] max-h-40 w-full resize-none bg-transparent text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[#8f8f8f]"
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
+              placeholder="Send a follow-up"
+              rows={3}
+              className="min-h-[120px] w-full resize-none bg-transparent px-5 py-5 text-[15px] leading-7 text-white outline-none placeholder:text-zinc-500"
             />
-          </div>
 
-          <div className="flex items-end justify-between gap-2 px-2 pb-2 pt-3">
-            <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
+            <div className="flex items-center justify-between border-t border-white/10 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={handleAttachmentChange}
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-zinc-300 transition hover:bg-white/[0.08] hover:text-white"
+                  aria-label="Add attachment"
+                >
+                  <Paperclip className="h-4 w-4" />
+                </button>
+
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setModelMenuOpen((open) => !open)}
+                    className="inline-flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 text-sm text-zinc-200 transition hover:bg-white/[0.08] hover:text-white"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    <span className="max-w-[180px] truncate">{selectedModelLabel}</span>
+                    <ChevronDown className="h-4 w-4" />
+                  </button>
+
+                  {modelMenuOpen ? (
+                    <div className="absolute bottom-[calc(100%+12px)] left-0 z-20 max-h-80 w-72 overflow-y-auto rounded-3xl border border-white/10 bg-[#0f1118] p-2 shadow-[0_30px_80px_rgba(0,0,0,0.45)]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedModel(sessionModel?.trim() || "");
+                          setModelMenuOpen(false);
+                        }}
+                        className="flex w-full flex-col rounded-2xl px-4 py-3 text-left transition hover:bg-white/[0.05]"
+                      >
+                        <span className="text-sm text-white">Session default</span>
+                        <span className="mt-1 text-xs text-zinc-400">Keep using the model configured on the current session.</span>
+                      </button>
+
+                      {modelOptions.map((option) => (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedModel(option.id);
+                            setModelMenuOpen(false);
+                          }}
+                          className={`flex w-full flex-col rounded-2xl px-4 py-3 text-left transition hover:bg-white/[0.05] ${selectedModel === option.id ? "bg-white/[0.06]" : ""}`}
+                        >
+                          <span className="text-sm text-white">{option.label}</span>
+                          <span className="mt-1 text-xs text-zinc-400">{option.helper}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
               <button
                 type="button"
-                className={controlButtonClass}
-                aria-label="Clear message draft"
-                onClick={() => setInput("")}
+                onClick={() => void handleSend()}
+                disabled={sending || (!message.trim() && attachments.length === 0)}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-white text-[#0d0f15] transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:bg-white/20 disabled:text-zinc-500"
+                aria-label="Send message"
               >
-                <Eraser className="h-[15px] w-[15px]" />
-              </button>
-              <button type="button" className={controlButtonClass} aria-label="Playback tools">
-                <Play className="h-[15px] w-[15px]" />
-              </button>
-              <button type="button" className={controlButtonClass} aria-label="Attach files">
-                <Paperclip className="h-[15px] w-[15px]" />
-              </button>
-              <button type="button" className={controlButtonClass} aria-label="Additional options">
-                <SlidersHorizontal className="h-[15px] w-[15px]" />
+                {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <SendHorizontal className="h-4 w-4" />}
               </button>
             </div>
-
-            <Button
-              variant="primary"
-              onClick={() => void handleSend()}
-              disabled={sending || !input.trim()}
-              className="min-h-[29px] rounded-[3px] border border-[var(--vk-border)] bg-[#292929] px-2 py-1 text-[16px] font-normal text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-            >
-              <span>Send</span>
-              <Send className="ml-1 h-[15px] w-[15px]" />
-            </Button>
           </div>
         </div>
-
-        {combinedError && (
-          <p className="mt-2 rounded-[3px] border border-[color:color-mix(in_srgb,var(--status-error)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--status-error)_12%,transparent)] px-2 py-1 text-[11px] text-[var(--status-error)]">
-            {combinedError}
-          </p>
-        )}
       </div>
     </div>
   );
 }
+
+export default ChatPanel;

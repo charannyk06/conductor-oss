@@ -32,7 +32,7 @@ import {
   constants,
 } from "node:fs";
 import { join, dirname } from "node:path";
-import type { SessionId, SessionMetadata } from "./types.js";
+import type { ConversationEntry, SessionId, SessionMetadata } from "./types.js";
 
 /**
  * Parse a key=value metadata file into a record.
@@ -82,6 +82,11 @@ function validateSessionId(sessionId: SessionId): void {
 function metadataPath(dataDir: string, sessionId: SessionId): string {
   validateSessionId(sessionId);
   return join(dataDir, sessionId);
+}
+
+function conversationPath(dataDir: string, sessionId: SessionId): string {
+  validateSessionId(sessionId);
+  return join(dataDir, "conversation", `${sessionId}.jsonl`);
 }
 
 /**
@@ -181,6 +186,120 @@ export function updateMetadata(
   writeFileSync(path, serializeMetadata(existing), "utf-8");
 }
 
+function normalizeConversationEntry(entry: ConversationEntry): ConversationEntry {
+  const normalized: ConversationEntry = {
+    id: sanitizeMetadataValue(entry.id),
+    sessionId: sanitizeMetadataValue(entry.sessionId),
+    kind: entry.kind,
+    text: entry.text.trim(),
+    createdAt: sanitizeMetadataValue(entry.createdAt),
+  };
+
+  const attachments = (entry.attachments ?? [])
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (attachments.length > 0) {
+    normalized.attachments = [...new Set(attachments)];
+  }
+  if (entry.model?.trim()) normalized.model = entry.model.trim();
+  if (entry.reasoningEffort?.trim()) normalized.reasoningEffort = entry.reasoningEffort.trim().toLowerCase();
+  if (entry.source?.trim()) normalized.source = entry.source;
+  return normalized;
+}
+
+export function appendConversationEntry(
+  dataDir: string,
+  sessionId: SessionId,
+  entry: ConversationEntry,
+): void {
+  const path = conversationPath(dataDir, sessionId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(normalizeConversationEntry(entry))}\n`, {
+    encoding: "utf-8",
+    flag: "a",
+  });
+}
+
+export function readConversationEntries(
+  dataDir: string,
+  sessionId: SessionId,
+): ConversationEntry[] {
+  const path = conversationPath(dataDir, sessionId);
+  if (!existsSync(path)) return [];
+
+  const entries: ConversationEntry[] = [];
+  for (const line of readFileSync(path, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as Partial<ConversationEntry>;
+      if (
+        typeof parsed.id !== "string"
+        || typeof parsed.sessionId !== "string"
+        || (parsed.kind !== "user_message" && parsed.kind !== "system_message")
+        || typeof parsed.text !== "string"
+        || typeof parsed.createdAt !== "string"
+      ) {
+        continue;
+      }
+      entries.push(normalizeConversationEntry(parsed as ConversationEntry));
+    } catch {
+      // Ignore malformed lines.
+    }
+  }
+  return entries;
+}
+
+export function readArchivedConversationEntries(
+  dataDir: string,
+  sessionId: SessionId,
+): ConversationEntry[] {
+  validateSessionId(sessionId);
+  const archiveDir = join(dataDir, "archive");
+  if (!existsSync(archiveDir)) return [];
+
+  const prefix = `${sessionId}_`;
+  const suffix = ".conversation.jsonl";
+  let latest: string | null = null;
+
+  for (const file of readdirSync(archiveDir)) {
+    if (!file.startsWith(prefix) || !file.endsWith(suffix)) continue;
+    const charAfterPrefix = file[prefix.length];
+    if (!charAfterPrefix || charAfterPrefix < "0" || charAfterPrefix > "9") continue;
+    if (!latest || file > latest) {
+      latest = file;
+    }
+  }
+
+  if (!latest) return [];
+  try {
+    const path = join(archiveDir, latest);
+    const entries: ConversationEntry[] = [];
+    for (const line of readFileSync(path, "utf-8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const parsed = JSON.parse(trimmed) as Partial<ConversationEntry>;
+        if (
+          typeof parsed.id !== "string"
+          || typeof parsed.sessionId !== "string"
+          || (parsed.kind !== "user_message" && parsed.kind !== "system_message")
+          || typeof parsed.text !== "string"
+          || typeof parsed.createdAt !== "string"
+        ) {
+          continue;
+        }
+        entries.push(normalizeConversationEntry(parsed as ConversationEntry));
+      } catch {
+        // Ignore malformed lines.
+      }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Delete a session's metadata file.
  * Optionally archive it to an `archive/` subdirectory.
@@ -188,16 +307,24 @@ export function updateMetadata(
 export function deleteMetadata(dataDir: string, sessionId: SessionId, archive = true): void {
   const path = metadataPath(dataDir, sessionId);
   if (!existsSync(path)) return;
+  const conversation = conversationPath(dataDir, sessionId);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   if (archive) {
     const archiveDir = join(dataDir, "archive");
     mkdirSync(archiveDir, { recursive: true });
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     const archivePath = join(archiveDir, `${sessionId}_${timestamp}`);
     writeFileSync(archivePath, readFileSync(path, "utf-8"));
+    if (existsSync(conversation)) {
+      const conversationArchivePath = join(archiveDir, `${sessionId}_${timestamp}.conversation.jsonl`);
+      writeFileSync(conversationArchivePath, readFileSync(conversation, "utf-8"));
+    }
   }
 
   unlinkSync(path);
+  if (existsSync(conversation)) {
+    unlinkSync(conversation);
+  }
 }
 
 /**

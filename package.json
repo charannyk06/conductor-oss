@@ -16,6 +16,8 @@
     "build:release": "pnpm --filter='!@conductor-oss/web' build && pnpm --filter @conductor-oss/web build",
     "changeset": "changeset",
     "dev": "pnpm --filter @conductor-oss/web dev",
+    "executor:build": "cargo build --manifest-path orchestrator/runtime-sidecar/Cargo.toml --release",
+    "executor:dev": "cargo run --manifest-path orchestrator/runtime-sidecar/Cargo.toml",
     "release": "pnpm build:release && pnpm release:verify && pnpm release:publish",
     "release:pack": "node scripts/pack-cli-package.mjs",
     "release:publish": "node scripts/publish-cli-package.mjs",

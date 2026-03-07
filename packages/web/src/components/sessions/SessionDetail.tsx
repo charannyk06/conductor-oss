@@ -6,14 +6,12 @@ import {
   FileCode,
   LayoutDashboard,
   MessageSquare,
-  SquareTerminal,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { useSession } from "@/hooks/useSession";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
-import { TerminalView } from "@/components/TerminalView";
 import { SessionOverview } from "./SessionOverview";
 import { SessionDiff } from "./SessionDiff";
 import { ChatPanel } from "./ChatPanel";
@@ -22,11 +20,14 @@ interface SessionDetailProps {
   sessionId: string;
 }
 
-type SessionTab = "overview" | "chat" | "diff" | "terminal";
+type SessionTab = "overview" | "chat" | "diff";
 
 function resolveSessionTab(value: string | null): SessionTab {
-  if (value === "chat" || value === "diff" || value === "terminal") {
+  if (value === "chat" || value === "diff") {
     return value;
+  }
+  if (value === "terminal") {
+    return "chat";
   }
   return "overview";
 }
@@ -77,6 +78,8 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
 
   const status = typeof session.status === "string" ? session.status : "unknown";
   const agentName = session.metadata["agent"]?.trim() ?? "";
+  const sessionModel = session.metadata["model"]?.trim() ?? "";
+  const sessionReasoningEffort = session.metadata["reasoningEffort"]?.trim() ?? "";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -97,10 +100,6 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
               <FileCode className="h-3.5 w-3.5" />
               Diff
             </TabsTrigger>
-            <TabsTrigger value="terminal">
-              <SquareTerminal className="h-3.5 w-3.5" />
-              Terminal
-            </TabsTrigger>
           </TabsList>
           <div className="flex min-w-0 items-center gap-2">
             <Badge variant="outline" className="h-[23px]">
@@ -114,20 +113,18 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
           <SessionOverview session={session} />
         </TabsContent>
 
-        <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden">
-          <Card className="h-full">
-            <ChatPanel sessionId={sessionId} agentName={agentName} />
-          </Card>
+        <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[#212121]">
+          <ChatPanel
+            sessionId={sessionId}
+            agentName={agentName}
+            projectId={session.projectId}
+            sessionModel={sessionModel}
+            sessionReasoningEffort={sessionReasoningEffort}
+          />
         </TabsContent>
 
         <TabsContent value="diff" className="min-h-0 flex-1 overflow-auto">
           <SessionDiff sessionId={sessionId} />
-        </TabsContent>
-
-        <TabsContent value="terminal" className="min-h-0 flex-1 overflow-hidden">
-          <Card className="h-full">
-            <TerminalView sessionId={sessionId} />
-          </Card>
         </TabsContent>
       </Tabs>
     </div>

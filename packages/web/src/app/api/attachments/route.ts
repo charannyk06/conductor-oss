@@ -126,6 +126,7 @@ export async function POST(request: NextRequest) {
 
     const uploaded: Array<{
       path: string;
+      absolutePath: string;
       name: string;
       size: number;
       mimeType: string | null;
@@ -152,6 +153,7 @@ export async function POST(request: NextRequest) {
       const relPath = relative(workspaceRoot, absolutePath).replaceAll("\\", "/");
       uploaded.push({
         path: relPath,
+        absolutePath,
         name: file.name || safeName,
         size: file.size,
         mimeType: file.type || null,
