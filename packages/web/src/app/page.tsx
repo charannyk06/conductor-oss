@@ -19,14 +19,19 @@ import {
   Bot,
   BookText,
   Building2,
+  ChevronsRight,
   Check,
   ChevronDown,
   Copy,
+  Eye,
   FolderOpen,
   FolderGit2,
   FolderKanban,
   Github,
+  Hand,
+  List,
   Loader2,
+  Paperclip,
   PlugZap,
   RefreshCcw,
   Search,
@@ -39,7 +44,7 @@ import {
 } from "lucide-react";
 import type { DashboardSession } from "@/lib/types";
 import { useSessions } from "@/hooks/useSessions";
-import { useConfig } from "@/hooks/useConfig";
+import { useConfig, type ConfigProject } from "@/hooks/useConfig";
 import { useAgents } from "@/hooks/useAgents";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
@@ -105,6 +110,15 @@ type NewWorkspacePayload = {
   gitUrl?: string;
   path?: string;
   initializeGit?: boolean;
+};
+
+type CreatePermissionMode = "default" | "auto" | "ask" | "plan";
+
+type CreateSessionOptions = {
+  projectId?: string;
+  branch?: string;
+  useWorktree?: boolean;
+  permissionMode?: CreatePermissionMode;
 };
 
 type GitHubRepo = {
@@ -203,6 +217,7 @@ type ModelSelectionState = {
 type PreferencesDialogMode = "onboarding" | "settings";
 type SettingsTabId =
   | "general"
+  | "remote_access"
   | "repositories"
   | "organization"
   | "projects"
@@ -218,13 +233,14 @@ type SettingsTab = {
 };
 
 const SETTINGS_TABS: SettingsTab[] = [
-  { id: "general", label: "General", icon: Settings2, implemented: false },
+  { id: "general", label: "General", icon: Settings2, implemented: true },
+  { id: "remote_access", label: "Remote Access", icon: SlidersHorizontal, implemented: true },
   { id: "repositories", label: "Repositories", icon: FolderGit2, implemented: true },
   { id: "organization", label: "Organization Settings", icon: Building2, implemented: true },
   { id: "projects", label: "Projects", icon: FolderKanban, implemented: false },
-  { id: "agents", label: "Agents", icon: Bot, implemented: false },
+  { id: "agents", label: "Agents", icon: Bot, implemented: true },
   { id: "mcp", label: "MCP Servers", icon: PlugZap, implemented: false },
-  { id: "preferences", label: "Preferences", icon: SlidersHorizontal, implemented: true },
+  { id: "preferences", label: "Preferences", icon: SlidersHorizontal, implemented: false },
 ];
 
 const ONBOARDING_TABS: SettingsTab[] = [
@@ -812,7 +828,7 @@ export default function Home() {
     const opts = new Set<string>();
 
     for (const agent of safeAgents) {
-      if (agent.ready && agent.name) {
+      if (agent.name && (agent.ready ?? agent.configured ?? agent.installed ?? true)) {
         opts.add(agent.name);
       }
     }
@@ -822,20 +838,14 @@ export default function Home() {
     if (preferences?.codingAgent) {
       opts.add(preferences.codingAgent);
     }
-
-    if (opts.size === 0) {
-      for (const agent of safeAgents) {
-        if ((agent.configured || agent.installed) && agent.name) {
-          opts.add(agent.name);
-        }
-      }
+    if (selectedAgent) {
+      opts.add(selectedAgent);
     }
-
     if (opts.size === 0) {
-      ["claude-code", "codex", "qwen-code"].forEach((name) => opts.add(name));
+      opts.add(preferences?.codingAgent || "qwen-code");
     }
     return [...opts];
-  }, [agents, preferences?.codingAgent, projects]);
+  }, [agents, preferences?.codingAgent, projects, selectedAgent]);
 
   const runtimeModelCatalogs = useMemo(() => {
     const catalogs: Record<string, RuntimeAgentModelCatalog> = {};
@@ -910,9 +920,14 @@ export default function Home() {
   useEffect(() => {
     if (agentOptions.length === 0) return;
     if (!selectedAgent || !agentOptions.includes(selectedAgent)) {
-      setSelectedAgent(agentOptions[0] ?? "qwen-code");
+      const fallbackAgent = preferences?.codingAgent || "qwen-code";
+      setSelectedAgent(
+        agentOptions.includes(fallbackAgent)
+          ? fallbackAgent
+          : agentOptions[0] ?? "qwen-code",
+      );
     }
-  }, [agentOptions, selectedAgent]);
+  }, [agentOptions, preferences?.codingAgent, selectedAgent]);
 
   useEffect(() => {
     const effectiveAgent = selectedAgent || selectedProject?.agent || preferences?.codingAgent || "qwen-code";
@@ -937,7 +952,7 @@ export default function Home() {
   async function handleSavePreferences(
     next: PreferencesPayload,
     options?: { closeDialog?: boolean },
-  ) {
+  ): Promise<boolean> {
     setPreferencesSaving(true);
     setPreferencesError(null);
     try {
@@ -958,9 +973,10 @@ export default function Home() {
       if (options?.closeDialog !== false) {
         setPreferencesDialogOpen(false);
       }
+      return true;
     } catch (err) {
       setPreferencesError(err instanceof Error ? err.message : "Failed to save preferences");
-      throw err;
+      return false;
     } finally {
       setPreferencesSaving(false);
     }
@@ -994,13 +1010,13 @@ export default function Home() {
     openWorkspaceDialog();
   }, [pendingWorkspaceSetup, preferencesDialogOpen]);
 
-  async function handleCreateSession() {
+  async function handleCreateSession(options?: CreateSessionOptions) {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) return;
     const resolvedModel = resolveModelSelectionValue(launchModelSelection);
     const resolvedReasoningEffort = resolveReasoningSelectionValue(launchModelSelection);
 
-    const projectId = selectedProjectId ?? projects[0]?.id;
+    const projectId = options?.projectId ?? selectedProjectId ?? projects[0]?.id;
     if (!projectId) {
       setCreateError("No project is configured in conductor.yaml");
       return;
@@ -1017,6 +1033,9 @@ export default function Home() {
           projectId,
           prompt: trimmedPrompt,
           agent: selectedAgent || "qwen-code",
+          ...(options?.branch ? { branch: options.branch } : {}),
+          ...(typeof options?.useWorktree === "boolean" ? { useWorktree: options.useWorktree } : {}),
+          ...(options?.permissionMode ? { permissionMode: options.permissionMode } : {}),
           ...(resolvedModel ? { model: resolvedModel } : {}),
           ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
         }),
@@ -1169,8 +1188,11 @@ export default function Home() {
                     modelAccess={resolvedPreferences.modelAccess}
                     runtimeModelCatalogs={runtimeModelCatalogs}
                     agentOptions={agentOptions}
+                    projects={projects}
+                    selectedProjectId={selectedProjectId}
+                    onSelectProject={setSelectedProjectId}
                     projectLabel={selectedProjectId ?? "No project selected"}
-                    hasProject={Boolean(selectedProjectId)}
+                    hasProject={projects.length > 0}
                     creating={creating}
                     error={workspaceError}
                     onOpenAddWorkspace={openWorkspaceDialog}
@@ -2005,6 +2027,9 @@ function CreateWorkspacePanel({
   modelAccess,
   runtimeModelCatalogs,
   agentOptions,
+  projects,
+  selectedProjectId,
+  onSelectProject,
   projectLabel,
   hasProject,
   creating,
@@ -2021,12 +2046,15 @@ function CreateWorkspacePanel({
   modelAccess: ModelAccessPreferences;
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   agentOptions: string[];
+  projects: ConfigProject[];
+  selectedProjectId: string | null;
+  onSelectProject: (projectId: string | null) => void;
   projectLabel: string;
   hasProject: boolean;
   creating: boolean;
   error: string | null;
   onOpenAddWorkspace: () => void;
-  onCreate: () => void;
+  onCreate: (options?: CreateSessionOptions) => void;
 }) {
   const orderedAgentOptions = useMemo(() => {
     const rankMap = new Map(EXECUTOR_ORDER.map((name, index) => [name, index]));
@@ -2039,22 +2067,127 @@ function CreateWorkspacePanel({
   }, [agentOptions]);
 
   const selectedAgentLabel = getAgentLabel(selectedAgent);
+  const projectOptions = useMemo(
+    () => [...projects].sort((left, right) => left.id.localeCompare(right.id)),
+    [projects],
+  );
+  const effectiveProjectId = selectedProjectId ?? projectOptions[0]?.id ?? null;
+  const selectedProject = useMemo(
+    () => projectOptions.find((project) => project.id === effectiveProjectId) ?? null,
+    [effectiveProjectId, projectOptions],
+  );
+  const [branchOptions, setBranchOptions] = useState<string[]>([]);
+  const [branchLoading, setBranchLoading] = useState(false);
+  const [selectedBranch, setSelectedBranch] = useState("");
+  const [useWorktree, setUseWorktree] = useState(true);
+  const [permissionMode, setPermissionMode] = useState<CreatePermissionMode>("default");
+
+  useEffect(() => {
+    if (!selectedProject) {
+      setBranchOptions([]);
+      setSelectedBranch("");
+      return;
+    }
+
+    let cancelled = false;
+    const project = selectedProject;
+    const fallbackBranch = project.defaultBranch.trim() || "main";
+
+    async function loadBranches() {
+      if (!project.path?.trim()) {
+        setBranchOptions([fallbackBranch]);
+        setSelectedBranch(fallbackBranch);
+        return;
+      }
+
+      setBranchLoading(true);
+      try {
+        const params = new URLSearchParams({ path: project.path });
+        const res = await fetch(`/api/workspaces/branches?${params.toString()}`);
+        const data = (await res.json().catch(() => null)) as
+          | { branches?: string[]; defaultBranch?: string | null }
+          | null;
+
+        const branches = Array.isArray(data?.branches)
+          ? data.branches.filter((branch) => typeof branch === "string" && branch.trim().length > 0)
+          : [];
+        const resolvedDefault = typeof data?.defaultBranch === "string" && data.defaultBranch.trim().length > 0
+          ? data.defaultBranch.trim()
+          : fallbackBranch;
+        const nextBranches = branches.length > 0 ? branches : [resolvedDefault];
+
+        if (cancelled) return;
+        setBranchOptions(nextBranches);
+        setSelectedBranch((current) => current.trim().length > 0 && nextBranches.includes(current) ? current : resolvedDefault);
+      } catch {
+        if (cancelled) return;
+        setBranchOptions([fallbackBranch]);
+        setSelectedBranch(fallbackBranch);
+      } finally {
+        if (!cancelled) {
+          setBranchLoading(false);
+        }
+      }
+    }
+
+    void loadBranches();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProject]);
+
+  const availableModels = useMemo(
+    () => supportsAgentModelSelection(selectedAgent)
+      ? getSelectableAgentModels(selectedAgent, modelAccess, runtimeModelCatalogs)
+      : [],
+    [modelAccess, runtimeModelCatalogs, selectedAgent],
+  );
+  const selectedModelValue = resolveModelSelectionValue(modelSelection) ?? "";
+  const selectedModelLabel = useMemo(() => {
+    if (!supportsAgentModelSelection(selectedAgent)) return "Default";
+    if (!selectedModelValue) return "Default";
+    return availableModels.find((option) => option.id === selectedModelValue)?.label ?? selectedModelValue;
+  }, [availableModels, selectedAgent, selectedModelValue]);
+  const lightMenuClass = "z-50 min-w-[240px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
+  const lightMenuItemClass = "flex min-h-[36px] cursor-default items-center gap-2 rounded-[3px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
+  const permissionOptions: Array<{ id: CreatePermissionMode; label: string; icon: LucideIcon }> = [
+    { id: "default", label: "Default", icon: SlidersHorizontal },
+    { id: "auto", label: "Auto", icon: ChevronsRight },
+    { id: "ask", label: "Ask", icon: Hand },
+    { id: "plan", label: "Plan", icon: List },
+  ];
+  const selectedPermission = permissionOptions.find((option) => option.id === permissionMode) ?? permissionOptions[0];
+  const getProjectDisplayName = (project: ConfigProject): string => {
+    const repo = project.repo?.trim();
+    if (repo) {
+      const parts = repo.split("/").filter(Boolean);
+      const label = parts[parts.length - 1]?.replace(/\.git$/i, "");
+      if (label) return label;
+    }
+    return project.id;
+  };
+  const selectedProjectLabel = selectedProject ? getProjectDisplayName(selectedProject) : null;
+  const currentProjectLabel = selectedProject
+    ? `${selectedProjectLabel} · ${selectedBranch || selectedProject.defaultBranch || "main"}`
+    : hasProject
+      ? projectLabel
+      : "Select project";
 
   return (
-    <section className="flex h-full min-h-0 items-start justify-center overflow-auto px-3 py-4 sm:items-center sm:py-6">
+    <section className="flex h-full min-h-0 items-start justify-center overflow-auto bg-[var(--vk-bg-main)] px-3 py-4 sm:items-center sm:px-6 sm:py-6">
       <div className="w-full max-w-[768px]">
-        <h1 className="pb-4 text-center text-[28px] font-medium leading-[32px] tracking-[-0.6px] text-[var(--vk-text-strong)] sm:text-[36px] sm:leading-[40px] sm:tracking-[-0.9px]">
+        <h1 className="pb-4 text-center text-[30px] font-medium leading-[34px] tracking-[-0.7px] text-[var(--vk-text-strong)] sm:text-[36px] sm:leading-[40px] sm:tracking-[-0.9px]">
           What would you like to work on?
         </h1>
 
-        <div className="rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
-          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--vk-border)] px-2 py-2">
-            <AgentTileIcon seed={{ label: selectedAgent }} className="h-8 w-8 border-none bg-transparent" />
+        <div className="mx-auto w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
+          <div className="flex items-center gap-2 border-b border-[var(--vk-border)] px-2 pb-[9px] pt-2">
+            <AgentTileIcon seed={{ label: selectedAgent }} className="h-[25px] w-[25px] border-none bg-transparent" />
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
                   type="button"
-                  className="inline-flex h-[31px] max-w-[70vw] items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)] sm:max-w-none"
+                  className="inline-flex h-[31px] max-w-[70vw] items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)] sm:max-w-none"
                   aria-label="Select agent"
                 >
                   <span className="truncate pr-1">{selectedAgentLabel}</span>
@@ -2066,9 +2199,9 @@ function CreateWorkspacePanel({
                 <DropdownMenu.Content
                   align="start"
                   sideOffset={6}
-                  className="z-50 min-w-[255px] rounded-[5px] border border-[var(--vk-border)] bg-[color:#2a2a2a] p-2 shadow-[0_10px_30px_rgba(0,0,0,0.45)]"
+                  className={lightMenuClass}
                 >
-                  <p className="px-2 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
+                  <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
                     Agents
                   </p>
 
@@ -2078,7 +2211,7 @@ function CreateWorkspacePanel({
                       <DropdownMenu.Item
                         key={agent}
                         onSelect={() => setSelectedAgent(agent)}
-                        className="flex h-[40px] cursor-default items-center gap-2 rounded-[3px] px-2 text-[14px] leading-[21px] text-[var(--vk-text-strong)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]"
+                        className={lightMenuItemClass}
                       >
                         <AgentTileIcon seed={{ label: agent }} className="h-6 w-6 border-none bg-transparent" />
                         <span>{getAgentLabel(agent)}</span>
@@ -2093,57 +2226,243 @@ function CreateWorkspacePanel({
             </DropdownMenu.Root>
           </div>
 
-          <div className="px-2 py-2">
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe the task..."
-              rows={2}
-              className="min-h-[48px] w-full resize-none bg-transparent text-[16px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
-            />
-          </div>
-
-          {supportsAgentModelSelection(selectedAgent) && (
-            <div className="border-t border-[var(--vk-border)] px-2 py-2">
-              <AgentModelSelector
-                agent={selectedAgent}
-                modelAccess={modelAccess}
-                runtimeModelCatalogs={runtimeModelCatalogs}
-                selection={modelSelection}
-                onChange={setModelSelection}
-                compact
-              />
-            </div>
-          )}
-
-          <div className="flex flex-col gap-2 border-t border-[var(--vk-border)] px-2 py-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-center text-[14px] text-[var(--vk-text-normal)]">
-              <span className="truncate">{projectLabel}</span>
-            </div>
-            <div className="flex w-full items-center justify-end gap-2 sm:w-auto">
-              {!hasProject ? (
+          <div className="rounded-[3.5px]">
+            <div className="flex flex-col gap-3 p-2">
+              <div className="relative w-full">
+                <textarea
+                  value={prompt}
+                  onChange={(e) => setPrompt(e.target.value)}
+                  placeholder="Describe the task..."
+                  rows={1}
+                  className="min-h-[24px] w-full resize-none bg-transparent pr-8 text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                />
                 <button
                   type="button"
-                  onClick={onOpenAddWorkspace}
-                  className="inline-flex min-h-[32px] w-full items-center justify-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[13px] text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] sm:w-auto"
+                  aria-label="Preview"
+                  className="absolute right-0 top-0 inline-flex h-[24px] w-[24px] items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                 >
-                  Add Workspace
+                  <Eye className="h-[14px] w-[14px]" />
                 </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={onCreate}
-                  disabled={creating || prompt.trim().length === 0}
-                  className="inline-flex min-h-[32px] w-full items-center justify-center rounded-[3px] bg-[var(--vk-bg-active)] px-2 text-[16px] text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] disabled:opacity-45 sm:w-auto"
-                >
-                  {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
-                </button>
-              )}
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1 gap-y-2">
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        className="inline-flex h-[29px] w-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                        aria-label="Select workspace or project"
+                      >
+                        <SlidersHorizontal className="h-[15px] w-[15px]" />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                        <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Projects</p>
+                        {projectOptions.map((project) => {
+                          const displayName = getProjectDisplayName(project);
+                          const secondaryLabel = project.id !== displayName
+                            ? project.id
+                            : project.path?.trim() || project.repo?.trim() || null;
+                          return (
+                            <DropdownMenu.Item
+                              key={project.id}
+                              onSelect={() => onSelectProject(project.id)}
+                              className={`${lightMenuItemClass} min-w-[280px] items-start`}
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate">{displayName}</div>
+                                {secondaryLabel ? (
+                                  <div className="truncate text-[12px] leading-[16px] text-[var(--text-faint)]">
+                                    {secondaryLabel}
+                                  </div>
+                                ) : null}
+                              </div>
+                              <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                                {project.id === effectiveProjectId ? <Check className="h-4 w-4" /> : null}
+                              </span>
+                            </DropdownMenu.Item>
+                          );
+                        })}
+                        <DropdownMenu.Separator className="my-1 h-px bg-[var(--vk-border)]" />
+                        <DropdownMenu.Item onSelect={onOpenAddWorkspace} className={lightMenuItemClass}>
+                          <FolderOpen className="h-4 w-4" />
+                          <span>Add Workspace</span>
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        disabled={!supportsAgentModelSelection(selectedAgent)}
+                        className="inline-flex h-[29px] items-center gap-[4px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <span>{selectedModelLabel}</span>
+                        <ChevronDown className="h-[10px] w-[10px] text-[var(--vk-text-muted)]" />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                        <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Model</p>
+                        <DropdownMenu.Item
+                          onSelect={() => setModelSelection(buildModelSelection(
+                            selectedAgent,
+                            modelAccess,
+                            runtimeModelCatalogs,
+                            selectedProject?.agentModel,
+                            selectedProject?.agentReasoningEffort,
+                          ))}
+                          className={lightMenuItemClass}
+                        >
+                          <span>Default</span>
+                        </DropdownMenu.Item>
+                        {availableModels.map((option) => (
+                          <DropdownMenu.Item
+                            key={option.id}
+                            onSelect={() => setModelSelection({
+                              catalogModel: option.id,
+                              customModel: "",
+                              reasoningEffort: getSelectableDefaultReasoningEffort(
+                                selectedAgent,
+                                modelAccess,
+                                runtimeModelCatalogs,
+                                option.id,
+                              ),
+                            })}
+                            className={lightMenuItemClass}
+                          >
+                            <span>{option.label}</span>
+                            <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                              {selectedModelValue === option.id ? <Check className="h-4 w-4" /> : null}
+                            </span>
+                          </DropdownMenu.Item>
+                        ))}
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+
+                  <div className="inline-flex h-[29px] w-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">
+                    <ChevronsRight className="h-[15px] w-[15px]" />
+                  </div>
+
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        className="inline-flex h-[29px] items-center gap-[4px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                      >
+                        <span>{selectedPermission.label}</span>
+                        <ChevronDown className="h-[10px] w-[10px] text-[var(--vk-text-muted)]" />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                        <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Permissions</p>
+                        {permissionOptions.map(({ id, label, icon: Icon }) => (
+                          <DropdownMenu.Item
+                            key={id}
+                            onSelect={() => setPermissionMode(id)}
+                            className={lightMenuItemClass}
+                          >
+                            <Icon className="h-4 w-4" />
+                            <span>{label}</span>
+                            <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                              {permissionMode === id ? <Check className="h-4 w-4" /> : null}
+                            </span>
+                          </DropdownMenu.Item>
+                        ))}
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+
+                  <button
+                    type="button"
+                    onClick={onOpenAddWorkspace}
+                    className="inline-flex h-[29px] w-[20px] items-center justify-center text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                    aria-label="Add workspace"
+                  >
+                    <Paperclip className="h-[18px] w-[18px]" />
+                  </button>
+
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        disabled={!selectedProject}
+                        className="inline-flex min-h-[29px] max-w-[320px] items-center justify-center truncate text-[14px] leading-[21px] text-[var(--vk-text-normal)] hover:text-[var(--vk-text-strong)] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {currentProjectLabel}
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                        <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Branch</p>
+                        {selectedProjectLabel ? (
+                          <p className="px-3 pb-2 text-[12px] leading-[16px] text-[var(--text-faint)]">
+                            {selectedProjectLabel}
+                          </p>
+                        ) : null}
+                        {branchLoading ? (
+                          <div className="px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-muted)]">Loading branches...</div>
+                        ) : (
+                          branchOptions.map((branch) => (
+                            <DropdownMenu.Item
+                              key={branch}
+                              onSelect={() => setSelectedBranch(branch)}
+                              className={lightMenuItemClass}
+                            >
+                              <span>{branch}</span>
+                              <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                                {selectedBranch === branch ? <Check className="h-4 w-4" /> : null}
+                              </span>
+                            </DropdownMenu.Item>
+                          ))
+                        )}
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+                </div>
+
+                <div className="flex w-full justify-end sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={() => onCreate({
+                      projectId: effectiveProjectId ?? undefined,
+                      branch: selectedBranch || selectedProject?.defaultBranch || undefined,
+                      useWorktree,
+                      permissionMode,
+                    })}
+                    disabled={creating || prompt.trim().length === 0 || !effectiveProjectId}
+                    className="inline-flex min-h-[29px] items-center justify-center rounded-[3px] bg-[var(--vk-bg-hover)] px-[8px] py-[6.5px] text-[16px] leading-[16px] text-[var(--vk-text-strong)] transition-colors hover:bg-[var(--vk-bg-active)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
+                  </button>
+                </div>
+              </div>
+
+              <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2 py-2 text-[13px] text-[var(--vk-text-normal)]">
+                <input
+                  type="checkbox"
+                  checked={useWorktree}
+                  onChange={(event) => setUseWorktree(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
+                />
+                <span>
+                  Use worktree isolation
+                  <span className="block text-[11px] text-[var(--vk-text-muted)]">
+                    If unchecked, the session runs directly on the selected branch in the local repo.
+                  </span>
+                </span>
+              </label>
             </div>
           </div>
         </div>
 
-        {error && <p className="pt-2 text-[12px] text-[var(--vk-red)]">{error}</p>}
+        {error && <p className="pt-2 text-[12px] text-[var(--status-error)]">{error}</p>}
       </div>
     </section>
   );
@@ -2203,7 +2522,7 @@ function SettingsDialog({
   onRepositoriesChanged?: () => Promise<void>;
   onOnboardingComplete?: (result: { needsProject: boolean }) => void;
   onClose: () => void;
-  onSave: (next: PreferencesPayload, options?: { closeDialog?: boolean }) => Promise<void>;
+  onSave: (next: PreferencesPayload, options?: { closeDialog?: boolean }) => Promise<boolean>;
 }) {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("preferences");
   const [codingAgent, setCodingAgent] = useState(current.codingAgent);
@@ -2459,7 +2778,7 @@ function SettingsDialog({
 
   useEffect(() => {
     if (!open) return;
-    setActiveTab("preferences");
+    setActiveTab(mode === "onboarding" ? "preferences" : "general");
     setCodingAgent(current.codingAgent);
     setIde(current.ide);
     setRemoteSshHost(current.remoteSshHost);
@@ -2473,7 +2792,7 @@ function SettingsDialog({
     setRepositoriesError(null);
     setRepositoryModelSelection(emptyModelSelection());
     setAccessError(null);
-  }, [open]);
+  }, [mode, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -2524,12 +2843,16 @@ function SettingsDialog({
         ? ONBOARDING_TABS
         : ONBOARDING_TABS.filter((tab) => tab.id === "preferences");
     }
-    return SETTINGS_TABS;
+    return SETTINGS_TABS.filter((tab) => tab.implemented);
   }, [mode, onboardingShouldShowRepositoryStep]);
 
   const activeTabItem = visibleTabs.find((tab) => tab.id === activeTab) ?? visibleTabs[0] ?? SETTINGS_TABS[0];
   const isOnboarding = mode === "onboarding";
   const isPreferencesTab = activeTabItem.id === "preferences";
+  const isGeneralTab = activeTabItem.id === "general";
+  const isRemoteAccessTab = activeTabItem.id === "remote_access";
+  const isAgentsTab = activeTabItem.id === "agents";
+  const isPreferenceFormTab = isPreferencesTab || isGeneralTab || isRemoteAccessTab || isAgentsTab;
   const isRepositoriesTab = activeTabItem.id === "repositories";
   const isOrganizationTab = activeTabItem.id === "organization";
   const onboardingStepIndex = visibleTabs.findIndex((tab) => tab.id === activeTabItem.id) + 1;
@@ -2632,20 +2955,22 @@ function SettingsDialog({
   async function handleSubmitPreferences(
     acknowledgeOnboarding: boolean,
     options?: { closeDialog?: boolean },
-  ) {
-    if (!canSubmitPreferences || creating) return;
-    await onSave(buildNextPreferences(acknowledgeOnboarding), options);
+  ): Promise<boolean> {
+    if (!canSubmitPreferences || creating) return false;
+    return onSave(buildNextPreferences(acknowledgeOnboarding), options);
   }
 
   async function handleOnboardingContinue() {
     if (repositoriesLoading) return;
     if (!onboardingHasRepositoryStep) {
-      await handleSubmitPreferences(true, { closeDialog: true });
+      const saved = await handleSubmitPreferences(true, { closeDialog: true });
+      if (!saved) return;
       onOnboardingComplete?.({ needsProject: projectCount === 0 });
       return;
     }
 
-    await handleSubmitPreferences(false, { closeDialog: false });
+    const saved = await handleSubmitPreferences(false, { closeDialog: false });
+    if (!saved) return;
     setActiveTab("repositories");
   }
 
@@ -2655,7 +2980,8 @@ function SettingsDialog({
       if (!saved) return;
     }
 
-    await handleSubmitPreferences(true, { closeDialog: true });
+    const saved = await handleSubmitPreferences(true, { closeDialog: true });
+    if (!saved) return;
     onOnboardingComplete?.({ needsProject: false });
   }
 
@@ -2731,7 +3057,7 @@ function SettingsDialog({
             </header>
 
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-6 sm:py-4">
-              {isPreferencesTab ? (
+              {isPreferenceFormTab ? (
                 <div className="space-y-5">
                   {isOnboarding && (
                     <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.08)] px-4 py-3">
@@ -2742,10 +3068,12 @@ function SettingsDialog({
                     </section>
                   )}
 
+                  {(isPreferencesTab || isAgentsTab) && (
+                    <>
                   <section className="space-y-2">
                     <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Choose Your Coding Agent</h4>
                     <p className="text-[12px] text-[var(--vk-text-muted)]">Select the default coding agent configuration.</p>
-                    <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="grid gap-2">
                       {orderedAgentOptions.map((agent) => {
                         const selected = codingAgent === agent;
                         return (
@@ -2805,6 +3133,11 @@ function SettingsDialog({
                       })}
                     </div>
                   </section>
+                    </>
+                  )}
+
+                  {(isPreferencesTab || isGeneralTab) && (
+                    <>
 
                   <section className="space-y-2">
                     <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Choose Your Code Editor</h4>
@@ -2832,9 +3165,10 @@ function SettingsDialog({
                     </div>
                   </section>
 
+                  {isPreferencesTab && (
                   <section className="space-y-3">
                     <div className="space-y-1">
-                      <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Editor Access</h4>
+                      <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Access</h4>
                       <p className="text-[12px] text-[var(--vk-text-muted)]">
                         Use your local Remote-SSH editor to jump straight into a remote worktree. This complements
                         ngrok or Cloudflare Tunnel for dashboard access; it does not replace the tunnel.
@@ -2868,6 +3202,7 @@ function SettingsDialog({
                       save as your preference, but they will not get a remote launch button yet.
                     </p>
                   </section>
+                  )}
 
                   <section className="space-y-2">
                     <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Markdown Editor</h4>
@@ -2938,6 +3273,47 @@ function SettingsDialog({
                       </button>
                     </div>
                   </section>
+                    </>
+                  )}
+
+                  {isRemoteAccessTab && (
+                  <section className="space-y-3">
+                    <div className="space-y-1">
+                      <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Access</h4>
+                      <p className="text-[12px] text-[var(--vk-text-muted)]">
+                        Use your local Remote-SSH editor to jump straight into a remote worktree. This complements
+                        ngrok or Cloudflare Tunnel for dashboard access; it does not replace the tunnel.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH Host or Alias</span>
+                        <input
+                          value={remoteSshHost}
+                          onChange={(event) => setRemoteSshHost(event.target.value)}
+                          placeholder="e.g., conductor-dev or 203.0.113.10"
+                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                        />
+                      </label>
+
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH User (optional)</span>
+                        <input
+                          value={remoteSshUser}
+                          onChange={(event) => setRemoteSshUser(event.target.value)}
+                          placeholder="e.g., ubuntu"
+                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                        />
+                      </label>
+                    </div>
+
+                    <p className="text-[12px] text-[var(--vk-text-muted)]">
+                      One-click remote open currently supports VS Code and VS Code Insiders. Other editors will still
+                      save as your preference, but they will not get a remote launch button yet.
+                    </p>
+                  </section>
+                  )}
                 </div>
               ) : isRepositoriesTab ? (
                 <div className="space-y-5">
@@ -3538,14 +3914,14 @@ function SettingsDialog({
                 <section className="space-y-3">
                   <h4 className="text-[16px] font-medium text-[var(--vk-text-strong)]">{activeTabItem.label}</h4>
                   <p className="text-[14px] text-[var(--vk-text-muted)]">
-                    This section is queued for implementation. Preferences and repository settings are available now.
+                    This section is queued for implementation. General, Agents, Remote Access, and repository settings are available now.
                   </p>
                   <button
                     type="button"
-                    onClick={() => setActiveTab("preferences")}
+                    onClick={() => setActiveTab("general")}
                     className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
                   >
-                    Open Preferences
+                    Open General
                   </button>
                 </section>
               )}
@@ -3558,7 +3934,7 @@ function SettingsDialog({
                     {dialogError}
                   </p>
                 )}
-                {!dialogError && isPreferencesTab && (
+                {!dialogError && isPreferenceFormTab && (
                   <p className="text-[11px] text-[var(--vk-text-muted)]">
                     {isOnboarding
                       ? "Finish setup once here. You can change these preferences any time from Settings."
@@ -3600,7 +3976,7 @@ function SettingsDialog({
                     Back
                   </button>
                 )}
-                {isPreferencesTab && !isOnboarding && (
+                {isPreferenceFormTab && !isOnboarding && (
                   <button
                     type="button"
                     onClick={() => {
