@@ -1,0 +1,17 @@
+[package]
+name = "conductor-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+conductor-core = { path = "../conductor-core" }
+sqlx = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

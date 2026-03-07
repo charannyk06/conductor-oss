@@ -1,0 +1,15 @@
+[package]
+name = "conductor-watcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+conductor-core = { path = "../conductor-core" }
+notify = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+glob = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

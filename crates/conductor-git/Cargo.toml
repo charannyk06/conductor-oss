@@ -1,0 +1,13 @@
+[package]
+name = "conductor-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+conductor-core = { path = "../conductor-core" }
+git2 = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

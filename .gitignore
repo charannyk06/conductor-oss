@@ -32,3 +32,11 @@ CONDUCTOR-TAGS.md
 
 # Release artifacts
 .release-artifacts/
+
+# Rust
+/target
+*.db
+*.db-journal
+*.db-wal
+/dashboard/node_modules
+/dashboard/dist
