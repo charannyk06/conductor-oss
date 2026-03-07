@@ -196,8 +196,8 @@ jobs:
         id: pack
         run: |
           mkdir -p .release-artifacts
-          cd packages/cli && npm pack --pack-destination ../../.release-artifacts && cd ../..
-          echo "tarball_path=$(ls .release-artifacts/*.tgz)" >> "$GITHUB_OUTPUT"
+          tarball_path=$(node scripts/pack-cli-release.mjs --pack-destination .release-artifacts)
+          echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
 
       - name: Tag release
         if: steps.check.outputs.skip != 'true'
