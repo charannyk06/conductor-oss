@@ -433,6 +433,34 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       return;
     }
 
+    // Auto-recover: if a session exited during spawning and has a prompt,
+    // attempt one automatic restore. Only try once (tracked via metadata).
+    if (
+      session.activity === "exited" &&
+      session.status === "spawning" &&
+      effectiveAge >= 120_000 &&
+      !session.metadata["autoRecoverAttempted"]
+    ) {
+      const hasPrompt = !!session.metadata["prompt"] || !!session.issueId;
+      if (hasPrompt) {
+        console.log(`[lifecycle] ${session.id}: auto-recover attempt (exited during spawn)`);
+        updateSessionFields(session, { autoRecoverAttempted: "1" });
+        try {
+          await sessionManager.restore(session.id);
+          await emit(createEvent("session.restored", "info", session, `Session ${session.id} auto-recovered after spawn failure`));
+          return;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[lifecycle] ${session.id}: auto-recover failed: ${msg}`);
+          updateSessionStatus(session, "errored");
+          state.lastStatus = "errored";
+          updateSessionFields(session, { autoRecoverError: msg });
+          await emit(createEvent("session.exited", "urgent", session, `Session ${session.id} auto-recover failed: ${msg}`));
+          return;
+        }
+      }
+    }
+
     // Detect exited sessions — agent process is no longer running.
     // If the session was actively working (not just spawning), treat as
     // normal completion ("done") rather than a crash ("killed").

@@ -377,7 +377,7 @@ export interface Terminal {
 export type EventPriority = "urgent" | "action" | "warning" | "info";
 
 export type EventType =
-  | "session.spawned" | "session.working" | "session.exited"
+  | "session.spawned" | "session.working" | "session.exited" | "session.restored"
   | "session.killed" | "session.stuck" | "session.needs_input" | "session.errored"
   | "pr.created" | "pr.merged" | "pr.closed"
   | "ci.passing" | "ci.failing" | "ci.fix_sent"

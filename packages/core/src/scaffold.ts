@@ -134,6 +134,12 @@ export function buildProjectConfigRecord(project: ScaffoldProjectConfig): Record
   return nextProject;
 }
 
+/**
+ * Marker added to generated project-local conductor.yaml files.
+ * Presence indicates the file is a mirror of the workspace canonical config.
+ */
+export const GENERATED_MARKER_KEY = "_generatedFromWorkspace";
+
 export function buildConductorYaml(config: ConductorYamlScaffoldConfig = {}): string {
   const preferences = config.preferences ?? {};
   const port = config.port ?? 4747;
@@ -189,6 +195,9 @@ export function buildConductorYaml(config: ConductorYamlScaffoldConfig = {}): st
   for (const project of projects) {
     projectMap[project.projectId] = buildProjectConfigRecord(project);
   }
+
+  // Add generation marker so drift detection can identify managed files
+  root[GENERATED_MARKER_KEY] = new Date().toISOString();
 
   return stringify(root, { lineWidth: 0 });
 }
