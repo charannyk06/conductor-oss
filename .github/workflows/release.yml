@@ -1,10 +1,12 @@
 name: Release
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version_type:
-        description: "Version bump type"
+        description: "Version bump type (overrides auto-detection)"
         required: true
         default: "patch"
         type: choice
@@ -15,7 +17,7 @@ on:
 
 concurrency:
   group: release
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -28,12 +30,15 @@ env:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Skip bot release commits to prevent infinite loops
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      !startsWith(github.event.head_commit.message, 'chore: release v')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -64,7 +69,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Build in dependency order BEFORE version bump so workspace:* protocol is intact
+      # ── Build (dependency order) ──────────────────────────────
       - name: Build core
         run: bun run --cwd packages/core build
 
@@ -85,121 +90,145 @@ jobs:
       - name: Build Rust
         run: cargo build --workspace --release
 
+      # ── Test ──────────────────────────────────────────────────
       - name: Run Rust tests
         run: cargo test --workspace
 
-      - name: Run core tests
-        run: bun run --cwd packages/core test
-        continue-on-error: true
+      - name: Run frontend tests
+        run: |
+          bun run --cwd packages/core test || true
+          bun run --cwd packages/cli test || true
 
-      - name: Run CLI tests
-        run: bun run --cwd packages/cli test
-        continue-on-error: true
-
-      - name: Compute next version
+      # ── Version ───────────────────────────────────────────────
+      - name: Determine version
         id: version
         run: |
-          current_version=$(node -p "require('./packages/cli/package.json').version")
-          npm_version=$(npm view conductor-oss version 2>/dev/null || echo "0.0.0")
-          echo "Current repo version: $current_version"
-          echo "Current npm version: $npm_version"
+          # Gather version sources
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          tag_ver="${last_tag#v}"
+          [ -z "$tag_ver" ] && tag_ver="0.0.0"
 
-          # Use the higher of the two as base
-          base_version=$(node -e "
-            const npm = '$npm_version'.split('.').map(Number);
-            const repo = '$current_version'.split('.').map(Number);
-            for (let i = 0; i < 3; i++) {
-              if ((npm[i] || 0) > (repo[i] || 0)) { console.log('$npm_version'); process.exit(); }
-              if ((npm[i] || 0) < (repo[i] || 0)) { console.log('$current_version'); process.exit(); }
-            }
-            console.log('$current_version');
+          pkg_ver=$(node -p "require('./packages/cli/package.json').version")
+          npm_ver=$(npm view conductor-oss version 2>/dev/null || echo "0.0.0")
+
+          echo "Tag: $tag_ver | Package: $pkg_ver | npm: $npm_ver"
+
+          # Use the highest as base
+          base=$(node -e "
+            const vs=['$tag_ver','$pkg_ver','$npm_ver'];
+            const p=v=>v.split('.').map(Number);
+            vs.sort((a,b)=>{const pa=p(a),pb=p(b);for(let i=0;i<3;i++)if((pa[i]||0)!==(pb[i]||0))return(pa[i]||0)-(pb[i]||0);return 0});
+            console.log(vs[vs.length-1]);
           ")
-          echo "Base version: $base_version"
 
-          # Bump
-          new_version=$(node -e "
-            const [major, minor, patch] = '$base_version'.split('.').map(Number);
-            const type = '${{ inputs.version_type }}';
-            if (type === 'major') console.log((major+1) + '.0.0');
-            else if (type === 'minor') console.log(major + '.' + (minor+1) + '.0');
-            else console.log(major + '.' + minor + '.' + (patch+1));
+          # Determine bump type from conventional commits or manual input
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            bump="${{ inputs.version_type }}"
+          else
+            if [ -n "$last_tag" ]; then
+              commits=$(git log --pretty=format:"%s" "$last_tag"..HEAD)
+            else
+              commits=$(git log --pretty=format:"%s" -20)
+            fi
+
+            if echo "$commits" | grep -qE '^[a-z]+(\(.*\))?!:|BREAKING CHANGE'; then
+              bump="major"
+            elif echo "$commits" | grep -qE '^feat(\(.*\))?:'; then
+              bump="minor"
+            else
+              bump="patch"
+            fi
+          fi
+
+          # Compute next version
+          next=$(node -e "
+            const [M,m,p]='$base'.split('.').map(Number);
+            if('$bump'==='major')console.log((M+1)+'.0.0');
+            else if('$bump'==='minor')console.log(M+'.'+(m+1)+'.0');
+            else console.log(M+'.'+m+'.'+(p+1));
           ")
-          echo "New version: $new_version"
-          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
-          echo "tag_name=v$new_version" >> "$GITHUB_OUTPUT"
 
-      - name: Bump version in package files
+          echo "Bump: $bump | $base -> $next"
+          echo "new_version=$next" >> "$GITHUB_OUTPUT"
+          echo "tag_name=v$next" >> "$GITHUB_OUTPUT"
+
+      - name: Check if already released
+        id: check
+        run: |
+          tag="${{ steps.version.outputs.tag_name }}"
+          ver="${{ steps.version.outputs.new_version }}"
+
+          # Skip if tag exists or version already on npm
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Tag $tag already exists — skipping"
+          elif npm view "conductor-oss@$ver" version 2>/dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️ v$ver already on npm — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Publish ───────────────────────────────────────────────
+      - name: Stamp version into packages
+        if: steps.check.outputs.skip != 'true'
         run: |
           node -e "
-            const { readFileSync, writeFileSync } = require('fs');
-            const { execSync } = require('child_process');
-
-            const packages = execSync('find packages -name package.json -not -path \"*/node_modules/*\" -not -path \"*/.next/*\"', { encoding: 'utf8' })
-              .trim().split('\n').filter(Boolean);
-
-            for (const pkgPath of packages) {
-              const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-              if (pkg.private) continue;
-              pkg.version = '${{ steps.version.outputs.new_version }}';
-              for (const depType of ['dependencies', 'devDependencies', 'peerDependencies']) {
-                if (!pkg[depType]) continue;
-                for (const [name, ver] of Object.entries(pkg[depType])) {
-                  if (name.startsWith('@conductor-oss/') && !ver.startsWith('file:') && !ver.startsWith('workspace:')) {
-                    pkg[depType][name] = '${{ steps.version.outputs.new_version }}';
-                  }
+            const fs=require('fs'),{execSync}=require('child_process');
+            const files=execSync('find packages -name package.json -not -path \"*/node_modules/*\" -not -path \"*/.next/*\"',{encoding:'utf8'}).trim().split('\n').filter(Boolean);
+            for(const f of files){
+              const pkg=JSON.parse(fs.readFileSync(f,'utf8'));
+              if(pkg.private)continue;
+              pkg.version='${{ steps.version.outputs.new_version }}';
+              for(const dt of['dependencies','devDependencies','peerDependencies']){
+                if(!pkg[dt])continue;
+                for(const[n,v]of Object.entries(pkg[dt])){
+                  if(n.startsWith('@conductor-oss/')&&!v.startsWith('file:')&&!v.startsWith('workspace:'))
+                    pkg[dt][n]='${{ steps.version.outputs.new_version }}';
                 }
               }
-              writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+              fs.writeFileSync(f,JSON.stringify(pkg,null,2)+'\n');
             }
           "
 
-      - name: Pack CLI for npm
+      - name: Pack CLI
+        if: steps.check.outputs.skip != 'true'
         id: pack
         run: |
           mkdir -p .release-artifacts
-          cd packages/cli
-          npm pack --pack-destination ../../.release-artifacts
-          cd ../..
-          tarball_path=$(ls .release-artifacts/*.tgz)
-          echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
-          echo "tarball_name=$(basename $tarball_path)" >> "$GITHUB_OUTPUT"
+          cd packages/cli && npm pack --pack-destination ../../.release-artifacts && cd ../..
+          echo "tarball_path=$(ls .release-artifacts/*.tgz)" >> "$GITHUB_OUTPUT"
 
-      - name: Commit version bump
+      - name: Tag release
+        if: steps.check.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "chore: release v${{ steps.version.outputs.new_version }}"
-          git tag -a "${{ steps.version.outputs.tag_name }}" -m "Release ${{ steps.version.outputs.tag_name }}"
-          git push origin HEAD:main
+          git tag -a "${{ steps.version.outputs.tag_name }}" \
+            -m "Release ${{ steps.version.outputs.tag_name }}"
           git push origin "${{ steps.version.outputs.tag_name }}"
 
       - name: Generate release notes
-        id: notes
+        if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api repos/${{ github.repository }}/releases/generate-notes \
             -f tag_name="${{ steps.version.outputs.tag_name }}" \
             -f target_commitish=main \
-            --jq '.body' > /tmp/release_notes.md 2>/dev/null || true
+            --jq '.body' > /tmp/notes.md 2>/dev/null || true
 
-          if [ ! -s /tmp/release_notes.md ]; then
-            previous_tag=$(git tag --sort=-v:refname | grep -v "${{ steps.version.outputs.tag_name }}" | head -1)
-            if [ -n "$previous_tag" ]; then
-              echo "## What's Changed" > /tmp/release_notes.md
-              git log --pretty=format:"* %s by @%an" "$previous_tag"..HEAD >> /tmp/release_notes.md
-              echo "" >> /tmp/release_notes.md
-              echo "" >> /tmp/release_notes.md
-              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$previous_tag...${{ steps.version.outputs.tag_name }}" >> /tmp/release_notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            prev=$(git tag --sort=-v:refname | grep -v "${{ steps.version.outputs.tag_name }}" | head -1)
+            if [ -n "$prev" ]; then
+              echo "## What's Changed" > /tmp/notes.md
+              git log --pretty=format:"* %s" "$prev"..HEAD >> /tmp/notes.md
             else
-              echo "## Initial Release" > /tmp/release_notes.md
-              echo "" >> /tmp/release_notes.md
-              echo "First published release of conductor-oss v${{ steps.version.outputs.new_version }}" >> /tmp/release_notes.md
+              echo "## Initial Release" > /tmp/notes.md
             fi
           fi
 
-          cat >> /tmp/release_notes.md << 'NOTES_EOF'
+          cat >> /tmp/notes.md << 'FOOTER'
 
           ---
 
@@ -208,37 +237,31 @@ jobs:
           ```bash
           npm install -g conductor-oss@latest
           ```
-
-          ### Verify
-
-          ```bash
-          conductor --version
-          ```
-          NOTES_EOF
+          FOOTER
 
       - name: Create GitHub release
+        if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.version.outputs.tag_name }}" \
             "${{ steps.pack.outputs.tarball_path }}" \
             --title "Release v${{ steps.version.outputs.new_version }}" \
-            --notes-file /tmp/release_notes.md \
-            --latest
+            --notes-file /tmp/notes.md --latest
 
       - name: Publish to npm
+        if: steps.check.outputs.skip != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           npm publish "${{ steps.pack.outputs.tarball_path }}" --access public --provenance
-          echo "✅ Published conductor-oss@${{ steps.version.outputs.new_version }} to npm"
+          echo "✅ Published conductor-oss@${{ steps.version.outputs.new_version }}"
 
-      - name: Update GitHub release with npm badge
+      - name: Annotate release
+        if: steps.check.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          current_body=$(gh release view "${{ steps.version.outputs.tag_name }}" --json body --jq '.body')
-          echo "$current_body" > /tmp/updated_notes.md
-          echo "" >> /tmp/updated_notes.md
-          echo "✅ **Published to npm registry**" >> /tmp/updated_notes.md
-          gh release edit "${{ steps.version.outputs.tag_name }}" --notes-file /tmp/updated_notes.md
+          body=$(gh release view "${{ steps.version.outputs.tag_name }}" --json body --jq '.body')
+          printf '%s\n\n✅ **Published to npm**\n' "$body" > /tmp/final.md
+          gh release edit "${{ steps.version.outputs.tag_name }}" --notes-file /tmp/final.md
