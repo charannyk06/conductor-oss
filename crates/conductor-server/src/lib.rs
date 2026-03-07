@@ -1,44 +1,47 @@
 pub mod routes;
 pub mod state;
-pub mod webhook;
 
 use anyhow::Result;
 use axum::Router;
-use conductor_core::config::ConductorConfig;
-use conductor_core::event::EventBus;
+use conductor_core::{ConductorConfig, EventBus};
 use conductor_db::Database;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use state::AppState;
+use crate::state::AppState;
 
-/// Build the HTTP server router.
-pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .merge(routes::health::router())
-        .merge(routes::projects::router())
-        .merge(routes::tasks::router())
-        .merge(routes::sessions::router())
-        .merge(routes::events::router())
+pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus) -> Result<()> {
+    let config_path = config
+        .config_path
+        .clone()
+        .unwrap_or_else(|| config.workspace.join("conductor.yaml"));
+    let state = AppState::new(config_path, config.clone(), db);
+    state.discover_executors().await;
+    state.publish_snapshot().await;
+
+    let app = Router::new()
         .merge(routes::config::router())
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .merge(routes::events::router())
+        .merge(routes::health::router())
+        .merge(routes::sessions::router())
+        .merge(routes::session_workspace::router())
+        .merge(routes::repositories::router())
+        .merge(routes::workspaces::router())
+        .merge(routes::filesystem::router())
+        .merge(routes::context_files::router())
+        .merge(routes::boards::router())
+        .merge(routes::github::router())
+        .merge(routes::attachments::router())
+        .merge(routes::notifications::router())
+        .merge(routes::auth::router())
         .with_state(state)
-}
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http());
 
-/// Start the HTTP server.
-pub async fn serve(config: &ConductorConfig, db: Database, event_bus: EventBus) -> Result<()> {
-    let state = Arc::new(AppState::new(config.clone(), db, event_bus));
-
-    let app = build_router(state);
-
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
-    tracing::info!("Conductor server listening on {addr}");
-
+    let host = config.server.host.parse::<IpAddr>().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let addr = SocketAddr::new(host, config.effective_port());
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
-
     Ok(())
 }

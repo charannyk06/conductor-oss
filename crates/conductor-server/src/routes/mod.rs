@@ -1,6 +1,14 @@
+pub mod attachments;
+pub mod auth;
+pub mod boards;
 pub mod config;
+pub mod context_files;
 pub mod events;
+pub mod filesystem;
+pub mod github;
 pub mod health;
-pub mod projects;
+pub mod notifications;
+pub mod repositories;
+pub mod session_workspace;
 pub mod sessions;
-pub mod tasks;
+pub mod workspaces;
