@@ -235,6 +235,8 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   );
   if (existsSync(webBundle.publicDir)) {
     cpSync(webBundle.publicDir, join(webOutputDir, "public"), { recursive: true });
+    cpSync(webBundle.publicDir, join(webOutputDir, ".next", "standalone", "public"), { recursive: true });
+    cpSync(webBundle.publicDir, join(webOutputDir, ".next", "standalone", "packages", "web", "public"), { recursive: true });
   }
   writeJson(join(webOutputDir, "package.json"), {
     name: "@conductor-oss/web-bundle",
