@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -125,5 +125,71 @@ impl Task {
                 self.state, new_state
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_task_defaults() {
+        let task = Task::new("proj-1".to_string(), "Build auth".to_string());
+        assert_eq!(task.state, TaskState::Inbox);
+        assert_eq!(task.priority, Priority::Normal);
+        assert_eq!(task.project_id, "proj-1");
+        assert_eq!(task.title, "Build auth");
+        assert!(task.description.is_none());
+        assert!(task.completed_at.is_none());
+    }
+
+    #[test]
+    fn test_valid_forward_transitions() {
+        let mut task = Task::new("p".to_string(), "t".to_string());
+        assert!(task.transition(TaskState::Ready).is_ok());
+        assert!(task.transition(TaskState::Dispatching).is_ok());
+        assert!(task.transition(TaskState::InProgress).is_ok());
+        assert!(task.transition(TaskState::Review).is_ok());
+        assert!(task.transition(TaskState::Merge).is_ok());
+        assert!(task.transition(TaskState::Done).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_transition() {
+        let mut task = Task::new("p".to_string(), "t".to_string());
+        assert!(task.transition(TaskState::InProgress).is_err());
+    }
+
+    #[test]
+    fn test_cancel_from_any_state() {
+        for start_state in [TaskState::Inbox, TaskState::Ready, TaskState::InProgress, TaskState::Review] {
+            let mut task = Task::new("p".to_string(), "t".to_string());
+            task.state = start_state;
+            assert!(task.transition(TaskState::Cancelled).is_ok());
+        }
+    }
+
+    #[test]
+    fn test_retry_from_errored() {
+        let mut task = Task::new("p".to_string(), "t".to_string());
+        task.state = TaskState::Errored;
+        assert!(task.transition(TaskState::Ready).is_ok());
+    }
+
+    #[test]
+    fn test_completed_at_set_on_done() {
+        let mut task = Task::new("p".to_string(), "t".to_string());
+        task.state = TaskState::Merge;
+        assert!(task.completed_at.is_none());
+        task.transition(TaskState::Done).unwrap();
+        assert!(task.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_display_impl() {
+        assert_eq!(TaskState::Inbox.to_string(), "inbox");
+        assert_eq!(TaskState::InProgress.to_string(), "in_progress");
+        assert_eq!(TaskState::Done.to_string(), "done");
+        assert_eq!(TaskState::NeedsInput.to_string(), "needs_input");
     }
 }
