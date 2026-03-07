@@ -22,7 +22,7 @@ export function useSessionOutputStream(
   sessionId: string,
   options: UseSessionOutputStreamOptions = {},
 ): UseSessionOutputStreamReturn {
-  const { lines = 500, pollIntervalMs = 2200 } = options;
+  const { lines = 500, pollIntervalMs = 3000 } = options;
   const [output, setOutput] = useState("");
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);

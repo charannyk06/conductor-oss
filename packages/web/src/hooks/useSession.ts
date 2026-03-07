@@ -3,6 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DashboardSession } from "@/lib/types";
 
+const TERMINAL_STATUSES = new Set([
+  "done",
+  "killed",
+  "errored",
+  "terminated",
+  "merged",
+  "cleanup",
+]);
+
 interface UseSessionReturn {
   session: DashboardSession | null;
   loading: boolean;
@@ -15,9 +24,10 @@ export function useSession(id: string): UseSessionReturn {
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const notFoundRef = useRef(false);
+  const terminalRef = useRef(false);
 
   const fetchSession = useCallback(async () => {
-    if (!id || notFoundRef.current) return;
+    if (!id || notFoundRef.current || terminalRef.current) return;
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
       if (res.status === 404) {
@@ -32,6 +42,9 @@ export function useSession(id: string): UseSessionReturn {
       if (mountedRef.current) {
         setSession(data);
         setError(null);
+        if (typeof data.status === "string" && TERMINAL_STATUSES.has(data.status)) {
+          terminalRef.current = true;
+        }
       }
     } catch (err) {
       if (mountedRef.current) setError(err instanceof Error ? err.message : "Unknown error");
@@ -43,8 +56,15 @@ export function useSession(id: string): UseSessionReturn {
   useEffect(() => {
     mountedRef.current = true;
     notFoundRef.current = false;
+    terminalRef.current = false;
     fetchSession();
-    const interval = setInterval(fetchSession, 2000);
+    const interval = setInterval(() => {
+      if (terminalRef.current) {
+        clearInterval(interval);
+        return;
+      }
+      fetchSession();
+    }, 3000);
     return () => {
       mountedRef.current = false;
       clearInterval(interval);

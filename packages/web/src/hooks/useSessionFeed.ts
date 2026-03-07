@@ -1,7 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NormalizedChatEntry } from "@/lib/chatFeed";
+
+const TERMINAL_STATUSES = new Set([
+  "done",
+  "killed",
+  "errored",
+  "terminated",
+  "merged",
+  "cleanup",
+]);
 
 interface SessionFeedResponse {
   entries?: NormalizedChatEntry[];
@@ -12,6 +21,7 @@ interface UseSessionFeedResult {
   entries: NormalizedChatEntry[];
   loading: boolean;
   error: string | null;
+  sessionStatus: string | null;
   refresh: () => Promise<void>;
 }
 
@@ -31,12 +41,15 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
   const [entries, setEntries] = useState<NormalizedChatEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sessionStatus, setSessionStatus] = useState<string | null>(null);
+  const terminalRef = useRef(false);
 
   const refresh = useCallback(async () => {
     if (!sessionId) {
       setEntries([]);
       setLoading(false);
       setError(null);
+      setSessionStatus(null);
       return;
     }
 
@@ -46,6 +59,11 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
       setEntries((current) => (
         JSON.stringify(current) === JSON.stringify(nextEntries) ? current : nextEntries
       ));
+      const status = typeof payload.sessionStatus === "string" ? payload.sessionStatus : null;
+      setSessionStatus(status);
+      if (status && TERMINAL_STATUSES.has(status)) {
+        terminalRef.current = true;
+      }
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load chat feed");
@@ -55,16 +73,24 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
   }, [sessionId]);
 
   useEffect(() => {
+    terminalRef.current = false;
     setLoading(true);
     void refresh();
 
     if (!sessionId) return;
     const intervalId = window.setInterval(() => {
+      if (terminalRef.current) {
+        window.clearInterval(intervalId);
+        return;
+      }
       void refresh();
-    }, 2000);
+    }, 3000);
 
     return () => window.clearInterval(intervalId);
   }, [refresh, sessionId]);
 
-  return useMemo(() => ({ entries, loading, error, refresh }), [entries, error, loading, refresh]);
+  return useMemo(
+    () => ({ entries, loading, error, sessionStatus, refresh }),
+    [entries, error, loading, refresh, sessionStatus],
+  );
 }
