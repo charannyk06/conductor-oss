@@ -1,6 +1,7 @@
 "use client";
 
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
+import { type FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   getAgentModelCatalog,
@@ -43,15 +44,14 @@ import {
   X,
 } from "lucide-react";
 import type { DashboardSession } from "@/lib/types";
+import { normalizeAgentName } from "@/lib/agentUtils";
 import { useSessions } from "@/hooks/useSessions";
 import { useConfig, type ConfigProject } from "@/hooks/useConfig";
 import { useAgents } from "@/hooks/useAgents";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
-import { SessionDetail } from "@/components/sessions/SessionDetail";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
-import { WorkspaceKanban } from "@/components/board/WorkspaceKanban";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
   getRuntimeCatalogDefaultModelForAccess,
@@ -87,9 +87,36 @@ const EXECUTOR_LABELS: Record<string, string> = {
   ccr: "CCR",
 };
 
-function normalizeAgentName(value: string): string {
-  return value.trim().toLowerCase().replace(/[_\s]+/g, "-");
-}
+const AGENT_SETUP_URLS: Record<string, string> = {
+  "claude-code": "https://claude.ai/",
+  codex: "https://chatgpt.com/codex",
+  gemini: "https://aistudio.google.com/",
+  "qwen-code": "https://chat.qwen.ai/",
+  opencode: "https://opencode.ai/",
+  "github-copilot": "https://github.com/settings/copilot",
+};
+
+const SessionDetail = dynamic(
+  () => import("@/components/sessions/SessionDetail").then((mod) => mod.SessionDetail),
+  {
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading session...
+      </div>
+    ),
+  },
+);
+
+const WorkspaceKanban = dynamic(
+  () => import("@/components/board/WorkspaceKanban").then((mod) => mod.WorkspaceKanban),
+  {
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading board...
+      </div>
+    ),
+  },
+);
 
 function getAgentLabel(value: string): string {
   const normalized = normalizeAgentName(value);
@@ -99,6 +126,35 @@ function getAgentLabel(value: string): string {
     .filter(Boolean)
     .map((part) => part[0]?.toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function formatCurrentModelLabel(agentName: string, modelId: string): string {
+  const normalizedModel = modelId.trim();
+  const normalizedAgent = normalizeAgentName(agentName);
+  if (!normalizedModel) return normalizedModel;
+
+  if (normalizedAgent === "claude-code") {
+    const lower = normalizedModel.toLowerCase();
+    if (lower === "opus") return "Claude Opus";
+    if (lower === "sonnet") return "Claude Sonnet";
+    if (lower === "haiku") return "Claude Haiku";
+    const match = lower.match(/^claude-(sonnet|opus|haiku)-(\d+)-(\d+)(?:-\d{8})?$/);
+    if (match) {
+      const family = match[1];
+      return `Claude ${family[0]?.toUpperCase() + family.slice(1)} ${match[2]}.${match[3]}`;
+    }
+  }
+
+  return normalizedModel
+    .split(/[-_]+/g)
+    .filter(Boolean)
+    .map((segment) => {
+      const lower = segment.toLowerCase();
+      if (lower === "gpt") return "GPT";
+      if (/^\d+(?:\.\d+)?$/.test(segment)) return segment;
+      return segment[0]?.toUpperCase() + segment.slice(1);
+    })
+    .join("-");
 }
 
 type NewWorkspacePayload = {
@@ -117,8 +173,24 @@ type CreatePermissionMode = "default" | "auto" | "ask" | "plan";
 type CreateSessionOptions = {
   projectId?: string;
   branch?: string;
+  baseBranch?: string;
   useWorktree?: boolean;
   permissionMode?: CreatePermissionMode;
+  issueId?: string;
+};
+
+type LinkedBoardTask = {
+  id: string;
+  text: string;
+  taskRef: string | null;
+  type: string | null;
+  priority: string | null;
+};
+
+type LinkedBoardResponse = {
+  columns?: Array<{
+    tasks?: LinkedBoardTask[];
+  }>;
 };
 
 type GitHubRepo = {
@@ -157,6 +229,15 @@ type AccessIdentitySummary = {
   email: string | null;
   provider: string | null;
 };
+
+function getLinkedTaskValue(task: LinkedBoardTask): string {
+  return task.taskRef?.trim() || task.id;
+}
+
+function getLinkedTaskTitle(text: string): string {
+  const [title] = text.split(" - ");
+  return (title ?? text).trim();
+}
 
 type AccessSettingsPayload = {
   requireAuth: boolean;
@@ -212,6 +293,15 @@ type ModelSelectionState = {
   catalogModel: string;
   customModel: string;
   reasoningEffort: string;
+};
+
+type AgentSetupState = {
+  name: string;
+  ready: boolean;
+  installed: boolean;
+  configured: boolean;
+  homepage: string | null;
+  description: string | null;
 };
 
 type PreferencesDialogMode = "onboarding" | "settings";
@@ -408,6 +498,24 @@ function getRuntimeModelCatalog(
   return runtimeModelCatalogs[normalizeAgentName(agent)] ?? null;
 }
 
+function getAllRuntimeCatalogModels(
+  runtimeCatalog: RuntimeAgentModelCatalog | null,
+): AgentModelOption[] {
+  if (!runtimeCatalog) return [];
+
+  const ordered: AgentModelOption[] = [];
+  const seen = new Set<string>();
+  for (const group of Object.values(runtimeCatalog.modelsByAccess)) {
+    if (!Array.isArray(group)) continue;
+    for (const model of group) {
+      if (!model?.id || seen.has(model.id)) continue;
+      seen.add(model.id);
+      ordered.push(model);
+    }
+  }
+  return ordered;
+}
+
 function getSelectableAgentModels(
   agent: string,
   modelAccess: ModelAccessPreferences,
@@ -415,7 +523,8 @@ function getSelectableAgentModels(
 ): AgentModelOption[] {
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
-  return getRuntimeCatalogModelsForAccess(runtimeCatalog, access);
+  const scopedModels = getRuntimeCatalogModelsForAccess(runtimeCatalog, access);
+  return scopedModels.length > 0 ? scopedModels : getAllRuntimeCatalogModels(runtimeCatalog);
 }
 
 function getSelectableAgentReasoningOptions(
@@ -436,7 +545,9 @@ function getSelectableDefaultAgentModel(
 ): string {
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
-  return getRuntimeCatalogDefaultModelForAccess(runtimeCatalog, access) ?? "";
+  return getRuntimeCatalogDefaultModelForAccess(runtimeCatalog, access)
+    ?? getAllRuntimeCatalogModels(runtimeCatalog)[0]?.id
+    ?? "";
 }
 
 function getSelectableDefaultReasoningEffort(
@@ -469,10 +580,6 @@ function buildModelSelection(
   preferredModel?: string | null,
   preferredReasoningEffort?: string | null,
 ): ModelSelectionState {
-  if (!supportsAgentModelSelection(agent)) {
-    return emptyModelSelection();
-  }
-
   const trimmedPreferred = preferredModel?.trim() ?? "";
   const trimmedPreferredReasoning = preferredReasoningEffort?.trim().toLowerCase() ?? "";
   const availableModels = getSelectableAgentModels(agent, modelAccess, runtimeModelCatalogs);
@@ -828,7 +935,7 @@ export default function Home() {
     const opts = new Set<string>();
 
     for (const agent of safeAgents) {
-      if (agent.name && (agent.ready ?? agent.configured ?? agent.installed ?? true)) {
+      if (agent.name) {
         opts.add(agent.name);
       }
     }
@@ -847,6 +954,34 @@ export default function Home() {
     return [...opts];
   }, [agents, preferences?.codingAgent, projects, selectedAgent]);
 
+  const agentStatesByName = useMemo(() => {
+    const states: Record<string, AgentSetupState> = {};
+    const safeAgents = Array.isArray(agents)
+      ? agents as Array<{
+        name?: string;
+        ready?: boolean;
+        installed?: boolean;
+        configured?: boolean;
+        homepage?: string | null;
+        description?: string | null;
+      }>
+      : [];
+
+    for (const agent of safeAgents) {
+      if (!agent.name) continue;
+      states[normalizeAgentName(agent.name)] = {
+        name: agent.name,
+        ready: agent.ready === true,
+        installed: agent.installed !== false,
+        configured: agent.configured !== false,
+        homepage: typeof agent.homepage === "string" ? agent.homepage : null,
+        description: typeof agent.description === "string" ? agent.description : null,
+      };
+    }
+
+    return states;
+  }, [agents]);
+
   const runtimeModelCatalogs = useMemo(() => {
     const catalogs: Record<string, RuntimeAgentModelCatalog> = {};
     const safeAgents = Array.isArray(agents)
@@ -860,6 +995,13 @@ export default function Home() {
 
     return catalogs;
   }, [agents]);
+
+  const openAgentSetup = useCallback((agentName: string) => {
+    const normalized = normalizeAgentName(agentName);
+    const target = agentStatesByName[normalized]?.homepage || AGENT_SETUP_URLS[normalized];
+    if (!target || typeof window === "undefined") return;
+    window.open(target, "_blank", "noopener,noreferrer");
+  }, [agentStatesByName]);
 
   useEffect(() => {
     let cancelled = false;
@@ -982,27 +1124,27 @@ export default function Home() {
     }
   }
 
-  const toggleSidebar = () => setSidebarOpen((prev) => !prev);
+  const toggleSidebar = useCallback(() => setSidebarOpen((prev) => !prev), []);
 
-  const closeSidebarOnMobile = () => {
+  const closeSidebarOnMobile = useCallback(() => {
     if (typeof window !== "undefined" && window.innerWidth < 1024) {
       setSidebarOpen(false);
     }
-  };
+  }, []);
 
-  const syncSidebarForViewport = () => {
+  const syncSidebarForViewport = useCallback(() => {
     if (typeof window !== "undefined" && window.innerWidth < 1024) {
       setSidebarOpen(false);
       return;
     }
     setSidebarOpen(true);
-  };
+  }, []);
 
-  const openWorkspaceDialog = () => {
+  const openWorkspaceDialog = useCallback(() => {
     setNewWorkspaceError(null);
     setNewWorkspaceOpen(true);
     syncSidebarForViewport();
-  };
+  }, [syncSidebarForViewport]);
 
   useEffect(() => {
     if (!pendingWorkspaceSetup || preferencesDialogOpen) return;
@@ -1010,7 +1152,7 @@ export default function Home() {
     openWorkspaceDialog();
   }, [pendingWorkspaceSetup, preferencesDialogOpen]);
 
-  async function handleCreateSession(options?: CreateSessionOptions) {
+  const handleCreateSession = useCallback(async (options?: CreateSessionOptions) => {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) return;
     const resolvedModel = resolveModelSelectionValue(launchModelSelection);
@@ -1019,6 +1161,18 @@ export default function Home() {
     const projectId = options?.projectId ?? selectedProjectId ?? projects[0]?.id;
     if (!projectId) {
       setCreateError("No project is configured in conductor.yaml");
+      return;
+    }
+
+    const effectiveAgent = selectedAgent || "qwen-code";
+    const selectedAgentState = agentStatesByName[normalizeAgentName(effectiveAgent)] ?? null;
+    if (selectedAgentState && !selectedAgentState.ready) {
+      setCreateError(
+        selectedAgentState.installed
+          ? `${getAgentLabel(effectiveAgent)} is not ready yet. Finish setup or authentication and try again.`
+          : `${getAgentLabel(effectiveAgent)} is not installed on this machine yet. Open setup and try again.`,
+      );
+      openAgentSetup(effectiveAgent);
       return;
     }
 
@@ -1032,8 +1186,10 @@ export default function Home() {
         body: JSON.stringify({
           projectId,
           prompt: trimmedPrompt,
-          agent: selectedAgent || "qwen-code",
+          ...(options?.issueId?.trim() ? { issueId: options.issueId.trim() } : {}),
+          agent: effectiveAgent,
           ...(options?.branch ? { branch: options.branch } : {}),
+          ...(options?.baseBranch ? { baseBranch: options.baseBranch } : {}),
           ...(typeof options?.useWorktree === "boolean" ? { useWorktree: options.useWorktree } : {}),
           ...(options?.permissionMode ? { permissionMode: options.permissionMode } : {}),
           ...(resolvedModel ? { model: resolvedModel } : {}),
@@ -1063,9 +1219,49 @@ export default function Home() {
     } finally {
       setCreating(false);
     }
-  }
+  }, [
+    agentStatesByName,
+    launchModelSelection,
+    openAgentSetup,
+    projects,
+    prompt,
+    refreshSessions,
+    selectedAgent,
+    selectedProjectId,
+    syncSidebarForViewport,
+  ]);
 
-  async function handleCreateWorkspace(payload: NewWorkspacePayload) {
+  const handleArchiveSession = useCallback(async (sessionId: string) => {
+    let res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+      method: "POST",
+    });
+    let data = (await res.json().catch(() => null)) as
+      | { ok?: boolean; error?: string }
+      | null;
+
+    if (res.status === 404) {
+      res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "archive" }),
+      });
+      data = (await res.json().catch(() => null)) as
+        | { ok?: boolean; error?: string }
+        | null;
+    }
+
+    if (!res.ok) {
+      throw new Error(data?.error ?? `Failed to archive session: ${res.status}`);
+    }
+
+    if (selectedSessionId === sessionId) {
+      setSelectedSessionId(null);
+    }
+
+    await refreshSessions();
+  }, [refreshSessions, selectedSessionId]);
+
+  const handleCreateWorkspace = useCallback(async (payload: NewWorkspacePayload) => {
     setCreatingWorkspace(true);
     setNewWorkspaceError(null);
 
@@ -1100,146 +1296,199 @@ export default function Home() {
     } finally {
       setCreatingWorkspace(false);
     }
-  }
+  }, [refreshConfig, syncSidebarForViewport]);
 
   const onboardingRequired = !preferencesLoading && !!preferences && !preferences.onboardingAcknowledged;
   const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || "qwen-code");
+  const resolvedCodingAgent = selectedAgent || resolvedPreferences.codingAgent || "qwen-code";
+
+  const handleSelectProject = useCallback((projectId: string | null) => {
+    setSelectedProjectId(projectId);
+    setSelectedSessionId(null);
+    closeSidebarOnMobile();
+  }, [closeSidebarOnMobile]);
+
+  const handleSelectSession = useCallback((id: string) => {
+    setSelectedSessionId(id);
+    closeSidebarOnMobile();
+  }, [closeSidebarOnMobile]);
+
+  const handleOpenPreferences = useCallback(() => {
+    setPreferencesDialogOpen(true);
+  }, []);
+
+  const handleCloseNewWorkspaceDialog = useCallback(() => {
+    if (creatingWorkspace) return;
+    setNewWorkspaceOpen(false);
+  }, [creatingWorkspace]);
+
+  const handleClosePreferencesDialog = useCallback(() => {
+    if (preferencesSaving || onboardingRequired) return;
+    setPreferencesDialogOpen(false);
+    setPreferencesError(null);
+  }, [onboardingRequired, preferencesSaving]);
+
+  const sidebarContent = useMemo(() => (
+    <WorkspaceSidebarPanel
+      orgLabel="conductor-oss"
+      projects={projects}
+      selectedProjectId={selectedProjectId}
+      onSelectProject={handleSelectProject}
+      sessions={dashboardSessions}
+      selectedSessionId={selectedSessionId}
+      onSelectSession={handleSelectSession}
+      onArchiveSession={handleArchiveSession}
+      onCreateWorkspace={openWorkspaceDialog}
+    />
+  ), [
+    dashboardSessions,
+    handleArchiveSession,
+    handleSelectProject,
+    handleSelectSession,
+    openWorkspaceDialog,
+    projects,
+    selectedProjectId,
+    selectedSessionId,
+  ]);
+
+  const workspaceContent = useMemo(() => {
+    if (selectedSessionId) {
+      return <SessionDetail sessionId={selectedSessionId} />;
+    }
+
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="border-b border-[var(--vk-border)] px-3 py-2">
+          <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] p-px">
+            <button
+              type="button"
+              onClick={() => setWorkspaceView("chat")}
+              className={`min-h-[28px] rounded-[2px] px-3 text-[13px] ${
+                workspaceView === "chat"
+                  ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                  : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+              }`}
+            >
+              Chat
+            </button>
+            <button
+              type="button"
+              onClick={() => setWorkspaceView("board")}
+              className={`min-h-[28px] rounded-[2px] px-3 text-[13px] ${
+                workspaceView === "board"
+                  ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                  : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+              }`}
+            >
+              Board
+            </button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {workspaceView === "board" ? (
+            <WorkspaceKanban
+              projectId={selectedProjectId}
+              defaultAgent={resolvedCodingAgent}
+              agentOptions={agentOptions}
+            />
+          ) : (
+            <CreateWorkspacePanel
+              prompt={prompt}
+              setPrompt={setPrompt}
+              selectedAgent={resolvedCodingAgent}
+              setSelectedAgent={setSelectedAgent}
+              agentStates={agentStatesByName}
+              modelSelection={launchModelSelection}
+              setModelSelection={setLaunchModelSelection}
+              modelAccess={resolvedPreferences.modelAccess}
+              runtimeModelCatalogs={runtimeModelCatalogs}
+              agentOptions={agentOptions}
+              projects={projects}
+              selectedProjectId={selectedProjectId}
+              onSelectProject={setSelectedProjectId}
+              projectLabel={selectedProjectId ?? "No project selected"}
+              hasProject={projects.length > 0}
+              creating={creating}
+              error={workspaceError}
+              onOpenAddWorkspace={openWorkspaceDialog}
+              onOpenAgentSetup={openAgentSetup}
+              onCreate={handleCreateSession}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }, [
+    agentOptions,
+    agentStatesByName,
+    creating,
+    handleCreateSession,
+    launchModelSelection,
+    openAgentSetup,
+    openWorkspaceDialog,
+    preferences?.modelAccess,
+    projects,
+    prompt,
+    resolvedCodingAgent,
+    resolvedPreferences.modelAccess,
+    runtimeModelCatalogs,
+    selectedProjectId,
+    selectedSessionId,
+    workspaceError,
+    workspaceView,
+  ]);
 
   return (
     <>
       <AppShell
         sidebarOpen={sidebarOpen}
         onToggleSidebar={toggleSidebar}
-        sidebar={
-          <WorkspaceSidebarPanel
-            orgLabel="conductor-oss"
-            projects={projects}
-            selectedProjectId={selectedProjectId}
-            onSelectProject={(projectId) => {
-              setSelectedProjectId(projectId);
-              setSelectedSessionId(null);
-              closeSidebarOnMobile();
-            }}
-            sessions={dashboardSessions}
-            selectedSessionId={selectedSessionId}
-            onSelectSession={(id) => {
-              setSelectedSessionId(id);
-              closeSidebarOnMobile();
-            }}
-            onCreateWorkspace={() => {
-              openWorkspaceDialog();
-            }}
-          />
-        }
+        sidebar={sidebarContent}
       >
         <TopBar
           session={selectedSession}
           fallbackTitle={selectedProjectId ?? (workspaceView === "board" ? "Board" : "Create Workspace")}
-          onOpenPreferences={() => setPreferencesDialogOpen(true)}
+          onOpenPreferences={handleOpenPreferences}
         />
 
         <div className="min-h-0 flex-1 overflow-hidden">
-          {selectedSessionId ? (
-            <SessionDetail sessionId={selectedSessionId} />
-          ) : (
-            <div className="flex h-full min-h-0 flex-col">
-              <div className="border-b border-[var(--vk-border)] px-3 py-2">
-                <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] p-px">
-                  <button
-                    type="button"
-                    onClick={() => setWorkspaceView("chat")}
-                    className={`min-h-[28px] rounded-[2px] px-3 text-[13px] ${
-                      workspaceView === "chat"
-                        ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                        : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                    }`}
-                  >
-                    Chat
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWorkspaceView("board")}
-                    className={`min-h-[28px] rounded-[2px] px-3 text-[13px] ${
-                      workspaceView === "board"
-                        ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                        : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                    }`}
-                  >
-                    Board
-                  </button>
-                </div>
-              </div>
-
-              <div className="min-h-0 flex-1 overflow-hidden">
-                {workspaceView === "board" ? (
-                  <WorkspaceKanban
-                    projectId={selectedProjectId}
-                    defaultAgent={selectedAgent || resolvedPreferences.codingAgent || "qwen-code"}
-                    agentOptions={agentOptions}
-                  />
-                ) : (
-                  <CreateWorkspacePanel
-                    prompt={prompt}
-                    setPrompt={setPrompt}
-                    selectedAgent={selectedAgent || resolvedPreferences.codingAgent || "qwen-code"}
-                    setSelectedAgent={setSelectedAgent}
-                    modelSelection={launchModelSelection}
-                    setModelSelection={setLaunchModelSelection}
-                    modelAccess={resolvedPreferences.modelAccess}
-                    runtimeModelCatalogs={runtimeModelCatalogs}
-                    agentOptions={agentOptions}
-                    projects={projects}
-                    selectedProjectId={selectedProjectId}
-                    onSelectProject={setSelectedProjectId}
-                    projectLabel={selectedProjectId ?? "No project selected"}
-                    hasProject={projects.length > 0}
-                    creating={creating}
-                    error={workspaceError}
-                    onOpenAddWorkspace={openWorkspaceDialog}
-                    onCreate={handleCreateSession}
-                  />
-                )}
-              </div>
-            </div>
-          )}
+          {workspaceContent}
         </div>
       </AppShell>
 
-      <NewWorkspaceDialog
-        open={newWorkspaceOpen}
-        onClose={() => {
-          if (creatingWorkspace) return;
-          setNewWorkspaceOpen(false);
-        }}
-        onCreate={handleCreateWorkspace}
-        creating={creatingWorkspace}
-        error={newWorkspaceError}
-        defaultAgent={selectedAgent || resolvedPreferences.codingAgent || "qwen-code"}
-        agentOptions={agentOptions}
-      />
+      {newWorkspaceOpen ? (
+        <NewWorkspaceDialog
+          open={newWorkspaceOpen}
+          onClose={handleCloseNewWorkspaceDialog}
+          onCreate={handleCreateWorkspace}
+          creating={creatingWorkspace}
+          error={newWorkspaceError}
+          defaultAgent={resolvedCodingAgent}
+          agentOptions={agentOptions}
+        />
+      ) : null}
 
-      <SettingsDialog
-        open={preferencesDialogOpen}
-        mode={onboardingRequired ? "onboarding" : "settings"}
-        creating={preferencesSaving}
-        error={preferencesError}
-        current={resolvedPreferences}
-        projectCount={projects.length}
-        agentOptions={agentOptions}
-        runtimeModelCatalogs={runtimeModelCatalogs}
-        onRepositoriesChanged={refreshConfig}
-        onOnboardingComplete={({ needsProject }) => {
-          if (needsProject) {
-            setPendingWorkspaceSetup(true);
-          }
-        }}
-        onClose={() => {
-          if (preferencesSaving || onboardingRequired) return;
-          setPreferencesDialogOpen(false);
-          setPreferencesError(null);
-        }}
-        onSave={handleSavePreferences}
-      />
+      {preferencesDialogOpen || onboardingRequired ? (
+        <SettingsDialog
+          open={preferencesDialogOpen}
+          mode={onboardingRequired ? "onboarding" : "settings"}
+          creating={preferencesSaving}
+          error={preferencesError}
+          current={resolvedPreferences}
+          projectCount={projects.length}
+          agentOptions={agentOptions}
+          runtimeModelCatalogs={runtimeModelCatalogs}
+          onRepositoriesChanged={refreshConfig}
+          onOnboardingComplete={({ needsProject }) => {
+            if (needsProject) {
+              setPendingWorkspaceSetup(true);
+            }
+          }}
+          onClose={handleClosePreferencesDialog}
+          onSave={handleSavePreferences}
+        />
+      ) : null}
     </>
   );
 }
@@ -2017,11 +2266,12 @@ function FolderPickerDialog({
   );
 }
 
-function CreateWorkspacePanel({
+const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   prompt,
   setPrompt,
   selectedAgent,
   setSelectedAgent,
+  agentStates,
   modelSelection,
   setModelSelection,
   modelAccess,
@@ -2035,12 +2285,14 @@ function CreateWorkspacePanel({
   creating,
   error,
   onOpenAddWorkspace,
+  onOpenAgentSetup,
   onCreate,
 }: {
   prompt: string;
   setPrompt: (value: string) => void;
   selectedAgent: string;
   setSelectedAgent: (value: string) => void;
+  agentStates: Record<string, AgentSetupState>;
   modelSelection: ModelSelectionState;
   setModelSelection: (next: ModelSelectionState) => void;
   modelAccess: ModelAccessPreferences;
@@ -2054,6 +2306,7 @@ function CreateWorkspacePanel({
   creating: boolean;
   error: string | null;
   onOpenAddWorkspace: () => void;
+  onOpenAgentSetup: (agent: string) => void;
   onCreate: (options?: CreateSessionOptions) => void;
 }) {
   const orderedAgentOptions = useMemo(() => {
@@ -2067,6 +2320,7 @@ function CreateWorkspacePanel({
   }, [agentOptions]);
 
   const selectedAgentLabel = getAgentLabel(selectedAgent);
+  const selectedAgentState = agentStates[normalizeAgentName(selectedAgent)] ?? null;
   const projectOptions = useMemo(
     () => [...projects].sort((left, right) => left.id.localeCompare(right.id)),
     [projects],
@@ -2079,6 +2333,9 @@ function CreateWorkspacePanel({
   const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [branchLoading, setBranchLoading] = useState(false);
   const [selectedBranch, setSelectedBranch] = useState("");
+  const [issueId, setIssueId] = useState("");
+  const [availableTasks, setAvailableTasks] = useState<LinkedBoardTask[]>([]);
+  const [taskLoading, setTaskLoading] = useState(false);
   const [useWorktree, setUseWorktree] = useState(true);
   const [permissionMode, setPermissionMode] = useState<CreatePermissionMode>("default");
 
@@ -2136,19 +2393,96 @@ function CreateWorkspacePanel({
     };
   }, [selectedProject]);
 
+  useEffect(() => {
+    if (!effectiveProjectId) {
+      setAvailableTasks([]);
+      setIssueId("");
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadTasks() {
+      setTaskLoading(true);
+      try {
+        const res = await fetch(`/api/boards?projectId=${encodeURIComponent(effectiveProjectId)}`);
+        const payload = (await res.json().catch(() => null)) as LinkedBoardResponse | { error?: string } | null;
+        if (!res.ok) {
+          throw new Error((payload as { error?: string } | null)?.error ?? `Failed to load tasks: ${res.status}`);
+        }
+
+        const boardPayload = payload as LinkedBoardResponse | null;
+        const columns = Array.isArray(boardPayload?.columns) ? boardPayload.columns : [];
+        const nextTasks = columns.flatMap((column: { tasks?: LinkedBoardTask[] }) =>
+          Array.isArray(column.tasks) ? column.tasks : [],
+        );
+        const seen = new Set<string>();
+        const deduped = nextTasks.filter((task: LinkedBoardTask) => {
+          const key = getLinkedTaskValue(task);
+          if (!key || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+        if (cancelled) return;
+        setAvailableTasks(deduped);
+        setIssueId((current) => deduped.some((task: LinkedBoardTask) => getLinkedTaskValue(task) === current) ? current : "");
+      } catch {
+        if (cancelled) return;
+        setAvailableTasks([]);
+        setIssueId("");
+      } finally {
+        if (!cancelled) {
+          setTaskLoading(false);
+        }
+      }
+    }
+
+    void loadTasks();
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveProjectId]);
+
   const availableModels = useMemo(
-    () => supportsAgentModelSelection(selectedAgent)
-      ? getSelectableAgentModels(selectedAgent, modelAccess, runtimeModelCatalogs)
-      : [],
+    () => getSelectableAgentModels(selectedAgent, modelAccess, runtimeModelCatalogs),
     [modelAccess, runtimeModelCatalogs, selectedAgent],
   );
+  const selectedTask = useMemo(
+    () => availableTasks.find((task) => getLinkedTaskValue(task) === issueId) ?? null,
+    [availableTasks, issueId],
+  );
   const selectedModelValue = resolveModelSelectionValue(modelSelection) ?? "";
-  const selectedModelLabel = useMemo(() => {
-    if (!supportsAgentModelSelection(selectedAgent)) return "Default";
-    if (!selectedModelValue) return "Default";
-    return availableModels.find((option) => option.id === selectedModelValue)?.label ?? selectedModelValue;
+  const modelMenuOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: AgentModelOption[] = [];
+    const currentModel = selectedModelValue.trim();
+
+    for (const option of availableModels) {
+      if (seen.has(option.id)) continue;
+      seen.add(option.id);
+      merged.push(option);
+    }
+
+    if (currentModel && !seen.has(currentModel)) {
+      seen.add(currentModel);
+      merged.unshift({
+        id: currentModel,
+        label: formatCurrentModelLabel(selectedAgent, currentModel),
+        description: "Current selected model.",
+        access: [],
+      });
+    }
+
+    return merged;
   }, [availableModels, selectedAgent, selectedModelValue]);
+  const selectedModelLabel = useMemo(() => {
+    if (selectedAgentState && !selectedAgentState.ready && !selectedModelValue) return "Setup required";
+    if (!selectedModelValue) return "Default";
+    return modelMenuOptions.find((option) => option.id === selectedModelValue)?.label ?? selectedModelValue;
+  }, [modelMenuOptions, selectedAgentState, selectedModelValue]);
   const lightMenuClass = "z-50 min-w-[240px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
+  const scrollMenuClass = `${lightMenuClass} max-h-[min(360px,50vh)] overflow-y-auto`;
   const lightMenuItemClass = "flex min-h-[36px] cursor-default items-center gap-2 rounded-[3px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
   const permissionOptions: Array<{ id: CreatePermissionMode; label: string; icon: LucideIcon }> = [
     { id: "default", label: "Default", icon: SlidersHorizontal },
@@ -2172,6 +2506,8 @@ function CreateWorkspacePanel({
     : hasProject
       ? projectLabel
       : "Select project";
+  const selectedTaskLabel = selectedTask?.taskRef?.trim() || "Link task";
+  const selectedTaskSubtitle = selectedTask ? getLinkedTaskTitle(selectedTask.text) : "Choose a task, bug, or issue from this project's board";
 
   return (
     <section className="flex h-full min-h-0 items-start justify-center overflow-auto bg-[var(--vk-bg-main)] px-3 py-4 sm:items-center sm:px-6 sm:py-6">
@@ -2181,7 +2517,7 @@ function CreateWorkspacePanel({
         </h1>
 
         <div className="mx-auto w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
-          <div className="flex items-center gap-2 border-b border-[var(--vk-border)] px-2 pb-[9px] pt-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--vk-border)] px-2 pb-[9px] pt-2">
             <AgentTileIcon seed={{ label: selectedAgent }} className="h-[25px] w-[25px] border-none bg-transparent" />
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
@@ -2207,6 +2543,7 @@ function CreateWorkspacePanel({
 
                   {orderedAgentOptions.map((agent) => {
                     const isSelected = agent === selectedAgent;
+                    const agentState = agentStates[normalizeAgentName(agent)] ?? null;
                     return (
                       <DropdownMenu.Item
                         key={agent}
@@ -2214,13 +2551,96 @@ function CreateWorkspacePanel({
                         className={lightMenuItemClass}
                       >
                         <AgentTileIcon seed={{ label: agent }} className="h-6 w-6 border-none bg-transparent" />
-                        <span>{getAgentLabel(agent)}</span>
+                        <div className="min-w-0 flex-1">
+                          <div>{getAgentLabel(agent)}</div>
+                          {!agentState?.ready ? (
+                            <div className="truncate text-[12px] leading-[16px] text-[var(--vk-text-muted)]">
+                              {agentState?.installed ? "Setup required" : "Not installed"}
+                            </div>
+                          ) : null}
+                        </div>
                         <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
                           {isSelected ? <Check className="h-4 w-4" /> : null}
                         </span>
                       </DropdownMenu.Item>
                     );
                   })}
+                </DropdownMenu.Content>
+              </DropdownMenu.Portal>
+            </DropdownMenu.Root>
+
+            <DropdownMenu.Root>
+              <DropdownMenu.Trigger asChild>
+                <button
+                  type="button"
+                  disabled={!effectiveProjectId}
+                  className="ml-auto flex h-[31px] min-w-[220px] items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-left disabled:cursor-not-allowed disabled:opacity-50 sm:ml-0 sm:w-[286px]"
+                  aria-label="Link task"
+                >
+                  <span className="pr-2 text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">Task</span>
+                  <span className="min-w-0 flex-1 truncate text-[14px] leading-[21px] text-[var(--vk-text-normal)]">
+                    {selectedTaskLabel}
+                  </span>
+                  <ChevronDown className="h-3 w-3 text-[var(--vk-text-muted)]" />
+                </button>
+              </DropdownMenu.Trigger>
+              <DropdownMenu.Portal>
+                <DropdownMenu.Content
+                  align="end"
+                  side="bottom"
+                  sideOffset={6}
+                  className={scrollMenuClass}
+                >
+                  <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
+                    Link task
+                  </p>
+                  <p className="px-3 pb-2 text-[12px] leading-[16px] text-[var(--text-faint)]">
+                    {selectedTaskSubtitle}
+                  </p>
+                  <DropdownMenu.Item
+                    onSelect={() => setIssueId("")}
+                    className={lightMenuItemClass}
+                  >
+                    <span>No linked task</span>
+                    <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                      {!issueId ? <Check className="h-4 w-4" /> : null}
+                    </span>
+                  </DropdownMenu.Item>
+                  {taskLoading ? (
+                    <div className="px-3 py-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+                      Loading board tasks...
+                    </div>
+                  ) : availableTasks.length > 0 ? (
+                    availableTasks.map((task) => {
+                      const taskValue = getLinkedTaskValue(task);
+                      const title = getLinkedTaskTitle(task.text);
+                      const secondary = [task.type, task.priority].filter(Boolean).join(" · ");
+                      return (
+                        <DropdownMenu.Item
+                          key={taskValue}
+                          onSelect={() => setIssueId(taskValue)}
+                          className={`${lightMenuItemClass} min-w-[320px] items-start`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate">
+                              {task.taskRef?.trim() || title}
+                            </div>
+                            <div className="truncate text-[12px] leading-[16px] text-[var(--text-faint)]">
+                              {task.taskRef?.trim() ? title : taskValue}
+                              {secondary ? ` · ${secondary}` : ""}
+                            </div>
+                          </div>
+                          <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                            {issueId === taskValue ? <Check className="h-4 w-4" /> : null}
+                          </span>
+                        </DropdownMenu.Item>
+                      );
+                    })
+                  ) : (
+                    <div className="px-3 py-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+                      No existing tasks were found for this project.
+                    </div>
+                  )}
                 </DropdownMenu.Content>
               </DropdownMenu.Portal>
             </DropdownMenu.Root>
@@ -2298,7 +2718,6 @@ function CreateWorkspacePanel({
                     <DropdownMenu.Trigger asChild>
                       <button
                         type="button"
-                        disabled={!supportsAgentModelSelection(selectedAgent)}
                         className="inline-flex h-[29px] items-center gap-[4px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                       >
                         <span>{selectedModelLabel}</span>
@@ -2319,8 +2738,11 @@ function CreateWorkspacePanel({
                           className={lightMenuItemClass}
                         >
                           <span>Default</span>
+                          <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                            {!selectedModelValue ? <Check className="h-4 w-4" /> : null}
+                          </span>
                         </DropdownMenu.Item>
-                        {availableModels.map((option) => (
+                        {modelMenuOptions.map((option) => (
                           <DropdownMenu.Item
                             key={option.id}
                             onSelect={() => setModelSelection({
@@ -2341,6 +2763,23 @@ function CreateWorkspacePanel({
                             </span>
                           </DropdownMenu.Item>
                         ))}
+                        {modelMenuOptions.length === 0 ? (
+                          <div className="px-3 py-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+                            Models will appear here after the selected agent is installed and its runtime catalog is detected.
+                          </div>
+                        ) : null}
+                        {selectedAgentState && !selectedAgentState.ready ? (
+                          <>
+                            <DropdownMenu.Separator className="my-1 h-px bg-[var(--vk-border)]" />
+                            <button
+                              type="button"
+                              onClick={() => onOpenAgentSetup(selectedAgent)}
+                              className="flex w-full items-center rounded-[3px] px-3 py-2 text-left text-[13px] text-[var(--vk-orange)] transition hover:bg-[var(--vk-bg-hover)]"
+                            >
+                              {selectedAgentState.installed ? "Open setup" : "Open install guide"}
+                            </button>
+                          </>
+                        ) : null}
                       </DropdownMenu.Content>
                     </DropdownMenu.Portal>
                   </DropdownMenu.Root>
@@ -2399,7 +2838,13 @@ function CreateWorkspacePanel({
                       </button>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Portal>
-                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                      <DropdownMenu.Content
+                        align="start"
+                        side="bottom"
+                        sideOffset={6}
+                        avoidCollisions={false}
+                        className={scrollMenuClass}
+                      >
                         <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Branch</p>
                         {selectedProjectLabel ? (
                           <p className="px-3 pb-2 text-[12px] leading-[16px] text-[var(--text-faint)]">
@@ -2432,7 +2877,10 @@ function CreateWorkspacePanel({
                     type="button"
                     onClick={() => onCreate({
                       projectId: effectiveProjectId ?? undefined,
-                      branch: selectedBranch || selectedProject?.defaultBranch || undefined,
+                      ...(useWorktree
+                        ? { baseBranch: selectedBranch || selectedProject?.defaultBranch || undefined }
+                        : { branch: selectedBranch || selectedProject?.defaultBranch || undefined }),
+                      issueId: issueId.trim() || undefined,
                       useWorktree,
                       permissionMode,
                     })}
@@ -2443,6 +2891,30 @@ function CreateWorkspacePanel({
                   </button>
                 </div>
               </div>
+
+              {selectedAgentState && !selectedAgentState.ready ? (
+                <div className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)]">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-[13px] text-[var(--vk-text-strong)]">
+                        {selectedAgentLabel} is not ready on this machine.
+                      </p>
+                      <p className="pt-0.5 text-[12px] text-[var(--vk-text-muted)]">
+                        {selectedAgentState.installed
+                          ? "Finish login or local setup to load models and start streaming sessions."
+                          : "Install the CLI first, then its models and authentication state will appear here."}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onOpenAgentSetup(selectedAgent)}
+                      className="inline-flex h-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-orange)] hover:bg-[var(--vk-bg-hover)]"
+                    >
+                      {selectedAgentState.installed ? "Open setup" : "Open install"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
 
               <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2 py-2 text-[13px] text-[var(--vk-text-normal)]">
                 <input
@@ -2466,7 +2938,7 @@ function CreateWorkspacePanel({
       </div>
     </section>
   );
-}
+});
 
 function CopySnippetButton({
   value,
