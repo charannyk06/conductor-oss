@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ConductorConfig;
 use crate::project::Project;
+use crate::types::AgentKind;
 
 /// A Conductor workspace manages projects, sessions, and the overall state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,13 +24,17 @@ impl Workspace {
             config
                 .projects
                 .into_iter()
-                .map(|p| {
-                    let mut project = Project::new(p.id.clone(), p.name, p.path);
-                    project.board_path = p.board;
-                    project.default_executor = p.executor;
-                    project.max_sessions = p.max_sessions;
-                    project.setup_script = p.setup_script;
-                    project.cleanup_script = p.cleanup_script;
+                .map(|(id, project_config)| {
+                    let name = project_config.name.clone().unwrap_or_else(|| id.clone());
+                    let path = resolve_project_path(root, &project_config.path);
+                    let mut project = Project::new(id.clone(), name, path.clone());
+                    project.board_path = project_config
+                        .board_dir
+                        .clone()
+                        .map(|board_dir| root.join("projects").join(board_dir).join("CONDUCTOR.md"));
+                    project.default_executor = project_config.agent.as_deref().map(AgentKind::parse);
+                    project.setup_script = join_script(&project_config.setup_script);
+                    project.cleanup_script = join_script(&project_config.cleanup_script);
                     project
                 })
                 .collect()
@@ -69,3 +74,62 @@ impl Workspace {
         self.data_dir().join("conductor.db")
     }
 }
+
+fn resolve_project_path(root: &Path, configured: &str) -> PathBuf {
+    let candidate = PathBuf::from(configured);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    }
+}
+
+fn join_script(lines: &[String]) -> Option<String> {
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_project_path_absolute() {
+        let root = Path::new("/workspace");
+        let result = resolve_project_path(root, "/opt/project");
+        assert_eq!(result, PathBuf::from("/opt/project"));
+    }
+
+    #[test]
+    fn test_resolve_project_path_relative() {
+        let root = Path::new("/workspace");
+        let result = resolve_project_path(root, "projects/my-app");
+        assert_eq!(result, PathBuf::from("/workspace/projects/my-app"));
+    }
+
+    #[test]
+    fn test_join_script_empty() {
+        assert!(join_script(&[]).is_none());
+    }
+
+    #[test]
+    fn test_join_script_multiple() {
+        let lines = vec!["echo hello".to_string(), "echo world".to_string()];
+        let result = join_script(&lines);
+        assert_eq!(result, Some("echo hello\necho world".to_string()));
+    }
+
+    #[test]
+    fn test_agent_kind_parse_via_workspace() {
+        assert_eq!(AgentKind::parse("claude-code"), AgentKind::ClaudeCode);
+        assert_eq!(AgentKind::parse("gemini"), AgentKind::Gemini);
+        assert_eq!(
+            AgentKind::parse("custom-agent"),
+            AgentKind::Custom("custom-agent".to_string())
+        );
+    }
+}
+
