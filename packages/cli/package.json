@@ -14,7 +14,8 @@
     "dev": "tsx src/index.ts",
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepack": "node ../../scripts/verify-cli-publish-manifest.mjs"
   },
   "dependencies": {
     "@conductor-oss/core": "workspace:*",
