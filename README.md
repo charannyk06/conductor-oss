@@ -291,6 +291,11 @@ Important current realities:
 - documentation can drift quickly unless it is updated alongside implementation changes
 
 ---
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=charannyk06/conductor-oss&type=Date)](https://star-history.com/#charannyk06/conductor-oss&Date)
+
+---
 
 ## License
 
