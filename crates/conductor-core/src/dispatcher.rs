@@ -2,11 +2,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::board::Board;
-use crate::event::{Event, EventBus};
-use crate::task::TaskState;
+use crate::event::EventBus;
 use crate::types::AgentKind;
 
 /// Configuration for the dispatcher.
@@ -33,79 +32,74 @@ impl Default for DispatcherConfig {
     }
 }
 
+#[derive(Debug, Default)]
+struct LimiterState {
+    global_active: usize,
+    project_active: HashMap<String, usize>,
+}
+
 /// Tracks active sessions for concurrency limiting.
 #[derive(Debug, Clone)]
 pub struct SpawnLimiter {
-    global_active: Arc<RwLock<usize>>,
-    project_active: Arc<RwLock<HashMap<String, usize>>>,
+    state: Arc<Mutex<LimiterState>>,
     config: DispatcherConfig,
 }
 
 impl SpawnLimiter {
     pub fn new(config: DispatcherConfig) -> Self {
         Self {
-            global_active: Arc::new(RwLock::new(0)),
-            project_active: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(Mutex::new(LimiterState::default())),
             config,
         }
     }
 
     /// Check if we can spawn a new session globally and for this project.
-    pub async fn can_spawn(&self, project_id: &str) -> bool {
-        let global = *self.global_active.read().await;
-        let project = self
-            .project_active
-            .read()
-            .await
-            .get(project_id)
-            .copied()
-            .unwrap_or(0);
-
-        global < self.config.max_global_sessions
+    /// NOTE: This is a non-reserving check. Use `acquire()` for atomic check-and-reserve.
+    #[cfg(test)]
+    pub(crate) async fn can_spawn(&self, project_id: &str) -> bool {
+        let state = self.state.lock().await;
+        let project = state.project_active.get(project_id).copied().unwrap_or(0);
+        state.global_active < self.config.max_global_sessions
             && project < self.config.max_project_sessions
     }
 
-    /// Reserve a slot for a new session.
+    /// Atomically check limits and reserve a slot for a new session.
     pub async fn acquire(&self, project_id: &str) -> bool {
-        if !self.can_spawn(project_id).await {
+        let mut state = self.state.lock().await;
+        let project = state.project_active.get(project_id).copied().unwrap_or(0);
+        if state.global_active >= self.config.max_global_sessions
+            || project >= self.config.max_project_sessions
+        {
             return false;
         }
-
-        *self.global_active.write().await += 1;
-        *self
-            .project_active
-            .write()
-            .await
-            .entry(project_id.to_string())
-            .or_insert(0) += 1;
-
+        state.global_active += 1;
+        *state.project_active.entry(project_id.to_string()).or_insert(0) += 1;
         true
     }
 
     /// Release a session slot.
     pub async fn release(&self, project_id: &str) {
-        let mut global = self.global_active.write().await;
-        *global = global.saturating_sub(1);
-
-        let mut projects = self.project_active.write().await;
-        if let Some(count) = projects.get_mut(project_id) {
+        let mut state = self.state.lock().await;
+        state.global_active = state.global_active.saturating_sub(1);
+        if let Some(count) = state.project_active.get_mut(project_id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                projects.remove(project_id);
+                state.project_active.remove(project_id);
             }
         }
     }
 
     /// Get current global active count.
     pub async fn global_count(&self) -> usize {
-        *self.global_active.read().await
+        self.state.lock().await.global_active
     }
 
     /// Get active count for a project.
     pub async fn project_count(&self, project_id: &str) -> usize {
-        self.project_active
-            .read()
+        self.state
+            .lock()
             .await
+            .project_active
             .get(project_id)
             .copied()
             .unwrap_or(0)
@@ -191,20 +185,27 @@ impl Dispatcher {
     }
 
     /// Drain the queue and return requests that can be spawned.
+    /// Holds the queue write lock for the entire operation and uses acquire()
+    /// to atomically reserve slots, avoiding TOCTOU races.
     pub async fn drain_ready(&self) -> Vec<DispatchRequest> {
         let mut queue = self.queue.write().await;
+        let pending = queue.drain(..).collect::<Vec<_>>();
+
         let mut ready = Vec::new();
         let mut remaining = Vec::new();
 
-        for request in queue.drain(..) {
-            if self.limiter.can_spawn(&request.project_id).await {
+        for request in pending {
+            if self.limiter.acquire(&request.project_id).await {
                 ready.push(request);
             } else {
                 remaining.push(request);
             }
         }
 
-        *queue = remaining;
+        if !remaining.is_empty() {
+            *queue = remaining;
+        }
+
         ready
     }
 
