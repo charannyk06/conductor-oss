@@ -12,30 +12,61 @@ const clerkConfigured = Boolean(
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
 );
 
+const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() || "";
+const RUST_API_PREFIXES = [
+  "/api/config",
+  "/api/preferences",
+  "/api/access",
+  "/api/events",
+  "/api/spawn",
+  "/api/sessions",
+  "/api/health",
+  "/api/executor/health",
+  "/api/repositories",
+  "/api/workspaces",
+  "/api/filesystem",
+  "/api/context-files",
+  "/api/boards",
+  "/api/github/repos",
+  "/api/attachments",
+  "/api/notifications",
+  "/api/auth/session",
+];
+
+function shouldProxyToRust(pathname: string): boolean {
+  return backendUrl.length > 0 && RUST_API_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
+function rewriteToBackend(req: NextRequest): NextResponse {
+  const target = new URL(`${req.nextUrl.pathname}${req.nextUrl.search}`, backendUrl);
+  return NextResponse.rewrite(target);
+}
+
 export default async function proxy(
   req: NextRequest,
   event: NextFetchEvent,
 ): Promise<NextResponse> {
+  const pathname = req.nextUrl.pathname;
+  const shouldRewrite = shouldProxyToRust(pathname);
   const trustedEdgeIdentity = await verifyTrustedEdgeIdentity(req.headers, null);
   if (trustedEdgeIdentity?.ok) {
-    return NextResponse.next();
+    return shouldRewrite ? rewriteToBackend(req) : NextResponse.next();
   }
 
   if (isBuiltinRemoteAuthEnabled()) {
-    const pathname = req.nextUrl.pathname;
     const isBuiltinPublicRoute =
       pathname.startsWith("/unlock") ||
       pathname.startsWith("/auth/grant") ||
       pathname.startsWith("/api/auth/session");
 
     if (isBuiltinPublicRoute) {
-      return NextResponse.next();
+      return shouldRewrite ? rewriteToBackend(req) : NextResponse.next();
     }
 
     const session = req.cookies.get(BUILTIN_REMOTE_SESSION_COOKIE)?.value ?? null;
     const hasValidSession = await verifyBuiltinRemoteSession(session);
     if (hasValidSession) {
-      return NextResponse.next();
+      return shouldRewrite ? rewriteToBackend(req) : NextResponse.next();
     }
 
     if (pathname.startsWith("/api/")) {
@@ -59,7 +90,7 @@ export default async function proxy(
 
   if (!clerkConfigured) {
     if (!isLoopbackHost(req.nextUrl.hostname)) {
-      if (!req.nextUrl.pathname.startsWith("/api/")) {
+      if (!pathname.startsWith("/api/")) {
         const redirectUrl = req.nextUrl.clone();
         redirectUrl.pathname = "/unlock";
         redirectUrl.searchParams.set("error", "unavailable");
@@ -73,11 +104,9 @@ export default async function proxy(
         { status: 403 },
       );
     }
-    return NextResponse.next();
+    return shouldRewrite ? rewriteToBackend(req) : NextResponse.next();
   }
 
-  // Dynamic import avoids crash when Clerk keys are absent.
-  // clerkMiddleware() throws at call-time if publishableKey is missing.
   try {
     const { clerkMiddleware, createRouteMatcher } = await import(
       "@clerk/nextjs/server"
@@ -90,9 +119,17 @@ export default async function proxy(
       }
     });
 
-    return handler(req, event) as NextResponse;
+    const response = handler(req, event) as NextResponse;
+    if (shouldRewrite) {
+      return rewriteToBackend(req);
+    }
+    return response;
   } catch {
-    return NextResponse.next();
+    // Fail closed: if Clerk middleware throws, deny access instead of allowing through.
+    return NextResponse.json(
+      { error: "Authentication service unavailable" },
+      { status: 503 },
+    );
   }
 }
 
