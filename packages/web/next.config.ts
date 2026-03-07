@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  experimental: {
+    turbopackFileSystemCacheForBuild: true,
+  },
   serverExternalPackages: [
     "@conductor-oss/core",
     "@conductor-oss/plugin-agent-amp",

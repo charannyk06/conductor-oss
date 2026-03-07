@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 type OutputStreamEvent =
   | { type: "output"; output: string }
+  | { type: "delta"; line: string }
   | { type: "error"; error: string };
 
 interface UseSessionOutputStreamOptions {
@@ -22,7 +23,7 @@ export function useSessionOutputStream(
   sessionId: string,
   options: UseSessionOutputStreamOptions = {},
 ): UseSessionOutputStreamReturn {
-  const { lines = 500, pollIntervalMs = 2200 } = options;
+  const { lines = 500, pollIntervalMs = 1000 } = options;
   const [output, setOutput] = useState("");
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,6 +96,13 @@ export function useSessionOutputStream(
           const payload = JSON.parse(event.data as string) as OutputStreamEvent;
           if (payload.type === "output") {
             setOutput(payload.output ?? "");
+            setConnected(true);
+            setError(null);
+            return;
+          }
+
+          if (payload.type === "delta") {
+            setOutput((prev) => (prev ? `${prev}\n${payload.line}` : payload.line));
             setConnected(true);
             setError(null);
             return;

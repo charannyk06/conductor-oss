@@ -97,12 +97,25 @@ export interface SSESnapshotEvent {
   }>;
 }
 
+/** Session statuses that indicate the session is no longer active. */
+export const TERMINAL_STATUSES = new Set([
+  "archived",
+  "done",
+  "killed",
+  "errored",
+  "terminated",
+  "merged",
+  "cleanup",
+]);
+
 /** Determines which attention zone a session belongs to. */
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
-  // Done: terminal states
+  // Done: terminal states (matches TERMINAL_STATUSES)
   if (
     session.status === "merged" ||
+    session.status === "archived" ||
     session.status === "killed" ||
+    session.status === "errored" ||
     session.status === "cleanup" ||
     session.status === "done" ||
     session.status === "terminated"
@@ -132,8 +145,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   }
   if (
     session.status === "needs_input" ||
-    session.status === "stuck" ||
-    session.status === "errored"
+    session.status === "stuck"
   ) {
     return "respond";
   }

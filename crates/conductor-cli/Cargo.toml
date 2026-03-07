@@ -1,0 +1,27 @@
+[package]
+name = "conductor-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "conductor"
+path = "src/main.rs"
+
+[dependencies]
+conductor-core = { path = "../conductor-core" }
+conductor-db = { path = "../conductor-db" }
+conductor-server = { path = "../conductor-server" }
+conductor-executors = { path = "../conductor-executors" }
+conductor-watcher = { path = "../conductor-watcher" }
+conductor-git = { path = "../conductor-git" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }

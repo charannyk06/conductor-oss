@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/conductor-core",
+    "crates/conductor-db",
+    "crates/conductor-server",
+    "crates/conductor-executors",
+    "crates/conductor-git",
+    "crates/conductor-watcher",
+    "crates/conductor-cli",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/charannyk06/conductor-oss"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# HTTP server
+axum = { version = "0.8", features = ["macros", "ws", "multipart"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+
+# Git
+git2 = { version = "0.19", default-features = false }
+
+# File watching
+notify = "7.0"
+
+# Process management
+portable-pty = "0.9"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+clap = { version = "4.0", features = ["derive"] }
+glob = "0.3"
+which = "7"
+regex = "1"
+
+# Crypto (for webhook HMAC, auth)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# HTTP client (for webhooks, GitHub API)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Channel communication
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-trait = "0.1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

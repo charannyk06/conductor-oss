@@ -35,6 +35,8 @@ function Shell({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${rootClass} dark`} suppressHydrationWarning>
       <head>
+        {/* Anti-FOUT theme script: reads localStorage and applies theme class
+            before React hydrates. Content is static with no dynamic input. */}
         <script
           dangerouslySetInnerHTML={{
             __html: `try{var t=localStorage.getItem("conductor-theme");var e=document.documentElement;e.classList.remove("light","dark");e.classList.add(t==="light"||t==="dark"?t:"dark")}catch{}`,

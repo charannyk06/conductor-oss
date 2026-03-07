@@ -43,10 +43,14 @@ import {
   type PluginRegistry,
   type RuntimeHandle,
   type Issue,
+  type ConversationEntry,
 } from "./types.js";
 import {
+  appendConversationEntry,
   readMetadataRaw,
   readArchivedMetadataRaw,
+  readArchivedConversationEntries,
+  readConversationEntries,
   writeMetadata,
   updateMetadata,
   deleteMetadata,
@@ -417,6 +421,31 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   function generateAttemptId(): string {
     return `a-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function appendSessionConversationEntry(
+    sessionsDir: string,
+    sessionId: SessionId,
+    entry: Omit<ConversationEntry, "id" | "sessionId" | "createdAt">,
+  ): void {
+    try {
+      appendConversationEntry(sessionsDir, sessionId, {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+        sessionId,
+        createdAt: new Date().toISOString(),
+        ...entry,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[session-manager] failed to append conversation entry for ${sessionId}: ${message}`);
+    }
+  }
+
+  function buildLaunchSummary(agentName: string, model?: string, reasoningEffort?: string): string {
+    const parts = [agentName];
+    if (model?.trim()) parts.push(model.trim());
+    if (reasoningEffort?.trim()) parts.push(`reasoning ${reasoningEffort.trim().toLowerCase()}`);
+    return `Session launched with ${parts.join(" · ")}.`;
   }
 
   function resolveParentBaseBranch(projectId: string, parentTaskId: string): string | undefined {
@@ -970,6 +999,27 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       updateMetadata(sessionsDir, sessionId, {
         devServerLog: devServerLog ?? "",
       });
+      const initialPrompt = spawnConfig.prompt?.trim()
+        || (spawnConfig.issueId ? `Start work on issue ${spawnConfig.issueId}.` : "");
+      if (initialPrompt || (spawnConfig.attachments?.length ?? 0) > 0) {
+        appendSessionConversationEntry(sessionsDir, sessionId, {
+          kind: "user_message",
+          text: initialPrompt || "Shared reference attachments.",
+          attachments: spawnConfig.attachments?.map((item) => item.path),
+          model: profileSelection.model,
+          reasoningEffort: profileSelection.reasoningEffort,
+          source: "spawn",
+        });
+      }
+      appendSessionConversationEntry(sessionsDir, sessionId, {
+        kind: "system_message",
+        text: buildLaunchSummary(
+          plugins.agent.name,
+          profileSelection.model,
+          profileSelection.reasoningEffort,
+        ),
+        source: "session_started",
+      });
 
       if (plugins.agent.postLaunchSetup) {
         await plugins.agent.postLaunchSetup(session);
@@ -1292,18 +1342,47 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return result;
   }
 
-  async function send(sessionId: SessionId, message: string): Promise<void> {
-    let raw: Record<string, string> | null = null;
-    for (const project of Object.values(config.projects)) {
-      const sessionsDir = getProjectSessionsDir(project);
-      const metadata = readMetadataRaw(sessionsDir, sessionId);
-      if (metadata) {
-        raw = metadata;
-        break;
-      }
+  function buildFollowUpMessage(
+    message: string,
+    options?: {
+      attachments?: string[];
+    },
+  ): string {
+    const trimmedMessage = message.trim();
+    const attachments = [...new Set((options?.attachments ?? [])
+      .map((item) => item.trim())
+      .filter(Boolean))];
+
+    if (attachments.length === 0) {
+      return trimmedMessage;
     }
 
-    if (!raw) throw new Error(`Session ${sessionId} not found`);
+    const lines: string[] = [];
+    if (trimmedMessage) {
+      lines.push(trimmedMessage, "");
+    }
+    lines.push(
+      "## Reference Attachments",
+      "The following files are attached to this follow-up. Read them directly from disk before responding or making changes.",
+      ...attachments.map((item) => `- \`${item}\``),
+    );
+    return lines.join("\n");
+  }
+
+  async function sendWithLog(
+    sessionId: SessionId,
+    message: string,
+    options?: {
+      attachments?: string[];
+      model?: string;
+      reasoningEffort?: string;
+      conversationText?: string;
+      conversationSource?: ConversationEntry["source"];
+    },
+  ): Promise<void> {
+    const location = findSessionLocation(sessionId);
+    if (!location) throw new Error(`Session ${sessionId} not found`);
+    const raw = location.raw;
 
     let handle: RuntimeHandle;
     if (raw["runtimeHandle"]) {
@@ -1326,7 +1405,60 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw new Error(`No runtime plugin for session ${sessionId}`);
     }
 
-    await runtimePlugin.sendMessage(handle, message);
+    const nextFields: Record<string, string> = {};
+    const nextModel = options?.model?.trim();
+    const nextReasoningEffort = options?.reasoningEffort?.trim().toLowerCase();
+    if (nextModel) {
+      nextFields["model"] = nextModel;
+    }
+    if (nextReasoningEffort) {
+      nextFields["reasoningEffort"] = nextReasoningEffort;
+    }
+    if (Object.keys(nextFields).length > 0) {
+      updateMetadata(location.sessionsDir, sessionId, nextFields);
+    }
+
+    const composedMessage = buildFollowUpMessage(message, options);
+    if (!composedMessage.trim()) {
+      throw new Error("Message is required");
+    }
+
+    await runtimePlugin.sendMessage(handle, composedMessage);
+
+    if (nextModel || nextReasoningEffort) {
+      const parts: string[] = [];
+      if (nextModel) parts.push(`model ${nextModel}`);
+      if (nextReasoningEffort) parts.push(`reasoning ${nextReasoningEffort}`);
+      appendSessionConversationEntry(location.sessionsDir, sessionId, {
+        kind: "system_message",
+        text: `Session preferences updated: ${parts.join(" · ")}.`,
+        source: "session_preferences",
+      });
+    }
+
+    const conversationText = (options?.conversationText ?? message).trim();
+    if (conversationText || (options?.attachments?.length ?? 0) > 0) {
+      appendSessionConversationEntry(location.sessionsDir, sessionId, {
+        kind: "user_message",
+        text: conversationText || "Shared reference attachments.",
+        attachments: options?.attachments,
+        model: nextModel ?? raw["model"] ?? undefined,
+        reasoningEffort: nextReasoningEffort ?? raw["reasoningEffort"] ?? undefined,
+        source: options?.conversationSource ?? "follow_up",
+      });
+    }
+  }
+
+  async function send(
+    sessionId: SessionId,
+    message: string,
+    options?: {
+      attachments?: string[];
+      model?: string;
+      reasoningEffort?: string;
+    },
+  ): Promise<void> {
+    await sendWithLog(sessionId, message, options);
   }
 
   async function retry(target: string, options?: RetryConfig): Promise<Session> {
@@ -1427,7 +1559,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       "",
       feedback.trim(),
     ].join("\n");
-    await send(sessionId, instruction);
+    await sendWithLog(sessionId, instruction, {
+      conversationText: feedback.trim(),
+      conversationSource: "feedback",
+    });
     updateMetadata(location.sessionsDir, sessionId, {
       status: "working",
       reviewDecision: "changes_requested",
@@ -1646,6 +1781,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       runtimeHandle: JSON.stringify(handle),
       restoredAt: now,
     });
+    appendSessionConversationEntry(sessionsDir, sessionId, {
+      kind: "system_message",
+      text: "Session restored and reattached to a fresh runtime.",
+      source: "restore",
+    });
 
     // 10. Run postLaunchSetup (non-fatal)
     const restoredSession: Session = {
@@ -1705,6 +1845,23 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return runtimePlugin.getOutput(handle, lines);
   }
 
+  async function getConversation(sessionId: SessionId): Promise<ConversationEntry[]> {
+    const location = findSessionLocation(sessionId);
+    if (location) {
+      return readConversationEntries(location.sessionsDir, sessionId);
+    }
+
+    for (const project of Object.values(config.projects)) {
+      const sessionsDir = getProjectSessionsDir(project);
+      const archived = readArchivedConversationEntries(sessionsDir, sessionId);
+      if (archived.length > 0) {
+        return archived;
+      }
+    }
+
+    return [];
+  }
+
   return {
     spawn,
     retry,
@@ -1716,6 +1873,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     kill,
     cleanup,
     send,
+    getConversation,
     getOutput,
   };
 }

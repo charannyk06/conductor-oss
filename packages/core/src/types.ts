@@ -47,6 +47,28 @@ export interface ActivityDetection {
   timestamp?: Date;
 }
 
+export type ConversationEntryKind = "user_message" | "system_message";
+
+export type ConversationEntrySource =
+  | "spawn"
+  | "follow_up"
+  | "feedback"
+  | "restore"
+  | "session_started"
+  | "session_preferences";
+
+export interface ConversationEntry {
+  id: string;
+  sessionId: SessionId;
+  kind: ConversationEntryKind;
+  text: string;
+  createdAt: string;
+  attachments?: string[];
+  model?: string;
+  reasoningEffort?: string;
+  source?: ConversationEntrySource;
+}
+
 /** Session status constants for safe comparisons. */
 export const SESSION_STATUS = {
   SPAWNING: "spawning" as const,
@@ -941,8 +963,17 @@ export interface SessionManager {
   submitFeedback(sessionId: SessionId, feedback: string): Promise<void>;
   kill(sessionId: SessionId): Promise<void>;
   cleanup(projectId?: string, options?: { dryRun?: boolean }): Promise<CleanupResult>;
-  send(sessionId: SessionId, message: string): Promise<void>;
+  send(
+    sessionId: SessionId,
+    message: string,
+    options?: {
+      attachments?: string[];
+      model?: string;
+      reasoningEffort?: string;
+    },
+  ): Promise<void>;
   restore(sessionId: SessionId): Promise<Session>;
+  getConversation(sessionId: SessionId): Promise<ConversationEntry[]>;
   /** Capture terminal output (last N lines from the runtime pane). */
   getOutput(sessionId: SessionId, lines?: number): Promise<string>;
 }

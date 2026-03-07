@@ -9,23 +9,21 @@
     "url": "https://github.com/charannyk06/conductor-oss.git"
   },
   "description": "Markdown-native AI agent orchestrator — dispatch coding tasks from a kanban board",
-  "packageManager": "pnpm@9.15.4",
+  "packageManager": "bun@1.2.0",
+  "workspaces": [
+    "packages/*",
+    "packages/plugins/*"
+  ],
   "type": "module",
   "scripts": {
-    "build": "pnpm -r build",
-    "build:release": "pnpm --filter='!@conductor-oss/web' build && pnpm --filter @conductor-oss/web build",
-    "changeset": "changeset",
-    "dev": "pnpm --filter @conductor-oss/web dev",
-    "release": "pnpm build:release && pnpm release:verify && pnpm release:publish",
-    "release:pack": "node scripts/pack-cli-package.mjs",
-    "release:publish": "node scripts/publish-cli-package.mjs",
-    "release:verify": "node scripts/verify-cli-package.mjs",
-    "sync:versions": "node scripts/sync-package-versions.mjs",
-    "typecheck": "pnpm --filter @conductor-oss/core build && pnpm -r typecheck",
-    "test": "pnpm --filter @conductor-oss/core test",
-    "clean": "pnpm -r clean",
-    "ui:screenshots": "node scripts/capture-dashboard-screenshots.mjs",
-    "version-packages": "changeset version && pnpm sync:versions && pnpm install --lockfile-only"
+    "build": "bun run build:frontend && cargo build --workspace --release",
+    "build:frontend": "bun run --cwd packages/web build",
+    "dev": "CONDUCTOR_BACKEND_URL=${CONDUCTOR_BACKEND_URL:-http://127.0.0.1:4748} bun run --cwd packages/web dev",
+    "dev:backend": "cargo run -p conductor-cli -- --workspace . start --port ${CONDUCTOR_BACKEND_PORT:-4748}",
+    "dev:full": "sh -c 'PORT=${PORT:-3000}; CONDUCTOR_BACKEND_PORT=${CONDUCTOR_BACKEND_PORT:-4748}; cargo run -p conductor-cli -- --workspace . start --port $CONDUCTOR_BACKEND_PORT & CONDUCTOR_BACKEND_URL=http://127.0.0.1:$CONDUCTOR_BACKEND_PORT bun run --cwd packages/web dev -- --port $PORT'",
+    "executor:build": "cargo build --manifest-path orchestrator/runtime-sidecar/Cargo.toml --release",
+    "executor:dev": "cargo run --manifest-path orchestrator/runtime-sidecar/Cargo.toml",
+    "clean": "bun run --cwd packages/web clean && cargo clean"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",

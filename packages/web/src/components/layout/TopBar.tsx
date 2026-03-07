@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import { Settings } from "lucide-react";
 import type { DashboardSession } from "@/lib/types";
 
@@ -9,7 +10,7 @@ interface TopBarProps {
   onOpenPreferences?: () => void;
 }
 
-export function TopBar({ session, fallbackTitle, onOpenPreferences }: TopBarProps) {
+export const TopBar = memo(function TopBar({ session, fallbackTitle, onOpenPreferences }: TopBarProps) {
   const title = session?.summary ?? fallbackTitle ?? "Create Workspace";
 
   return (
@@ -30,4 +31,4 @@ export function TopBar({ session, fallbackTitle, onOpenPreferences }: TopBarProp
       </div>
     </header>
   );
-}
+});

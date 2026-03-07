@@ -1,0 +1,18 @@
+[package]
+name = "conductor-executors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+conductor-core = { path = "../conductor-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+which = { workspace = true }
+regex = { workspace = true }
+portable-pty = { workspace = true }

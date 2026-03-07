@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import type { SSESnapshotEvent } from "@/lib/types";
 
 interface Session {
@@ -87,7 +88,6 @@ export function useSessions(projectId?: string | null): UseSessionsReturn {
     setLoading(true);
     void fetchSessions();
 
-    let eventSource: EventSource | null = null;
     let pollingId: number | null = null;
 
     const startPolling = () => {
@@ -103,39 +103,18 @@ export function useSessions(projectId?: string | null): UseSessionsReturn {
       pollingId = null;
     };
 
-    if (typeof EventSource !== "undefined") {
-      eventSource = new EventSource("/api/events");
-      eventSource.onopen = () => {
-        if (!mountedRef.current) return;
-        stopPolling();
-        setError(null);
-        setLoading(false);
-      };
-      eventSource.onmessage = (event) => {
-        if (!mountedRef.current) return;
-        try {
-          const data = JSON.parse(event.data as string) as SSESnapshotEvent;
-          if (data.type !== "snapshot" || !Array.isArray(data.sessions)) return;
-          const filtered = filterByProject(data.sessions as unknown as Session[], projectId);
-          applySessions(filtered);
-          setError(null);
-          setLoading(false);
-        } catch {
-          // Ignore malformed events and keep stream alive.
-        }
-      };
-      eventSource.onerror = () => {
-        if (!mountedRef.current) return;
-        startPolling();
-        setError((prev) => prev ?? "Live updates disconnected. Falling back to polling.");
-      };
-    } else {
-      startPolling();
-    }
+    startPolling();
+    const unsubscribe = subscribeToSnapshotEvents((data: SSESnapshotEvent) => {
+      if (!mountedRef.current) return;
+      const filtered = filterByProject(data.sessions as unknown as Session[], projectId);
+      applySessions(filtered);
+      setError(null);
+      setLoading(false);
+    });
 
     return () => {
       mountedRef.current = false;
-      if (eventSource) eventSource.close();
+      unsubscribe();
       stopPolling();
     };
   }, [applySessions, fetchSessions, projectId]);
