@@ -98,7 +98,7 @@ jobs:
               for (const depType of ['dependencies', 'devDependencies', 'peerDependencies']) {
                 if (!pkg[depType]) continue;
                 for (const [name, ver] of Object.entries(pkg[depType])) {
-                  if (name.startsWith('@conductor-oss/') && !ver.startsWith('file:')) {
+                  if (name.startsWith('@conductor-oss/') && !ver.startsWith('file:') && !ver.startsWith('workspace:')) {
                     pkg[depType][name] = '$new_version';
                   }
                 }
@@ -107,7 +107,9 @@ jobs:
             }
           "
 
-          pnpm install --lockfile-only
+          # Re-install to update lockfile with new versions.
+          # Use --no-frozen-lockfile since workspace deps changed.
+          pnpm install --no-frozen-lockfile
 
           echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
           echo "tag_name=v$new_version" >> "$GITHUB_OUTPUT"
