@@ -21,7 +21,7 @@ repository = "https://github.com/charannyk06/conductor-oss"
 tokio = { version = "1.0", features = ["full"] }
 
 # HTTP server
-axum = { version = "0.8", features = ["macros", "ws"] }
+axum = { version = "0.8", features = ["macros", "ws", "multipart"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
 # Serialization

@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "next dev -p ${PORT:-3000}",
     "build": "next build",
-    "start": "next start",
+    "start": "PORT=${PORT:-3000} HOSTNAME=${HOSTNAME:-0.0.0.0} node .next/standalone/packages/web/server.js",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf .next"
   },

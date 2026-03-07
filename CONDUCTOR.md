@@ -1,25 +1,16 @@
-# My Project
+# Conductor Board
 
-> 🤖 Conductor — AI agent orchestrator. Write tasks here, agents do the work.
-> Tags: `#agent/claude-code` or `#agent/codex` · `#project/my-app` · `#type/feature` · `#priority/high`
+## To do
+- [ ] API board smoke - created during runtime validation | id:7f8a254c-80b1-483e-994d-1700ef994ace | agent:claude-code | type:feature | priority:normal | project:conductor-oss #agent/claude-code #project/conductor-oss #type/feature #priority/medium
+- [ ] Task ref smoke - runtime validation | id:41c86b44-974e-4831-b918-3e6e36817f97 | agent:qwen-code | project:conductor-oss | taskRef:COC-001 #agent/qwen-code #project/conductor-oss
 
-## Inbox
-
-> Drop rough ideas here. Conductor auto-tags them within 20s.
-
-
-
-## Ready to Dispatch
-
-> Move tagged tasks here to dispatch an agent.
+## Ready
 
 ## Dispatching
 
-## In Progress
+## In progress
 
-## Review
-
-> Agent finished — review the PR, then move to Done.
+## In review
 
 ## Done
 
