@@ -241,10 +241,51 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   stagedManifest.bundleDependencies = internalDependencyNames;
   writeJson(join(outputDir, "package.json"), stagedManifest);
 
-  execFileSync("npm", ["install", "--omit=dev", "--no-package-lock"], {
-    cwd: outputDir,
-    stdio: "inherit",
-  });
+  // Install external dependencies and resolve file: tarballs for internal ones.
+  // Internal package tarballs reference other internal packages by version number,
+  // which don't exist on npm until after the first publish. Use --install-strategy=shallow
+  // so npm only installs direct dependencies without recursing into sub-deps.
+  // The bundleDependencies field ensures internal packages are packed into the final tarball.
+  try {
+    execFileSync("npm", ["install", "--omit=dev", "--no-package-lock", "--install-strategy=shallow"], {
+      cwd: outputDir,
+      stdio: "inherit",
+    });
+  } catch {
+    // If shallow install fails (pre-publish), fall back to installing only external deps
+    // by temporarily removing internal deps from package.json, installing, then restoring.
+    console.log("Shallow install failed, falling back to manual external-only install...");
+    const manifest = readJson(join(outputDir, "package.json"));
+    const fullDeps = { ...manifest.dependencies };
+    const externalDeps = {};
+    for (const [name, spec] of Object.entries(fullDeps)) {
+      if (!name.startsWith("@conductor-oss/")) {
+        externalDeps[name] = spec;
+      }
+    }
+    manifest.dependencies = externalDeps;
+    writeJson(join(outputDir, "package.json"), manifest);
+
+    execFileSync("npm", ["install", "--omit=dev", "--no-package-lock"], {
+      cwd: outputDir,
+      stdio: "inherit",
+    });
+
+    // Restore full deps and manually unpack internal tarballs into node_modules
+    manifest.dependencies = fullDeps;
+    writeJson(join(outputDir, "package.json"), manifest);
+
+    for (const [depName, spec] of Object.entries(fullDeps)) {
+      if (depName.startsWith("@conductor-oss/") && spec.startsWith("file:")) {
+        const tarPath = spec.replace("file:", "");
+        const depDir = join(outputDir, "node_modules", ...depName.split("/"));
+        mkdirSync(depDir, { recursive: true });
+        execFileSync("tar", ["xzf", tarPath, "--strip-components=1", "-C", depDir], {
+          stdio: "inherit",
+        });
+      }
+    }
+  }
 
   const publishedDependencies = {};
   for (const [dependencyName, specifier] of Object.entries(cliPackage.dependencies ?? {})) {
