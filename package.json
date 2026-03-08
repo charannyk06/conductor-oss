@@ -18,9 +18,11 @@
   "scripts": {
     "build": "bun run build:frontend && cargo build --workspace --release",
     "build:frontend": "bun run --cwd packages/web build",
-    "dev": "CONDUCTOR_BACKEND_URL=${CONDUCTOR_BACKEND_URL:-http://127.0.0.1:4748} bun run --cwd packages/web dev",
-    "dev:backend": "cargo run -p conductor-cli -- --workspace . start --port ${CONDUCTOR_BACKEND_PORT:-4748}",
-    "dev:full": "sh -c 'PORT=${PORT:-3000}; CONDUCTOR_BACKEND_PORT=${CONDUCTOR_BACKEND_PORT:-4748}; cargo run -p conductor-cli -- --workspace . start --port $CONDUCTOR_BACKEND_PORT & CONDUCTOR_BACKEND_URL=http://127.0.0.1:$CONDUCTOR_BACKEND_PORT bun run --cwd packages/web dev -- --port $PORT'",
+    "dev": "CONDUCTOR_BACKEND_URL=${CONDUCTOR_BACKEND_URL:-http://127.0.0.1:4749} bun run --cwd packages/web dev",
+    "dev:backend": "cargo run -p conductor-cli -- --workspace . start --port ${CONDUCTOR_BACKEND_PORT:-4749}",
+    "dev:full": "sh -c 'PORT=${PORT:-3000}; CONDUCTOR_BACKEND_PORT=${CONDUCTOR_BACKEND_PORT:-4749}; cargo run -p conductor-cli -- --workspace . start --port $CONDUCTOR_BACKEND_PORT & CONDUCTOR_BACKEND_URL=http://127.0.0.1:$CONDUCTOR_BACKEND_PORT bun run --cwd packages/web dev -- --port $PORT'",
+    "prod:prepare": "pnpm --dir packages/cli build && bun run --cwd packages/web build && cargo build -p conductor-cli --release",
+    "prod:full": "CONDUCTOR_WEB_MODE=standalone node packages/cli/dist/index.js start --port 4747 --backend-port 4748 --workspace .",
     "executor:build": "cargo build --manifest-path orchestrator/runtime-sidecar/Cargo.toml --release",
     "executor:dev": "cargo run --manifest-path orchestrator/runtime-sidecar/Cargo.toml",
     "clean": "bun run --cwd packages/web clean && cargo clean"
