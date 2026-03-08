@@ -4,14 +4,14 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "conductor-oss": "dist/index.js",
-    "conductor": "dist/index.js",
-    "co": "dist/index.js"
+    "conductor-oss": "dist/launcher.js",
+    "conductor": "dist/launcher.js",
+    "co": "dist/launcher.js"
   },
-  "main": "dist/index.js",
+  "main": "dist/launcher.js",
   "scripts": {
     "build": "rm -rf dist && tsc",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/launcher.ts",
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist",

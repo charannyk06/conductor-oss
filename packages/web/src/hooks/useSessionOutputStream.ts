@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 type OutputStreamEvent =
   | { type: "output"; output: string }
   | { type: "delta"; line: string }
+  | { type: "refresh" }
   | { type: "error"; error: string };
 
 interface UseSessionOutputStreamOptions {
@@ -108,6 +109,11 @@ export function useSessionOutputStream(
             return;
           }
 
+          if (payload.type === "refresh") {
+            void fetchOutput();
+            return;
+          }
+
           if (payload.type === "error") {
             const normalized = (payload.error || "").toLowerCase();
             setConnected(false);
@@ -128,6 +134,11 @@ export function useSessionOutputStream(
           // Ignore malformed stream messages.
         }
       };
+
+      eventSource.addEventListener("refresh", () => {
+        if (!mountedRef.current) return;
+        void fetchOutput();
+      });
 
       eventSource.onerror = () => {
         if (!mountedRef.current) return;

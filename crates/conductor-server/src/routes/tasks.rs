@@ -1,11 +1,11 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::state::AppState;
-use conductor_core::task::Task;
+use conductor_core::{task::Task, types::Priority};
 use conductor_db::repo::TaskRepo;
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -52,14 +52,14 @@ async fn create_task(
     let pool = state.db.pool();
     let mut task = Task::new(body.project_id, body.title);
     task.description = body.description;
+    if let Some(priority) = body.priority.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        task.priority = serde_json::from_value(serde_json::Value::String(priority.to_lowercase()))
+            .unwrap_or(Priority::default());
+    }
 
     match TaskRepo::create(pool, &task).await {
         Ok(_) => {
-            state.event_bus.publish(conductor_core::event::Event::TaskCreated {
-                task_id: task.id,
-                project_id: task.project_id.clone(),
-                title: task.title.clone(),
-            });
+            state.publish_snapshot().await;
             Json(serde_json::to_value(&task).unwrap_or_default())
         }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
@@ -91,11 +91,7 @@ async fn update_task_state(
     let pool = state.db.pool();
     match TaskRepo::update_state(pool, &id, &body.state).await {
         Ok(_) => {
-            state.event_bus.publish(conductor_core::event::Event::TaskStateChanged {
-                task_id: uuid::Uuid::parse_str(&id).unwrap_or_default(),
-                old_state: String::new(),
-                new_state: body.state.clone(),
-            });
+            state.publish_snapshot().await;
             Json(serde_json::json!({ "ok": true }))
         }
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),

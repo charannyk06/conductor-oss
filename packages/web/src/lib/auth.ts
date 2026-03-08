@@ -1,10 +1,12 @@
-import type { DashboardAccessConfig, DashboardRole } from "@conductor-oss/core/types";
+import { existsSync, statSync } from "node:fs";
+import { basename, resolve } from "node:path";
+import { findConfigFile, loadConfig } from "@conductor-oss/core";
+import type { DashboardAccessConfig, DashboardRole, OrchestratorConfig } from "@conductor-oss/core/types";
 import { cookies, headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRoleForEmail, roleMeetsRequirement, isLoopbackHost } from "@/lib/accessControl";
 import { verifyTrustedEdgeIdentity } from "@/lib/edgeAuth";
 import { BUILTIN_REMOTE_SESSION_COOKIE, isBuiltinRemoteAuthEnabled, verifyBuiltinRemoteSession } from "@/lib/remoteAuth";
-import { getServices } from "@/lib/services";
 
 const clerkConfigured = Boolean(
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
@@ -25,6 +27,17 @@ export interface DashboardAccess {
   provider?: DashboardIdentityProvider;
   reason?: string;
 }
+
+type DashboardConfigSnapshot = {
+  access: DashboardAccessConfig | null;
+  dashboardUrl: string | null;
+};
+
+const globalForDashboardConfig = globalThis as typeof globalThis & {
+  _conductorDashboardConfig?: DashboardConfigSnapshot;
+  _conductorDashboardConfigPath?: string | null;
+  _conductorDashboardConfigMtimeMs?: number | null;
+};
 
 function parseCsv(value?: string): string[] {
   return (value ?? "")
@@ -129,12 +142,76 @@ function passesLegacyEmailRestrictions(email: string): boolean {
   return emailAllowed && domainAllowed;
 }
 
-async function loadAccessConfig(): Promise<DashboardAccessConfig | null> {
+function resolveDashboardConfigPath(): string | null {
+  const envConfigPath = process.env.CO_CONFIG_PATH?.trim();
+  if (envConfigPath) {
+    const resolvedPath = resolve(envConfigPath);
+    return existsSync(resolvedPath) ? resolvedPath : null;
+  }
+
+  const workspaceHint = process.env.CONDUCTOR_WORKSPACE?.trim();
+  if (workspaceHint) {
+    const resolvedHint = resolve(workspaceHint);
+    if (/^conductor\.ya?ml$/i.test(basename(resolvedHint))) {
+      return existsSync(resolvedHint) ? resolvedHint : null;
+    }
+
+    const workspaceConfigPath = findConfigFile(resolvedHint);
+    if (workspaceConfigPath) {
+      return workspaceConfigPath;
+    }
+  }
+
+  return findConfigFile() ?? null;
+}
+
+function readDashboardConfigSnapshot(configPath: string): DashboardConfigSnapshot {
+  const config = loadConfig(configPath) as OrchestratorConfig;
+  return {
+    access: config.access ?? null,
+    dashboardUrl: config.dashboardUrl?.trim() || null,
+  };
+}
+
+function loadDashboardConfigSnapshot(): DashboardConfigSnapshot {
+  const configPath = resolveDashboardConfigPath();
+  const mtimeMs = configPath
+    ? (() => {
+        try {
+          return statSync(configPath).mtimeMs;
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+
+  if (
+    globalForDashboardConfig._conductorDashboardConfig
+    && globalForDashboardConfig._conductorDashboardConfigPath === configPath
+    && globalForDashboardConfig._conductorDashboardConfigMtimeMs === mtimeMs
+  ) {
+    return globalForDashboardConfig._conductorDashboardConfig;
+  }
+
+  const fallback = { access: null, dashboardUrl: null };
+  if (!configPath) {
+    globalForDashboardConfig._conductorDashboardConfig = fallback;
+    globalForDashboardConfig._conductorDashboardConfigPath = null;
+    globalForDashboardConfig._conductorDashboardConfigMtimeMs = null;
+    return fallback;
+  }
+
   try {
-    const { config } = await getServices();
-    return config.access ?? null;
+    const snapshot = readDashboardConfigSnapshot(configPath);
+    globalForDashboardConfig._conductorDashboardConfig = snapshot;
+    globalForDashboardConfig._conductorDashboardConfigPath = configPath;
+    globalForDashboardConfig._conductorDashboardConfigMtimeMs = mtimeMs;
+    return snapshot;
   } catch {
-    return null;
+    globalForDashboardConfig._conductorDashboardConfig = fallback;
+    globalForDashboardConfig._conductorDashboardConfigPath = configPath;
+    globalForDashboardConfig._conductorDashboardConfigMtimeMs = mtimeMs;
+    return fallback;
   }
 }
 
@@ -320,7 +397,8 @@ async function resolveClerkAccess(access: DashboardAccessConfig | null): Promise
 }
 
 export async function getDashboardAccess(request?: Request): Promise<DashboardAccess> {
-  const access = await loadAccessConfig();
+  const dashboardConfig = loadDashboardConfigSnapshot();
+  const access = dashboardConfig.access;
   const host = await currentHost(request);
 
   const trustedHeaderAccess = await resolveTrustedHeaderAccess(request, access);
@@ -336,15 +414,13 @@ export async function getDashboardAccess(request?: Request): Promise<DashboardAc
 
   // Trust the configured dashboardUrl host (for remote access via tunnels like ngrok).
   let isTrustedDashboardHost = false;
-  try {
-    const { config } = await getServices();
-    const configuredDashboardUrl = config.dashboardUrl?.trim();
-    if (configuredDashboardUrl) {
-      const dashboardHost = new URL(configuredDashboardUrl).hostname.toLowerCase();
+  if (dashboardConfig.dashboardUrl) {
+    try {
+      const dashboardHost = new URL(dashboardConfig.dashboardUrl).hostname.toLowerCase();
       isTrustedDashboardHost = host.toLowerCase() === dashboardHost;
+    } catch {
+      // Ignore malformed dashboard URLs and continue with default host checks.
     }
-  } catch {
-    // Ignore config lookup errors and continue with default host checks.
   }
 
   if (!isLoopbackHost(host) && !isTrustedDashboardHost) {

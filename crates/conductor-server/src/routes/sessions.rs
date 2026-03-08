@@ -198,11 +198,12 @@ async fn get_output(
 async fn output_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<OutputQuery>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
     let initial_output = state
         .get_session(&id)
         .await
-        .map(|session| session.output)
+        .map(|session| trim_lines_tail(&session.output, query.lines.unwrap_or(500)))
         .unwrap_or_default();
     let initial_stream = stream::iter(vec![Ok(SseEvent::default().data(
         json!({ "type": "output", "output": initial_output }).to_string(),

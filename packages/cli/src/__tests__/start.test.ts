@@ -25,10 +25,10 @@ test("extractCloudflareTunnelUrl returns null when no URL is present", () => {
   assert.equal(extractCloudflareTunnelUrl("no tunnel yet"), null);
 });
 
-test("buildRemoteUnlockUrl points at the built-in auth grant route", () => {
+test("buildRemoteUnlockUrl points at the built-in unlock route", () => {
   assert.equal(
     buildRemoteUnlockUrl("https://fancy-space-1234.trycloudflare.com", "secret-token"),
-    "https://fancy-space-1234.trycloudflare.com/auth/grant?token=secret-token",
+    "https://fancy-space-1234.trycloudflare.com/unlock#token=secret-token",
   );
 });
 

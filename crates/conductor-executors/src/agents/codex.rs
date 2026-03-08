@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use conductor_core::types::AgentKind;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -97,18 +98,44 @@ impl Executor for CodexExecutor {
                         }
                         return ExecutorOutput::Stdout(String::new());
                     }
-                    "agent_message_delta" | "thread.started" | "turn.started" | "turn.completed" | "task.started" => {
+                    "agent_message_delta" => {
+                        if let Some(text) = extract_text(&value) {
+                            return ExecutorOutput::Stdout(text);
+                        }
+                        return ExecutorOutput::Stdout(String::new());
+                    }
+                    "thread.started" | "turn.started" | "turn.completed" | "task.started" => {
                         return ExecutorOutput::Stdout(String::new());
                     }
                     "item.started" => {
                         if let Some(item) = value.get("item") {
-                            if item.get("type").and_then(|v| v.as_str()) == Some("command_execution") {
-                                if let Some(command) = item.get("command").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
-                                    return ExecutorOutput::Stdout(command.to_string());
+                            match item.get("type").and_then(|v| v.as_str()) {
+                                Some("command_execution") => {
+                                    if let Some(command) = item.get("command").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+                                        return ExecutorOutput::StructuredStatus {
+                                            text: "Command".to_string(),
+                                            metadata: tool_metadata("command", "Command", "running", vec![command.to_string()]),
+                                        };
+                                    }
                                 }
-                            }
-                            if item.get("type").and_then(|v| v.as_str()) == Some("reasoning") {
-                                return ExecutorOutput::Stdout("Thinking".to_string());
+                                Some("reasoning") => {
+                                    return ExecutorOutput::StructuredStatus {
+                                        text: "Thinking".to_string(),
+                                        metadata: tool_metadata("thinking", "Thinking", "running", Vec::new()),
+                                    };
+                                }
+                                Some("mcp_tool_call") => {
+                                    return ExecutorOutput::StructuredStatus {
+                                        text: tool_title_from_item(item),
+                                        metadata: tool_metadata(
+                                            &tool_kind_from_item(item),
+                                            &tool_title_from_item(item),
+                                            "running",
+                                            tool_content_from_item(item),
+                                        ),
+                                    };
+                                }
+                                _ => {}
                             }
                         }
                         return ExecutorOutput::Stdout(String::new());
@@ -123,6 +150,7 @@ impl Executor for CodexExecutor {
                                 }
                                 Some("reasoning") => return ExecutorOutput::Stdout(String::new()),
                                 Some("command_execution") => return ExecutorOutput::Stdout(String::new()),
+                                Some("mcp_tool_call") => return ExecutorOutput::Stdout(String::new()),
                                 _ => {}
                             }
                         }
@@ -166,6 +194,94 @@ impl Executor for CodexExecutor {
         }
 
         ExecutorOutput::Stdout(line.trim().to_string())
+    }
+}
+
+fn tool_title_from_item(item: &Value) -> String {
+    if let Some(tool) = item.get("tool").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+        return tool
+            .split(['_', '-'])
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| {
+                let lower = segment.to_ascii_lowercase();
+                match lower.as_str() {
+                    "mcp" => "MCP".to_string(),
+                    _ => {
+                        let mut chars = lower.chars();
+                        match chars.next() {
+                            Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                            None => String::new(),
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    "Tool".to_string()
+}
+
+fn tool_kind_from_item(item: &Value) -> String {
+    item.get("tool")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("tool")
+        .to_ascii_lowercase()
+}
+
+fn tool_content_from_item(item: &Value) -> Vec<String> {
+    let mut content = Vec::new();
+    if let Some(server) = item.get("server").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+        content.push(format!("server: {server}"));
+    }
+    if let Some(arguments) = item.get("arguments") {
+        if let Some(path) = arguments.get("path").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+            content.push(path.to_string());
+        } else if let Some(pattern) = arguments.get("pattern").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+            content.push(pattern.to_string());
+        } else if let Ok(serialized) = serde_json::to_string(arguments) {
+            if !serialized.trim().is_empty() && serialized != "{}" {
+                content.push(serialized);
+            }
+        }
+    }
+    content
+}
+
+fn tool_metadata(
+    tool_kind: &str,
+    tool_title: &str,
+    tool_status: &str,
+    tool_content: Vec<String>,
+) -> HashMap<String, Value> {
+    let mut metadata = HashMap::new();
+    metadata.insert("toolKind".to_string(), Value::String(tool_kind.to_string()));
+    metadata.insert("toolTitle".to_string(), Value::String(tool_title.to_string()));
+    metadata.insert("toolStatus".to_string(), Value::String(tool_status.to_string()));
+    metadata.insert(
+        "toolContent".to_string(),
+        Value::Array(tool_content.into_iter().map(Value::String).collect()),
+    );
+    metadata
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_started_mcp_tool_call_emits_structured_status() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let line = r#"{"type":"item.started","item":{"type":"mcp_tool_call","tool":"read_text_file","server":"filesystem","arguments":{"path":"/tmp/demo.txt"}}}"#;
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::StructuredStatus { text, metadata } = output else {
+            panic!("expected structured status");
+        };
+        assert_eq!(text, "Read Text File");
+        assert_eq!(metadata.get("toolKind").and_then(Value::as_str), Some("read_text_file"));
     }
 }
 

@@ -46,3 +46,34 @@ test("validateConfig upgrades legacy project arrays before applying defaults", (
   assert.equal(config.projects["legacy-app"]?.name, "legacy-app");
   assert.equal(typeof config.projects["legacy-app"]?.sessionPrefix, "string");
 });
+
+test("validateConfig sanitizes null optional project fields from mixed writers", () => {
+  const config = validateConfig({
+    projects: {
+      demo: {
+        repo: "org/demo",
+        path: "/tmp/demo",
+        defaultWorkingDirectory: null,
+        sessionPrefix: null,
+        boardDir: null,
+        scm: null,
+        agent: null,
+        agentConfig: {
+          permissions: null,
+          model: null,
+          reasoningEffort: null,
+        },
+      },
+    },
+  });
+
+  assert.equal(config.projects["demo"]?.repo, "org/demo");
+  assert.equal(config.projects["demo"]?.defaultWorkingDirectory, undefined);
+  assert.equal(typeof config.projects["demo"]?.sessionPrefix, "string");
+  assert.equal(config.projects["demo"]?.boardDir, undefined);
+  assert.deepEqual(config.projects["demo"]?.scm, { plugin: "github" });
+  assert.equal(config.projects["demo"]?.agent, undefined);
+  assert.equal(config.projects["demo"]?.agentConfig?.permissions, "skip");
+  assert.equal(config.projects["demo"]?.agentConfig?.model, undefined);
+  assert.equal(config.projects["demo"]?.agentConfig?.reasoningEffort, undefined);
+});

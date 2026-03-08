@@ -37,6 +37,8 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .merge(routes::github::router())
         .merge(routes::attachments::router())
         .merge(routes::notifications::router())
+        .merge(routes::projects::router())
+        .merge(routes::tasks::router())
         .merge(routes::auth::router())
         .with_state(state)
         .layer({
@@ -79,6 +81,16 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .host
         .parse::<IpAddr>()
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let allow_remote_backend = std::env::var("CONDUCTOR_UNSAFE_ALLOW_REMOTE_BACKEND")
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !host.is_loopback() && !allow_remote_backend {
+        anyhow::bail!(
+            "Refusing to bind the Rust backend to {} without loopback protection. \
+Set CONDUCTOR_UNSAFE_ALLOW_REMOTE_BACKEND=true only if you are intentionally exposing the unauthenticated backend.",
+            host
+        );
+    }
     let addr = SocketAddr::new(host, config.effective_port());
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

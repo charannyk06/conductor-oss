@@ -29,6 +29,7 @@ impl AppState {
     pub(crate) async fn prepare_workspace(
         &self,
         project_id: &str,
+        session_id: &str,
         project: &ProjectConfig,
         use_worktree: bool,
         branch: Option<&str>,
@@ -40,10 +41,7 @@ impl AppState {
             return Ok(resolve_default_working_directory(&repo_path, project.default_working_directory.as_deref()));
         }
 
-        // Use branch name for worktree directory, with a short UUID suffix to prevent
-        // collisions when multiple sessions share the same branch name.
-        let branch_dir = branch.unwrap_or("default");
-        let worktree_path = self.resolve_worktree_path(project_id, branch_dir);
+        let worktree_path = self.resolve_worktree_path(project_id, session_id);
         if worktree_path.exists() {
             return Ok(resolve_default_working_directory(&worktree_path, project.default_working_directory.as_deref()));
         }

@@ -18,11 +18,11 @@
   "scripts": {
     "build": "bun run build:frontend && cargo build --workspace --release",
     "build:frontend": "bun run --cwd packages/web build",
-    "dev": "CONDUCTOR_BACKEND_URL=${CONDUCTOR_BACKEND_URL:-http://127.0.0.1:4749} bun run --cwd packages/web dev",
-    "dev:backend": "cargo run -p conductor-cli -- --workspace . start --port ${CONDUCTOR_BACKEND_PORT:-4749}",
-    "dev:full": "sh -c 'PORT=${PORT:-3000}; CONDUCTOR_BACKEND_PORT=${CONDUCTOR_BACKEND_PORT:-4749}; cargo run -p conductor-cli -- --workspace . start --port $CONDUCTOR_BACKEND_PORT & CONDUCTOR_BACKEND_URL=http://127.0.0.1:$CONDUCTOR_BACKEND_PORT bun run --cwd packages/web dev -- --port $PORT'",
-    "prod:prepare": "pnpm --dir packages/cli build && bun run --cwd packages/web build && cargo build -p conductor-cli --release",
-    "prod:full": "CONDUCTOR_WEB_MODE=standalone node packages/cli/dist/index.js start --port 4747 --backend-port 4748 --workspace .",
+    "dev": "CONDUCTOR_WORKSPACE=${CONDUCTOR_WORKSPACE:-$PWD} CO_CONFIG_PATH=${CO_CONFIG_PATH:-$PWD/conductor.yaml} CONDUCTOR_BACKEND_URL=${CONDUCTOR_BACKEND_URL:-http://127.0.0.1:4749} bun run --cwd packages/web dev",
+    "dev:backend": "sh -c 'WORKSPACE=${CONDUCTOR_WORKSPACE:-$PWD}; CONFIG=${CO_CONFIG_PATH:-$WORKSPACE/conductor.yaml}; CONDUCTOR_WORKSPACE=$WORKSPACE CO_CONFIG_PATH=$CONFIG cargo run -p conductor-cli -- --workspace \"$WORKSPACE\" start --port ${CONDUCTOR_BACKEND_PORT:-4749}'",
+    "dev:full": "sh -c 'WORKSPACE=${CONDUCTOR_WORKSPACE:-$PWD}; CONFIG=${CO_CONFIG_PATH:-$WORKSPACE/conductor.yaml}; PORT=${PORT:-3000}; CONDUCTOR_BACKEND_PORT=${CONDUCTOR_BACKEND_PORT:-4749}; CONDUCTOR_WORKSPACE=$WORKSPACE CO_CONFIG_PATH=$CONFIG cargo run -p conductor-cli -- --workspace \"$WORKSPACE\" start --port $CONDUCTOR_BACKEND_PORT & CONDUCTOR_WORKSPACE=$WORKSPACE CO_CONFIG_PATH=$CONFIG CONDUCTOR_BACKEND_URL=http://127.0.0.1:$CONDUCTOR_BACKEND_PORT bun run --cwd packages/web dev -- --port $PORT'",
+    "prod:prepare": "bun run --cwd packages/web build && cargo build -p conductor-cli --release",
+    "prod:full": "sh -c 'WORKSPACE=${CONDUCTOR_WORKSPACE:-$PWD}; CONFIG=${CO_CONFIG_PATH:-$WORKSPACE/conductor.yaml}; DASHBOARD_PORT=${PORT:-4747}; BACKEND_PORT=${CONDUCTOR_BACKEND_PORT:-4748}; BACKEND_BIN=${CONDUCTOR_BACKEND_BIN:-target/release/conductor}; if [ ! -x \"$BACKEND_BIN\" ]; then echo \"Missing Rust backend binary at $BACKEND_BIN. Run bun run prod:prepare first.\" >&2; exit 1; fi; CONDUCTOR_WORKSPACE=$WORKSPACE CO_CONFIG_PATH=$CONFIG \"$BACKEND_BIN\" --workspace \"$WORKSPACE\" --config \"$CONFIG\" start --host 127.0.0.1 --port $BACKEND_PORT & CONDUCTOR_WORKSPACE=$WORKSPACE CO_CONFIG_PATH=$CONFIG CONDUCTOR_BACKEND_URL=http://127.0.0.1:$BACKEND_PORT bun run --cwd packages/web start -- --hostname 0.0.0.0 --port $DASHBOARD_PORT'",
     "executor:build": "cargo build --manifest-path orchestrator/runtime-sidecar/Cargo.toml --release",
     "executor:dev": "cargo run --manifest-path orchestrator/runtime-sidecar/Cargo.toml",
     "clean": "bun run --cwd packages/web clean && cargo clean"
