@@ -1,7 +1,7 @@
 "use client";
 
-import { memo, useMemo } from "react";
-import { Layers3, Plus } from "lucide-react";
+import { memo, useMemo, useState } from "react";
+import { Layers3, Plus, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { getAttentionLevel, type DashboardSession } from "@/lib/types";
 import { Sidebar } from "@/components/layout/Sidebar";
@@ -16,6 +16,7 @@ interface WorkspaceSidebarPanelProps {
   projects: ProjectItem[];
   selectedProjectId: string | null;
   onSelectProject: (projectId: string | null) => void;
+  onUnlinkProject?: (projectId: string) => Promise<void>;
   sessions: DashboardSession[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
@@ -28,12 +29,14 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
   projects,
   selectedProjectId,
   onSelectProject,
+  onUnlinkProject,
   sessions,
   selectedSessionId,
   onSelectSession,
   onArchiveSession,
   onCreateWorkspace,
 }: WorkspaceSidebarPanelProps) {
+  const [unlinkingId, setUnlinkingId] = useState<string | null>(null);
   const sessionCountByProject = useMemo(() => {
     const counts = new Map<string, { total: number; active: number }>();
 
@@ -99,38 +102,72 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
           >
             <span className="h-2.5 w-2.5 rounded-full bg-[var(--vk-text-muted)]" />
             <span className="truncate">All projects</span>
-            <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{sessions.length}</span>
+            <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{projects.length}</span>
           </button>
 
           {projects.map((project) => {
             const selected = selectedProjectId === project.id;
             const counts = sessionCountByProject.get(project.id) ?? { total: 0, active: 0 };
+            const isUnlinking = unlinkingId === project.id;
             return (
-              <button
+              <div
                 key={project.id}
-                type="button"
-                onClick={() => onSelectProject(project.id)}
                 className={cn(
-                  "mb-1.5 flex w-full items-center gap-3 rounded-[6px] px-3 py-2.5 text-left text-[14px] leading-[21px]",
+                  "group relative mb-1.5 flex items-center rounded-[6px]",
                   selected
-                    ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
-                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
+                    ? "bg-[var(--vk-bg-hover)]"
+                    : "hover:bg-[var(--vk-bg-hover)]",
                 )}
               >
-                <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-[#3c83f6]" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate">{project.id}</span>
-                  {project.description ? (
-                    <span className="block truncate text-[11px] text-[var(--vk-text-muted)]">
-                      {project.description}
-                    </span>
-                  ) : null}
-                </span>
-                <span className="shrink-0 text-right">
-                  <span className="block text-[11px] text-[var(--vk-text-normal)]">{counts.active} active</span>
-                  <span className="block text-[10px] text-[var(--vk-text-muted)]">{counts.total} total</span>
-                </span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => onSelectProject(project.id)}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left text-[14px] leading-[21px]",
+                    selected
+                      ? "text-[var(--vk-text-normal)]"
+                      : "text-[var(--vk-text-muted)]",
+                  )}
+                >
+                  <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-[#3c83f6]" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{project.id}</span>
+                    {project.description ? (
+                      <span className="block truncate text-[11px] text-[var(--vk-text-muted)]">
+                        {project.description}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="shrink-0 text-right">
+                    <span className="block text-[11px] text-[var(--vk-text-normal)]">{counts.active} active</span>
+                    <span className="block text-[10px] text-[var(--vk-text-muted)]">{counts.total} total</span>
+                  </span>
+                </button>
+                {onUnlinkProject && (
+                  <button
+                    type="button"
+                    disabled={isUnlinking}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      const confirmed = window.confirm(
+                        `Unlink "${project.id}"? This removes it from your workspace config. Files on disk are not deleted.`,
+                      );
+                      if (!confirmed) return;
+                      setUnlinkingId(project.id);
+                      try {
+                        await onUnlinkProject(project.id);
+                      } finally {
+                        setUnlinkingId(null);
+                      }
+                    }}
+                    className="mr-2 hidden shrink-0 items-center justify-center rounded-[4px] p-1 text-[var(--vk-text-muted)] hover:bg-[var(--vk-red)]/10 hover:text-[var(--vk-red)] group-hover:inline-flex disabled:opacity-50"
+                    aria-label={`Unlink ${project.id}`}
+                    title="Unlink project"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
