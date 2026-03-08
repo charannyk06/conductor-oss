@@ -13,11 +13,11 @@ export function registerDashboard(program: Command): void {
   program
     .command("dashboard")
     .description("Open the Conductor web dashboard in a browser")
-    .option("-p, --port <port>", "Dashboard port (default: from config or 3000)")
+    .option("-p, --port <port>", "Dashboard port (default: from config or 4747)")
     .action(async (opts: { port?: string }) => {
       try {
         const config = await loadConfig();
-        const port = opts.port ? parseInt(opts.port, 10) : (config.port ?? 3000);
+        const port = opts.port ? parseInt(opts.port, 10) : (config.port ?? 4747);
 
         if (isNaN(port) || port < 1 || port > 65535) {
           console.error(chalk.red("Invalid port number. Must be 1-65535."));

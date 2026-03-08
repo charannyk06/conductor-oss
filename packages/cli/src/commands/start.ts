@@ -1,24 +1,21 @@
 /**
  * `co start`
  *
- * Starts the lifecycle manager and web dashboard.
- * Runs in the foreground -- designed for LaunchAgent / systemd usage.
- *
- * The lifecycle manager polls sessions periodically, advancing their
- * state machine (checking CI, reviews, merging, sending reactions, etc.).
- * The web dashboard provides a browser UI for monitoring and interaction.
+ * Starts the Rust backend and web dashboard in the foreground.
+ * The JS launcher is intentionally thin: it resolves paths, launches
+ * the Rust backend, and wires the frontend to it.
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
+import { parse as parseYaml } from "yaml";
 import { buildConductorBoard, buildConductorYaml } from "@conductor-oss/core";
-import { createServices, loadConfig } from "../services.js";
 
 function commandExists(command: string): boolean {
   const checker = process.platform === "win32" ? "where" : "which";
@@ -54,6 +51,27 @@ type TrustedHeaderAuth = {
   audience: string | null;
 };
 
+type LauncherAccessConfig = {
+  requireAuth: boolean;
+  defaultRole: string | null;
+  trustedHeaders: TrustedHeaderAuth;
+};
+
+type LauncherSettings = {
+  workspacePath: string;
+  configPath: string;
+  dashboardPort: number;
+  backendPort: number;
+  access: LauncherAccessConfig;
+};
+
+type RustLaunchConfig = {
+  cmd: string;
+  args: string[];
+  cwd: string;
+  label: string;
+};
+
 function resolveBuiltinRemoteAuth(enabled: boolean): BuiltinRemoteAuth | null {
   if (!enabled) return null;
 
@@ -68,25 +86,46 @@ function resolveBuiltinRemoteAuth(enabled: boolean): BuiltinRemoteAuth | null {
   };
 }
 
-function resolveTrustedHeaderAuth(config: {
-  access?: {
-    trustedHeaders?: {
-      enabled?: boolean;
-      provider?: "generic" | "cloudflare-access";
-      emailHeader?: string;
-      jwtHeader?: string;
-      teamDomain?: string;
-      audience?: string;
-    };
-  };
-}): TrustedHeaderAuth {
+function asObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
+}
+
+function asTrimmedString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function asBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function coercePort(value: unknown, fallback: number): number {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = parseInt(value.trim(), 10);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+function resolveTrustedHeaderAuth(config: Record<string, unknown>): TrustedHeaderAuth {
+  const access = asObject(config["access"]);
+  const trustedHeaders = asObject(access["trustedHeaders"]);
   return {
-    enabled: config.access?.trustedHeaders?.enabled === true,
-    provider: config.access?.trustedHeaders?.provider === "generic" ? "generic" : "cloudflare-access",
-    emailHeader: config.access?.trustedHeaders?.emailHeader?.trim() || "Cf-Access-Authenticated-User-Email",
-    jwtHeader: config.access?.trustedHeaders?.jwtHeader?.trim() || "Cf-Access-Jwt-Assertion",
-    teamDomain: config.access?.trustedHeaders?.teamDomain?.trim() || null,
-    audience: config.access?.trustedHeaders?.audience?.trim() || null,
+    enabled: asBoolean(trustedHeaders["enabled"]),
+    provider: trustedHeaders["provider"] === "generic" ? "generic" : "cloudflare-access",
+    emailHeader: asTrimmedString(trustedHeaders["emailHeader"]) || "Cf-Access-Authenticated-User-Email",
+    jwtHeader: asTrimmedString(trustedHeaders["jwtHeader"]) || "Cf-Access-Jwt-Assertion",
+    teamDomain: asTrimmedString(trustedHeaders["teamDomain"]),
+    audience: asTrimmedString(trustedHeaders["audience"]),
   };
 }
 
@@ -213,7 +252,7 @@ async function waitForDashboard(url: string, timeoutMs = 15_000): Promise<boolea
       // Dashboard is still starting.
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
   }
 
   return false;
@@ -221,6 +260,38 @@ async function waitForDashboard(url: string, timeoutMs = 15_000): Promise<boolea
 
 function getDefaultLauncherWorkspace(): string {
   return resolve(homedir(), ".openclaw", "workspace");
+}
+
+function resolveWorkspacePathHint(configHint?: string | null): string {
+  if (!configHint) {
+    return getDefaultLauncherWorkspace();
+  }
+
+  const resolved = resolve(configHint);
+  if (existsSync(resolved) && basename(resolved).match(/^conductor\.ya?ml$/i)) {
+    return dirname(resolved);
+  }
+  return resolved;
+}
+
+function findConfigFile(startDir?: string): string | null {
+  const baseDir = resolveWorkspacePathHint(startDir);
+  let currentDir = baseDir;
+
+  for (;;) {
+    for (const filename of ["conductor.yaml", "conductor.yml"]) {
+      const candidate = join(currentDir, filename);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+
+    const parentDir = dirname(currentDir);
+    if (parentDir === currentDir) {
+      return null;
+    }
+    currentDir = parentDir;
+  }
 }
 
 function ensureDashboardBootstrapWorkspace(): { workspacePath: string; configPath: string } {
@@ -249,57 +320,255 @@ function ensureDashboardBootstrapWorkspace(): { workspacePath: string; configPat
   return { workspacePath, configPath };
 }
 
+function loadLauncherSettings(configHint?: string | null): LauncherSettings {
+  const explicitConfigPath = configHint && basename(configHint).match(/^conductor\.ya?ml$/i)
+    ? resolve(configHint)
+    : null;
+  const configPath = explicitConfigPath ?? findConfigFile(configHint ?? undefined);
+
+  if (!configPath) {
+    const bootstrap = ensureDashboardBootstrapWorkspace();
+    return {
+      workspacePath: bootstrap.workspacePath,
+      configPath: bootstrap.configPath,
+      dashboardPort: 4747,
+      backendPort: 4748,
+      access: {
+        requireAuth: false,
+        defaultRole: "operator",
+        trustedHeaders: resolveTrustedHeaderAuth({}),
+      },
+    };
+  }
+
+  const parsed = parseYaml(readFileSync(configPath, "utf8"));
+  const config = asObject(parsed);
+  const access = asObject(config["access"]);
+  const server = asObject(config["server"]);
+
+  return {
+    workspacePath: dirname(configPath),
+    configPath,
+    dashboardPort: 4747,
+    backendPort: coercePort(server["port"], coercePort(config["port"], 4748)),
+    access: {
+      requireAuth: asBoolean(access["requireAuth"]),
+      defaultRole: asTrimmedString(access["defaultRole"]),
+      trustedHeaders: resolveTrustedHeaderAuth(config),
+    },
+  };
+}
+
+function resolveBackendPort(cliValue: string | undefined, configuredPort: number): number {
+  const raw = cliValue?.trim() || process.env["CONDUCTOR_BACKEND_PORT"]?.trim();
+  if (!raw) return configuredPort;
+  return coercePort(raw, configuredPort);
+}
+
+function resolveFrontendPort(cliValue: string | undefined, configuredPort: number): number {
+  const raw = cliValue?.trim() || process.env["PORT"]?.trim();
+  if (!raw) return configuredPort;
+  return coercePort(raw, configuredPort);
+}
+
+function resolveRepoCargoRoot(workspacePath: string): string | null {
+  const candidate = resolve(workspacePath);
+  if (
+    existsSync(join(candidate, "Cargo.toml"))
+    && existsSync(join(candidate, "crates", "conductor-cli", "Cargo.toml"))
+  ) {
+    return candidate;
+  }
+
+  return null;
+}
+
+function resolveBundledRustBinary(): string | null {
+  const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
+  const cliDir = new URL(".", import.meta.url).pathname;
+  const candidates = [
+    resolve(cliDir, "..", "..", "native", binaryName),
+    resolve(cliDir, "..", "..", "..", "native", binaryName),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveRustBackendLaunch(workspacePath: string, configPath: string, backendPort: number): RustLaunchConfig | null {
+  const bundledBinary = resolveBundledRustBinary();
+  if (bundledBinary) {
+    return {
+      cmd: bundledBinary,
+      args: [
+        "--workspace",
+        workspacePath,
+        "--config",
+        configPath,
+        "start",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(backendPort),
+      ],
+      cwd: workspacePath,
+      label: "bundled Rust backend",
+    };
+  }
+
+  const repoCargoRoot = resolveRepoCargoRoot(workspacePath);
+  if (!repoCargoRoot) {
+    return null;
+  }
+
+  const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
+  const prebuiltCandidates = [
+    join(repoCargoRoot, "target", "release", binaryName),
+    join(repoCargoRoot, "target", "debug", binaryName),
+  ];
+
+  for (const candidate of prebuiltCandidates) {
+    if (existsSync(candidate)) {
+      return {
+        cmd: candidate,
+        args: [
+          "--workspace",
+          workspacePath,
+          "--config",
+          configPath,
+          "start",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(backendPort),
+        ],
+        cwd: repoCargoRoot,
+        label: "prebuilt Rust backend",
+      };
+    }
+  }
+
+  return {
+    cmd: "cargo",
+    args: [
+      "run",
+      "-p",
+      "conductor-cli",
+      "--",
+      "--workspace",
+      workspacePath,
+      "--config",
+      configPath,
+      "start",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(backendPort),
+    ],
+    cwd: repoCargoRoot,
+    label: "cargo-run Rust backend",
+  };
+}
+
+async function waitForHttpService(url: string, timeoutMs = 15_000): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(url, { redirect: "manual" });
+      if (response.ok || response.status < 500) {
+        return true;
+      }
+    } catch {
+      // Service is still starting.
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+
+  return false;
+}
+
+async function killStalePortListener(port: number): Promise<void> {
+  try {
+    const { execSync } = await import("node:child_process");
+    const pids = execSync(`lsof -ti :${port} -sTCP:LISTEN 2>/dev/null`, { encoding: "utf8" }).trim();
+    if (!pids) {
+      return;
+    }
+
+    for (const pid of pids.split("\n").filter(Boolean)) {
+      if (pid !== String(process.pid)) {
+        process.kill(Number(pid), "SIGTERM");
+        console.log(`[port] Killed stale process ${pid} on port ${port}`);
+      }
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+  } catch {
+    // no stale process — expected
+  }
+}
+
+function resolveDashboardWebMode(mode: string | undefined): "auto" | "dev" | "production" | "standalone" {
+  switch (mode?.trim().toLowerCase()) {
+    case "dev":
+      return "dev";
+    case "production":
+    case "prod":
+      return "production";
+    case "standalone":
+      return "standalone";
+    default:
+      return "auto";
+  }
+}
+
 export function registerStart(program: Command): void {
   program
     .command("start")
-    .description("Start lifecycle manager + board watcher + web dashboard (foreground)")
+    .description("Start the Rust backend and web dashboard (foreground)")
     .option("--no-dashboard", "Skip starting the web dashboard")
-    .option("--no-watcher", "Skip starting the board watcher")
+    .option("--no-watcher", "Deprecated. Rust backend startup no longer uses the JS watcher")
     .option("--open", "Open the dashboard in your default browser")
     .option("--tunnel", "Expose the dashboard on a free public Cloudflare Quick Tunnel")
     .option("--host <host>", "Dashboard bind host. Defaults to 127.0.0.1 for local-only access")
     .option("-p, --port <port>", "Dashboard port override")
-    .option("-w, --workspace <path>", "Obsidian workspace path")
-      .action(async (opts: { dashboard?: boolean; watcher?: boolean; open?: boolean; tunnel?: boolean; host?: string; port?: string; workspace?: string }) => {
+    .option("--no-backend", "Do not launch a separate local Rust backend")
+    .option("--backend-port <port>", "Rust backend port override (default: from config or 4748)")
+    .option("-w, --workspace <path>", "Workspace path or conductor.yaml path")
+    .action(async (opts: {
+      dashboard?: boolean;
+      watcher?: boolean;
+      open?: boolean;
+      tunnel?: boolean;
+      host?: string;
+      port?: string;
+      backend?: boolean;
+      backendPort?: string;
+      workspace?: string;
+    }) => {
       try {
-        const explicitWorkspaceHint = opts.workspace ?? process.env["CONDUCTOR_WORKSPACE"];
-        let config;
-        if (explicitWorkspaceHint) {
-          config = await loadConfig(explicitWorkspaceHint);
-        } else {
-          try {
-            config = await loadConfig();
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            if (!/No conductor\.ya?ml found/i.test(message)) {
-              throw err;
-            }
-
-            const bootstrap = ensureDashboardBootstrapWorkspace();
-            process.env["CONDUCTOR_WORKSPACE"] = bootstrap.workspacePath;
-            process.env["CO_CONFIG_PATH"] = bootstrap.configPath;
-            config = await loadConfig(bootstrap.workspacePath);
-          }
-        }
-
-        const workspacePath = opts.workspace
-          ?? process.env["CONDUCTOR_WORKSPACE"]
-          ?? (config.configPath ? dirname(config.configPath) : `${process.env["HOME"]}/.conductor/workspace`);
-        if (!process.env["CONDUCTOR_WORKSPACE"]) {
-          process.env["CONDUCTOR_WORKSPACE"] = workspacePath;
-        }
-        if (!process.env["CO_CONFIG_PATH"] && config.configPath) {
-          process.env["CO_CONFIG_PATH"] = config.configPath;
-        }
-
-        const { sessionManager, registry } = await createServices(config);
-        const supportedAgents = registry.list("agent").map((agent) => agent.name);
-
-        // Mutable ref — set after boardWatcher is created, used by lifecycle callback
-        let boardWatcherRef: { updateNow(): void } | null = null;
-        const port = opts.port ? parseInt(opts.port, 10) : (config.port ?? 3000);
+        const configHint = opts.workspace
+          || process.env["CO_CONFIG_PATH"]?.trim()
+          || process.env["CONDUCTOR_WORKSPACE"]
+          || null;
+        const settings = loadLauncherSettings(configHint);
+        const workspacePath = settings.workspacePath;
+        const configPath = settings.configPath;
+        const dashboardPort = resolveFrontendPort(opts.port, settings.dashboardPort);
+        const backendPort = resolveBackendPort(opts.backendPort, settings.backendPort);
+        const explicitBackendUrl = process.env["CONDUCTOR_BACKEND_URL"]?.trim() || null;
+        const bindHost = opts.host?.trim() || "127.0.0.1";
         const shutdownTasks: Array<() => void | Promise<void>> = [];
         let isShuttingDown = false;
+
+        process.env["CONDUCTOR_WORKSPACE"] = workspacePath;
+        process.env["CO_CONFIG_PATH"] = configPath;
 
         const requestShutdown = (): void => {
           void (async () => {
@@ -309,10 +578,11 @@ export function registerStart(program: Command): void {
             for (const task of shutdownTasks) {
               try {
                 await task();
-              } catch (err) {
-                console.error(err);
+              } catch (error) {
+                console.error(error);
               }
             }
+
             process.exit(0);
           })();
         };
@@ -326,86 +596,68 @@ export function registerStart(program: Command): void {
         console.log(chalk.dim(line));
         console.log();
 
-        // ---- Start lifecycle manager ----
-        const spinner = ora("Starting lifecycle manager").start();
-        const core = await import("@conductor-oss/core");
-        core.syncWorkspaceSupportFiles(config, {
-          workspacePath,
-          agentNames: supportedAgents,
-        });
-
-        // Startup config sync: regenerate drifted project-local conductor.yaml mirrors
-        if (typeof core.startupConfigSync === "function") {
-          const syncResult = core.startupConfigSync(config);
-          if (syncResult.fixed > 0) {
-            console.log(chalk.dim(`  Synced ${syncResult.fixed} project-local config(s) from canonical`));
-          }
+        if (opts.watcher === false) {
+          console.log(chalk.dim("  JS watcher flag ignored: runtime ownership has moved to the Rust backend path."));
         }
 
-        if (typeof core.createLifecycleManager !== "function") {
-          spinner.warn("Lifecycle manager not yet implemented in @conductor-oss/core");
-        } else {
-          const lifecycle = core.createLifecycleManager({
-            config,
-            sessionManager,
-            onStatusChange: (sessionId, newStatus, projectId) => {
-              console.log(`[lifecycle] Status change: ${sessionId} → ${newStatus} (${projectId})`);
-              // Trigger immediate board sync
-              boardWatcherRef?.updateNow();
-            },
-          });
-          lifecycle.start(10_000); // Poll every 10s (was 30s)
-          spinner.succeed("Lifecycle manager running");
+        // ---- Start Rust backend ----
+        let backendProcess: ChildProcess | null = null;
+        const shouldLaunchBackend = opts.backend !== false && !explicitBackendUrl;
+        const backendUrl = explicitBackendUrl ?? (shouldLaunchBackend ? `http://127.0.0.1:${backendPort}` : null);
 
-          // Graceful shutdown
-          shutdownTasks.push(() => {
-            console.log(chalk.dim("\nShutting down lifecycle manager..."));
-            lifecycle.stop();
-          });
-        }
+        if (shouldLaunchBackend) {
+          const backendSpinner = ora(`Starting Rust backend on http://127.0.0.1:${backendPort}`).start();
+          const launch = resolveRustBackendLaunch(workspacePath, configPath, backendPort);
 
-        // ---- Start board watcher ----
-        if (opts.watcher !== false) {
-          const watchSpinner = ora("Starting board watcher").start();
-              try {
-            const boardPatternsOrConfig = config.boards?.length ? config.boards : config;
-            const boards = core.discoverBoards(workspacePath, boardPatternsOrConfig);
-            if (boards.length === 0) {
-              watchSpinner.warn("No CONDUCTOR.md boards found");
-            } else {
-              const boardProjectMap = core.buildBoardProjectMap(boards, config);
-              const boardWatcher = core.createBoardWatcher({
-                config,
-                sessionManager,
-                agentNames: supportedAgents,
-                boardPaths: boards,
-                boardProjectMap,
-                pollIntervalMs: 5000,
-                workspacePath,
-                onDispatch: (projectId, sessionId, task) => {
-                  console.log(`[board-watcher] Dispatched ${sessionId} -> ${projectId}: "${task}"`);
+          if (!launch) {
+            backendSpinner.warn("Rust backend binary was not found. Build or package the Rust backend first.");
+          } else {
+            try {
+              await killStalePortListener(backendPort);
+              backendProcess = spawn(launch.cmd, launch.args, {
+                cwd: launch.cwd,
+                stdio: "inherit",
+                detached: false,
+                env: {
+                  ...process.env,
                 },
               });
-              boardWatcher.start();
-              boardWatcherRef = boardWatcher;
-              shutdownTasks.push(() => boardWatcher.stop());
-              watchSpinner.succeed(`Board watcher running (${boards.length} boards)`);
+
+              backendProcess.on("error", () => {
+                backendSpinner.warn("Rust backend failed to start.");
+              });
+
+              const backendReady = await waitForHttpService(`${backendUrl}/api/health`);
+              if (backendReady) {
+                backendSpinner.succeed(`Rust backend running on ${backendUrl} (${launch.label})`);
+              } else {
+                backendSpinner.warn(`Rust backend did not become ready at ${backendUrl} in time.`);
+              }
+
+              shutdownTasks.push(() => {
+                if (backendProcess && backendProcess.exitCode === null) {
+                  backendProcess.kill("SIGTERM");
+                }
+              });
+            } catch (error) {
+              backendSpinner.warn(`Rust backend failed: ${error}`);
             }
-          } catch (err) {
-            watchSpinner.warn(`Board watcher failed: ${err}`);
           }
+        } else if (explicitBackendUrl) {
+          console.log(chalk.dim(`  Backend:   using existing Rust backend at ${explicitBackendUrl}`));
+        } else {
+          console.log(chalk.yellow("  Backend:   not launched; frontend API requests will fail without CONDUCTOR_BACKEND_URL."));
         }
 
         // ---- Start web dashboard ----
         let dashboardProcess: ChildProcess | null = null;
         let publicDashboardUrl: string | null = null;
         let unlockDashboardUrl: string | null = null;
-        const bindHost = opts.host?.trim() || "127.0.0.1";
         const externalAccessRequested = opts.tunnel === true || !isLoopbackHost(bindHost);
         const clerkConfigured = Boolean(
           process.env["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"] && process.env["CLERK_SECRET_KEY"],
         );
-        const trustedHeaderAuth = resolveTrustedHeaderAuth(config);
+        const trustedHeaderAuth = settings.access.trustedHeaders;
         const builtinRemoteAuth = resolveBuiltinRemoteAuth(
           externalAccessRequested && !clerkConfigured,
         );
@@ -415,21 +667,15 @@ export function registerStart(program: Command): void {
 
           try {
             const cliDir = new URL(".", import.meta.url).pathname;
-            const { dirname, join, resolve } = await import("node:path");
-            const { cpSync, existsSync, mkdirSync } = await import("node:fs");
+            const { cpSync, readdirSync, statSync } = await import("node:fs");
 
-            // Search order:
-            // 1. Standalone build inside CLI package (npm install -g)
-            // 2. Sibling packages/web in monorepo dev setup
-            // 3. config.configPath-relative monorepo root
             let webDir: string | null = null;
-
             const candidates = [
-              resolve(cliDir, "..", "web"),                               // npm: cli/dist/../web
-              resolve(cliDir, "..", "..", "..", "web"),                   // npm: cli/dist/../../web
-              resolve(cliDir, "..", "..", "web"),                         // monorepo: packages/cli/dist/../../web = packages/web
-              config.configPath ? resolve(config.configPath, "..", "packages", "web") : null,
-            ].filter(Boolean) as string[];
+              resolve(cliDir, "..", "web"),
+              resolve(cliDir, "..", "..", "..", "web"),
+              resolve(cliDir, "..", "..", "web"),
+              resolve(dirname(configPath), "packages", "web"),
+            ];
 
             for (const candidate of candidates) {
               if (existsSync(join(candidate, "package.json"))) {
@@ -443,53 +689,50 @@ export function registerStart(program: Command): void {
               return;
             }
 
-            // Kill any stale process holding the dashboard port (prevents EADDRINUSE on restart)
-            try {
-              const { execSync } = await import("node:child_process");
-              const pids = execSync(`lsof -ti :${port} -sTCP:LISTEN 2>/dev/null`, { encoding: "utf8" }).trim();
-              if (pids) {
-                for (const pid of pids.split("\n").filter(Boolean)) {
-                  if (pid !== String(process.pid)) {
-                    process.kill(Number(pid), "SIGTERM");
-                    console.log(`[dashboard] Killed stale process ${pid} on port ${port}`);
-                  }
-                }
-                await new Promise(r => setTimeout(r, 1000));
-              }
-            } catch { /* no stale process — expected */ }
+            await killStalePortListener(dashboardPort);
 
-            // Prefer standalone build (output: standalone in next.config), then production, then dev
-            // Find standalone server.js (location varies by monorepo nesting)
-            const { readdirSync, statSync: fsStat } = await import("node:fs");
+            const webMode = resolveDashboardWebMode(process.env["CONDUCTOR_WEB_MODE"]);
+            const isSourceCheckout = existsSync(join(webDir, "src", "app", "page.tsx"))
+              && existsSync(join(webDir, "next.config.ts"));
+            const preferDevServer = webMode === "dev" || (webMode === "auto" && isSourceCheckout);
             const standaloneDir = join(webDir, ".next", "standalone");
+            const hasNextBuild = existsSync(join(webDir, ".next"));
+
             let standaloneServer: string | null = null;
             const searchQueue = [standaloneDir];
-            for (let depth = 0; depth < 6 && searchQueue.length > 0 && !standaloneServer; depth++) {
+            for (let depth = 0; depth < 6 && searchQueue.length > 0 && !standaloneServer; depth += 1) {
               const nextQueue: string[] = [];
-              for (const d of searchQueue) {
-                const candidate = join(d, "server.js");
+              for (const currentDir of searchQueue) {
+                const candidate = join(currentDir, "server.js");
                 if (existsSync(candidate)) {
                   standaloneServer = candidate;
                   break;
                 }
                 try {
-                  for (const entry of readdirSync(d)) {
-                    const full = join(d, String(entry));
-                    if (fsStat(full).isDirectory() && entry !== "node_modules") {
+                  for (const entry of readdirSync(currentDir)) {
+                    const full = join(currentDir, String(entry));
+                    if (statSync(full).isDirectory() && entry !== "node_modules") {
                       nextQueue.push(full);
                     }
                   }
-                } catch { /* ignore */ }
+                } catch {
+                  // ignore
+                }
               }
               searchQueue.splice(0, searchQueue.length, ...nextQueue);
             }
-            const hasNextBuild = existsSync(join(webDir, ".next"));
 
             let cmd: string;
             let args: string[];
             let dashboardCwd = webDir;
 
-            if (standaloneServer) {
+            if (preferDevServer) {
+              cmd = "pnpm";
+              args = ["run", "dev", "--hostname", bindHost, "--port", String(dashboardPort)];
+            } else if (webMode === "production" && hasNextBuild) {
+              cmd = "pnpm";
+              args = ["run", "start", "--hostname", bindHost, "--port", String(dashboardPort)];
+            } else if (standaloneServer) {
               const standaloneAppDir = dirname(standaloneServer);
               const standaloneStaticDir = join(standaloneAppDir, ".next", "static");
               const sourceStaticDir = join(webDir, ".next", "static");
@@ -502,31 +745,15 @@ export function registerStart(program: Command): void {
               if (!existsSync(standalonePublicDir) && existsSync(sourcePublicDir)) {
                 cpSync(sourcePublicDir, standalonePublicDir, { recursive: true });
               }
-
               cmd = process.execPath;
               args = [standaloneServer];
               dashboardCwd = standaloneDir;
             } else if (hasNextBuild) {
-              // Use pnpm run start (next start) — reliable, serves static assets correctly
               cmd = "pnpm";
-              args = [
-                "run",
-                "start",
-                "--hostname",
-                bindHost,
-                "--port",
-                String(port),
-              ];
+              args = ["run", "start", "--hostname", bindHost, "--port", String(dashboardPort)];
             } else {
               cmd = "pnpm";
-              args = [
-                "run",
-                "dev",
-                "--hostname",
-                bindHost,
-                "--port",
-                String(port),
-              ];
+              args = ["run", "dev", "--hostname", bindHost, "--port", String(dashboardPort)];
             }
 
             dashboardProcess = spawn(cmd, args, {
@@ -535,10 +762,16 @@ export function registerStart(program: Command): void {
               detached: false,
               env: {
                 ...process.env,
-                PORT: String(port),
+                PORT: String(dashboardPort),
                 HOSTNAME: bindHost,
                 CONDUCTOR_WORKSPACE: workspacePath,
-                CO_CONFIG_PATH: config.configPath,
+                CO_CONFIG_PATH: configPath,
+                ...(backendUrl
+                  ? {
+                      CONDUCTOR_BACKEND_URL: backendUrl,
+                      CONDUCTOR_BACKEND_PORT: String(backendPort),
+                    }
+                  : {}),
                 ...(builtinRemoteAuth
                   ? {
                       CONDUCTOR_REMOTE_ACCESS_TOKEN: builtinRemoteAuth.accessToken,
@@ -559,15 +792,11 @@ export function registerStart(program: Command): void {
                         : {}),
                     }
                   : {}),
-                ...(config.access?.requireAuth
-                  ? {
-                      CONDUCTOR_REQUIRE_AUTH: "true",
-                    }
+                ...(settings.access.requireAuth
+                  ? { CONDUCTOR_REQUIRE_AUTH: "true" }
                   : {}),
-                ...(config.access?.defaultRole
-                  ? {
-                      CONDUCTOR_ACCESS_DEFAULT_ROLE: config.access.defaultRole,
-                    }
+                ...(settings.access.defaultRole
+                  ? { CONDUCTOR_ACCESS_DEFAULT_ROLE: settings.access.defaultRole }
                   : {}),
               },
             });
@@ -576,10 +805,10 @@ export function registerStart(program: Command): void {
               dashSpinner.warn("Dashboard failed to start. Try: cd packages/web && pnpm build");
             });
 
-            const dashboardInternalUrl = `http://127.0.0.1:${port}`;
+            const dashboardInternalUrl = `http://127.0.0.1:${dashboardPort}`;
             const dashboardUrl = isLoopbackHost(bindHost)
-              ? `http://localhost:${port}`
-              : `http://${bindHost}:${port}`;
+              ? `http://localhost:${dashboardPort}`
+              : `http://${bindHost}:${dashboardPort}`;
             if (builtinRemoteAuth) {
               unlockDashboardUrl = buildRemoteUnlockUrl(dashboardUrl, builtinRemoteAuth.accessToken);
             }
@@ -598,7 +827,6 @@ export function registerStart(program: Command): void {
                     }
                   });
                   publicDashboardUrl = await tunnel.url;
-                  config.dashboardUrl = publicDashboardUrl;
                   if (builtinRemoteAuth) {
                     unlockDashboardUrl = buildRemoteUnlockUrl(publicDashboardUrl, builtinRemoteAuth.accessToken);
                   }
@@ -625,38 +853,23 @@ export function registerStart(program: Command): void {
                 console.log(chalk.yellow(`Dashboard is still starting. Open ${dashboardUrl} manually if it does not open shortly.`));
               });
             }
-          } catch {
-            dashSpinner.warn("Could not start dashboard.");
-          }
-        }
-
-        // ---- Start webhook server (if enabled in config) ----
-        if (config.webhook?.enabled) {
-          const webhookSpinner = ora("Starting webhook server").start();
-          try {
-            const { createWebhookServer } = await import(
-              "@conductor-oss/plugin-webhook"
-            );
-            const webhookServer = createWebhookServer(config, config.webhook);
-            await webhookServer.start();
-            shutdownTasks.push(() => webhookServer.stop());
-            webhookSpinner.succeed(
-              `Webhook server running on port ${config.webhook.port}`,
-            );
-          } catch (err) {
-            webhookSpinner.warn(`Webhook server failed to start: ${err}`);
+          } catch (error) {
+            dashSpinner.warn(`Could not start dashboard: ${error}`);
           }
         }
 
         // ---- Summary ----
         console.log();
         console.log(chalk.bold.green("Conductor is running."));
-        console.log(chalk.dim(`  Config:    ${config.configPath}`));
+        console.log(chalk.dim(`  Config:    ${configPath}`));
         if (opts.dashboard !== false) {
           const dashboardSummaryUrl = isLoopbackHost(bindHost)
-            ? `http://localhost:${port}`
-            : `http://${bindHost}:${port}`;
+            ? `http://localhost:${dashboardPort}`
+            : `http://${bindHost}:${dashboardPort}`;
           console.log(chalk.dim(`  Dashboard: ${dashboardSummaryUrl}`));
+          if (backendUrl) {
+            console.log(chalk.dim(`  Backend:   ${backendUrl}`));
+          }
           if (publicDashboardUrl) {
             console.log(chalk.dim(`  Public:    ${publicDashboardUrl}`));
           }
@@ -670,55 +883,51 @@ export function registerStart(program: Command): void {
               && trustedHeaderAuth.teamDomain
               && trustedHeaderAuth.audience
             ) {
-              console.log(
-                chalk.dim(
-                  `  Edge Auth: Cloudflare Access via ${trustedHeaderAuth.teamDomain} (${trustedHeaderAuth.emailHeader})`,
-                ),
-              );
+              console.log(chalk.dim(
+                `  Edge Auth: Cloudflare Access via ${trustedHeaderAuth.teamDomain} (${trustedHeaderAuth.emailHeader})`,
+              ));
             } else if (trustedHeaderAuth.provider === "cloudflare-access") {
-              console.log(
-                chalk.dim(
-                  "  Edge Auth: Cloudflare Access is enabled but still needs team domain and audience configuration.",
-                ),
-              );
+              console.log(chalk.dim(
+                "  Edge Auth: Cloudflare Access is enabled but still needs team domain and audience configuration.",
+              ));
             } else {
               console.log(chalk.dim(`  Edge Auth: generic trusted header ${trustedHeaderAuth.emailHeader}`));
             }
           }
         }
-        if (opts.watcher !== false) {
-          console.log(chalk.dim("  Watcher:   Obsidian CONDUCTOR.md boards"));
-        }
-        if (config.webhook?.enabled) {
-          console.log(
-            chalk.dim(
-              `  Webhook:   http://localhost:${config.webhook.port}/api/webhook`,
-            ),
-          );
-        }
+        console.log(chalk.dim("  Runtime:   Rust backend + Next frontend"));
         console.log(chalk.dim("  Press Ctrl-C to stop.\n"));
 
-        // Keep process alive. Dashboard is optional for orchestrator health.
-        // If it crashes (e.g. EADDRINUSE), keep lifecycle + board watcher running.
         if (dashboardProcess) {
           dashboardProcess.on("exit", (code, signal) => {
             if (code !== 0 && code !== null) {
               console.error(
                 chalk.yellow(
                   `Dashboard exited with code ${code}${signal ? ` (signal ${signal})` : ""}. ` +
-                  "Keeping orchestrator core services running.",
+                  "Keeping the Rust backend running.",
                 ),
               );
             }
           });
         }
 
-        // Always keep process alive via interval heartbeat.
+        if (backendProcess) {
+          backendProcess.on("exit", (code, signal) => {
+            if (code !== 0 && code !== null) {
+              console.error(
+                chalk.red(
+                  `Rust backend exited with code ${code}${signal ? ` (signal ${signal})` : ""}.`,
+                ),
+              );
+            }
+          });
+        }
+
         setInterval(() => {
-          // heartbeat -- lifecycle manager / watcher run on their own intervals
+          // Keep the launcher attached while child processes run.
         }, 60_000);
-      } catch (err) {
-        console.error(chalk.red(`Failed to start: ${err}`));
+      } catch (error) {
+        console.error(chalk.red(`Failed to start: ${error}`));
         process.exit(1);
       }
     });

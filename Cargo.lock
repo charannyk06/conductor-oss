@@ -429,6 +429,7 @@ dependencies = [
  "conductor-core",
  "conductor-db",
  "conductor-executors",
+ "conductor-watcher",
  "hex",
  "hmac",
  "libc",
