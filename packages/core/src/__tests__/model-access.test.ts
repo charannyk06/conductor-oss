@@ -37,11 +37,24 @@ test("agent catalogs only expose access metadata", () => {
   );
 });
 
-test("core no longer exposes hardcoded model or reasoning lists", () => {
-  assert.deepEqual(getAvailableAgentModels("codex", { codex: "chatgpt" }), []);
-  assert.equal(getDefaultAgentModel("codex", { codex: "chatgpt" }), null);
-  assert.deepEqual(getAvailableAgentReasoningEfforts("claude-code", { claudeCode: "max" }), []);
-  assert.equal(getDefaultAgentReasoningEffort("claude-code", { claudeCode: "max" }), null);
+test("core exposes stable fallback model and reasoning catalogs", () => {
+  assert.deepEqual(
+    getAvailableAgentModels("codex", { codex: "chatgpt" }).map((model) => model.id),
+    [
+      "gpt-5.4",
+      "gpt-5.3-codex",
+      "gpt-5.3-codex-spark",
+      "gpt-5.2-codex",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex-mini",
+    ],
+  );
+  assert.equal(getDefaultAgentModel("codex", { codex: "chatgpt" }), "gpt-5.4");
+  assert.deepEqual(
+    getAvailableAgentReasoningEfforts("claude-code", { claudeCode: "max" }).map((option) => option.id),
+    ["low", "medium", "high"],
+  );
+  assert.equal(getDefaultAgentReasoningEffort("claude-code", { claudeCode: "max" }), "high");
 });
 
 test("resolveAgentModelAccess uses the saved preference when valid", () => {
