@@ -296,6 +296,25 @@ const markdownComponents = {
       className={[props.className, "whitespace-pre-wrap"].filter(Boolean).join(" ")}
     />
   ),
+  pre: (props: ComponentProps<"pre">) => (
+    <pre
+      {...props}
+      className={[
+        props.className,
+        "max-w-full overflow-x-hidden whitespace-pre-wrap break-words rounded-[6px] border border-[#333] bg-[#1c1c1c] px-3 py-3 text-[12px] leading-[18px] [overflow-wrap:anywhere] sm:text-[13px] sm:leading-[20px]",
+      ].filter(Boolean).join(" ")}
+    />
+  ),
+  code: (props: ComponentProps<"code"> & { inline?: boolean }) => (
+    <code
+      {...props}
+      className={[
+        props.className,
+        "font-mono whitespace-pre-wrap break-all [overflow-wrap:anywhere]",
+        props.inline ? "rounded bg-[rgba(0,0,0,0.22)] px-1 py-[1px] text-[#f1f1f1]" : "",
+      ].filter(Boolean).join(" ")}
+    />
+  ),
 };
 
 function SetupScriptHint() {
@@ -750,7 +769,7 @@ function ParserStateBanner({
           <p className="whitespace-pre-wrap break-words text-[13px] leading-[20px]">{message}</p>
           {command ? (
             <p className="text-[12px] leading-[18px] text-[#c4c4c4]">
-              Run locally: <code className="rounded bg-[rgba(0,0,0,0.22)] px-1 py-[1px] text-[#f1f1f1]">{command}</code>
+              Run locally: <code className="rounded bg-[rgba(0,0,0,0.22)] px-1 py-[1px] whitespace-pre-wrap break-all text-[#f1f1f1] [overflow-wrap:anywhere]">{command}</code>
             </p>
           ) : null}
         </div>
@@ -855,12 +874,12 @@ function ToolEntry({ entry }: { entry: NormalizedChatEntry }) {
         {statusIndicator}
         <Icon className="mt-[2px] h-[14px] w-[14px] shrink-0 text-[var(--vk-text-muted)]" strokeWidth={1.7} />
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="shrink-0 text-[14px] font-medium leading-[21px] text-[#d0d0d0]">
+          <div className="flex min-w-0 flex-col items-start gap-1 sm:flex-row sm:flex-wrap sm:items-center sm:gap-2">
+            <span className="min-w-0 max-w-full break-words text-[13px] font-medium leading-[20px] text-[#d0d0d0] sm:text-[14px] sm:leading-[21px]">
               {toolTitle}
             </span>
             {inlineSummary ? (
-              <span className="min-w-0 max-w-full truncate rounded-[3px] bg-[rgba(255,255,255,0.06)] px-2 py-[2px] font-mono text-[12px] leading-[18px] text-[#a9a9a9]">
+              <span className="min-w-0 w-full whitespace-pre-wrap break-all rounded-[3px] bg-[rgba(255,255,255,0.06)] px-2 py-[2px] font-mono text-[11px] leading-[17px] text-[#a9a9a9] [overflow-wrap:anywhere] sm:w-auto sm:max-w-full sm:text-[12px] sm:leading-[18px]">
                 {inlineSummary}
               </span>
             ) : null}
@@ -957,7 +976,7 @@ function ToolGroup({
         <span>{countLabel}</span>
       </button>
       {expanded ? (
-        <div className="space-y-1 pl-5">
+        <div className="space-y-1 pl-3 sm:pl-5">
           {entries.map((entry) => (
             <ToolEntry key={entry.id} entry={entry} />
           ))}

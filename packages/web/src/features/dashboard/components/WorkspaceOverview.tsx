@@ -112,6 +112,7 @@ export function WorkspaceOverview({
   }).length;
   const mergeReady = visibleSessions.filter((session) => getAttentionLevel(session) === "merge").length;
   const selectedProject = projectSummaries.find((project) => project.id === selectedProjectId) ?? null;
+  const showWelcomeState = projects.length === 0 && visibleSessions.length === 0;
 
   const statCards = [
     { label: "Projects", value: String(projects.length), icon: FolderGit2 },
@@ -120,9 +121,52 @@ export function WorkspaceOverview({
     { label: "Merge ready", value: String(mergeReady), icon: GitBranch },
   ];
 
+  if (showWelcomeState) {
+    return (
+      <div className="flex min-h-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
+        <div className="mx-auto flex min-h-full w-full max-w-[1200px] flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4">
+          <div className="mb-4 flex justify-end">
+            <Button variant="outline" size="md" onClick={onCreateWorkspace}>
+              Add workspace
+            </Button>
+          </div>
+
+          <div className="flex flex-1 items-center justify-center">
+            <Card className="w-full max-w-[880px] border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_88%,transparent)]">
+              <CardContent className="flex flex-col items-center px-6 py-12 text-center sm:px-10 sm:py-16">
+                <span className="inline-flex h-14 w-14 items-center justify-center rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]">
+                  <FolderKanban className="h-6 w-6" />
+                </span>
+                <p className="mt-5 text-[11px] uppercase tracking-[0.14em] text-[var(--vk-text-muted)]">
+                  Frontend Control Surface
+                </p>
+                <h1 className="mt-3 max-w-[14ch] text-[30px] font-semibold leading-[1.02] tracking-[-0.05em] text-[var(--vk-text-strong)] sm:text-[44px]">
+                  Operate workspaces, sessions, and agents from one surface.
+                </h1>
+                <p className="mt-4 max-w-[560px] text-[14px] leading-7 text-[var(--vk-text-muted)] sm:text-[15px]">
+                  Start by linking a workspace. Once a project is connected, this page will show active sessions,
+                  recent work, and project focus without sending you through an empty composer first.
+                </p>
+
+                <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+                  <Button variant="primary" size="md" onClick={onCreateWorkspace}>
+                    Add workspace
+                  </Button>
+                  <div className="inline-flex rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                    0 projects · 0 active sessions
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="border-b border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
-      <div className="mx-auto flex w-full max-w-[1440px] flex-col gap-4 px-3 py-3 sm:px-4">
+    <div className="flex min-h-full flex-col border-b border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
+      <div className="mx-auto flex min-h-full w-full max-w-[1440px] flex-1 flex-col gap-4 px-3 py-3 sm:px-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-3xl">
             <p className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
@@ -185,8 +229,8 @@ export function WorkspaceOverview({
           ))}
         </div>
 
-        <div className="grid gap-3 xl:grid-cols-[1.35fr_0.95fr]">
-          <Card>
+        <div className="grid flex-1 gap-3 xl:grid-cols-[1.35fr_0.95fr]">
+          <Card className="flex h-full min-h-[280px] flex-col">
             <CardHeader className="justify-between">
               <div>
                 <p className="text-[14px] font-semibold text-[var(--vk-text-strong)]">Recent sessions</p>
@@ -194,9 +238,11 @@ export function WorkspaceOverview({
               </div>
               <Badge variant="outline">{visibleSessions.length}</Badge>
             </CardHeader>
-            <CardContent className="space-y-2">
+            <CardContent className="flex-1 space-y-2">
               {recentSessions.length === 0 ? (
-                <p className="text-[13px] text-[var(--vk-text-muted)]">No sessions yet. Create one from the launchpad below.</p>
+                <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
+                  No sessions yet. Create or open a workspace to start work.
+                </div>
               ) : recentSessions.map((session) => (
                 <button
                   key={session.id}
@@ -226,7 +272,7 @@ export function WorkspaceOverview({
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="flex h-full min-h-[280px] flex-col">
             <CardHeader className="justify-between">
               <div>
                 <p className="text-[14px] font-semibold text-[var(--vk-text-strong)]">Project focus</p>
@@ -236,7 +282,7 @@ export function WorkspaceOverview({
               </div>
               <Badge variant="outline">{agentCount} agents</Badge>
             </CardHeader>
-            <CardContent className="space-y-2">
+            <CardContent className="flex-1 space-y-2">
               <button
                 type="button"
                 onClick={() => onSelectProject(null)}
@@ -251,7 +297,9 @@ export function WorkspaceOverview({
               </button>
 
               {projectSummaries.length === 0 ? (
-                <p className="text-[13px] text-[var(--vk-text-muted)]">No configured projects yet.</p>
+                <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
+                  No configured projects yet.
+                </div>
               ) : projectSummaries.slice(0, 6).map((project) => (
                 <button
                   key={project.id}

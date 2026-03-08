@@ -13,26 +13,9 @@ const clerkConfigured = Boolean(
 );
 
 const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() || "";
-const RUST_API_PREFIXES = [
-  "/api/agents",
-  "/api/config",
-  "/api/preferences",
-  "/api/access",
-  "/api/events",
-  "/api/spawn",
-  "/api/sessions",
-  "/api/health",
-  "/api/executor/health",
-  "/api/repositories",
-  "/api/workspaces",
-  "/api/filesystem",
-  "/api/context-files",
-  "/api/boards",
-  "/api/github/repos",
-  "/api/attachments",
-  "/api/notifications",
-  "/api/auth/session",
-];
+// Sensitive browser API requests should terminate in Next so the route-level auth,
+// role checks, and CSRF/origin guards are consistently enforced.
+const RUST_API_PREFIXES: string[] = [];
 
 function shouldProxyToRust(pathname: string): boolean {
   return backendUrl.length > 0 && RUST_API_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));

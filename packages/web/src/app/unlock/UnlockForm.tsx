@@ -1,6 +1,6 @@
 "use client";
 
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type UnlockFormProps = {
@@ -13,9 +13,9 @@ export function UnlockForm({ initialError, nextPath }: UnlockFormProps) {
   const [token, setToken] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
+  const attemptedHashUnlockRef = useRef(false);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
+  async function submitToken(submittedToken: string): Promise<void> {
     setSubmitting(true);
     setError(null);
 
@@ -25,7 +25,7 @@ export function UnlockForm({ initialError, nextPath }: UnlockFormProps) {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ token }),
+        body: JSON.stringify({ token: submittedToken }),
       });
 
       if (!response.ok) {
@@ -40,6 +40,27 @@ export function UnlockForm({ initialError, nextPath }: UnlockFormProps) {
       setSubmitting(false);
     }
   }
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    await submitToken(token);
+  }
+
+  useEffect(() => {
+    if (attemptedHashUnlockRef.current) return;
+    attemptedHashUnlockRef.current = true;
+
+    const hash = window.location.hash.startsWith("#")
+      ? window.location.hash.slice(1)
+      : window.location.hash;
+    const hashToken = new URLSearchParams(hash).get("token")?.trim() ?? "";
+    if (!hashToken) return;
+
+    setToken(hashToken);
+    const nextUrl = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState(null, "", nextUrl);
+    void submitToken(hashToken);
+  }, []);
 
   return (
     <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>

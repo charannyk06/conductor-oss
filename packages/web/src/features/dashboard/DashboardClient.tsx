@@ -1364,7 +1364,14 @@ export default function DashboardClient() {
   }, [onboardingRequired, preferencesSaving]);
 
   const handleUnlinkProject = useCallback(async (projectId: string) => {
-    const res = await fetch(`/api/repositories/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+    const encodedProjectId = encodeURIComponent(projectId);
+    let res = await fetch(`/api/repositories/${encodedProjectId}`, { method: "DELETE" });
+
+    // Fall back to the query-string endpoint for older servers that only expose DELETE /api/repositories?id=...
+    if (res.status === 404 || res.status === 405) {
+      res = await fetch(`/api/repositories?id=${encodedProjectId}`, { method: "DELETE" });
+    }
+
     const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
     if (!res.ok) {
       throw new Error(data?.error ?? `Failed to unlink project (${res.status})`);
@@ -1465,7 +1472,7 @@ export default function DashboardClient() {
     }
 
     return (
-      <div className="flex h-full min-h-0 flex-col">
+      <div className="min-h-0 flex-1 overflow-auto">
         <WorkspaceOverview
           projects={projects}
           sessions={dashboardSessions}
@@ -1477,10 +1484,6 @@ export default function DashboardClient() {
           onSelectSession={handleSelectSession}
           onShowView={setWorkspaceView}
         />
-
-        <div className="min-h-0 flex-1 overflow-hidden">
-          {workspaceMainPanel}
-        </div>
       </div>
     );
   }, [

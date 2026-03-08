@@ -722,15 +722,15 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
           </div>
         ) : (
           <div
-            className="grid min-w-[980px] gap-0 rounded-[4px] border border-[var(--vk-border)]"
+            className="flex min-w-0 flex-col gap-3 rounded-[4px] border border-[var(--vk-border)] lg:grid lg:gap-0"
             style={{ gridTemplateColumns: `repeat(${Math.max(visibleColumns.length, 1)}, minmax(240px, 1fr))` }}
           >
             {visibleColumns.map((column, columnIndex) => (
               <article
                 key={column.role}
                 className={cn(
-                  "flex min-h-[540px] flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)]",
-                  columnIndex === visibleColumns.length - 1 && "border-r-0",
+                  "flex min-h-[320px] flex-col border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] lg:min-h-[540px] lg:border-b-0 lg:border-r",
+                  columnIndex === visibleColumns.length - 1 && "border-b-0 lg:border-r-0",
                 )}
               >
                 <header className="flex h-[41px] items-center border-b border-[var(--vk-border)] px-2">
