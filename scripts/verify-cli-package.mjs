@@ -47,7 +47,7 @@ async function allocatePort() {
 }
 
 function getInstalledCliEntry(installDir) {
-  return join(installDir, "node_modules", "conductor-oss", "dist", "index.js");
+  return join(installDir, "node_modules", "conductor-oss", "dist", "launcher.js");
 }
 
 function verifyNodeShebang(path, label) {
@@ -174,6 +174,39 @@ async function fetchJson(url, init) {
   const response = await fetch(url, init);
   const payload = await response.json().catch(() => null);
   return { response, payload };
+}
+
+const SPAWN_AGENT_PRIORITY = [
+  "codex",
+  "claude-code",
+  "gemini",
+  "amp",
+  "cursor-cli",
+  "opencode",
+  "droid",
+  "qwen-code",
+  "ccr",
+  "github-copilot",
+];
+
+async function resolveSpawnAgent(baseUrl) {
+  const agentsResult = await fetchJson(`${baseUrl}/api/agents`);
+  if (!agentsResult.response.ok) {
+    throw new Error(`failed to load agents before spawn verification (${agentsResult.response.status})`);
+  }
+
+  const names = (agentsResult.payload?.agents ?? [])
+    .map((agent) => (typeof agent?.name === "string" ? agent.name.trim() : ""))
+    .filter(Boolean);
+
+  if (names.length === 0) {
+    return null;
+  }
+
+  for (const preferred of SPAWN_AGENT_PRIORITY) {
+    if (names.includes(preferred)) return preferred;
+  }
+  return names[0];
 }
 
 async function verifyDashboardAssets(baseUrl) {
@@ -461,38 +494,43 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
         && projectYaml.includes("remoteSshUser: pm-team");
     });
 
-    const spawnResult = await fetchJson(`${baseUrl}/api/spawn`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        projectId: createdProjectId,
-        prompt: "Smoke test the agent launcher",
-        agent: "codex",
-      }),
-    });
-
-    if (spawnResult.response.status === 404 || spawnResult.response.status === 400) {
-      throw new Error(
-        `spawn endpoint rejected dashboard launch inputs (${spawnResult.response.status}): ${spawnResult.payload?.error ?? "unknown error"}`,
-      );
-    }
-
-    await waitForCondition("repo-local config to reflect spawn agent selection", async () => {
-      const projectYaml = readTextFile(projectConfigPath);
-      return projectYaml.includes("codingAgent: codex")
-        && yamlContainsProject(projectYaml, createdProjectId)
-        && projectYaml.includes("agent: codex")
-        && projectYaml.includes(`path: ${canonicalProjectDir}`)
-        && !projectYaml.includes(`path: ${legacyMarkdownPath}`);
-    });
-
-    const createdSessionId = spawnResult.payload?.session?.id;
-    if (typeof createdSessionId === "string" && createdSessionId.length > 0) {
-      await fetch(`${baseUrl}/api/sessions/${createdSessionId}/kill`, {
+    const spawnAgent = await resolveSpawnAgent(baseUrl);
+    if (spawnAgent) {
+      const spawnResult = await fetchJson(`${baseUrl}/api/spawn`, {
         method: "POST",
-      }).catch(() => {
-        // Best-effort cleanup.
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: createdProjectId,
+          prompt: "Smoke test the agent launcher",
+          agent: spawnAgent,
+        }),
       });
+
+      if (spawnResult.response.status === 404 || spawnResult.response.status === 400) {
+        throw new Error(
+          `spawn endpoint rejected dashboard launch inputs (${spawnResult.response.status}): ${spawnResult.payload?.error ?? "unknown error"}`,
+        );
+      }
+
+      await waitForCondition("repo-local config to reflect spawn agent selection", async () => {
+        const projectYaml = readTextFile(projectConfigPath);
+        return projectYaml.includes(`codingAgent: ${spawnAgent}`)
+          && yamlContainsProject(projectYaml, createdProjectId)
+          && projectYaml.includes(`agent: ${spawnAgent}`)
+          && projectYaml.includes(`path: ${canonicalProjectDir}`)
+          && !projectYaml.includes(`path: ${legacyMarkdownPath}`);
+      });
+
+      const createdSessionId = spawnResult.payload?.session?.id;
+      if (typeof createdSessionId === "string" && createdSessionId.length > 0) {
+        await fetch(`${baseUrl}/api/sessions/${createdSessionId}/kill`, {
+          method: "POST",
+        }).catch(() => {
+          // Best-effort cleanup.
+        });
+      }
+    } else {
+      console.warn("No agent executors were discovered; skipping spawn endpoint launcher verification.");
     }
 
     const bootstrapConfig = readTextFile(bootstrapConfigPath);

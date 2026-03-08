@@ -33,8 +33,8 @@ export function isLoopbackHost(hostname: string): boolean {
 }
 
 export function buildRemoteUnlockUrl(baseUrl: string, accessToken: string): string {
-  const unlockUrl = new URL("/auth/grant", baseUrl);
-  unlockUrl.searchParams.set("token", accessToken);
+  const unlockUrl = new URL("/unlock", baseUrl);
+  unlockUrl.hash = new URLSearchParams({ token: accessToken }).toString();
   return unlockUrl.toString();
 }
 

@@ -14,27 +14,21 @@ echo ""
 echo -e "${BOLD}Installing Conductor...${RESET}"
 echo ""
 
-# Check Node.js
-if ! command -v node &>/dev/null; then
-  echo "Error: Node.js 20+ is required."
-  echo "  Install from https://nodejs.org or: brew install node"
-  exit 1
-fi
-
-NODE_VER=$(node -e "process.stdout.write(process.version.slice(1).split('.')[0])")
-if [ "$NODE_VER" -lt 20 ]; then
-  echo "Error: Node.js 20+ required (found v${NODE_VER})"
-  exit 1
-fi
-
-# Check npm
-if ! command -v npm &>/dev/null; then
-  echo "Error: npm is required."
+# Check Cargo
+if ! command -v cargo &>/dev/null; then
+  echo "Error: Rust/Cargo is required."
+  echo "  Install from https://rustup.rs/"
   exit 1
 fi
 
 # Install
-npm install -g conductor-oss
+cargo install --locked --git https://github.com/charannyk06/conductor-oss conductor-cli
+
+CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
+if [ -x "$CARGO_BIN_DIR/conductor" ]; then
+  ln -sf "$CARGO_BIN_DIR/conductor" "$CARGO_BIN_DIR/co"
+  ln -sf "$CARGO_BIN_DIR/conductor" "$CARGO_BIN_DIR/conductor-oss"
+fi
 
 echo ""
 echo -e "${GREEN}✔${RESET} Conductor installed!"
