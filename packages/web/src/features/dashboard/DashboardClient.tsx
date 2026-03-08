@@ -4,7 +4,11 @@ import dynamic from "next/dynamic";
 import { type FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  getAvailableAgentModels,
+  getAvailableAgentReasoningEfforts,
   getAgentModelCatalog,
+  getDefaultAgentModel,
+  getDefaultAgentReasoningEffort,
   resolveAgentModelAccess,
   supportsAgentModelSelection,
   type AgentModelOption,
@@ -527,7 +531,17 @@ function getSelectableAgentModels(
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
   const scopedModels = getRuntimeCatalogModelsForAccess(runtimeCatalog, access);
-  return scopedModels.length > 0 ? scopedModels : getAllRuntimeCatalogModels(runtimeCatalog);
+  const staticModels = getAvailableAgentModels(agent, modelAccess);
+  const merged: AgentModelOption[] = [];
+  const seen = new Set<string>();
+
+  for (const model of [...scopedModels, ...staticModels, ...getAllRuntimeCatalogModels(runtimeCatalog)]) {
+    if (!model?.id || seen.has(model.id)) continue;
+    seen.add(model.id);
+    merged.push(model);
+  }
+
+  return merged;
 }
 
 function getSelectableAgentReasoningOptions(
@@ -538,7 +552,18 @@ function getSelectableAgentReasoningOptions(
 ): AgentReasoningOption[] {
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
-  return getRuntimeCatalogReasoningOptions(runtimeCatalog, model, access);
+  const runtimeOptions = getRuntimeCatalogReasoningOptions(runtimeCatalog, model, access);
+  const staticOptions = getAvailableAgentReasoningEfforts(agent, modelAccess);
+  const merged: AgentReasoningOption[] = [];
+  const seen = new Set<string>();
+
+  for (const option of [...runtimeOptions, ...staticOptions]) {
+    if (!option?.id || seen.has(option.id)) continue;
+    seen.add(option.id);
+    merged.push(option);
+  }
+
+  return merged;
 }
 
 function getSelectableDefaultAgentModel(
@@ -549,6 +574,7 @@ function getSelectableDefaultAgentModel(
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
   return getRuntimeCatalogDefaultModelForAccess(runtimeCatalog, access)
+    ?? getDefaultAgentModel(agent, modelAccess)
     ?? getAllRuntimeCatalogModels(runtimeCatalog)[0]?.id
     ?? "";
 }
@@ -561,7 +587,9 @@ function getSelectableDefaultReasoningEffort(
 ): string {
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
-  return getRuntimeCatalogDefaultReasoning(runtimeCatalog, model, access) ?? "";
+  return getRuntimeCatalogDefaultReasoning(runtimeCatalog, model, access)
+    ?? getDefaultAgentReasoningEffort(agent, modelAccess)
+    ?? "";
 }
 
 function getSelectableModelPlaceholder(
@@ -1066,14 +1094,6 @@ export default function DashboardClient() {
   }, [preferences, preferencesLoading]);
 
   useEffect(() => {
-    if (selectedAgent) return;
-    const fromProject = projects.find((p) => p.id === selectedProjectId)?.agent;
-    if (fromProject) {
-      setSelectedAgent(fromProject);
-    }
-  }, [projects, selectedAgent, selectedProjectId]);
-
-  useEffect(() => {
     if (agentOptions.length === 0) return;
     if (!selectedAgent || !agentOptions.includes(selectedAgent)) {
       const fallbackAgent = preferences?.codingAgent || DEFAULT_AGENT;
@@ -1319,12 +1339,9 @@ export default function DashboardClient() {
   const handleSelectProject = useCallback((projectId: string | null) => {
     setSelectedProjectId(projectId);
     setSelectedSessionId(null);
-    const nextAgent = projectId
-      ? projects.find((project) => project.id === projectId)?.agent
-      : preferences?.codingAgent;
-    setSelectedAgent(nextAgent || DEFAULT_AGENT);
+    setSelectedAgent(preferences?.codingAgent || DEFAULT_AGENT);
     closeSidebarOnMobile();
-  }, [closeSidebarOnMobile, preferences?.codingAgent, projects]);
+  }, [closeSidebarOnMobile, preferences?.codingAgent]);
 
   const handleSelectSession = useCallback((id: string) => {
     setSelectedSessionId(id);
@@ -1346,12 +1363,22 @@ export default function DashboardClient() {
     setPreferencesError(null);
   }, [onboardingRequired, preferencesSaving]);
 
+  const handleUnlinkProject = useCallback(async (projectId: string) => {
+    const res = await fetch(`/api/repositories/${encodeURIComponent(projectId)}`, { method: "DELETE" });
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+    if (!res.ok) {
+      throw new Error(data?.error ?? `Failed to unlink project (${res.status})`);
+    }
+    await refreshConfig();
+  }, [refreshConfig]);
+
   const sidebarContent = useMemo(() => (
     <WorkspaceSidebarPanel
       orgLabel="conductor-oss"
       projects={projects}
       selectedProjectId={selectedProjectId}
       onSelectProject={handleSelectProject}
+      onUnlinkProject={handleUnlinkProject}
       sessions={dashboardSessions}
       selectedSessionId={selectedSessionId}
       onSelectSession={handleSelectSession}
@@ -1363,6 +1390,7 @@ export default function DashboardClient() {
     handleArchiveSession,
     handleSelectProject,
     handleSelectSession,
+    handleUnlinkProject,
     openWorkspaceDialog,
     projects,
     selectedProjectId,
@@ -2090,6 +2118,7 @@ function FolderPickerDialog({
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [browseLoading, setBrowseLoading] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -2154,10 +2183,33 @@ function FolderPickerDialog({
   const handleGoParent = () => {
     if (!currentPath) return;
     const normalized = currentPath.replace(/\\/g, "/");
+    // Handle Windows drive root (e.g. "C:/")
+    if (/^[A-Za-z]:\/?$/.test(currentPath)) return;
     if (normalized === "/") return;
     const parts = normalized.split("/").filter(Boolean);
-    const parent = parts.length > 1 ? `/${parts.slice(0, -1).join("/")}` : "/";
+    // Preserve Windows drive letter when going up
+    const driveMatch = currentPath.match(/^([A-Za-z]):[/\\]/);
+    const parent = driveMatch
+      ? parts.length > 1 ? `${driveMatch[1]}:/${parts.slice(1, -1).join("/")}` : `${driveMatch[1]}:/`
+      : parts.length > 1 ? `/${parts.slice(0, -1).join("/")}` : "/";
     void loadDirectory(parent);
+  };
+
+  const handleNativeBrowse = async () => {
+    setBrowseLoading(true);
+    try {
+      const res = await fetch("/api/filesystem/pick-directory", { method: "POST" });
+      const data = (await res.json().catch(() => null)) as
+        | { path?: string; cancelled?: boolean; error?: string }
+        | null;
+      if (!data || data.cancelled || !data.path) return;
+      setManualPath(data.path);
+      void loadDirectory(data.path);
+    } catch {
+      // Native picker unavailable — user can still use manual path entry
+    } finally {
+      setBrowseLoading(false);
+    }
   };
 
   if (!open) return null;
@@ -2215,6 +2267,15 @@ function FolderPickerDialog({
               className="inline-flex h-8 items-center rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
             >
               Up
+            </button>
+            <button
+              type="button"
+              disabled={browseLoading}
+              onClick={() => { void handleNativeBrowse(); }}
+              className="inline-flex h-8 items-center gap-1 rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+            >
+              {browseLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <FolderOpen className="h-3 w-3" />}
+              {browseLoading ? "Opening..." : "Browse"}
             </button>
             <div className="truncate text-[12px] text-[var(--vk-text-muted)]">{currentPath || "Home"}</div>
           </div>
