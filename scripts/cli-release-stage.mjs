@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CLI_NATIVE_TARGETS } from "./cli-native-packages.mjs";
 
+const NPM_EXECUTABLE = process.platform === "win32" ? "npm.cmd" : "npm";
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -238,7 +240,7 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
     writeJson(join(packageStageDir, "package.json"), sanitizedManifest);
     copyDistDirectory(sourceDistDir, join(packageStageDir, "dist"));
 
-    const tarballName = execFileSync("npm", ["pack", "--silent", "--pack-destination", tarballRoot], {
+    const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", tarballRoot], {
       cwd: packageStageDir,
       encoding: "utf8",
     }).trim();
@@ -332,7 +334,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   // If that still attempts to resolve unpublished internal versions, fall back to
   // installing only external deps and unpack internal tarballs manually.
   try {
-    execFileSync("npm", ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
+    execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
       cwd: outputDir,
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -351,7 +353,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     manifest.dependencies = externalDeps;
     writeJson(join(outputDir, "package.json"), manifest);
 
-    execFileSync("npm", ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
+    execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
       cwd: outputDir,
       stdio: "inherit",
     });
@@ -411,7 +413,7 @@ export function packCliReleasePackage({ rootDir = process.cwd(), stageDir, packD
   const destinationDir = packDestination ? resolve(packDestination) : stage.stageDir;
   mkdirSync(destinationDir, { recursive: true });
 
-  const tarballName = execFileSync("npm", ["pack", "--silent", "--pack-destination", destinationDir], {
+  const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
     cwd: stage.stageDir,
     encoding: "utf8",
   }).trim();
