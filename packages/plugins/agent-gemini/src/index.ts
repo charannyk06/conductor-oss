@@ -2,8 +2,8 @@
  * agent-gemini plugin — Google Gemini CLI as the AI coding agent.
  *
  * - processName: "gemini"
- * - promptDelivery: "inline" (prompt passed as positional arg)
- * - getLaunchCommand: `gemini --yolo "<prompt>"`
+ * - promptDelivery: "inline" (prompt passed via --prompt-interactive)
+ * - getLaunchCommand: `gemini --prompt-interactive "<prompt>"`
  * - Activity detection from terminal output patterns
  * - isProcessRunning: check tmux pane for gemini process
  *
@@ -25,7 +25,7 @@ import type {
 } from "@conductor-oss/core";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { writeFile, mkdir, readFile, rename } from "node:fs/promises";
+import { writeFile, mkdir, readFile, rename, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -71,6 +71,8 @@ function findTmuxBin(): string {
 const TMUX_BIN = findTmuxBin();
 const DEFAULT_READY_THRESHOLD_MS = 60_000;
 const CLAW_BIN_DIR = join(homedir(), ".conductor", "bin");
+const GEMINI_HOME_DIR = join(homedir(), ".gemini");
+const geminiSessionFileCache = new Map<string, string | null>();
 
 // =============================================================================
 // Plugin Manifest
@@ -185,6 +187,196 @@ async function setupGeminiWorkspace(workspacePath: string): Promise<void> {
 }
 
 // =============================================================================
+// Gemini Session Files
+// =============================================================================
+
+interface GeminiProjectsIndex {
+  projects?: Record<string, string>;
+}
+
+interface GeminiThought {
+  subject?: string;
+  description?: string;
+  timestamp?: string;
+}
+
+interface GeminiTokens {
+  input?: number;
+  output?: number;
+}
+
+interface GeminiMessagePart {
+  text?: string;
+}
+
+interface GeminiChatMessage {
+  id?: string;
+  timestamp?: string;
+  type?: string;
+  content?: string | GeminiMessagePart[];
+  thoughts?: GeminiThought[];
+  tokens?: GeminiTokens;
+  model?: string;
+}
+
+interface GeminiChatSession {
+  sessionId?: string;
+  startTime?: string;
+  lastUpdated?: string;
+  messages?: GeminiChatMessage[];
+}
+
+async function readGeminiProjectsIndex(baseDir = GEMINI_HOME_DIR): Promise<Record<string, string>> {
+  try {
+    const content = await readFile(join(baseDir, "projects.json"), "utf-8");
+    const parsed = JSON.parse(content) as GeminiProjectsIndex;
+    return Object.fromEntries(
+      Object.entries(parsed.projects ?? {}).filter((entry): entry is [string, string] => {
+        return typeof entry[0] === "string" && typeof entry[1] === "string" && entry[1].trim().length > 0;
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+async function resolveGeminiProjectAlias(
+  workspacePath: string,
+  baseDir = GEMINI_HOME_DIR,
+): Promise<string | null> {
+  const projects = await readGeminiProjectsIndex(baseDir);
+  const alias = projects[workspacePath];
+  return typeof alias === "string" && alias.trim().length > 0 ? alias : null;
+}
+
+async function findGeminiSessionFile(
+  workspacePath: string,
+  baseDir = GEMINI_HOME_DIR,
+): Promise<string | null> {
+  const alias = await resolveGeminiProjectAlias(workspacePath, baseDir);
+  if (!alias) return null;
+
+  const chatsDir = join(baseDir, "tmp", alias, "chats");
+  let entries: string[];
+  try {
+    entries = await readdir(chatsDir);
+  } catch {
+    return null;
+  }
+
+  const candidates = entries.filter((entry) => entry.startsWith("session-") && entry.endsWith(".json"));
+  if (candidates.length === 0) return null;
+
+  let bestMatch: { path: string; mtimeMs: number } | null = null;
+  for (const entry of candidates) {
+    const filePath = join(chatsDir, entry);
+    try {
+      const info = await stat(filePath);
+      if (!bestMatch || info.mtimeMs > bestMatch.mtimeMs) {
+        bestMatch = { path: filePath, mtimeMs: info.mtimeMs };
+      }
+    } catch {
+      // Skip unreadable files.
+    }
+  }
+
+  return bestMatch?.path ?? null;
+}
+
+async function findGeminiSessionFileCached(workspacePath: string): Promise<string | null> {
+  const cached = geminiSessionFileCache.get(workspacePath);
+  if (cached) {
+    try {
+      await stat(cached);
+      return cached;
+    } catch {
+      geminiSessionFileCache.delete(workspacePath);
+    }
+  }
+
+  const resolved = await findGeminiSessionFile(workspacePath);
+  geminiSessionFileCache.set(workspacePath, resolved);
+  return resolved;
+}
+
+async function readGeminiSessionFile(filePath: string): Promise<GeminiChatSession | null> {
+  try {
+    const content = await readFile(filePath, "utf-8");
+    return JSON.parse(content) as GeminiChatSession;
+  } catch {
+    return null;
+  }
+}
+
+function extractGeminiMessageText(message: GeminiChatMessage | null | undefined): string | null {
+  if (!message) return null;
+  if (typeof message.content === "string") {
+    const normalized = message.content.trim();
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  if (Array.isArray(message.content)) {
+    const normalized = message.content
+      .map((part) => part?.text?.trim())
+      .filter((part): part is string => Boolean(part))
+      .join("\n")
+      .trim();
+    return normalized.length > 0 ? normalized : null;
+  }
+
+  return null;
+}
+
+function extractGeminiSummary(
+  data: GeminiChatSession,
+): { summary: string | null; summaryIsFallback: boolean } {
+  const messages = Array.isArray(data.messages) ? data.messages : [];
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.type !== "gemini") continue;
+    const content = extractGeminiMessageText(message);
+    if (content) {
+      return { summary: content, summaryIsFallback: false };
+    }
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const thought = messages[index]?.thoughts?.find((entry) => entry?.description?.trim());
+    if (thought?.description) {
+      return { summary: thought.description.trim(), summaryIsFallback: true };
+    }
+  }
+
+  for (const message of messages) {
+    if (message?.type !== "user") continue;
+    const content = extractGeminiMessageText(message);
+    if (content) {
+      return { summary: content, summaryIsFallback: true };
+    }
+  }
+
+  return { summary: null, summaryIsFallback: true };
+}
+
+function extractGeminiModel(data: GeminiChatSession): string | null {
+  const messages = Array.isArray(data.messages) ? data.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const model = messages[index]?.model?.trim();
+    if (model) return model;
+  }
+  return null;
+}
+
+function resolveGeminiTimestamp(data: GeminiChatSession, fallback: Date): Date {
+  const timestamp = data.lastUpdated ?? data.startTime;
+  if (!timestamp) return fallback;
+
+  const parsed = new Date(timestamp);
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+// =============================================================================
 // Terminal Output Detection
 // =============================================================================
 
@@ -236,17 +428,13 @@ function createGeminiAgent(): Agent {
         parts.push("--model", shellEscape(config.model));
       }
 
-      // Gemini CLI: --yolo auto-approves all tool calls
-      // --approval-mode=auto_edit is a middle ground (auto-approve edits only)
       if (config.permissions === "skip") {
-        parts.push("--yolo");
-      } else {
         parts.push("--yolo");
       }
 
-      // Gemini takes prompt as positional argument for one-shot execution
+      // Keep Gemini interactive so follow-up turns can reuse the same runtime.
       if (config.prompt) {
-        parts.push(shellEscape(config.prompt));
+        parts.push("--prompt-interactive", shellEscape(config.prompt));
       }
 
       return parts.join(" ");
@@ -265,13 +453,40 @@ function createGeminiAgent(): Agent {
     },
 
     async getActivityState(session: Session, readyThresholdMs?: number): Promise<ActivityDetection | null> {
-      void (readyThresholdMs ?? DEFAULT_READY_THRESHOLD_MS);
-
       if (!session.runtimeHandle) return { state: "exited", timestamp: new Date() };
       const running = await this.isProcessRunning(session.runtimeHandle);
       if (!running) return { state: "exited", timestamp: new Date() };
 
-      // Gemini doesn't write JSONL session files — rely on terminal output
+      const threshold = readyThresholdMs ?? DEFAULT_READY_THRESHOLD_MS;
+      const sessionFile = session.workspacePath
+        ? await findGeminiSessionFileCached(session.workspacePath)
+        : null;
+
+      if (sessionFile) {
+        try {
+          const sessionData = await readGeminiSessionFile(sessionFile);
+          const stats = await stat(sessionFile);
+          const timestamp = resolveGeminiTimestamp(sessionData ?? {}, stats.mtime);
+          const ageMs = Date.now() - timestamp.getTime();
+
+          if (ageMs <= threshold) {
+            return { state: "active", timestamp };
+          }
+
+          const termOutput = await captureTmuxPane(session.runtimeHandle);
+          if (termOutput) {
+            const state = classifyGeminiTerminal(termOutput);
+            if (state === "active" || state === "waiting_input") {
+              return { state, timestamp: new Date() };
+            }
+          }
+
+          return { state: "ready", timestamp };
+        } catch {
+          // Fall through to terminal heuristics.
+        }
+      }
+
       const termOutput = await captureTmuxPane(session.runtimeHandle);
       if (termOutput) {
         const state = classifyGeminiTerminal(termOutput);
@@ -312,6 +527,22 @@ function createGeminiAgent(): Agent {
     },
 
     async getSessionInfo(session: Session): Promise<AgentSessionInfo | null> {
+      if (session.workspacePath) {
+        const sessionFile = await findGeminiSessionFileCached(session.workspacePath);
+        if (sessionFile) {
+          const data = await readGeminiSessionFile(sessionFile);
+          if (data) {
+            const summary = extractGeminiSummary(data);
+            return {
+              summary: summary.summary,
+              summaryIsFallback: summary.summaryIsFallback,
+              agentSessionId: data.sessionId ?? null,
+              cost: undefined,
+            };
+          }
+        }
+      }
+
       if (!session.runtimeHandle) return null;
       const termOutput = await captureTmuxPane(session.runtimeHandle, 50);
       if (!termOutput) return null;
@@ -326,10 +557,22 @@ function createGeminiAgent(): Agent {
       return { summary, summaryIsFallback: true, agentSessionId: session.id, cost: undefined };
     },
 
-    async getRestoreCommand(_session: Session, project: ProjectConfig): Promise<string | null> {
-      const parts: string[] = [GEMINI_BIN, "--yolo"];
-      if (project.agentConfig?.model) parts.push("--model", shellEscape(project.agentConfig.model as string));
-      parts.push("--resume", "latest");
+    async getRestoreCommand(session: Session, project: ProjectConfig): Promise<string | null> {
+      if (!session.workspacePath) return null;
+
+      const sessionFile = await findGeminiSessionFileCached(session.workspacePath);
+      if (!sessionFile) return null;
+
+      const data = await readGeminiSessionFile(sessionFile);
+      if (!data?.sessionId) return null;
+
+      const parts: string[] = [GEMINI_BIN];
+      if (project.agentConfig?.permissions === "skip") {
+        parts.push("--yolo");
+      }
+      const model = session.metadata["model"] || project.agentConfig?.model || extractGeminiModel(data);
+      if (model) parts.push("--model", shellEscape(model));
+      parts.push("--resume", shellEscape(data.sessionId));
       return parts.join(" ");
     },
 
@@ -365,5 +608,13 @@ function createGeminiAgent(): Agent {
 export function create(): Agent {
   return createGeminiAgent();
 }
+
+export const __test__ = {
+  extractGeminiMessageText,
+  extractGeminiSummary,
+  findGeminiSessionFile,
+  readGeminiProjectsIndex,
+  resolveGeminiProjectAlias,
+};
 
 export default { manifest, create } satisfies PluginModule<Agent>;
