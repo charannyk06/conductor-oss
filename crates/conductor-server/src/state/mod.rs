@@ -4,7 +4,9 @@ mod session_store;
 pub mod types;
 mod workspace;
 
-pub use helpers::{build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail};
+pub use helpers::{
+    build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
+};
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus, SpawnRequest,
 };
@@ -13,6 +15,7 @@ pub use workspace::{expand_path, resolve_workspace_path};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use conductor_core::config::{ConductorConfig, DashboardAccessConfig, PreferencesConfig};
+use conductor_core::support::{startup_config_sync, sync_workspace_support_files};
 use conductor_core::types::AgentKind;
 use conductor_db::Database;
 use conductor_executors::executor::Executor;
@@ -67,10 +70,16 @@ impl AppState {
 
     pub async fn save_config(&self) -> Result<()> {
         let config = self.config.read().await.clone();
-        config.save(&self.config_path)
+        config.save(&self.config_path)?;
+        let _ = startup_config_sync(&config, &self.workspace_path, false)?;
+        let _ = sync_workspace_support_files(&config, &self.workspace_path)?;
+        Ok(())
     }
 
-    pub async fn update_preferences(&self, preferences: PreferencesConfig) -> Result<PreferencesConfig> {
+    pub async fn update_preferences(
+        &self,
+        preferences: PreferencesConfig,
+    ) -> Result<PreferencesConfig> {
         {
             let mut config = self.config.write().await;
             config.preferences = preferences.clone();
@@ -79,7 +88,10 @@ impl AppState {
         Ok(preferences)
     }
 
-    pub async fn update_access(&self, access: DashboardAccessConfig) -> Result<DashboardAccessConfig> {
+    pub async fn update_access(
+        &self,
+        access: DashboardAccessConfig,
+    ) -> Result<DashboardAccessConfig> {
         {
             let mut config = self.config.write().await;
             config.access = access.clone();

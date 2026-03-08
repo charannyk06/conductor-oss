@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_yaml::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -83,6 +84,8 @@ pub struct ProjectConfig {
     #[serde(default = "default_branch")]
     pub default_branch: String,
     #[serde(default)]
+    pub session_prefix: Option<String>,
+    #[serde(default)]
     pub default_working_directory: Option<String>,
     #[serde(default)]
     pub board_dir: Option<String>,
@@ -92,6 +95,8 @@ pub struct ProjectConfig {
     pub agent: Option<String>,
     #[serde(default)]
     pub workspace: Option<String>,
+    #[serde(default)]
+    pub scm: Option<Value>,
     #[serde(default)]
     pub icon_url: Option<String>,
     #[serde(default)]

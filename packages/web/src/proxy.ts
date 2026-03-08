@@ -14,6 +14,7 @@ const clerkConfigured = Boolean(
 
 const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() || "";
 const RUST_API_PREFIXES = [
+  "/api/agents",
   "/api/config",
   "/api/preferences",
   "/api/access",

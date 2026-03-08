@@ -828,6 +828,17 @@ try {
     fail("installed CLI package is missing the dashboard standalone directory");
   }
 
+  const installedNativeBackend = join(
+    installDir,
+    "node_modules",
+    "conductor-oss",
+    "native",
+    process.platform === "win32" ? "conductor.exe" : "conductor",
+  );
+  if (!existsSync(installedNativeBackend)) {
+    fail("installed CLI package is missing the bundled Rust backend binary");
+  }
+
   const installedDashboardServer = join(
     installDir,
     "node_modules",

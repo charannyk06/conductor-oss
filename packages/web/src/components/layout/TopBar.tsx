@@ -2,32 +2,30 @@
 
 import { memo } from "react";
 import { Settings } from "lucide-react";
-import type { DashboardSession } from "@/lib/types";
 
 interface TopBarProps {
-  session: DashboardSession | null;
-  fallbackTitle?: string;
+  title?: string;
   onOpenPreferences?: () => void;
 }
 
-export const TopBar = memo(function TopBar({ session, fallbackTitle, onOpenPreferences }: TopBarProps) {
-  const title = session?.summary ?? fallbackTitle ?? "Create Workspace";
-
+export const TopBar = memo(function TopBar({ title, onOpenPreferences }: TopBarProps) {
   return (
-    <header className="flex h-[36px] items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[11px] text-[var(--vk-text-muted)] sm:h-[33px]">
+    <header className="flex h-12 items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 text-[13px] text-[var(--vk-text-muted)] sm:h-14 sm:px-5 sm:text-[14px]">
       <div className="min-w-0 flex-1 text-center">
-        <span className="block truncate">{title}</span>
+        <span className="block truncate font-medium tracking-[0.01em] text-[var(--vk-text-normal)]">
+          {title ?? "All Projects"}
+        </span>
       </div>
       {onOpenPreferences ? (
         <div className="ml-1 flex shrink-0">
           <button
             type="button"
             onClick={onOpenPreferences}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
             aria-label="Open preferences"
             title="Preferences"
           >
-            <Settings className="h-3.5 w-3.5" />
+            <Settings className="h-4 w-4" />
           </button>
         </div>
       ) : null}

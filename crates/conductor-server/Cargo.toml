@@ -8,6 +8,7 @@ license.workspace = true
 conductor-core = { path = "../conductor-core" }
 conductor-db = { path = "../conductor-db" }
 conductor-executors = { path = "../conductor-executors" }
+conductor-watcher = { path = "../conductor-watcher" }
 axum = { workspace = true }
 tower-http = { workspace = true }
 serde = { workspace = true }

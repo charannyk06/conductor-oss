@@ -75,6 +75,8 @@ const EXECUTOR_ORDER = [
   "ccr",
 ];
 
+const DEFAULT_AGENT = "claude-code";
+
 const EXECUTOR_LABELS: Record<string, string> = {
   codex: "Codex",
   gemini: "Gemini",
@@ -928,6 +930,17 @@ export default function DashboardClient() {
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   );
+  const topBarTitle = useMemo(() => {
+    if (selectedSession) {
+      return [selectedSession.projectId, selectedSession.branch].filter(Boolean).join(" \u00b7 ");
+    }
+
+    if (selectedProject) {
+      return [selectedProject.id, selectedProject.defaultBranch || "main"].filter(Boolean).join(" \u00b7 ");
+    }
+
+    return "All Projects";
+  }, [selectedProject, selectedSession]);
 
   const agentOptions = useMemo(() => {
     const safeAgents = Array.isArray(agents)
@@ -950,7 +963,7 @@ export default function DashboardClient() {
       opts.add(selectedAgent);
     }
     if (opts.size === 0) {
-      opts.add(preferences?.codingAgent || "qwen-code");
+      opts.add(preferences?.codingAgent || DEFAULT_AGENT);
     }
     return [...opts];
   }, [agents, preferences?.codingAgent, projects, selectedAgent]);
@@ -1017,12 +1030,12 @@ export default function DashboardClient() {
           throw new Error(data?.error ?? `Failed to load preferences: ${res.status}`);
         }
         if (cancelled) return;
-        const normalized = normalizePreferences(data?.preferences, "qwen-code");
+        const normalized = normalizePreferences(data?.preferences, DEFAULT_AGENT);
         setPreferences(normalized);
         setPreferencesError(null);
       } catch (err) {
         if (cancelled) return;
-        setPreferences(normalizePreferences(null, "qwen-code"));
+        setPreferences(normalizePreferences(null, DEFAULT_AGENT));
         setPreferencesError(err instanceof Error ? err.message : "Failed to load preferences");
       } finally {
         if (!cancelled) {
@@ -1063,17 +1076,17 @@ export default function DashboardClient() {
   useEffect(() => {
     if (agentOptions.length === 0) return;
     if (!selectedAgent || !agentOptions.includes(selectedAgent)) {
-      const fallbackAgent = preferences?.codingAgent || "qwen-code";
+      const fallbackAgent = preferences?.codingAgent || DEFAULT_AGENT;
       setSelectedAgent(
         agentOptions.includes(fallbackAgent)
           ? fallbackAgent
-          : agentOptions[0] ?? "qwen-code",
+          : agentOptions[0] ?? DEFAULT_AGENT,
       );
     }
   }, [agentOptions, preferences?.codingAgent, selectedAgent]);
 
   useEffect(() => {
-    const effectiveAgent = selectedAgent || selectedProject?.agent || preferences?.codingAgent || "qwen-code";
+    const effectiveAgent = selectedAgent || selectedProject?.agent || preferences?.codingAgent || DEFAULT_AGENT;
     const preferredModel = selectedProject && normalizeAgentName(selectedProject.agent) === normalizeAgentName(effectiveAgent)
       ? selectedProject.agentModel
       : null;
@@ -1110,7 +1123,7 @@ export default function DashboardClient() {
       if (!res.ok) {
         throw new Error(data?.error ?? `Failed to save preferences: ${res.status}`);
       }
-      const normalized = normalizePreferences(data?.preferences, next.codingAgent || "qwen-code");
+      const normalized = normalizePreferences(data?.preferences, next.codingAgent || DEFAULT_AGENT);
       setPreferences(normalized);
       setSelectedAgent(normalized.codingAgent);
       if (options?.closeDialog !== false) {
@@ -1165,7 +1178,7 @@ export default function DashboardClient() {
       return;
     }
 
-    const effectiveAgent = selectedAgent || "qwen-code";
+    const effectiveAgent = selectedAgent || DEFAULT_AGENT;
     const selectedAgentState = agentStatesByName[normalizeAgentName(effectiveAgent)] ?? null;
     if (selectedAgentState && !selectedAgentState.ready) {
       setCreateError(
@@ -1300,14 +1313,18 @@ export default function DashboardClient() {
   }, [refreshConfig, syncSidebarForViewport]);
 
   const onboardingRequired = !preferencesLoading && !!preferences && !preferences.onboardingAcknowledged;
-  const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || "qwen-code");
-  const resolvedCodingAgent = selectedAgent || resolvedPreferences.codingAgent || "qwen-code";
+  const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || DEFAULT_AGENT);
+  const resolvedCodingAgent = selectedAgent || resolvedPreferences.codingAgent || DEFAULT_AGENT;
 
   const handleSelectProject = useCallback((projectId: string | null) => {
     setSelectedProjectId(projectId);
     setSelectedSessionId(null);
+    const nextAgent = projectId
+      ? projects.find((project) => project.id === projectId)?.agent
+      : preferences?.codingAgent;
+    setSelectedAgent(nextAgent || DEFAULT_AGENT);
     closeSidebarOnMobile();
-  }, [closeSidebarOnMobile]);
+  }, [closeSidebarOnMobile, preferences?.codingAgent, projects]);
 
   const handleSelectSession = useCallback((id: string) => {
     setSelectedSessionId(id);
@@ -1459,8 +1476,7 @@ export default function DashboardClient() {
         sidebar={sidebarContent}
       >
         <TopBar
-          session={selectedSession}
-          fallbackTitle={selectedProjectId ?? "All Projects"}
+          title={topBarTitle}
           onOpenPreferences={handleOpenPreferences}
         />
 
@@ -1583,7 +1599,7 @@ function NewWorkspaceDialog({
   const orderedAgentOptions = useMemo(() => {
     const opts = [...new Set(agentOptions)];
     if (opts.length === 0) {
-      opts.push(defaultAgent || "qwen-code");
+      opts.push(defaultAgent || DEFAULT_AGENT);
     }
 
     const rankMap = new Map(EXECUTOR_ORDER.map((name, index) => [name, index]));
@@ -1597,7 +1613,7 @@ function NewWorkspaceDialog({
 
   useEffect(() => {
     if (!orderedAgentOptions.includes(agent)) {
-      setAgent(orderedAgentOptions[0] ?? "qwen-code");
+      setAgent(orderedAgentOptions[0] ?? DEFAULT_AGENT);
     }
   }, [agent, orderedAgentOptions]);
 
@@ -3349,7 +3365,7 @@ function SettingsDialog({
       opts.add(codingAgent);
     }
     if (opts.size === 0) {
-      opts.add("qwen-code");
+      opts.add(DEFAULT_AGENT);
     }
     const rankMap = new Map(EXECUTOR_ORDER.map((name, index) => [name, index]));
     return [...opts].sort((left, right) => {
