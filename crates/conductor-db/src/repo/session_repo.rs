@@ -122,23 +122,17 @@ impl SessionRepo {
         line_type: &str,
         content: &str,
     ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO session_logs (session_id, line_type, content) VALUES (?, ?, ?)",
-        )
-        .bind(session_id)
-        .bind(line_type)
-        .bind(content)
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT INTO session_logs (session_id, line_type, content) VALUES (?, ?, ?)")
+            .bind(session_id)
+            .bind(line_type)
+            .bind(content)
+            .execute(pool)
+            .await?;
         Ok(())
     }
 
     /// Get recent logs for a session.
-    pub async fn get_logs(
-        pool: &SqlitePool,
-        session_id: &str,
-        limit: i64,
-    ) -> Result<Vec<LogRow>> {
+    pub async fn get_logs(pool: &SqlitePool, session_id: &str, limit: i64) -> Result<Vec<LogRow>> {
         let rows = sqlx::query_as::<_, LogRow>(
             "SELECT line_type, content, created_at FROM session_logs WHERE session_id = ? ORDER BY id DESC LIMIT ?",
         )

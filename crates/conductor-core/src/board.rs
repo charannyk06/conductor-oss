@@ -161,7 +161,11 @@ impl Board {
                 } else {
                     format!(
                         " {}",
-                        card.tags.iter().map(|t| format!("@{t}")).collect::<Vec<_>>().join(" ")
+                        card.tags
+                            .iter()
+                            .map(|t| format!("@{t}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
                     )
                 };
                 output.push_str(&format!("- {} {}{}\n", checkbox, card.title, tags));

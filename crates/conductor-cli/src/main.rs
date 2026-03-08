@@ -77,7 +77,10 @@ async fn main() -> Result<()> {
             let mut config = if config_path.exists() {
                 ConductorConfig::load(&config_path)?
             } else {
-                tracing::warn!("No config found at {}. Creating defaults.", config_path.display());
+                tracing::warn!(
+                    "No config found at {}. Creating defaults.",
+                    config_path.display()
+                );
                 ConductorConfig::default_for_workspace(&cli.workspace)
             };
 
@@ -91,10 +94,14 @@ async fn main() -> Result<()> {
             }
 
             let db_path = cli.workspace.join(".conductor").join("conductor.db");
-            let db = Database::connect(&db_path).await
+            let db = Database::connect(&db_path)
+                .await
                 .context("Failed to connect to database")?;
             let event_bus = EventBus::new(1024);
-            tracing::info!("Starting Conductor Rust backend v{}", env!("CARGO_PKG_VERSION"));
+            tracing::info!(
+                "Starting Conductor Rust backend v{}",
+                env!("CARGO_PKG_VERSION")
+            );
             conductor_server::serve(&config, db, event_bus).await?;
         }
         Commands::Init { path } => {

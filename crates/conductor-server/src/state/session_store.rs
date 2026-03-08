@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 
-use super::AppState;
 use super::helpers::normalize_loaded_session;
 use super::types::SessionRecord;
+use super::AppState;
 
 impl AppState {
     pub fn session_store_dir(&self) -> PathBuf {

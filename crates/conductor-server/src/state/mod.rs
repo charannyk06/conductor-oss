@@ -1,6 +1,8 @@
 mod helpers;
 mod session_manager;
 mod session_store;
+mod spawn_queue;
+mod tmux_runtime;
 pub mod types;
 mod workspace;
 
@@ -25,6 +27,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 
+pub(crate) struct DevServerRecord {
+    pub pid: u32,
+    pub log_path: String,
+}
+
 /// Shared application state for the HTTP server.
 pub struct AppState {
     pub config_path: PathBuf,
@@ -40,6 +47,7 @@ pub struct AppState {
     pub started_at: DateTime<Utc>,
     /// Serializes board-triggered spawns to prevent TOCTOU races in limit checks.
     pub spawn_guard: Mutex<()>,
+    dev_servers: Mutex<HashMap<String, DevServerRecord>>,
 }
 
 impl AppState {
@@ -59,6 +67,7 @@ impl AppState {
             output_updates,
             started_at: Utc::now(),
             spawn_guard: Mutex::new(()),
+            dev_servers: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;
@@ -111,48 +120,41 @@ impl AppState {
         Ok(access)
     }
 
-    pub async fn persist_spawn_agent_selection(&self, project_id: &str, agent: &str) -> Result<()> {
-        let normalized_agent = agent.trim();
-        if normalized_agent.is_empty() {
-            return Ok(());
-        }
-
-        let mut changed = false;
-        {
-            let mut config = self.config.write().await;
-
-            {
-                let Some(project) = config.projects.get_mut(project_id) else {
-                    return Ok(());
-                };
-
-                if project.agent.as_deref() != Some(normalized_agent) {
-                    project.agent = Some(normalized_agent.to_string());
-                    changed = true;
-                }
-            }
-
-            if config.preferences.coding_agent != normalized_agent {
-                config.preferences.coding_agent = normalized_agent.to_string();
-                changed = true;
-            }
-        }
-
-        if changed {
-            self.save_config().await?;
-        }
-
-        Ok(())
-    }
-
     pub async fn snapshot_sessions(&self) -> Vec<Value> {
         let sessions = self.sessions.read().await;
-        let mut list: Vec<&SessionRecord> = sessions
+        let mut list: Vec<SessionRecord> = sessions
             .values()
             .filter(|session| session.status != "archived")
+            .cloned()
             .collect();
         list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        list.into_iter().map(session_to_dashboard_value).collect()
+
+        let mut queued = list
+            .iter()
+            .filter(|session| session.status == "queued")
+            .map(|session| (session.created_at.clone(), session.id.clone()))
+            .collect::<Vec<_>>();
+        queued.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        let queue_depth = queued.len();
+        let queue_positions = queued
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, id))| (id, index + 1))
+            .collect::<HashMap<_, _>>();
+
+        list.into_iter()
+            .map(|mut session| {
+                if let Some(position) = queue_positions.get(&session.id) {
+                    session
+                        .metadata
+                        .insert("queuePosition".to_string(), position.to_string());
+                    session
+                        .metadata
+                        .insert("queueDepth".to_string(), queue_depth.to_string());
+                }
+                session_to_dashboard_value(&session)
+            })
+            .collect()
     }
 
     pub async fn snapshot_event_json(&self) -> String {

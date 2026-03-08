@@ -73,7 +73,7 @@ pub struct AgentConfig {
     pub reasoning_effort: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +115,33 @@ pub struct ProjectConfig {
     pub archive_script: Vec<String>,
     #[serde(default)]
     pub copy_files: Vec<String>,
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            name: None,
+            repo: None,
+            path: String::new(),
+            default_branch: default_branch(),
+            session_prefix: None,
+            default_working_directory: None,
+            board_dir: None,
+            runtime: None,
+            agent: None,
+            workspace: None,
+            scm: None,
+            icon_url: None,
+            description: None,
+            agent_config: AgentConfig::default(),
+            setup_script: Vec::new(),
+            run_setup_in_parallel: false,
+            dev_server_script: Vec::new(),
+            cleanup_script: Vec::new(),
+            archive_script: Vec::new(),
+            copy_files: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -442,5 +469,11 @@ mod tests {
         assert_eq!(prefs.ide, "vscode");
         assert_eq!(prefs.markdown_editor, "obsidian");
         assert!(!prefs.onboarding_acknowledged);
+    }
+
+    #[test]
+    fn test_project_config_default_branch_defaults_to_main() {
+        let project = ProjectConfig::default();
+        assert_eq!(project.default_branch, "main");
     }
 }

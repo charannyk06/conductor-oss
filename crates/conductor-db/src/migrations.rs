@@ -22,16 +22,28 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     ];
 
     for (name, sql) in migrations {
-        let exists: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = ?)",
-        )
-        .bind(name)
-        .fetch_one(pool)
-        .await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _migrations WHERE name = ?)")
+                .bind(name)
+                .fetch_one(pool)
+                .await?;
 
         if !exists {
             tracing::info!("Running migration: {name}");
-            sqlx::query(sql).execute(pool).await?;
+            // Split multi-statement SQL and execute each statement individually,
+            // because sqlx::query().execute() only runs the first statement.
+            let sanitized = sql
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for statement in sanitized
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                sqlx::query(statement).execute(pool).await?;
+            }
             sqlx::query("INSERT INTO _migrations (name) VALUES (?)")
                 .bind(name)
                 .execute(pool)

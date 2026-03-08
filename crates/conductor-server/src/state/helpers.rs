@@ -3,6 +3,15 @@ use std::path::Path;
 
 use super::types::{SessionRecord, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT};
 
+const SPAWN_REQUEST_METADATA_KEY: &str = "spawnRequest";
+const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
+const RECOVERY_STATE_METADATA_KEY: &str = "recoveryState";
+const RECOVERY_ACTION_METADATA_KEY: &str = "recoveryAction";
+const RECOVERY_COUNT_METADATA_KEY: &str = "restartRecoveryCount";
+const RECOVERED_AT_METADATA_KEY: &str = "lastRecoveredAt";
+const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
+const TMUX_SESSION_METADATA_KEY: &str = "tmuxSession";
+
 pub fn session_to_dashboard_value(session: &SessionRecord) -> Value {
     json!({
         "id": session.id,
@@ -19,7 +28,11 @@ pub fn session_to_dashboard_value(session: &SessionRecord) -> Value {
     })
 }
 
-pub fn resolve_board_file(workspace_path: &Path, board_dir: &str, project_path: Option<&str>) -> String {
+pub fn resolve_board_file(
+    workspace_path: &Path,
+    board_dir: &str,
+    project_path: Option<&str>,
+) -> String {
     let mut candidates = Vec::new();
     let trimmed = board_dir.trim();
     if !trimmed.is_empty() {
@@ -44,7 +57,10 @@ pub fn resolve_board_file(workspace_path: &Path, board_dir: &str, project_path: 
             return candidate.clone();
         }
     }
-    candidates.into_iter().next().unwrap_or_else(|| "CONDUCTOR.md".to_string())
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "CONDUCTOR.md".to_string())
 }
 
 pub fn trim_lines_tail(output: &str, lines: usize) -> String {
@@ -124,6 +140,13 @@ pub(super) fn is_runtime_status_line(line: &str) -> bool {
 
 fn is_streaming_status(status: &str) -> bool {
     matches!(status.trim().to_lowercase().as_str(), "working" | "running")
+}
+
+fn is_failed_session_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_lowercase().as_str(),
+        "errored" | "killed" | "terminated"
+    )
 }
 
 pub(super) fn runtime_tool_metadata(line: &str) -> Option<Value> {
@@ -297,7 +320,15 @@ fn is_runtime_transport_event_line(line: &str) -> bool {
 
     matches!(
         value.get("type").and_then(Value::as_str),
-        Some("system" | "assistant" | "user" | "tool_use" | "result" | "input_request" | "rate_limit_event")
+        Some(
+            "system"
+                | "assistant"
+                | "user"
+                | "tool_use"
+                | "result"
+                | "input_request"
+                | "rate_limit_event"
+        )
     )
 }
 
@@ -313,7 +344,11 @@ fn is_runtime_transport_dump(text: &str) -> bool {
     }
 
     let mut saw_event = false;
-    for line in trimmed.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         if !is_runtime_transport_event_line(line) {
             return false;
         }
@@ -327,9 +362,15 @@ fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
     let mut assistant_text = String::new();
     let mut assistant_index = 0usize;
     let mut status_index = 0usize;
-    let is_streaming = matches!(session.status.trim().to_lowercase().as_str(), "working" | "running");
+    let is_streaming = matches!(
+        session.status.trim().to_lowercase().as_str(),
+        "working" | "running"
+    );
 
-    let flush_assistant = |streaming: bool, entries: &mut Vec<Value>, assistant_text: &mut String, assistant_index: &mut usize| {
+    let flush_assistant = |streaming: bool,
+                           entries: &mut Vec<Value>,
+                           assistant_text: &mut String,
+                           assistant_index: &mut usize| {
         let text = assistant_text.trim();
         if text.is_empty() {
             assistant_text.clear();
@@ -366,9 +407,18 @@ fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
         }
 
         if is_runtime_status_line(line) {
-            flush_assistant(false, &mut entries, &mut assistant_text, &mut assistant_index);
+            flush_assistant(
+                false,
+                &mut entries,
+                &mut assistant_text,
+                &mut assistant_index,
+            );
             let metadata = runtime_tool_metadata(line).unwrap_or_else(|| json!({}));
-            let kind = if metadata.get("toolTitle").is_some() { "tool" } else { "status" };
+            let kind = if metadata.get("toolTitle").is_some() {
+                "tool"
+            } else {
+                "status"
+            };
             entries.push(json!({
                 "id": format!("runtime-status-{}-{status_index}", session.id),
                 "kind": kind,
@@ -387,7 +437,12 @@ fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
         merge_assistant_fragment(&mut assistant_text, line);
     }
 
-    flush_assistant(is_streaming, &mut entries, &mut assistant_text, &mut assistant_index);
+    flush_assistant(
+        is_streaming,
+        &mut entries,
+        &mut assistant_text,
+        &mut assistant_index,
+    );
     entries
 }
 
@@ -399,27 +454,28 @@ fn push_runtime_assistant_segments(
     let mut assistant_text = String::new();
     let mut segment_index = 0usize;
 
-    let flush_assistant = |feed: &mut Vec<Value>, assistant_text: &mut String, segment_index: &mut usize| {
-        let text = assistant_text.trim();
-        if text.is_empty() {
-            assistant_text.clear();
-            return;
-        }
+    let flush_assistant =
+        |feed: &mut Vec<Value>, assistant_text: &mut String, segment_index: &mut usize| {
+            let text = assistant_text.trim();
+            if text.is_empty() {
+                assistant_text.clear();
+                return;
+            }
 
-        feed.push(json!({
-            "id": format!("{}-assistant-{segment_index}", entry.id),
-            "kind": "assistant",
-            "label": "Assistant",
-            "text": text,
-            "createdAt": entry.created_at,
-            "attachments": entry.attachments,
-            "source": entry.source,
-            "streaming": streaming,
-            "metadata": entry.metadata,
-        }));
-        *segment_index += 1;
-        assistant_text.clear();
-    };
+            feed.push(json!({
+                "id": format!("{}-assistant-{segment_index}", entry.id),
+                "kind": "assistant",
+                "label": "Assistant",
+                "text": text,
+                "createdAt": entry.created_at,
+                "attachments": entry.attachments,
+                "source": entry.source,
+                "streaming": streaming,
+                "metadata": entry.metadata,
+            }));
+            *segment_index += 1;
+            assistant_text.clear();
+        };
 
     for raw_line in entry.text.lines() {
         let trimmed_end = raw_line.trim_end();
@@ -449,7 +505,10 @@ fn push_runtime_assistant_segments(
             continue;
         }
 
-        if !assistant_text.is_empty() && !assistant_text.ends_with('\n') && !assistant_text.ends_with("\n\n") {
+        if !assistant_text.is_empty()
+            && !assistant_text.ends_with('\n')
+            && !assistant_text.ends_with("\n\n")
+        {
             assistant_text.push('\n');
         }
         assistant_text.push_str(normalized);
@@ -475,7 +534,9 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
             runtime_entries
                 .iter()
                 .rev()
-                .find(|entry| entry.get("kind").and_then(|value| value.as_str()) == Some("assistant"))
+                .find(|entry| {
+                    entry.get("kind").and_then(|value| value.as_str()) == Some("assistant")
+                })
                 .and_then(|entry| entry.get("text").and_then(|value| value.as_str()))
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -505,9 +566,7 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
     if let Some(summary_text) = summary {
         parts.push(summary_text.to_string());
     }
-    if (normalized_status != "done" || parts.is_empty())
-        && !session.status.trim().is_empty()
-    {
+    if (normalized_status != "done" || parts.is_empty()) && !session.status.trim().is_empty() {
         parts.push(format!("Session status: {}", session.status));
     }
 
@@ -545,14 +604,11 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     } else {
         None
     };
-    let has_structured_runtime_entries = session
-        .conversation
-        .iter()
-        .any(|entry| {
-            matches!(entry.kind.as_str(), "assistant_message" | "status_message")
-                && entry.source == "runtime"
-                && !is_runtime_transport_dump(&entry.text)
-        });
+    let has_structured_runtime_entries = session.conversation.iter().any(|entry| {
+        matches!(entry.kind.as_str(), "assistant_message" | "status_message")
+            && entry.source == "runtime"
+            && !is_runtime_transport_dump(&entry.text)
+    });
     let runtime_entries = if has_structured_runtime_entries {
         Vec::new()
     } else {
@@ -563,8 +619,7 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     }
 
     for entry in &session.conversation {
-        if entry.source == "runtime" && is_runtime_transport_dump(&entry.text)
-        {
+        if entry.source == "runtime" && is_runtime_transport_dump(&entry.text) {
             continue;
         }
 
@@ -612,12 +667,65 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
         }));
     }
     feed.extend(runtime_entries);
+    finalize_tool_statuses(&mut feed, &session.status);
 
     if feed.len() > DEFAULT_SESSION_HISTORY_LIMIT {
         feed = feed.split_off(feed.len() - DEFAULT_SESSION_HISTORY_LIMIT);
     }
 
     feed
+}
+
+fn finalize_tool_statuses(feed: &mut [Value], session_status: &str) {
+    let session_is_streaming = is_streaming_status(session_status);
+    let session_failed = is_failed_session_status(session_status);
+
+    for index in 0..feed.len() {
+        let resolved_status = {
+            let Some(entry) = feed.get(index) else {
+                continue;
+            };
+            if entry.get("kind").and_then(Value::as_str) != Some("tool") {
+                continue;
+            }
+            let Some(metadata) = entry.get("metadata").and_then(Value::as_object) else {
+                continue;
+            };
+            let Some(status) = metadata.get("toolStatus").and_then(Value::as_str) else {
+                continue;
+            };
+            let normalized = status.trim().to_ascii_lowercase();
+            if !matches!(normalized.as_str(), "running" | "working" | "pending") {
+                continue;
+            }
+
+            let has_later_entry = feed
+                .iter()
+                .skip(index + 1)
+                .any(|candidate| candidate.get("kind").and_then(Value::as_str).is_some());
+
+            if has_later_entry {
+                "success"
+            } else if session_is_streaming {
+                "running"
+            } else if session_failed {
+                "error"
+            } else {
+                "success"
+            }
+        };
+
+        if let Some(metadata) = feed
+            .get_mut(index)
+            .and_then(|entry| entry.get_mut("metadata"))
+            .and_then(Value::as_object_mut)
+        {
+            metadata.insert(
+                "toolStatus".to_string(),
+                Value::String(resolved_status.to_string()),
+            );
+        }
+    }
 }
 
 pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
@@ -628,24 +736,370 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
         .unwrap_or_default()
         .trim()
         .to_lowercase();
+    let has_spawn_request = session
+        .metadata
+        .get(SPAWN_REQUEST_METADATA_KEY)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let has_workspace = session
+        .workspace_path
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || session
+            .metadata
+            .get("worktree")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    let is_tmux_runtime = session
+        .metadata
+        .get(RUNTIME_MODE_METADATA_KEY)
+        .map(|value| value == "tmux")
+        .unwrap_or(false)
+        && session
+            .metadata
+            .get(TMUX_SESSION_METADATA_KEY)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    if normalized_status == "queued" {
+        let mut changed = false;
+        if session
+            .activity
+            .as_deref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            session.activity = Some("idle".to_string());
+            changed = true;
+        }
+        if session
+            .summary
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            session.summary = Some("Queued for launch".to_string());
+            session
+                .metadata
+                .insert("summary".to_string(), "Queued for launch".to_string());
+            changed = true;
+        }
+        return changed;
+    }
+
+    if normalized_status == "spawning" && has_spawn_request {
+        requeue_recovered_session(
+            session,
+            &now,
+            "Recovered after backend restart and requeued for launch",
+        );
+        return true;
+    }
 
     let is_active_status = normalized_status == "working" || normalized_status == "running";
-    let is_active_activity = normalized_activity == "active" && !is_terminal_status(&session.status);
+    let is_active_activity =
+        normalized_activity == "active" && !is_terminal_status(&session.status);
+
+    if is_tmux_runtime && (is_active_status || is_active_activity) {
+        let mut changed = false;
+        if session
+            .metadata
+            .get(RECOVERY_STATE_METADATA_KEY)
+            .map(|value| value != "reattach_pending")
+            .unwrap_or(true)
+        {
+            session.metadata.insert(
+                RECOVERY_STATE_METADATA_KEY.to_string(),
+                "reattach_pending".to_string(),
+            );
+            session.metadata.insert(
+                RECOVERY_ACTION_METADATA_KEY.to_string(),
+                "reattach".to_string(),
+            );
+            changed = true;
+        }
+        if session
+            .summary
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            session.summary = Some("Reattaching tmux runtime after backend restart".to_string());
+            session.metadata.insert(
+                "summary".to_string(),
+                "Reattaching tmux runtime after backend restart".to_string(),
+            );
+            changed = true;
+        }
+        return changed;
+    }
+
+    if is_active_status && has_spawn_request && !has_workspace && session.pid.unwrap_or(0) == 0 {
+        requeue_recovered_session(
+            session,
+            &now,
+            "Recovered after backend restart and requeued before launch completed",
+        );
+        return true;
+    }
+
     if !is_active_status && !is_active_activity {
         return false;
     }
 
-    session.status = "errored".to_string();
-    session.activity = Some("exited".to_string());
-    if session.summary.as_ref().map(|value| value.trim().is_empty()).unwrap_or(true) {
-        session.summary = Some("Interrupted after backend restart".to_string());
-    }
-    if session.metadata.get("summary").map(|value| value.trim().is_empty()).unwrap_or(true) {
+    session.status = "stuck".to_string();
+    session.activity = Some("blocked".to_string());
+    session.last_activity_at = now.clone();
+    record_restart_recovery(session, &now);
+
+    if let Some(pid) = session
+        .pid
+        .filter(|pid| *pid > 0)
+        .filter(|pid| super::workspace::is_process_alive(*pid))
+    {
         session
             .metadata
-            .insert("summary".to_string(), "Interrupted after backend restart".to_string());
+            .insert(DETACHED_PID_METADATA_KEY.to_string(), pid.to_string());
+        session.metadata.insert(
+            RECOVERY_STATE_METADATA_KEY.to_string(),
+            "detached_runtime".to_string(),
+        );
+        session.metadata.insert(
+            RECOVERY_ACTION_METADATA_KEY.to_string(),
+            "kill_or_archive_before_resume".to_string(),
+        );
+        session.summary =
+            Some("Backend restarted while the agent may still be running. Kill or archive before resuming.".to_string());
+    } else {
+        session.pid = None;
+        session.metadata.remove(DETACHED_PID_METADATA_KEY);
+        session.metadata.insert(
+            RECOVERY_STATE_METADATA_KEY.to_string(),
+            "resume_required".to_string(),
+        );
+        session.metadata.insert(
+            RECOVERY_ACTION_METADATA_KEY.to_string(),
+            "resume".to_string(),
+        );
+        session.summary =
+            Some("Backend restarted. Send a message to resume in the same workspace.".to_string());
     }
+    session.metadata.insert(
+        "summary".to_string(),
+        session.summary.clone().unwrap_or_default(),
+    );
     true
+}
+
+fn requeue_recovered_session(session: &mut SessionRecord, recovered_at: &str, summary: &str) {
+    session.status = "queued".to_string();
+    session.activity = Some("idle".to_string());
+    session.pid = None;
+    session.last_activity_at = recovered_at.to_string();
+    session.summary = Some(summary.to_string());
+    session.metadata.insert(
+        RECOVERY_STATE_METADATA_KEY.to_string(),
+        "requeued_after_restart".to_string(),
+    );
+    session.metadata.insert(
+        RECOVERY_ACTION_METADATA_KEY.to_string(),
+        "wait_for_launch".to_string(),
+    );
+    session
+        .metadata
+        .insert("summary".to_string(), summary.to_string());
+    session.metadata.remove(DETACHED_PID_METADATA_KEY);
+    record_restart_recovery(session, recovered_at);
+}
+
+fn record_restart_recovery(session: &mut SessionRecord, recovered_at: &str) {
+    let count = session
+        .metadata
+        .get(RECOVERY_COUNT_METADATA_KEY)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0)
+        + 1;
+    session
+        .metadata
+        .insert(RECOVERY_COUNT_METADATA_KEY.to_string(), count.to_string());
+    session.metadata.insert(
+        RECOVERED_AT_METADATA_KEY.to_string(),
+        recovered_at.to_string(),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finalize_tool_statuses_marks_completed_tool_calls_success() {
+        let mut feed = vec![
+            json!({
+                "kind": "tool",
+                "metadata": { "toolStatus": "running" }
+            }),
+            json!({
+                "kind": "assistant",
+                "metadata": {}
+            }),
+        ];
+
+        finalize_tool_statuses(&mut feed, "done");
+
+        assert_eq!(
+            feed[0]
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|metadata| metadata.get("toolStatus"))
+                .and_then(Value::as_str),
+            Some("success")
+        );
+    }
+
+    #[test]
+    fn finalize_tool_statuses_marks_last_tool_error_for_failed_sessions() {
+        let mut feed = vec![json!({
+            "kind": "tool",
+            "metadata": { "toolStatus": "running" }
+        })];
+
+        finalize_tool_statuses(&mut feed, "errored");
+
+        assert_eq!(
+            feed[0]
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|metadata| metadata.get("toolStatus"))
+                .and_then(Value::as_str),
+            Some("error")
+        );
+    }
+
+    #[test]
+    fn finalize_tool_statuses_keeps_last_tool_running_for_active_sessions() {
+        let mut feed = vec![json!({
+            "kind": "tool",
+            "metadata": { "toolStatus": "running" }
+        })];
+
+        finalize_tool_statuses(&mut feed, "working");
+
+        assert_eq!(
+            feed[0]
+                .get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|metadata| metadata.get("toolStatus"))
+                .and_then(Value::as_str),
+            Some("running")
+        );
+    }
+
+    #[test]
+    fn normalize_loaded_session_requeues_recoverable_spawning_sessions() {
+        let mut session = SessionRecord::new(
+            "session-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = "spawning".to_string();
+        session.activity = Some("active".to_string());
+        session.metadata.insert(
+            SPAWN_REQUEST_METADATA_KEY.to_string(),
+            "{\"projectId\":\"demo\"}".to_string(),
+        );
+
+        let changed = normalize_loaded_session(&mut session);
+
+        assert!(changed);
+        assert_eq!(session.status, "queued");
+        assert_eq!(session.activity.as_deref(), Some("idle"));
+        assert_eq!(
+            session
+                .metadata
+                .get(RECOVERY_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some("requeued_after_restart")
+        );
+    }
+
+    #[test]
+    fn normalize_loaded_session_marks_active_sessions_stuck_when_runtime_is_gone() {
+        let mut session = SessionRecord::new(
+            "session-2".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(u32::MAX),
+        );
+        session.status = "working".to_string();
+        session.activity = Some("active".to_string());
+
+        let changed = normalize_loaded_session(&mut session);
+
+        assert!(changed);
+        assert_eq!(session.status, "stuck");
+        assert_eq!(session.activity.as_deref(), Some("blocked"));
+        assert_eq!(session.pid, None);
+        assert_eq!(
+            session
+                .metadata
+                .get(RECOVERY_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some("resume_required")
+        );
+    }
+
+    #[test]
+    fn normalize_loaded_session_flags_detached_runtime_when_pid_is_alive() {
+        let mut session = SessionRecord::new(
+            "session-3".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(std::process::id()),
+        );
+        session.status = "working".to_string();
+        session.activity = Some("active".to_string());
+
+        let changed = normalize_loaded_session(&mut session);
+
+        assert!(changed);
+        assert_eq!(session.status, "stuck");
+        assert_eq!(
+            session
+                .metadata
+                .get(RECOVERY_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some("detached_runtime")
+        );
+        assert_eq!(
+            session
+                .metadata
+                .get(DETACHED_PID_METADATA_KEY)
+                .map(String::as_str),
+            Some(std::process::id().to_string().as_str())
+        );
+    }
 }
 
 pub fn append_output(session: &mut SessionRecord, line: &str) {
@@ -657,7 +1111,10 @@ pub fn append_output(session: &mut SessionRecord, line: &str) {
     }
     session.output.push_str(line.trim_end());
     if session.output.len() > DEFAULT_OUTPUT_LIMIT_BYTES {
-        let start = session.output.len().saturating_sub(DEFAULT_OUTPUT_LIMIT_BYTES);
+        let start = session
+            .output
+            .len()
+            .saturating_sub(DEFAULT_OUTPUT_LIMIT_BYTES);
         // Find the next valid UTF-8 char boundary to avoid panicking on multi-byte chars.
         let mut safe_start = start;
         while safe_start < session.output.len() && !session.output.is_char_boundary(safe_start) {

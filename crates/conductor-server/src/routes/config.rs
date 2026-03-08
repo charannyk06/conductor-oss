@@ -2,22 +2,59 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 use crate::state::AppState;
-use conductor_core::config::{DashboardAccessConfig, DashboardRoleBindings, NotificationPreferences, PreferencesConfig, TrustedHeaderAccessConfig};
+use conductor_core::config::{
+    DashboardAccessConfig, DashboardRoleBindings, NotificationPreferences, PreferencesConfig,
+    TrustedHeaderAccessConfig,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AccessRole {
+    Viewer,
+    Operator,
+    Admin,
+}
+
+impl AccessRole {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Operator => "operator",
+            Self::Admin => "admin",
+        }
+    }
+
+    pub(crate) fn allows(self, required: Self) -> bool {
+        self >= required
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccessIdentity {
+    pub authenticated: bool,
+    pub role: Option<AccessRole>,
+    pub email: Option<String>,
+    pub provider: Option<String>,
+    pub reason: Option<String>,
+}
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/config", get(get_config))
-        .route("/api/preferences", get(get_preferences).put(update_preferences))
+        .route(
+            "/api/preferences",
+            get(get_preferences).put(update_preferences),
+        )
         .route("/api/access", get(get_access).put(update_access))
         .route("/api/agents", get(list_agents))
         .route("/api/executor/health", get(executor_health))
@@ -83,7 +120,10 @@ async fn update_preferences(
     };
     match state.update_preferences(next).await {
         Ok(preferences) => (StatusCode::OK, Json(json!({ "preferences": preferences }))),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
     }
 }
 
@@ -98,6 +138,51 @@ const TRUSTED_CLOUDFLARE_AUDIENCE_ENV: &str = "CONDUCTOR_CLOUDFLARE_ACCESS_AUDIE
 const TRUSTED_ALLOW_INSECURE_HEADERS_ENV: &str = "CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS";
 const PROVIDER_CLOUDFLARE_ACCESS: &str = "cloudflare-access";
 const PROVIDER_TRUSTED_HEADER: &str = "trusted-header";
+const DEFAULT_TRUSTED_EMAIL_HEADER: &str = "Cf-Access-Authenticated-User-Email";
+const DEFAULT_TRUSTED_JWT_HEADER: &str = "Cf-Access-Jwt-Assertion";
+const CLOUDFLARE_JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone)]
+struct TrustedHeaderAuthConfig {
+    enabled: bool,
+    provider: &'static str,
+    email_header: String,
+    jwt_header: String,
+    team_domain: Option<String>,
+    audience: Option<String>,
+    allow_insecure_email_header: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CloudflareJwksResponse {
+    keys: Vec<CloudflareJwk>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CloudflareJwk {
+    #[serde(default)]
+    kid: Option<String>,
+    kty: String,
+    #[serde(default)]
+    n: Option<String>,
+    #[serde(default)]
+    e: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CloudflareJwksCacheEntry {
+    keys: Vec<CloudflareJwk>,
+    fetched_at: Instant,
+}
+
+static CLOUDFLARE_JWKS_CACHE: LazyLock<Mutex<HashMap<String, CloudflareJwksCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CLOUDFLARE_JWKS_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("cloudflare jwks client")
+});
 
 fn parse_csv(value: &str) -> Vec<String> {
     value
@@ -117,6 +202,15 @@ fn parse_role(value: &str) -> Option<&'static str> {
     }
 }
 
+fn parse_access_role(value: &str) -> Option<AccessRole> {
+    match parse_role(value) {
+        Some("viewer") => Some(AccessRole::Viewer),
+        Some("operator") => Some(AccessRole::Operator),
+        Some("admin") => Some(AccessRole::Admin),
+        _ => None,
+    }
+}
+
 fn resolve_default_role(config: &DashboardAccessConfig) -> String {
     parse_role(&env::var("CONDUCTOR_ACCESS_DEFAULT_ROLE").unwrap_or_else(|_| String::new()))
         .unwrap_or(config.default_role.as_str())
@@ -124,10 +218,316 @@ fn resolve_default_role(config: &DashboardAccessConfig) -> String {
 }
 
 fn parse_env_bool(name: &str) -> bool {
-    env::var(name).map(|value| value.trim().eq_ignore_ascii_case("true")).unwrap_or(false)
+    env::var(name)
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
-fn should_require_auth(config: &DashboardAccessConfig) -> bool {
+fn normalize_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_team_domain(value: &str) -> Option<String> {
+    let trimmed = normalize_value(value)?;
+    let candidate = if trimmed.contains("://") {
+        trimmed.clone()
+    } else {
+        format!("https://{trimmed}")
+    };
+    if let Ok(url) = reqwest::Url::parse(&candidate) {
+        if let Some(host) = url.host_str() {
+            return Some(host.to_ascii_lowercase());
+        }
+    }
+
+    Some(
+        trimmed
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_ascii_lowercase(),
+    )
+}
+
+fn configured_header(env_name: &str, configured: &str, default_value: &str) -> String {
+    env::var(env_name)
+        .ok()
+        .and_then(|value| normalize_value(&value))
+        .or_else(|| normalize_value(configured))
+        .unwrap_or_else(|| default_value.to_string())
+}
+
+fn configured_optional_value(env_name: &str, configured: &str) -> Option<String> {
+    env::var(env_name)
+        .ok()
+        .and_then(|value| normalize_value(&value))
+        .or_else(|| normalize_value(configured))
+}
+
+fn resolve_trusted_header_config(access: &DashboardAccessConfig) -> TrustedHeaderAuthConfig {
+    let provider = env::var(TRUSTED_PROVIDER_ENV)
+        .ok()
+        .and_then(|value| normalize_value(&value))
+        .unwrap_or_else(|| access.trusted_headers.provider.trim().to_ascii_lowercase());
+    let provider = if provider == "generic" {
+        PROVIDER_TRUSTED_HEADER
+    } else {
+        PROVIDER_CLOUDFLARE_ACCESS
+    };
+
+    TrustedHeaderAuthConfig {
+        enabled: access.trusted_headers.enabled || parse_env_bool(TRUSTED_HEADERS_ENABLED_ENV),
+        provider,
+        email_header: configured_header(
+            TRUSTED_EMAIL_HEADER_ENV,
+            &access.trusted_headers.email_header,
+            DEFAULT_TRUSTED_EMAIL_HEADER,
+        ),
+        jwt_header: configured_header(
+            TRUSTED_JWT_HEADER_ENV,
+            &access.trusted_headers.jwt_header,
+            DEFAULT_TRUSTED_JWT_HEADER,
+        ),
+        team_domain: configured_optional_value(
+            TRUSTED_CLOUDFLARE_TEAM_DOMAIN_ENV,
+            &access.trusted_headers.team_domain,
+        )
+        .and_then(|value| normalize_team_domain(&value)),
+        audience: configured_optional_value(
+            TRUSTED_CLOUDFLARE_AUDIENCE_ENV,
+            &access.trusted_headers.audience,
+        ),
+        allow_insecure_email_header: parse_env_bool(TRUSTED_ALLOW_INSECURE_HEADERS_ENV),
+    }
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(normalize_value)
+}
+
+fn numeric_claim(payload: &Value, key: &str) -> Option<i64> {
+    match payload.get(key) {
+        Some(Value::Number(value)) => value.as_i64(),
+        Some(Value::String(value)) => value.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn audience_matches(payload: &Value, audience: &str) -> bool {
+    match payload.get("aud") {
+        Some(Value::String(value)) => value == audience,
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value == audience),
+        _ => false,
+    }
+}
+
+fn extract_email_from_claims(payload: &Value) -> Option<String> {
+    let email_claim = payload
+        .get("email")
+        .and_then(Value::as_str)
+        .and_then(normalize_value)
+        .map(|value| value.to_ascii_lowercase());
+    if email_claim.is_some() {
+        return email_claim;
+    }
+
+    payload
+        .get("sub")
+        .and_then(Value::as_str)
+        .and_then(normalize_value)
+        .filter(|value| value.contains('@'))
+        .map(|value| value.to_ascii_lowercase())
+}
+
+fn is_supported_cloudflare_algorithm(algorithm: Algorithm) -> bool {
+    matches!(
+        algorithm,
+        Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512
+    )
+}
+
+fn validate_cloudflare_claims(
+    payload: &Value,
+    team_domain: &str,
+    audience: &str,
+) -> Result<(), String> {
+    let issuer = payload
+        .get("iss")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Cloudflare Access token is missing an issuer claim.".to_string())?;
+    if issuer != format!("https://{team_domain}") {
+        return Err(
+            "Cloudflare Access token issuer did not match the configured team domain.".to_string(),
+        );
+    }
+
+    if !audience_matches(payload, audience) {
+        return Err(
+            "Cloudflare Access token audience did not match the configured application."
+                .to_string(),
+        );
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let exp = numeric_claim(payload, "exp")
+        .ok_or_else(|| "Cloudflare Access token is missing an expiration claim.".to_string())?;
+    if exp <= now {
+        return Err("Cloudflare Access token has expired.".to_string());
+    }
+
+    if let Some(nbf) = numeric_claim(payload, "nbf") {
+        if nbf > now {
+            return Err("Cloudflare Access token is not valid yet.".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+fn select_cloudflare_jwk<'a>(
+    keys: &'a [CloudflareJwk],
+    kid: Option<&str>,
+) -> Option<&'a CloudflareJwk> {
+    let rsa_keys = keys
+        .iter()
+        .filter(|key| key.kty.eq_ignore_ascii_case("RSA"))
+        .collect::<Vec<_>>();
+
+    if let Some(kid) = kid {
+        return rsa_keys
+            .into_iter()
+            .find(|key| key.kid.as_deref() == Some(kid));
+    }
+
+    if rsa_keys.len() == 1 {
+        return rsa_keys.into_iter().next();
+    }
+
+    None
+}
+
+async fn fetch_cloudflare_jwks(team_domain: &str) -> Result<Vec<CloudflareJwk>, String> {
+    let url = format!("https://{team_domain}/cdn-cgi/access/certs");
+    let response = CLOUDFLARE_JWKS_CLIENT
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| format!("Cloudflare Access cert fetch failed: {err}"))?;
+    let response = response
+        .error_for_status()
+        .map_err(|err| format!("Cloudflare Access cert fetch failed: {err}"))?;
+    let payload = response
+        .json::<CloudflareJwksResponse>()
+        .await
+        .map_err(|err| format!("Cloudflare Access cert response was invalid: {err}"))?;
+    if payload.keys.is_empty() {
+        return Err("Cloudflare Access cert endpoint returned no signing keys.".to_string());
+    }
+    Ok(payload.keys)
+}
+
+async fn get_cloudflare_jwks(
+    team_domain: &str,
+    force_refresh: bool,
+) -> Result<Vec<CloudflareJwk>, String> {
+    if !force_refresh {
+        if let Some(cached) = CLOUDFLARE_JWKS_CACHE
+            .lock()
+            .unwrap()
+            .get(team_domain)
+            .cloned()
+        {
+            if cached.fetched_at.elapsed() < CLOUDFLARE_JWKS_CACHE_TTL {
+                return Ok(cached.keys);
+            }
+        }
+    }
+
+    let keys = fetch_cloudflare_jwks(team_domain).await?;
+    CLOUDFLARE_JWKS_CACHE.lock().unwrap().insert(
+        team_domain.to_string(),
+        CloudflareJwksCacheEntry {
+            keys: keys.clone(),
+            fetched_at: Instant::now(),
+        },
+    );
+    Ok(keys)
+}
+
+async fn verify_cloudflare_access_assertion(
+    assertion: &str,
+    asserted_email: Option<&str>,
+    team_domain: &str,
+    audience: &str,
+) -> Result<String, String> {
+    let header = decode_header(assertion)
+        .map_err(|err| format!("Cloudflare Access token header is invalid: {err}"))?;
+    if !is_supported_cloudflare_algorithm(header.alg) {
+        return Err("Cloudflare Access token uses an unsupported signing algorithm.".to_string());
+    }
+
+    let kid = header.kid.as_deref();
+    let mut keys = get_cloudflare_jwks(team_domain, false).await?;
+    let mut key = select_cloudflare_jwk(&keys, kid).cloned();
+    if key.is_none() {
+        keys = get_cloudflare_jwks(team_domain, true).await?;
+        key = select_cloudflare_jwk(&keys, kid).cloned();
+    }
+    let key = key.ok_or_else(|| {
+        "Cloudflare Access signing key was not found for the presented token.".to_string()
+    })?;
+
+    let modulus = key
+        .n
+        .as_deref()
+        .ok_or_else(|| "Cloudflare Access signing key is missing an RSA modulus.".to_string())?;
+    let exponent = key
+        .e
+        .as_deref()
+        .ok_or_else(|| "Cloudflare Access signing key is missing an RSA exponent.".to_string())?;
+    let decoding_key = DecodingKey::from_rsa_components(modulus, exponent)
+        .map_err(|err| format!("Cloudflare Access signing key is invalid: {err}"))?;
+
+    let mut validation = Validation::new(header.alg);
+    validation.validate_exp = false;
+    validation.validate_nbf = false;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+
+    let token = decode::<Value>(assertion, &decoding_key, &validation)
+        .map_err(|err| format!("Cloudflare Access token verification failed: {err}"))?;
+    validate_cloudflare_claims(&token.claims, team_domain, audience)?;
+
+    let email = extract_email_from_claims(&token.claims)
+        .ok_or_else(|| "Cloudflare Access token is missing an email claim.".to_string())?;
+    if let Some(asserted_email) = asserted_email {
+        if asserted_email != email {
+            return Err(
+                "Cloudflare Access email header does not match the verified token.".to_string(),
+            );
+        }
+    }
+
+    Ok(email)
+}
+
+pub(crate) fn should_require_auth(config: &DashboardAccessConfig) -> bool {
     config.require_auth
         || parse_env_bool("CONDUCTOR_REQUIRE_AUTH")
         || !legacy_allowlist_emails().is_empty()
@@ -197,6 +597,28 @@ fn verify_builtin_session(secret: &str, value: &str) -> bool {
     constant_time_equal(expected.as_bytes(), signature.as_bytes())
 }
 
+fn builtin_remote_access_token() -> Option<String> {
+    env::var("CONDUCTOR_REMOTE_ACCESS_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn builtin_remote_session_secret() -> Option<String> {
+    env::var(BUILTIN_REMOTE_SESSION_SECRET_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn builtin_remote_auth_enabled() -> bool {
+    builtin_remote_access_token().is_some() && builtin_remote_session_secret().is_some()
+}
+
+pub(crate) fn access_control_enabled(access: &DashboardAccessConfig) -> bool {
+    builtin_remote_auth_enabled() || should_require_auth(access)
+}
+
 fn matches_domain(email: &str, domains: &[String]) -> bool {
     let normalized = email.to_ascii_lowercase();
     domains
@@ -243,13 +665,25 @@ fn resolve_role_for_email(
         || !operator_domains.is_empty();
 
     if matches_email_or_domain(&normalized, &admin_emails, &admin_domains) {
-        return (Some("admin".to_string()), true, explicit_bindings_configured);
+        return (
+            Some("admin".to_string()),
+            true,
+            explicit_bindings_configured,
+        );
     }
     if matches_email_or_domain(&normalized, &operator_emails, &operator_domains) {
-        return (Some("operator".to_string()), true, explicit_bindings_configured);
+        return (
+            Some("operator".to_string()),
+            true,
+            explicit_bindings_configured,
+        );
     }
     if matches_email_or_domain(&normalized, &viewer_emails, &viewer_domains) {
-        return (Some("viewer".to_string()), true, explicit_bindings_configured);
+        return (
+            Some("viewer".to_string()),
+            true,
+            explicit_bindings_configured,
+        );
     }
 
     let default_role = parse_role(&resolve_default_role(access)).map(str::to_string);
@@ -265,44 +699,35 @@ fn resolve_role_for_email(
 }
 
 enum TrustedHeaderIdentity {
-    Authenticated { provider: &'static str, email: String },
-    Unauthenticated { provider: &'static str, reason: String, email: Option<String> },
+    Authenticated {
+        provider: &'static str,
+        email: String,
+    },
+    Unauthenticated {
+        provider: &'static str,
+        reason: String,
+        email: Option<String>,
+    },
     NotProvided,
 }
 
-fn resolve_trusted_header_identity(
+async fn resolve_trusted_header_identity(
     headers: &HeaderMap,
     access: &DashboardAccessConfig,
 ) -> Option<TrustedHeaderIdentity> {
-    let enabled = access.trusted_headers.enabled || parse_env_bool(TRUSTED_HEADERS_ENABLED_ENV);
-    if !enabled {
+    let config = resolve_trusted_header_config(access);
+    if !config.enabled {
         return None;
     }
 
-    let configured_provider = env::var(TRUSTED_PROVIDER_ENV)
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| access.trusted_headers.provider.trim().to_ascii_lowercase());
-    let provider = if configured_provider == "generic" {
-        PROVIDER_TRUSTED_HEADER
-    } else {
-        PROVIDER_CLOUDFLARE_ACCESS
-    };
+    if config.provider == PROVIDER_TRUSTED_HEADER {
+        let email = header_value(headers, &config.email_header)?
+            .trim()
+            .to_ascii_lowercase();
 
-    if provider == PROVIDER_TRUSTED_HEADER {
-        let email_header = env::var(TRUSTED_EMAIL_HEADER_ENV)
-            .unwrap_or_else(|_| access.trusted_headers.email_header.clone());
-        let allow_insecure = parse_env_bool(TRUSTED_ALLOW_INSECURE_HEADERS_ENV);
-        let email = headers
-            .get(email_header.as_str())
-            .and_then(|value| value.to_str().ok())
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|email| !email.is_empty())?;
-
-        if !allow_insecure {
+        if !config.allow_insecure_email_header {
             return Some(TrustedHeaderIdentity::Unauthenticated {
-                provider,
+                provider: config.provider,
                 reason:
                     "Generic trusted-header mode is disabled. Use verified Cloudflare Access, or explicitly set CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS=true."
                         .to_string(),
@@ -310,82 +735,73 @@ fn resolve_trusted_header_identity(
             });
         }
         return Some(TrustedHeaderIdentity::Authenticated {
-            provider,
+            provider: config.provider,
             email,
         });
     }
 
-    let jwt_header = env::var(TRUSTED_JWT_HEADER_ENV).unwrap_or_else(|_| access.trusted_headers.jwt_header.clone());
-    let has_jwt = headers
-        .get(jwt_header.as_str())
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| !value.trim().is_empty());
-    if !has_jwt {
+    let Some(assertion) = header_value(headers, &config.jwt_header) else {
         return Some(TrustedHeaderIdentity::NotProvided);
-    }
+    };
+    let asserted_email =
+        header_value(headers, &config.email_header).map(|value| value.to_ascii_lowercase());
 
-    let email_header = env::var(TRUSTED_EMAIL_HEADER_ENV).unwrap_or_else(|_| access.trusted_headers.email_header.clone());
-    let email = headers.get(email_header.as_str()).and_then(|value| value.to_str().ok())
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|email| !email.is_empty());
-
-    let team_domain = env::var(TRUSTED_CLOUDFLARE_TEAM_DOMAIN_ENV)
-        .ok()
-        .or_else(|| access.trusted_headers.team_domain.clone().into())
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-    let audience = env::var(TRUSTED_CLOUDFLARE_AUDIENCE_ENV)
-        .ok()
-        .or_else(|| access.trusted_headers.audience.clone().into())
-        .and_then(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        });
-
-    if team_domain.is_none() || audience.is_none() {
+    let Some(team_domain) = config.team_domain.as_deref() else {
         return Some(TrustedHeaderIdentity::Unauthenticated {
-            provider,
-            reason: "Cloudflare Access is enabled but team domain or audience is missing.".to_string(),
-            email,
+            provider: config.provider,
+            reason: "Cloudflare Access is enabled but team domain or audience is missing."
+                .to_string(),
+            email: asserted_email,
         });
-    }
+    };
+    let Some(audience) = config.audience.as_deref() else {
+        return Some(TrustedHeaderIdentity::Unauthenticated {
+            provider: config.provider,
+            reason: "Cloudflare Access is enabled but team domain or audience is missing."
+                .to_string(),
+            email: asserted_email,
+        });
+    };
 
-    Some(TrustedHeaderIdentity::Unauthenticated {
-        provider,
-        reason: "Cloudflare Access verification is not implemented in Rust backend.".to_string(),
-        email,
-    })
+    match verify_cloudflare_access_assertion(
+        &assertion,
+        asserted_email.as_deref(),
+        team_domain,
+        audience,
+    )
+    .await
+    {
+        Ok(email) => Some(TrustedHeaderIdentity::Authenticated {
+            provider: config.provider,
+            email,
+        }),
+        Err(reason) => Some(TrustedHeaderIdentity::Unauthenticated {
+            provider: config.provider,
+            reason,
+            email: asserted_email,
+        }),
+    }
 }
 
-fn resolve_current_identity(headers: &HeaderMap, access: &DashboardAccessConfig) -> Value {
-    if let Some(secret) = env::var(BUILTIN_REMOTE_SESSION_SECRET_ENV).ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
+pub(crate) async fn resolve_access_identity(
+    headers: &HeaderMap,
+    access: &DashboardAccessConfig,
+) -> AccessIdentity {
+    if let Some(secret) = builtin_remote_session_secret() {
         if let Some(cookie) = resolve_cookie_value(headers, BUILTIN_REMOTE_SESSION_COOKIE) {
             if verify_builtin_session(&secret, &cookie) {
-                return json!({
-                    "authenticated": true,
-                    "role": "admin",
-                    "email": "builtin",
-                    "provider": "builtin",
-                    "reason": Value::Null,
-                });
+                return AccessIdentity {
+                    authenticated: true,
+                    role: Some(AccessRole::Admin),
+                    email: Some("builtin".to_string()),
+                    provider: Some("builtin".to_string()),
+                    reason: None,
+                };
             }
         }
     }
 
-    if let Some(trusted) = resolve_trusted_header_identity(headers, access) {
+    if let Some(trusted) = resolve_trusted_header_identity(headers, access).await {
         match trusted {
             TrustedHeaderIdentity::NotProvided => {}
             TrustedHeaderIdentity::Unauthenticated {
@@ -393,13 +809,13 @@ fn resolve_current_identity(headers: &HeaderMap, access: &DashboardAccessConfig)
                 reason,
                 email,
             } => {
-                return json!({
-                    "authenticated": false,
-                    "role": Value::Null,
-                    "email": email,
-                    "provider": provider,
-                    "reason": reason,
-                });
+                return AccessIdentity {
+                    authenticated: false,
+                    role: None,
+                    email,
+                    provider: Some(provider.to_string()),
+                    reason: Some(reason),
+                };
             }
             TrustedHeaderIdentity::Authenticated { provider, email } => {
                 let is_allowed = legacy_allowlist_emails().is_empty()
@@ -414,60 +830,76 @@ fn resolve_current_identity(headers: &HeaderMap, access: &DashboardAccessConfig)
                             || allowed_emails.contains(&normalized)
                             || admin_emails.contains(&normalized);
                         let allowed_by_domain = allowed_domains.is_empty()
-                            || allowed_domains.iter().any(|domain| normalized.ends_with(&format!("@{domain}")));
+                            || allowed_domains
+                                .iter()
+                                .any(|domain| normalized.ends_with(&format!("@{domain}")));
                         allowed_by_email && allowed_by_domain
                     };
 
                 if !is_allowed {
-                    return json!({
-                        "authenticated": true,
-                        "role": Value::Null,
-                        "email": email,
-                        "provider": provider,
-                        "reason": "Email/domain not allowed",
-                    });
+                    return AccessIdentity {
+                        authenticated: true,
+                        role: None,
+                        email: Some(email),
+                        provider: Some(provider.to_string()),
+                        reason: Some("Email/domain not allowed".to_string()),
+                    };
                 }
 
-                let (role, _, explicit_bindings_configured) = resolve_role_for_email(&email, access);
+                let (role, _, explicit_bindings_configured) =
+                    resolve_role_for_email(&email, access);
                 if let Some(role) = role {
-                    return json!({
-                        "authenticated": true,
-                        "role": role,
-                        "email": email,
-                        "provider": provider,
-                        "reason": Value::Null,
-                    });
+                    return AccessIdentity {
+                        authenticated: true,
+                        role: parse_access_role(&role),
+                        email: Some(email),
+                        provider: Some(provider.to_string()),
+                        reason: None,
+                    };
                 }
 
                 if explicit_bindings_configured {
-                    return json!({
-                        "authenticated": true,
-                        "role": Value::Null,
-                        "email": email,
-                        "provider": provider,
-                        "reason": "Authenticated user is not granted dashboard access",
-                    });
+                    return AccessIdentity {
+                        authenticated: true,
+                        role: None,
+                        email: Some(email),
+                        provider: Some(provider.to_string()),
+                        reason: Some(
+                            "Authenticated user is not granted dashboard access".to_string(),
+                        ),
+                    };
                 }
             }
         }
     }
 
-    if should_require_auth(access) {
-        return json!({
-            "authenticated": false,
-            "role": Value::Null,
-            "email": Value::Null,
-            "provider": Value::Null,
-            "reason": "Authentication required",
-        });
+    if access_control_enabled(access) {
+        return AccessIdentity {
+            authenticated: false,
+            role: None,
+            email: None,
+            provider: None,
+            reason: Some("Authentication required".to_string()),
+        };
     }
 
+    AccessIdentity {
+        authenticated: false,
+        role: Some(AccessRole::Admin),
+        email: Some("local".to_string()),
+        provider: Some("local".to_string()),
+        reason: None,
+    }
+}
+
+async fn resolve_current_identity(headers: &HeaderMap, access: &DashboardAccessConfig) -> Value {
+    let identity = resolve_access_identity(headers, access).await;
     json!({
-        "authenticated": false,
-        "role": "admin",
-        "email": "local",
-        "provider": "local",
-        "reason": Value::Null,
+        "authenticated": identity.authenticated,
+        "role": identity.role.map(AccessRole::as_str),
+        "email": identity.email,
+        "provider": identity.provider,
+        "reason": identity.reason,
     })
 }
 
@@ -476,7 +908,7 @@ async fn get_access(State(state): State<Arc<AppState>>, headers: HeaderMap) -> J
     let access = config.access.clone();
     Json(json!({
         "access": access,
-        "current": resolve_current_identity(&headers, &access),
+        "current": resolve_current_identity(&headers, &access).await,
     }))
 }
 
@@ -523,15 +955,21 @@ async fn update_access(
             .trusted_headers
             .map(|value| TrustedHeaderAccessConfig {
                 enabled: value.enabled.unwrap_or(current.trusted_headers.enabled),
-                provider: value.provider.unwrap_or(current.trusted_headers.provider.clone()),
+                provider: value
+                    .provider
+                    .unwrap_or(current.trusted_headers.provider.clone()),
                 email_header: value
                     .email_header
                     .unwrap_or(current.trusted_headers.email_header.clone()),
                 jwt_header: value
                     .jwt_header
                     .unwrap_or(current.trusted_headers.jwt_header.clone()),
-                team_domain: value.team_domain.unwrap_or(current.trusted_headers.team_domain.clone()),
-                audience: value.audience.unwrap_or(current.trusted_headers.audience.clone()),
+                team_domain: value
+                    .team_domain
+                    .unwrap_or(current.trusted_headers.team_domain.clone()),
+                audience: value
+                    .audience
+                    .unwrap_or(current.trusted_headers.audience.clone()),
             })
             .unwrap_or(current.trusted_headers),
         roles: body
@@ -546,14 +984,19 @@ async fn update_access(
                 operator_domains: value
                     .operator_domains
                     .unwrap_or(current.roles.operator_domains.clone()),
-                admin_domains: value.admin_domains.unwrap_or(current.roles.admin_domains.clone()),
+                admin_domains: value
+                    .admin_domains
+                    .unwrap_or(current.roles.admin_domains.clone()),
             })
             .unwrap_or(current.roles),
     };
 
     match state.update_access(next).await {
         Ok(access) => (StatusCode::OK, Json(json!({ "access": access }))),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": err.to_string() }))),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
     }
 }
 
@@ -594,7 +1037,9 @@ async fn executor_health() -> Json<Value> {
     }))
 }
 
-fn agent_metadata(kind: &conductor_core::types::AgentKind) -> (&'static str, &'static str, &'static str) {
+fn agent_metadata(
+    kind: &conductor_core::types::AgentKind,
+) -> (&'static str, &'static str, &'static str) {
     match kind {
         conductor_core::types::AgentKind::ClaudeCode => (
             "Claude Code CLI",
@@ -850,7 +1295,9 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
     }
 
     let all_models = if discovered_models.is_empty() {
-        vec![configured_model.clone().unwrap_or_else(|| "sonnet".to_string())]
+        vec![configured_model
+            .clone()
+            .unwrap_or_else(|| "sonnet".to_string())]
     } else {
         discovered_models.clone()
     };
@@ -871,13 +1318,21 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
         .cloned()
         .collect::<Vec<_>>();
 
-    let pro_default = resolve_claude_configured_model(configured_model.as_deref(), &pro_models, "sonnet")
-        .or_else(|| pro_models.first().cloned());
-    let max_default = resolve_claude_configured_model(configured_model.as_deref(), &max_models, "opus")
-        .or_else(|| max_models.iter().find(|model| model.contains("claude-opus")).cloned())
-        .or_else(|| max_models.first().cloned());
-    let api_default = resolve_claude_configured_model(configured_model.as_deref(), &api_models, "sonnet")
-        .or_else(|| api_models.first().cloned());
+    let pro_default =
+        resolve_claude_configured_model(configured_model.as_deref(), &pro_models, "sonnet")
+            .or_else(|| pro_models.first().cloned());
+    let max_default =
+        resolve_claude_configured_model(configured_model.as_deref(), &max_models, "opus")
+            .or_else(|| {
+                max_models
+                    .iter()
+                    .find(|model| model.contains("claude-opus"))
+                    .cloned()
+            })
+            .or_else(|| max_models.first().cloned());
+    let api_default =
+        resolve_claude_configured_model(configured_model.as_deref(), &api_models, "sonnet")
+            .or_else(|| api_models.first().cloned());
 
     let default_reasoning = settings
         .as_ref()
@@ -918,11 +1373,198 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
 
 #[cfg(test)]
 mod tests {
-    use super::claude_access_for_model;
+    use super::{
+        claude_access_for_model, resolve_access_identity, AccessRole, CloudflareJwk,
+        CloudflareJwksCacheEntry, CLOUDFLARE_JWKS_CACHE,
+    };
+    use axum::http::HeaderMap;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use conductor_core::config::{DashboardAccessConfig, TrustedHeaderAccessConfig};
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use rand::rngs::OsRng;
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use rsa::traits::PublicKeyParts;
+    use rsa::RsaPrivateKey;
+    use serde::Serialize;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::Instant;
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    const TEST_TEAM_DOMAIN: &str = "acme.cloudflareaccess.com";
+    const TEST_AUDIENCE: &str = "cf-access-audience";
+
+    struct TestCloudflareKeyMaterial {
+        private_pem: String,
+        modulus: String,
+        exponent: String,
+    }
+
+    static TEST_CLOUDFLARE_KEY: LazyLock<TestCloudflareKeyMaterial> = LazyLock::new(|| {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public_key = private_key.to_public_key();
+        TestCloudflareKeyMaterial {
+            private_pem: private_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .unwrap()
+                .to_string(),
+            modulus: URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
+            exponent: URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+        }
+    });
+
+    #[derive(Debug, Serialize)]
+    struct TestCloudflareClaims<'a> {
+        email: &'a str,
+        iss: String,
+        aud: &'a str,
+        sub: &'a str,
+        exp: usize,
+        iat: usize,
+    }
+
+    fn cache_cloudflare_test_key(team_domain: &str) {
+        let key = &*TEST_CLOUDFLARE_KEY;
+        CLOUDFLARE_JWKS_CACHE.lock().unwrap().insert(
+            team_domain.to_string(),
+            CloudflareJwksCacheEntry {
+                keys: vec![CloudflareJwk {
+                    kid: Some("rust-edge-auth-test".to_string()),
+                    kty: "RSA".to_string(),
+                    n: Some(key.modulus.clone()),
+                    e: Some(key.exponent.clone()),
+                }],
+                fetched_at: Instant::now(),
+            },
+        );
+    }
+
+    fn clear_cloudflare_test_cache() {
+        CLOUDFLARE_JWKS_CACHE.lock().unwrap().clear();
+    }
+
+    fn build_cloudflare_assertion(email: &str) -> String {
+        let key = &*TEST_CLOUDFLARE_KEY;
+        let now = chrono::Utc::now().timestamp() as usize;
+        let claims = TestCloudflareClaims {
+            email,
+            iss: format!("https://{TEST_TEAM_DOMAIN}"),
+            aud: TEST_AUDIENCE,
+            sub: email,
+            exp: now + 300,
+            iat: now,
+        };
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some("rust-edge-auth-test".to_string());
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_rsa_pem(key.private_pem.as_bytes()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn cloudflare_access_config() -> DashboardAccessConfig {
+        DashboardAccessConfig {
+            require_auth: true,
+            default_role: "viewer".to_string(),
+            trusted_headers: TrustedHeaderAccessConfig {
+                enabled: true,
+                provider: "cloudflare-access".to_string(),
+                email_header: "Cf-Access-Authenticated-User-Email".to_string(),
+                jwt_header: "Cf-Access-Jwt-Assertion".to_string(),
+                team_domain: TEST_TEAM_DOMAIN.to_string(),
+                audience: TEST_AUDIENCE.to_string(),
+            },
+            ..DashboardAccessConfig::default()
+        }
+    }
 
     #[test]
     fn claude_access_for_model_keeps_haiku_visible_for_subscription_access() {
-        assert_eq!(claude_access_for_model("claude-haiku-4-5"), vec!["pro", "max", "api"]);
+        assert_eq!(
+            claude_access_for_model("claude-haiku-4-5"),
+            vec!["pro", "max", "api"]
+        );
         assert_eq!(claude_access_for_model("haiku"), vec!["pro", "max", "api"]);
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_accepts_verified_cloudflare_access_jwt() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_cloudflare_test_cache();
+        cache_cloudflare_test_key(TEST_TEAM_DOMAIN);
+
+        let access = cloudflare_access_config();
+        let assertion = build_cloudflare_assertion("dev@example.com");
+        let mut headers = HeaderMap::new();
+        headers.insert("Cf-Access-Jwt-Assertion", assertion.parse().unwrap());
+        headers.insert(
+            "Cf-Access-Authenticated-User-Email",
+            "dev@example.com".parse().unwrap(),
+        );
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(identity.authenticated);
+        assert_eq!(identity.role, Some(AccessRole::Viewer));
+        assert_eq!(identity.email.as_deref(), Some("dev@example.com"));
+        assert_eq!(identity.provider.as_deref(), Some("cloudflare-access"));
+
+        clear_cloudflare_test_cache();
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_rejects_cloudflare_email_header_mismatch() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_cloudflare_test_cache();
+        cache_cloudflare_test_key(TEST_TEAM_DOMAIN);
+
+        let access = cloudflare_access_config();
+        let assertion = build_cloudflare_assertion("dev@example.com");
+        let mut headers = HeaderMap::new();
+        headers.insert("Cf-Access-Jwt-Assertion", assertion.parse().unwrap());
+        headers.insert(
+            "Cf-Access-Authenticated-User-Email",
+            "other@example.com".parse().unwrap(),
+        );
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(!identity.authenticated);
+        assert_eq!(identity.role, None);
+        assert_eq!(
+            identity.reason.as_deref(),
+            Some("Cloudflare Access email header does not match the verified token.")
+        );
+
+        clear_cloudflare_test_cache();
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_rejects_misconfigured_cloudflare_access() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_cloudflare_test_cache();
+
+        let mut access = cloudflare_access_config();
+        access.trusted_headers.team_domain = String::new();
+
+        let assertion = build_cloudflare_assertion("dev@example.com");
+        let mut headers = HeaderMap::new();
+        headers.insert("Cf-Access-Jwt-Assertion", assertion.parse().unwrap());
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(!identity.authenticated);
+        assert_eq!(identity.role, None);
+        assert_eq!(
+            identity.reason.as_deref(),
+            Some("Cloudflare Access is enabled but team domain or audience is missing.")
+        );
     }
 }

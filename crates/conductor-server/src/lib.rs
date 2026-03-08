@@ -4,6 +4,7 @@ pub mod state;
 
 use anyhow::Result;
 use axum::http::{HeaderValue, Method};
+use axum::middleware;
 use axum::Router;
 use conductor_core::{ConductorConfig, EventBus};
 use conductor_db::Database;
@@ -20,7 +21,9 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .unwrap_or_else(|| config.workspace.join("conductor.yaml"));
     let state = AppState::new(config_path, config.clone(), db).await;
     state.discover_executors().await;
+    state.restore_runtime_sessions().await;
     let _runtime = runtime::initialize_runtime(config, state.clone(), _event_bus.clone()).await?;
+    state.kick_spawn_supervisor();
     state.publish_snapshot().await;
 
     let app = Router::new()
@@ -40,6 +43,10 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .merge(routes::projects::router())
         .merge(routes::tasks::router())
         .merge(routes::auth::router())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::middleware::require_auth_when_remote,
+        ))
         .with_state(state)
         .layer({
             let mut origins: Vec<HeaderValue> = vec![

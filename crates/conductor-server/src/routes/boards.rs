@@ -29,7 +29,10 @@ const ROLE_ORDER: [(&str, &str); 11] = [
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/boards", get(get_board).post(add_board_task).patch(update_board_task))
+        .route(
+            "/api/boards",
+            get(get_board).post(add_board_task).patch(update_board_task),
+        )
         .route("/api/health/boards", get(board_health))
 }
 
@@ -130,9 +133,15 @@ async fn add_board_task(
 
     let config = state.config.read().await.clone();
     let Some(project) = config.projects.get(&body.project_id) else {
-        return error(StatusCode::NOT_FOUND, format!("Unknown project: {}", body.project_id));
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Unknown project: {}", body.project_id),
+        );
     };
-    let board_dir = project.board_dir.clone().unwrap_or_else(|| body.project_id.clone());
+    let board_dir = project
+        .board_dir
+        .clone()
+        .unwrap_or_else(|| body.project_id.clone());
     let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
     let board_path = state.workspace_path.join(&board_relative);
     let board = parse_board(&board_path, &body.project_id);
@@ -172,9 +181,15 @@ async fn update_board_task(
 
     let config = state.config.read().await.clone();
     let Some(project) = config.projects.get(&body.project_id) else {
-        return error(StatusCode::NOT_FOUND, format!("Unknown project: {}", body.project_id));
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Unknown project: {}", body.project_id),
+        );
     };
-    let board_dir = project.board_dir.clone().unwrap_or_else(|| body.project_id.clone());
+    let board_dir = project
+        .board_dir
+        .clone()
+        .unwrap_or_else(|| body.project_id.clone());
     let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
     let board_path = state.workspace_path.join(&board_relative);
 
@@ -190,7 +205,10 @@ async fn update_board_task(
     }
 
     let Some((source_column_index, source_task_index, mut task)) = located else {
-        return error(StatusCode::NOT_FOUND, format!("Task {} not found", body.task_id));
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Task {} not found", body.task_id),
+        );
     };
 
     let source_role = board.columns[source_column_index].role.clone();
@@ -204,8 +222,14 @@ async fn update_board_task(
 
     if target_role == source_role {
         let insert_at = source_task_index.min(board.columns[source_column_index].tasks.len());
-        board.columns[source_column_index].tasks.insert(insert_at, task);
-    } else if let Some(target_column) = board.columns.iter_mut().find(|column| column.role == target_role) {
+        board.columns[source_column_index]
+            .tasks
+            .insert(insert_at, task);
+    } else if let Some(target_column) = board
+        .columns
+        .iter_mut()
+        .find(|column| column.role == target_role)
+    {
         target_column.tasks.push(task);
     } else {
         board.columns.push(ParsedBoardColumn {
@@ -231,7 +255,10 @@ async fn board_health(State(state): State<Arc<AppState>>) -> ApiResponse {
         .projects
         .iter()
         .map(|(project_id, project)| {
-            let board_dir = project.board_dir.clone().unwrap_or_else(|| project_id.clone());
+            let board_dir = project
+                .board_dir
+                .clone()
+                .unwrap_or_else(|| project_id.clone());
             resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path))
         })
         .collect::<Vec<_>>();
@@ -266,12 +293,21 @@ async fn board_health(State(state): State<Arc<AppState>>) -> ApiResponse {
     }))
 }
 
-async fn load_board_response(state: &Arc<AppState>, project_id: &str) -> Result<Value, (StatusCode, String)> {
+async fn load_board_response(
+    state: &Arc<AppState>,
+    project_id: &str,
+) -> Result<Value, (StatusCode, String)> {
     let config = state.config.read().await.clone();
     let Some(project) = config.projects.get(project_id) else {
-        return Err((StatusCode::NOT_FOUND, format!("Unknown project: {project_id}")));
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Unknown project: {project_id}"),
+        ));
     };
-    let board_dir = project.board_dir.clone().unwrap_or_else(|| project_id.to_string());
+    let board_dir = project
+        .board_dir
+        .clone()
+        .unwrap_or_else(|| project_id.to_string());
     let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
     let board_path = state.workspace_path.join(&board_relative);
     let parsed = parse_board(&board_path, project_id);
@@ -379,7 +415,9 @@ fn parse_board(path: &Path, project_id: &str) -> ParsedBoard {
 
         if let Some(heading) = trimmed.strip_prefix("## ") {
             seen_heading = true;
-            if let (Some(role), Some(existing_heading)) = (current_role.take(), current_heading.take()) {
+            if let (Some(role), Some(existing_heading)) =
+                (current_role.take(), current_heading.take())
+            {
                 columns.push(ParsedBoardColumn {
                     role,
                     heading: existing_heading,
@@ -445,7 +483,9 @@ fn parse_task_line(line: &str, _role: &str, project_id: &str) -> Option<BoardTas
     }
 
     Some(BoardTaskRecord {
-        id: metadata.remove("id").unwrap_or_else(|| Uuid::new_v4().to_string()),
+        id: metadata
+            .remove("id")
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         text,
         checked: checked.0,
         agent: metadata
@@ -479,9 +519,18 @@ fn parse_task_line(line: &str, _role: &str, project_id: &str) -> Option<BoardTas
             .filter(|value| !value.is_empty()),
         attachments: metadata
             .remove("attachments")
-            .map(|value| value.split(',').map(str::trim).filter(|item| !item.is_empty()).map(ToOwned::to_owned).collect())
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
             .unwrap_or_default(),
-        notes: metadata.remove("notes").map(|value| strip_inline_tags(&value).to_string()),
+        notes: metadata
+            .remove("notes")
+            .map(|value| strip_inline_tags(&value).to_string()),
     })
 }
 
@@ -530,7 +579,10 @@ fn task_ref_prefix(project_id: &str) -> String {
     }
 
     if prefix.len() < 3 {
-        for ch in project_id.chars().filter(|value| value.is_ascii_alphanumeric()) {
+        for ch in project_id
+            .chars()
+            .filter(|value| value.is_ascii_alphanumeric())
+        {
             prefix.push(ch.to_ascii_uppercase());
             if prefix.len() >= 3 {
                 break;
@@ -616,7 +668,11 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
     }
     if let Some(next_description) = body.description.as_ref() {
         let trimmed = next_description.trim();
-        description = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+        description = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
 
     task.text = build_task_text(&title, description.as_deref());
@@ -629,7 +685,12 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
     if let Some(checked) = body.checked {
         task.checked = checked;
     }
-    if task.project.as_ref().map(|value| value.trim().is_empty()).unwrap_or(true) {
+    if task
+        .project
+        .as_ref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
         task.project = Some(project_id.to_string());
     }
 }
@@ -676,7 +737,12 @@ fn write_parsed_board(path: &Path, board: &ParsedBoard, project_id: &str) -> std
     std::fs::write(path, out)
 }
 
-fn insert_task_into_board(path: &Path, role: &str, task: &BoardTaskRecord, project_id: &str) -> std::io::Result<()> {
+fn insert_task_into_board(
+    path: &Path,
+    role: &str,
+    task: &BoardTaskRecord,
+    project_id: &str,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -697,10 +763,16 @@ fn insert_task_into_board(path: &Path, role: &str, task: &BoardTaskRecord, proje
         return std::fs::write(path, out);
     }
 
-    let mut lines = existing.lines().map(|line| line.to_string()).collect::<Vec<_>>();
-    let target_heading_index = lines
-        .iter()
-        .position(|line| line.trim().strip_prefix("## ").map(|heading| normalize_role(heading) == role).unwrap_or(false));
+    let mut lines = existing
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    let target_heading_index = lines.iter().position(|line| {
+        line.trim()
+            .strip_prefix("## ")
+            .map(|heading| normalize_role(heading) == role)
+            .unwrap_or(false)
+    });
 
     if let Some(index) = target_heading_index {
         let mut insert_at = index + 1;
@@ -742,7 +814,12 @@ fn insert_task_into_board(path: &Path, role: &str, task: &BoardTaskRecord, proje
 }
 
 fn normalize_role(value: &str) -> &'static str {
-    match value.trim().to_lowercase().replace(['-', '_', ' '], "").as_str() {
+    match value
+        .trim()
+        .to_lowercase()
+        .replace(['-', '_', ' '], "")
+        .as_str()
+    {
         "todo" | "intake" | "inbox" | "backlog" => "intake",
         "ready" | "readytodispatch" => "ready",
         "dispatching" => "dispatching",
@@ -768,7 +845,11 @@ fn build_task_text(title: &str, description: Option<&str>) -> String {
 }
 
 fn sanitize_value(value: &str) -> String {
-    value.replace('|', "/").replace('\n', " ").trim().to_string()
+    value
+        .replace('|', "/")
+        .replace('\n', " ")
+        .trim()
+        .to_string()
 }
 
 fn sanitize_tag_value(value: &str) -> String {
@@ -781,26 +862,53 @@ fn sanitize_tag_value(value: &str) -> String {
 
 fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
     let checkbox = if task.checked { "[x]" } else { "[ ]" };
-    let mut segments = vec![sanitize_value(&task.text), format!("id:{}", sanitize_value(&task.id))];
+    let mut segments = vec![
+        sanitize_value(&task.text),
+        format!("id:{}", sanitize_value(&task.id)),
+    ];
 
-    if let Some(agent) = task.agent.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(agent) = task
+        .agent
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         segments.push(format!("agent:{}", sanitize_value(agent)));
     }
-    if let Some(task_type) = task.task_type.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(task_type) = task
+        .task_type
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         segments.push(format!("type:{}", sanitize_value(task_type)));
     }
-    if let Some(priority) = task.priority.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(priority) = task
+        .priority
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         segments.push(format!("priority:{}", sanitize_value(priority)));
     }
-    if let Some(project) = task.project.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(project) = task
+        .project
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         segments.push(format!("project:{}", sanitize_value(project)));
     } else {
         segments.push(format!("project:{}", sanitize_value(project_id)));
     }
-    if let Some(task_ref) = task.task_ref.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(task_ref) = task
+        .task_ref
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         segments.push(format!("taskRef:{}", sanitize_value(task_ref)));
     }
-    if let Some(attempt_ref) = task.attempt_ref.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(attempt_ref) = task
+        .attempt_ref
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         segments.push(format!("attemptRef:{}", sanitize_value(attempt_ref)));
     }
     if !task.attachments.is_empty() {
@@ -813,22 +921,43 @@ fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
                 .join(",")
         ));
     }
-    if let Some(notes) = task.notes.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(notes) = task
+        .notes
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         segments.push(format!("notes:{}", sanitize_value(notes)));
     }
 
     let mut inline_tags = Vec::<String>::new();
-    if let Some(agent) = task.agent.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(agent) = task
+        .agent
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         inline_tags.push(format!("#agent/{}", sanitize_tag_value(agent)));
     }
     inline_tags.push(format!(
         "#project/{}",
-        sanitize_tag_value(task.project.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or(project_id))
+        sanitize_tag_value(
+            task.project
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(project_id)
+        )
     ));
-    if let Some(task_type) = task.task_type.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(task_type) = task
+        .task_type
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         inline_tags.push(format!("#type/{}", sanitize_tag_value(task_type)));
     }
-    if let Some(priority) = task.priority.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(priority) = task
+        .priority
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         inline_tags.push(format!("#priority/{}", sanitize_tag_value(priority)));
     }
 

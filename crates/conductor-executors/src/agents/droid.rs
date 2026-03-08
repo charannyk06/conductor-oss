@@ -12,7 +12,9 @@ pub struct DroidExecutor {
 }
 
 impl DroidExecutor {
-    pub fn new(binary: PathBuf) -> Self { Self { binary } }
+    pub fn new(binary: PathBuf) -> Self {
+        Self { binary }
+    }
 
     pub fn discover() -> Option<Self> {
         which::which("droid").ok().map(Self::new)
@@ -21,10 +23,18 @@ impl DroidExecutor {
 
 #[async_trait]
 impl Executor for DroidExecutor {
-    fn kind(&self) -> AgentKind { AgentKind::Droid }
-    fn name(&self) -> &str { "Droid" }
-    fn binary_path(&self) -> &Path { &self.binary }
-    async fn is_available(&self) -> bool { self.binary.exists() }
+    fn kind(&self) -> AgentKind {
+        AgentKind::Droid
+    }
+    fn name(&self) -> &str {
+        "Droid"
+    }
+    fn binary_path(&self) -> &Path {
+        &self.binary
+    }
+    async fn is_available(&self) -> bool {
+        self.binary.exists()
+    }
 
     async fn version(&self) -> Result<String> {
         let output = Command::new(&self.binary).arg("--version").output().await?;
@@ -34,7 +44,13 @@ impl Executor for DroidExecutor {
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
-        Ok(ExecutorHandle::new(handle.pid, self.kind(), handle.output_rx, handle.input_tx, handle.kill_tx))
+        Ok(ExecutorHandle::new(
+            handle.pid,
+            self.kind(),
+            handle.output_rx,
+            handle.input_tx,
+            handle.kill_tx,
+        ))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
@@ -43,7 +59,7 @@ impl Executor for DroidExecutor {
             args.push("--model".to_string());
             args.push(model.clone());
         }
-        args.extend(options.extra_args.clone());
+        args.extend(options.sanitized_extra_args());
         args.push(options.prompt.clone());
         args
     }

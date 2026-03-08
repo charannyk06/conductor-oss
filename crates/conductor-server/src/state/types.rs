@@ -1,8 +1,8 @@
+use conductor_executors::executor::ExecutorInput;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use conductor_executors::executor::ExecutorInput;
 use tokio::sync::{mpsc, Mutex};
 
 pub const DEFAULT_SESSION_HISTORY_LIMIT: usize = 2000;
@@ -12,6 +12,7 @@ pub const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
+    Queued,
     Working,
     Done,
     Errored,
@@ -30,6 +31,7 @@ pub enum SessionStatus {
 impl SessionStatus {
     pub fn as_str(&self) -> &str {
         match self {
+            Self::Queued => "queued",
             Self::Working => "working",
             Self::Done => "done",
             Self::Errored => "errored",
@@ -47,7 +49,13 @@ impl SessionStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Done | Self::Errored | Self::Killed | Self::Archived | Self::Merged | Self::Terminated | Self::Cleanup
+            Self::Done
+                | Self::Errored
+                | Self::Killed
+                | Self::Archived
+                | Self::Merged
+                | Self::Terminated
+                | Self::Cleanup
         )
     }
 }
@@ -61,6 +69,7 @@ impl fmt::Display for SessionStatus {
 impl From<&str> for SessionStatus {
     fn from(value: &str) -> Self {
         match value {
+            "queued" => Self::Queued,
             "working" => Self::Working,
             "done" => Self::Done,
             "errored" => Self::Errored,
@@ -161,7 +170,12 @@ impl SessionRecord {
             .build()
     }
 
-    pub fn builder(id: String, project_id: String, agent: String, prompt: String) -> SessionRecordBuilder {
+    pub fn builder(
+        id: String,
+        project_id: String,
+        agent: String,
+        prompt: String,
+    ) -> SessionRecordBuilder {
         SessionRecordBuilder {
             id,
             project_id,
@@ -191,12 +205,30 @@ pub struct SessionRecordBuilder {
 }
 
 impl SessionRecordBuilder {
-    pub fn branch(mut self, value: Option<String>) -> Self { self.branch = value; self }
-    pub fn issue_id(mut self, value: Option<String>) -> Self { self.issue_id = value; self }
-    pub fn workspace_path(mut self, value: Option<String>) -> Self { self.workspace_path = value; self }
-    pub fn model(mut self, value: Option<String>) -> Self { self.model = value; self }
-    pub fn reasoning_effort(mut self, value: Option<String>) -> Self { self.reasoning_effort = value; self }
-    pub fn pid(mut self, value: Option<u32>) -> Self { self.pid = value; self }
+    pub fn branch(mut self, value: Option<String>) -> Self {
+        self.branch = value;
+        self
+    }
+    pub fn issue_id(mut self, value: Option<String>) -> Self {
+        self.issue_id = value;
+        self
+    }
+    pub fn workspace_path(mut self, value: Option<String>) -> Self {
+        self.workspace_path = value;
+        self
+    }
+    pub fn model(mut self, value: Option<String>) -> Self {
+        self.model = value;
+        self
+    }
+    pub fn reasoning_effort(mut self, value: Option<String>) -> Self {
+        self.reasoning_effort = value;
+        self
+    }
+    pub fn pid(mut self, value: Option<u32>) -> Self {
+        self.pid = value;
+        self
+    }
 
     pub fn build(self) -> SessionRecord {
         let now = chrono::Utc::now().to_rfc3339();
@@ -241,6 +273,8 @@ pub struct LiveSessionHandle {
     pub kill_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpawnRequest {
     pub project_id: String,
     pub prompt: String,

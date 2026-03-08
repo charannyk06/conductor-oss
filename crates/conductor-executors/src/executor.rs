@@ -6,6 +6,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
+/// Flags that must never be injected via extra_args because they bypass
+/// security controls or grant unrestricted filesystem/shell access.
+const BLOCKED_EXTRA_ARGS: &[&str] = &[
+    "--dangerously-skip-permissions",
+    "--full-auto",
+    "--yolo",
+    "--no-permissions",
+    "--skip-permissions",
+    "--trust",
+];
+
 /// Options for spawning an executor.
 #[derive(Debug, Clone)]
 pub struct SpawnOptions {
@@ -18,6 +29,9 @@ pub struct SpawnOptions {
     /// Model override.
     pub model: Option<String>,
 
+    /// Reasoning effort override.
+    pub reasoning_effort: Option<String>,
+
     /// Skip permission prompts.
     pub skip_permissions: bool,
 
@@ -29,6 +43,20 @@ pub struct SpawnOptions {
 
     /// Branch to work on.
     pub branch: Option<String>,
+}
+
+impl SpawnOptions {
+    /// Returns extra_args with dangerous/permission-bypassing flags filtered out.
+    pub fn sanitized_extra_args(&self) -> Vec<String> {
+        self.extra_args
+            .iter()
+            .filter(|arg| {
+                let lower = arg.to_lowercase();
+                !BLOCKED_EXTRA_ARGS.iter().any(|blocked| lower == *blocked)
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 /// Input sent to a running executor session.
@@ -57,7 +85,10 @@ pub enum ExecutorOutput {
     /// Agent has completed its task.
     Completed { exit_code: i32 },
     /// Agent crashed or was killed.
-    Failed { error: String, exit_code: Option<i32> },
+    Failed {
+        error: String,
+        exit_code: Option<i32>,
+    },
     /// A single transport frame expanded into multiple runtime events.
     Composite(Vec<ExecutorOutput>),
 }
@@ -99,13 +130,17 @@ impl ExecutorHandle {
 
     /// Send input text to the running agent.
     pub async fn send_input(&self, text: &str) -> Result<()> {
-        self.input_tx.send(ExecutorInput::Text(text.to_string())).await?;
+        self.input_tx
+            .send(ExecutorInput::Text(text.to_string()))
+            .await?;
         Ok(())
     }
 
     /// Send raw terminal input to the running agent.
     pub async fn send_raw_input(&self, text: &str) -> Result<()> {
-        self.input_tx.send(ExecutorInput::Raw(text.to_string())).await?;
+        self.input_tx
+            .send(ExecutorInput::Raw(text.to_string()))
+            .await?;
         Ok(())
     }
 

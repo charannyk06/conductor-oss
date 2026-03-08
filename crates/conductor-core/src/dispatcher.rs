@@ -73,7 +73,10 @@ impl SpawnLimiter {
             return false;
         }
         state.global_active += 1;
-        *state.project_active.entry(project_id.to_string()).or_insert(0) += 1;
+        *state
+            .project_active
+            .entry(project_id.to_string())
+            .or_insert(0) += 1;
         true
     }
 
@@ -155,10 +158,7 @@ impl Dispatcher {
                 .find_map(|tag| parse_agent_tag(tag))
                 .unwrap_or(self.config.default_agent.clone());
 
-            let model = card
-                .metadata
-                .get("model")
-                .cloned();
+            let model = card.metadata.get("model").cloned();
 
             let request = DispatchRequest {
                 project_id: project_id.to_string(),

@@ -9,27 +9,66 @@ use crate::types::{EntityId, Timestamp};
 #[serde(tag = "type", content = "data")]
 pub enum Event {
     // Task events
-    TaskCreated { task_id: EntityId, project_id: String, title: String },
-    TaskStateChanged { task_id: EntityId, old_state: String, new_state: String },
-    TaskCompleted { task_id: EntityId, project_id: String },
+    TaskCreated {
+        task_id: EntityId,
+        project_id: String,
+        title: String,
+    },
+    TaskStateChanged {
+        task_id: EntityId,
+        old_state: String,
+        new_state: String,
+    },
+    TaskCompleted {
+        task_id: EntityId,
+        project_id: String,
+    },
 
     // Session events
-    SessionSpawned { session_id: EntityId, task_id: EntityId, executor: String },
-    SessionActive { session_id: EntityId },
-    SessionOutput { session_id: EntityId, line: String },
-    SessionNeedsInput { session_id: EntityId, prompt: String },
-    SessionErrored { session_id: EntityId, error: String },
-    SessionTerminated { session_id: EntityId, exit_code: Option<i32> },
-    SessionRestored { session_id: EntityId },
+    SessionSpawned {
+        session_id: EntityId,
+        task_id: EntityId,
+        executor: String,
+    },
+    SessionActive {
+        session_id: EntityId,
+    },
+    SessionOutput {
+        session_id: EntityId,
+        line: String,
+    },
+    SessionNeedsInput {
+        session_id: EntityId,
+        prompt: String,
+    },
+    SessionErrored {
+        session_id: EntityId,
+        error: String,
+    },
+    SessionTerminated {
+        session_id: EntityId,
+        exit_code: Option<i32>,
+    },
+    SessionRestored {
+        session_id: EntityId,
+    },
 
     // Project events
-    BoardChanged { project_id: String, path: String },
-    ConfigChanged { path: String },
+    BoardChanged {
+        project_id: String,
+        path: String,
+    },
+    ConfigChanged {
+        path: String,
+    },
 
     // System events
     SystemStarted,
     SystemShutdown,
-    HealthCheck { grade: String, details: String },
+    HealthCheck {
+        grade: String,
+        details: String,
+    },
 }
 
 impl Event {

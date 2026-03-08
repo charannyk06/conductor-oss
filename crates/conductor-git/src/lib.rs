@@ -17,10 +17,7 @@ impl GitOps {
     /// Get the current branch name.
     pub fn current_branch(&self) -> Result<String> {
         let head = self.repo.head()?;
-        let name = head
-            .shorthand()
-            .unwrap_or("HEAD")
-            .to_string();
+        let name = head.shorthand().unwrap_or("HEAD").to_string();
         Ok(name)
     }
 
@@ -36,20 +33,26 @@ impl GitOps {
     /// Create a worktree for isolated agent work.
     pub fn create_worktree(&self, name: &str, path: &Path, branch: &str) -> Result<()> {
         // Ensure branch exists.
-        let branch_ref = self
-            .repo
-            .find_branch(branch, git2::BranchType::Local)
-            .or_else(|_| {
-                // Create branch if it doesn't exist.
-                let head = self.repo.head().unwrap();
-                let commit = head.peel_to_commit().unwrap();
-                self.repo.branch(branch, &commit, false)
-            })?;
+        let branch_ref =
+            self.repo
+                .find_branch(branch, git2::BranchType::Local)
+                .or_else(|_| {
+                    // Create branch if it doesn't exist.
+                    let head = self.repo.head().map_err(|e| {
+                        git2::Error::from_str(&format!("failed to resolve HEAD: {e}"))
+                    })?;
+                    let commit = head.peel_to_commit().map_err(|e| {
+                        git2::Error::from_str(&format!("failed to peel HEAD to commit: {e}"))
+                    })?;
+                    self.repo.branch(branch, &commit, false)
+                })?;
 
         let reference = branch_ref.into_reference();
-        self.repo.worktree(name, path, Some(
-            git2::WorktreeAddOptions::new().reference(Some(&reference)),
-        ))?;
+        self.repo.worktree(
+            name,
+            path,
+            Some(git2::WorktreeAddOptions::new().reference(Some(&reference))),
+        )?;
 
         tracing::info!("Created worktree: {name} at {}", path.display());
         Ok(())
@@ -72,7 +75,10 @@ impl GitOps {
     /// List all worktrees.
     pub fn list_worktrees(&self) -> Result<Vec<String>> {
         let worktrees = self.repo.worktrees()?;
-        Ok(worktrees.iter().filter_map(|w| w.map(String::from)).collect())
+        Ok(worktrees
+            .iter()
+            .filter_map(|w| w.map(String::from))
+            .collect())
     }
 
     /// Check if the working directory is clean (no uncommitted changes).

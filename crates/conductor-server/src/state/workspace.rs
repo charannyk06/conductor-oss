@@ -1,11 +1,23 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use conductor_core::config::ProjectConfig;
-use std::fs::create_dir_all;
+use glob::Pattern;
+use std::fs::{self, create_dir_all, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 
-use super::AppState;
+use super::{AppState, SessionRecord};
+
+const SETUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(900);
+const WORKSPACE_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub(crate) struct PreparedWorkspace {
+    pub repo_path: PathBuf,
+    pub root_path: PathBuf,
+    pub working_directory: PathBuf,
+    pub uses_worktree: bool,
+}
 
 /// Validate a git ref name to prevent argument injection.
 /// Rejects names starting with `-` and allows only safe characters.
@@ -34,22 +46,32 @@ impl AppState {
         use_worktree: bool,
         branch: Option<&str>,
         base_branch: Option<&str>,
-    ) -> Result<PathBuf> {
+    ) -> Result<PreparedWorkspace> {
         let repo_path = self.resolve_project_path(project);
         let git_dir = repo_path.join(".git");
         if !use_worktree || !git_dir.exists() {
-            return Ok(resolve_default_working_directory(
-                &repo_path,
-                project.default_working_directory.as_deref(),
-            ));
+            return Ok(PreparedWorkspace {
+                working_directory: resolve_default_working_directory(
+                    &repo_path,
+                    project.default_working_directory.as_deref(),
+                ),
+                repo_path: repo_path.clone(),
+                root_path: repo_path,
+                uses_worktree: false,
+            });
         }
 
         let worktree_path = self.resolve_worktree_path(project_id, session_id);
         if worktree_path.exists() {
-            return Ok(resolve_default_working_directory(
-                &worktree_path,
-                project.default_working_directory.as_deref(),
-            ));
+            return Ok(PreparedWorkspace {
+                working_directory: resolve_default_working_directory(
+                    &worktree_path,
+                    project.default_working_directory.as_deref(),
+                ),
+                repo_path: repo_path.clone(),
+                root_path: worktree_path,
+                uses_worktree: true,
+            });
         }
         if let Some(parent) = worktree_path.parent() {
             create_dir_all(parent)?;
@@ -101,10 +123,177 @@ impl AppState {
             ));
         }
 
-        Ok(resolve_default_working_directory(
-            &worktree_path,
+        Ok(PreparedWorkspace {
+            working_directory: resolve_default_working_directory(
+                &worktree_path,
+                project.default_working_directory.as_deref(),
+            ),
+            repo_path,
+            root_path: worktree_path,
+            uses_worktree: true,
+        })
+    }
+
+    pub(crate) async fn initialize_workspace(
+        &self,
+        project: &ProjectConfig,
+        workspace: &PreparedWorkspace,
+    ) -> Result<()> {
+        if workspace.uses_worktree {
+            copy_configured_files(
+                &workspace.repo_path,
+                &workspace.root_path,
+                &project.copy_files,
+            )?;
+
+            if project.run_setup_in_parallel {
+                spawn_background_workspace_commands(
+                    &project.setup_script,
+                    workspace.root_path.clone(),
+                    "setup",
+                    SETUP_COMMAND_TIMEOUT,
+                );
+            } else {
+                run_workspace_commands(
+                    &project.setup_script,
+                    &workspace.root_path,
+                    "setup",
+                    SETUP_COMMAND_TIMEOUT,
+                )
+                .await?;
+            }
+        }
+
+        ensure_working_directory_exists(
+            &workspace.root_path,
+            &workspace.working_directory,
             project.default_working_directory.as_deref(),
-        ))
+        )?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn ensure_dev_server(
+        &self,
+        project_id: &str,
+        project: &ProjectConfig,
+    ) -> Result<Option<String>> {
+        let script = join_script_lines(&project.dev_server_script);
+        let Some(script) = script else {
+            return Ok(None);
+        };
+
+        let mut dev_servers = self.dev_servers.lock().await;
+        if let Some(existing) = dev_servers.get(project_id) {
+            if is_process_alive(existing.pid) {
+                return Ok(Some(existing.log_path.clone()));
+            }
+        }
+
+        let log_dir = self
+            .workspace_path
+            .join(".conductor")
+            .join("rust-backend")
+            .join("dev-servers");
+        create_dir_all(&log_dir)?;
+        let log_path = log_dir.join(format!("{}.log", sanitize_token(project_id)));
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        let stderr = stdout.try_clone()?;
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-lc")
+            .arg(script)
+            .current_dir(self.resolve_project_path(project))
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .kill_on_drop(false);
+
+        let child = command.spawn().context("Failed to start dev server")?;
+        let pid = child
+            .id()
+            .with_context(|| format!("Failed to capture pid for dev server in {project_id}"))?;
+        drop(child);
+
+        let log_path = log_path.to_string_lossy().to_string();
+        dev_servers.insert(
+            project_id.to_string(),
+            super::DevServerRecord {
+                pid,
+                log_path: log_path.clone(),
+            },
+        );
+
+        Ok(Some(log_path))
+    }
+
+    pub(crate) async fn archive_workspace(
+        &self,
+        session_id: &str,
+        session: &SessionRecord,
+        project: &ProjectConfig,
+    ) -> Result<()> {
+        let workspace_root = session
+            .metadata
+            .get("worktree")
+            .cloned()
+            .or_else(|| session.workspace_path.clone())
+            .map(PathBuf::from);
+        let Some(workspace_root) = workspace_root else {
+            return Ok(());
+        };
+        if !workspace_root.exists() {
+            return Ok(());
+        }
+
+        let project_root = self.resolve_project_path(project);
+        if workspace_root == project_root {
+            return Ok(());
+        }
+
+        run_workspace_commands_best_effort(
+            &project.cleanup_script,
+            &workspace_root,
+            "cleanup",
+            WORKSPACE_COMMAND_TIMEOUT,
+        )
+        .await;
+        run_workspace_commands_best_effort(
+            &project.archive_script,
+            &workspace_root,
+            "archive",
+            WORKSPACE_COMMAND_TIMEOUT,
+        )
+        .await;
+
+        remove_worktree(&project_root, &workspace_root)
+            .await
+            .or_else(|_| remove_directory(&workspace_root))
+            .with_context(|| {
+                format!(
+                    "Failed to remove archived workspace for session {session_id} at {}",
+                    workspace_root.display()
+                )
+            })?;
+
+        Ok(())
+    }
+
+    pub(crate) async fn cleanup_unpersisted_workspace(
+        &self,
+        workspace: &PreparedWorkspace,
+    ) -> Result<()> {
+        if !workspace.uses_worktree {
+            return Ok(());
+        }
+
+        remove_worktree(&workspace.repo_path, &workspace.root_path)
+            .await
+            .or_else(|_| remove_directory(&workspace.root_path))
     }
 }
 
@@ -212,6 +401,414 @@ fn resolve_default_working_directory(root: &Path, relative: Option<&str>) -> Pat
         return root.to_path_buf();
     }
     root.join(trimmed)
+}
+
+fn ensure_working_directory_exists(
+    workspace_root: &Path,
+    working_directory: &Path,
+    configured_subdir: Option<&str>,
+) -> Result<()> {
+    if working_directory.is_dir() {
+        return Ok(());
+    }
+
+    if let Some(relative) = configured_subdir
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Err(anyhow!(
+            "defaultWorkingDirectory '{}' does not exist in workspace '{}'",
+            relative,
+            workspace_root.display()
+        ));
+    }
+
+    Err(anyhow!(
+        "Workspace '{}' is unavailable",
+        workspace_root.display()
+    ))
+}
+
+fn join_script_lines(lines: &[String]) -> Option<String> {
+    let scripts = lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if scripts.is_empty() {
+        None
+    } else {
+        Some(scripts.join("\n"))
+    }
+}
+
+fn sanitize_token(value: &str) -> String {
+    let sanitized = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    sanitized.trim_matches('-').to_string()
+}
+
+pub(crate) fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    let pid = pid as libc::pid_t;
+    // SAFETY: libc::kill with signal 0 only checks process existence.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+pub(crate) fn terminate_process(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
+        if !is_process_alive(pid) {
+            return true;
+        }
+
+        let pid = pid as libc::pid_t;
+        // SAFETY: libc::kill sends a termination signal to an explicit pid.
+        let terminated = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if terminated != 0 {
+            let error = std::io::Error::last_os_error().raw_os_error();
+            if error != Some(libc::ESRCH) {
+                return false;
+            }
+            return true;
+        }
+
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(100));
+            if !is_process_alive(pid as u32) {
+                return true;
+            }
+        }
+
+        // SAFETY: SIGKILL is the final fallback after a bounded SIGTERM wait.
+        let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
+        killed == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn copy_configured_files(
+    repo_path: &Path,
+    worktree_path: &Path,
+    patterns: &[String],
+) -> Result<()> {
+    if patterns.is_empty() {
+        return Ok(());
+    }
+
+    let matches = resolve_copy_file_matches(repo_path, patterns)?;
+    for relative in matches {
+        let source = repo_path.join(&relative);
+        let target = worktree_path.join(&relative);
+        if !target.starts_with(worktree_path) {
+            return Err(anyhow!(
+                "copyFiles target '{}' resolves outside workspace",
+                relative
+            ));
+        }
+
+        let metadata = fs::metadata(&source)
+            .with_context(|| format!("Failed to read copyFiles source {}", source.display()))?;
+        if metadata.is_dir() {
+            copy_directory_recursive(&source, &target)?;
+            continue;
+        }
+
+        if let Some(parent) = target.parent() {
+            create_dir_all(parent)?;
+        }
+        fs::copy(&source, &target).with_context(|| {
+            format!(
+                "Failed to copy configured file {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn resolve_copy_file_matches(repo_path: &Path, patterns: &[String]) -> Result<Vec<String>> {
+    let all_files = collect_repo_files(repo_path)?;
+    let mut matches = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for raw_pattern in patterns {
+        let pattern = assert_safe_relative_path(raw_pattern, "copyFiles pattern")?;
+        let has_glob = pattern.contains('*') || pattern.contains('?');
+        if !has_glob {
+            let source = repo_path.join(&pattern);
+            if !source.exists() {
+                continue;
+            }
+            let relative = normalize_relative_path(
+                source
+                    .strip_prefix(repo_path)
+                    .unwrap_or_else(|_| Path::new(&pattern)),
+            );
+            if seen.insert(relative.clone()) {
+                matches.push(relative);
+            }
+            continue;
+        }
+
+        let matcher = Pattern::new(&pattern)
+            .with_context(|| format!("Invalid copyFiles glob pattern '{}'", raw_pattern.trim()))?;
+        for file in &all_files {
+            if matcher.matches(file) && seen.insert(file.clone()) {
+                matches.push(file.clone());
+            }
+        }
+    }
+
+    Ok(matches)
+}
+
+fn collect_repo_files(repo_path: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    let mut stack = vec![repo_path.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        let relative = normalize_relative_path(
+            current
+                .strip_prefix(repo_path)
+                .unwrap_or_else(|_| Path::new("")),
+        );
+        if relative == ".git" || relative.starts_with(".git/") {
+            continue;
+        }
+
+        let entries = fs::read_dir(&current)
+            .with_context(|| format!("Failed to read directory {}", current.display()))?;
+        for entry in entries {
+            let entry = entry?;
+            let next = entry.path();
+            let relative = normalize_relative_path(
+                next.strip_prefix(repo_path)
+                    .unwrap_or_else(|_| Path::new("")),
+            );
+            if relative == ".git" || relative.starts_with(".git/") {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                stack.push(next);
+            } else {
+                files.push(relative);
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+fn copy_directory_recursive(source: &Path, target: &Path) -> Result<()> {
+    create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_directory_recursive(&source_path, &target_path)?;
+        } else {
+            if let Some(parent) = target_path.parent() {
+                create_dir_all(parent)?;
+            }
+            fs::copy(&source_path, &target_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn assert_safe_relative_path(raw: &str, label: &str) -> Result<String> {
+    let normalized = raw.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return Err(anyhow!("{label} cannot be empty"));
+    }
+    if normalized.starts_with('/') {
+        return Err(anyhow!("{label} must be relative: '{raw}'"));
+    }
+    if normalized.split('/').any(|segment| segment == "..") {
+        return Err(anyhow!("{label} cannot contain '..': '{raw}'"));
+    }
+    Ok(normalized
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string())
+}
+
+fn normalize_relative_path(path: &Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    let trimmed = value.trim_matches('/');
+    if trimmed.is_empty() {
+        ".".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+async fn run_workspace_commands(
+    commands: &[String],
+    workspace_path: &Path,
+    label: &str,
+    timeout: Duration,
+) -> Result<()> {
+    for command in commands {
+        let script = command.trim();
+        if script.is_empty() {
+            continue;
+        }
+        run_shell_command(script, workspace_path, timeout)
+            .await
+            .with_context(|| {
+                format!(
+                    "{} command failed in workspace '{}'",
+                    label,
+                    workspace_path.display()
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
+fn spawn_background_workspace_commands(
+    commands: &[String],
+    workspace_path: PathBuf,
+    label: &'static str,
+    timeout: Duration,
+) {
+    for command in commands {
+        let script = command.trim().to_string();
+        if script.is_empty() {
+            continue;
+        }
+        let workspace_path = workspace_path.clone();
+        tokio::spawn(async move {
+            if let Err(err) = run_shell_command(&script, &workspace_path, timeout).await {
+                tracing::warn!(
+                    workspace = %workspace_path.display(),
+                    command = %script,
+                    error = %err,
+                    "{} command failed",
+                    label
+                );
+            }
+        });
+    }
+}
+
+async fn run_workspace_commands_best_effort(
+    commands: &[String],
+    workspace_path: &Path,
+    label: &'static str,
+    timeout: Duration,
+) {
+    for command in commands {
+        let script = command.trim();
+        if script.is_empty() {
+            continue;
+        }
+        if let Err(err) = run_shell_command(script, workspace_path, timeout).await {
+            tracing::warn!(
+                workspace = %workspace_path.display(),
+                command = %script,
+                error = %err,
+                "{} command failed",
+                label
+            );
+        }
+    }
+}
+
+async fn run_shell_command(script: &str, workspace_path: &Path, timeout: Duration) -> Result<()> {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(script)
+        .current_dir(workspace_path)
+        .stdin(Stdio::null());
+
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .with_context(|| format!("Command timed out after {}s", timeout.as_secs()))??;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        format!("exit status {}", output.status)
+    };
+
+    Err(anyhow!("`{script}` failed: {detail}"))
+}
+
+async fn remove_worktree(repo_path: &Path, workspace_path: &Path) -> Result<()> {
+    let status = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "worktree",
+            "remove",
+            "--force",
+            workspace_path.to_string_lossy().as_ref(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await?;
+    if status.success() {
+        let _ = Command::new("git")
+            .args([
+                "-C",
+                repo_path.to_string_lossy().as_ref(),
+                "worktree",
+                "prune",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "git worktree remove failed for {}",
+        workspace_path.display()
+    ))
+}
+
+fn remove_directory(workspace_path: &Path) -> Result<()> {
+    if workspace_path.exists() {
+        fs::remove_dir_all(workspace_path)
+            .with_context(|| format!("Failed to remove {}", workspace_path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

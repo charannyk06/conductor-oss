@@ -28,11 +28,11 @@ impl Workspace {
                     let name = project_config.name.clone().unwrap_or_else(|| id.clone());
                     let path = resolve_project_path(root, &project_config.path);
                     let mut project = Project::new(id.clone(), name, path.clone());
-                    project.board_path = project_config
-                        .board_dir
-                        .clone()
-                        .map(|board_dir| root.join("projects").join(board_dir).join("CONDUCTOR.md"));
-                    project.default_executor = project_config.agent.as_deref().map(AgentKind::parse);
+                    project.board_path = project_config.board_dir.clone().map(|board_dir| {
+                        root.join("projects").join(board_dir).join("CONDUCTOR.md")
+                    });
+                    project.default_executor =
+                        project_config.agent.as_deref().map(AgentKind::parse);
                     project.setup_script = join_script(&project_config.setup_script);
                     project.cleanup_script = join_script(&project_config.cleanup_script);
                     project
@@ -132,4 +132,3 @@ mod tests {
         );
     }
 }
-

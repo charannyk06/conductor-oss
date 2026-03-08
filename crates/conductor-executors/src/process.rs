@@ -19,7 +19,10 @@ pub struct PtyDimensions {
 
 impl Default for PtyDimensions {
     fn default() -> Self {
-        Self { rows: 48, cols: 160 }
+        Self {
+            rows: 48,
+            cols: 160,
+        }
     }
 }
 
@@ -80,7 +83,10 @@ pub async fn spawn_process_with_pty_size(
         loop {
             match lines.next() {
                 Some(Ok(line)) => {
-                    if stdout_tx.blocking_send(ExecutorOutput::Stdout(line)).is_err() {
+                    if stdout_tx
+                        .blocking_send(ExecutorOutput::Stdout(line))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -224,8 +230,14 @@ pub async fn spawn_process_no_stdin(
     let mut child = cmd.spawn()?;
     let pid = child.id().unwrap_or(0);
 
-    let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("stdout not piped"))?;
-    let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("stderr not piped"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stdout not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stderr not piped"))?;
 
     let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
     // Input channel is intentionally created and receiver dropped — stdin is closed for

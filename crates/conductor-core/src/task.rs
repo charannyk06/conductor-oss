@@ -162,7 +162,12 @@ mod tests {
 
     #[test]
     fn test_cancel_from_any_state() {
-        for start_state in [TaskState::Inbox, TaskState::Ready, TaskState::InProgress, TaskState::Review] {
+        for start_state in [
+            TaskState::Inbox,
+            TaskState::Ready,
+            TaskState::InProgress,
+            TaskState::Review,
+        ] {
             let mut task = Task::new("p".to_string(), "t".to_string());
             task.state = start_state;
             assert!(task.transition(TaskState::Cancelled).is_ok());

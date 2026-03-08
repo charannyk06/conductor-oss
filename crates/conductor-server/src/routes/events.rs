@@ -19,8 +19,8 @@ async fn event_stream(
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
     let initial = state.snapshot_event_json().await;
     let initial_stream = stream::iter(vec![Ok(SseEvent::default().data(initial))]);
-    let updates = BroadcastStream::new(state.event_snapshots.subscribe()).filter_map(|result| {
-        match result {
+    let updates =
+        BroadcastStream::new(state.event_snapshots.subscribe()).filter_map(|result| match result {
             Ok(payload) => Some(Ok(SseEvent::default().data(payload))),
             Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(count)) => {
                 tracing::warn!("Event snapshot SSE stream lagged by {count} messages");
@@ -28,8 +28,7 @@ async fn event_stream(
                     json!({"type": "refresh", "reason": "lagged", "missed": count}).to_string(),
                 )))
             }
-        }
-    });
+        });
 
     Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default())
 }

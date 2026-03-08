@@ -12,11 +12,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant, MissedTickBehavior};
 
 use crate::state::{AppState, SessionStatus, SpawnRequest};
 
 const MAX_GLOBAL_AUTODISPATCH_SESSIONS: usize = 5;
 const MAX_PROJECT_AUTODISPATCH_SESSIONS: usize = 2;
+const AUTODISPATCH_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct RuntimeHandles {
     _watchers: Vec<BoardWatcher>,
@@ -150,20 +152,57 @@ async fn run_board_automation(
     event_bus: EventBus,
     project_board_map: HashMap<String, PathBuf>,
 ) {
+    run_board_automation_with_retry_interval(
+        state,
+        event_bus,
+        project_board_map,
+        AUTODISPATCH_RETRY_INTERVAL,
+    )
+    .await;
+}
+
+async fn run_board_automation_with_retry_interval(
+    state: Arc<AppState>,
+    event_bus: EventBus,
+    project_board_map: HashMap<String, PathBuf>,
+    retry_interval: Duration,
+) {
     let mut receiver = event_bus.subscribe();
+    let mut retry_tick = tokio::time::interval_at(Instant::now() + retry_interval, retry_interval);
+    retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    while let Ok(event) = receiver.recv().await {
-        let Event::BoardChanged { project_id, .. } = &*event else {
-            continue;
-        };
+    loop {
+        tokio::select! {
+            event = receiver.recv() => {
+                match event {
+                    Ok(event) => {
+                        let Event::BoardChanged { project_id, .. } = &*event else {
+                            continue;
+                        };
 
-        let Some(board_path) = project_board_map.get(project_id).cloned() else {
-            continue;
-        };
+                        let Some(board_path) = project_board_map.get(project_id).cloned() else {
+                            continue;
+                        };
 
-        if let Err(err) = process_board_change(state.clone(), project_id.clone(), board_path).await
-        {
-            tracing::warn!(project_id, error = %err, "Rust board automation failed");
+                        if let Err(err) = process_board_change(state.clone(), project_id.clone(), board_path).await
+                        {
+                            tracing::warn!(project_id, error = %err, "Rust board automation failed");
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(skipped, "Board automation lagged behind board-change events");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = retry_tick.tick() => {
+                for (project_id, board_path) in &project_board_map {
+                    if let Err(err) = process_board_change(state.clone(), project_id.clone(), board_path.clone()).await
+                    {
+                        tracing::warn!(project_id, error = %err, "Rust board automation retry tick failed");
+                    }
+                }
+            }
         }
     }
 }
@@ -236,7 +275,7 @@ async fn process_board_change(
                     project_id,
                     session_id = session.id,
                     title = card.title,
-                    "Spawned session from Rust board automation"
+                    "Queued session from Rust board automation"
                 );
                 moved_cards.push(card.title.clone());
                 available_global = available_global.saturating_sub(1);
@@ -301,4 +340,208 @@ fn resolve_card_agent(tags: &[String]) -> Option<AgentKind> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use conductor_core::config::ConductorConfig;
+    use conductor_db::Database;
+    use conductor_executors::executor::{
+        Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
+    };
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::Path;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio::time::timeout;
+    use uuid::Uuid;
+
+    struct TestExecutor;
+
+    #[async_trait]
+    impl Executor for TestExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "Test Executor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/bin/true")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
+            let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
+            drop(output_tx);
+            let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(8);
+            let (kill_tx, _kill_rx) = oneshot::channel();
+            Ok(ExecutorHandle::new(
+                1,
+                self.kind(),
+                output_rx,
+                input_tx,
+                kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
+
+    async fn wait_for_condition<F, T>(label: &str, mut check: F) -> T
+    where
+        F: FnMut() -> Option<T>,
+    {
+        timeout(Duration::from_secs(3), async move {
+            loop {
+                if let Some(value) = check() {
+                    return value;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
+    }
+
+    #[tokio::test]
+    async fn board_automation_retries_ready_cards_without_new_board_events() {
+        let root = std::env::temp_dir().join(format!("conductor-runtime-test-{}", Uuid::new_v4()));
+        let project_root = root.join("repo");
+        fs::create_dir_all(&project_root).unwrap();
+        let board_path = project_root.join("CONDUCTOR.md");
+        fs::write(
+            &board_path,
+            [
+                "## Ready to Dispatch",
+                "",
+                "- [ ] Task one",
+                "- [ ] Task two",
+                "- [ ] Task three",
+                "",
+                "## Dispatching",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let mut config = ConductorConfig::default();
+        config.workspace = root.clone();
+        config.preferences.coding_agent = "codex".to_string();
+        config.projects = BTreeMap::from([(
+            "demo".to_string(),
+            ProjectConfig {
+                path: project_root.to_string_lossy().to_string(),
+                agent: Some("codex".to_string()),
+                runtime: Some("direct".to_string()),
+                ..ProjectConfig::default()
+            },
+        )]);
+
+        let db = Database::in_memory().await.unwrap();
+        let config_path = root.join("conductor.yaml");
+        let state = AppState::new(config_path, config, db).await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TestExecutor));
+
+        let project_board_map = HashMap::from([("demo".to_string(), board_path.clone())]);
+        let event_bus = EventBus::new(16);
+        let automation = tokio::spawn(run_board_automation_with_retry_interval(
+            state.clone(),
+            event_bus.clone(),
+            project_board_map,
+            Duration::from_millis(50),
+        ));
+
+        event_bus.publish(Event::BoardChanged {
+            project_id: "demo".to_string(),
+            path: board_path.display().to_string(),
+        });
+
+        wait_for_condition("initial dispatch wave", || {
+            let board = Board::from_file(&board_path).ok()?;
+            let dispatching = board
+                .columns
+                .iter()
+                .find(|column| column.state == TaskState::Dispatching)
+                .map(|column| column.cards.len())
+                .unwrap_or(0);
+            if dispatching == 2 {
+                Some(())
+            } else {
+                None
+            }
+        })
+        .await;
+
+        let active_session_id = wait_for_condition("initial launched demo sessions", || {
+            let Ok(sessions) = state.sessions.try_read() else {
+                return None;
+            };
+            let active = sessions
+                .values()
+                .filter(|session| {
+                    session.project_id == "demo"
+                        && matches!(session.status.as_str(), "spawning" | "working")
+                })
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>();
+            if active.len() == 2 {
+                active.into_iter().next()
+            } else {
+                None
+            }
+        })
+        .await;
+
+        state.kill_session(&active_session_id).await.unwrap();
+
+        wait_for_condition("retry dispatch wave", || {
+            let board = Board::from_file(&board_path).ok()?;
+            let ready = board
+                .columns
+                .iter()
+                .find(|column| column.state == TaskState::Ready)
+                .map(|column| column.cards.len())
+                .unwrap_or(0);
+            let dispatching = board
+                .columns
+                .iter()
+                .find(|column| column.state == TaskState::Dispatching)
+                .map(|column| column.cards.len())
+                .unwrap_or(0);
+            if ready == 0 && dispatching == 3 {
+                Some(())
+            } else {
+                None
+            }
+        })
+        .await;
+
+        automation.abort();
+        let _ = automation.await;
+        let _ = fs::remove_dir_all(&root);
+    }
 }

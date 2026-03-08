@@ -11,8 +11,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
 use crate::state::{
-    build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState, SessionRecord,
-    SpawnRequest,
+    build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState,
+    SessionRecord, SpawnRequest,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -57,7 +57,12 @@ async fn list_sessions(
     Query(query): Query<ListQuery>,
 ) -> ApiResponse {
     let mut sessions = state.snapshot_sessions().await;
-    if let Some(project_id) = query.project.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(project_id) = query
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         sessions.retain(|session| session["projectId"] == project_id);
     }
 
@@ -77,12 +82,14 @@ async fn list_sessions(
     ok(json!({ "sessions": sessions, "stats": stats }))
 }
 
-async fn get_session(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> ApiResponse {
-    match state.get_session(&id).await {
-        Some(session) => ok(session_to_dashboard_value(&session)),
+async fn get_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
+    match state
+        .snapshot_sessions()
+        .await
+        .into_iter()
+        .find(|session| session["id"] == id)
+    {
+        Some(session) => ok(session),
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
 }
@@ -108,8 +115,18 @@ async fn spawn_session(
     Json(body): Json<SpawnBody>,
 ) -> ApiResponse {
     let prompt = body.prompt.unwrap_or_default();
-    if prompt.trim().is_empty() && body.issue_id.as_deref().unwrap_or_default().trim().is_empty() {
-        return error(StatusCode::BAD_REQUEST, "Either prompt or issueId is required to create a session");
+    if prompt.trim().is_empty()
+        && body
+            .issue_id
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Either prompt or issueId is required to create a session",
+        );
     }
 
     match state
@@ -144,10 +161,7 @@ async fn get_conversation(
     }
 }
 
-async fn get_feed(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> ApiResponse {
+async fn get_feed(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
     match state.get_session(&id).await {
         Some(session) => ok(session_feed_payload(&session)),
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
@@ -205,22 +219,24 @@ async fn output_stream(
         .await
         .map(|session| trim_lines_tail(&session.output, query.lines.unwrap_or(500)))
         .unwrap_or_default();
-    let initial_stream = stream::iter(vec![Ok(SseEvent::default().data(
-        json!({ "type": "output", "output": initial_output }).to_string(),
-    ))]);
+    let initial_stream = stream::iter(vec![Ok(
+        SseEvent::default().data(json!({ "type": "output", "output": initial_output }).to_string())
+    )]);
     // Delta updates: each broadcast carries only the new line, not the full output.
-    let updates = BroadcastStream::new(state.output_updates.subscribe()).filter_map(move |result| match result {
-        Ok((session_id, delta)) if session_id == id => Some(Ok(SseEvent::default().data(
-            json!({ "type": "delta", "line": delta }).to_string(),
-        ))),
-        Ok(_) => None,
-        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(count)) => {
-            tracing::warn!("Output stream SSE lagged by {count} messages");
-            Some(Ok(SseEvent::default().event("refresh").data(
-                json!({ "type": "refresh", "reason": "lagged", "missed": count }).to_string(),
-            )))
-        }
-    });
+    let updates = BroadcastStream::new(state.output_updates.subscribe()).filter_map(
+        move |result| match result {
+            Ok((session_id, delta)) if session_id == id => Some(Ok(
+                SseEvent::default().data(json!({ "type": "delta", "line": delta }).to_string())
+            )),
+            Ok(_) => None,
+            Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(count)) => {
+                tracing::warn!("Output stream SSE lagged by {count} messages");
+                Some(Ok(SseEvent::default().event("refresh").data(
+                    json!({ "type": "refresh", "reason": "lagged", "missed": count }).to_string(),
+                )))
+            }
+        },
+    );
     Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default())
 }
 
@@ -241,7 +257,10 @@ async fn send_to_session(
     let attachments = body.attachments.unwrap_or_default();
 
     if body.message.trim().is_empty() && attachments.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "Message or attachments are required");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "Message or attachments are required",
+        );
     }
 
     let is_live = state.live_sessions.read().await.contains_key(&id);
@@ -250,12 +269,7 @@ async fn send_to_session(
         let should_resume = state
             .get_session(&id)
             .await
-            .map(|session| {
-                matches!(
-                    session.status.as_str(),
-                    "needs_input" | "stuck" | "done"
-                )
-            })
+            .map(|session| matches!(session.status.as_str(), "needs_input" | "stuck" | "done"))
             .unwrap_or(false);
 
         if should_resume {
@@ -302,12 +316,12 @@ async fn send_to_session(
     }
 }
 
-async fn kill_session(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> ApiResponse {
+async fn kill_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
     match state.kill_session(&id).await {
-        Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
+        Ok(()) => {
+            state.kick_spawn_supervisor();
+            ok(json!({ "ok": true, "sessionId": id }))
+        }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -317,7 +331,10 @@ async fn archive_session(
     Path(id): Path<String>,
 ) -> ApiResponse {
     match state.archive_session(&id).await {
-        Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
+        Ok(()) => {
+            state.kick_spawn_supervisor();
+            ok(json!({ "ok": true, "sessionId": id }))
+        }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -364,7 +381,9 @@ async fn apply_action(
 ) -> ApiResponse {
     match body.action.as_str() {
         "retry" | "restore" => match state.restore_session(&id).await {
-            Ok(session) => ok(json!({ "ok": true, "action": "restore", "session": session_to_dashboard_value(&session) })),
+            Ok(session) => ok(
+                json!({ "ok": true, "action": "restore", "session": session_to_dashboard_value(&session) }),
+            ),
             Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
         },
         "kill" | "terminate" => match state.kill_session(&id).await {
@@ -376,7 +395,14 @@ async fn apply_action(
             Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
         },
         "send" => match state
-            .send_to_session(&id, body.message.unwrap_or_default(), Vec::new(), None, None, "follow_up")
+            .send_to_session(
+                &id,
+                body.message.unwrap_or_default(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
             .await
         {
             Ok(()) => ok(json!({ "ok": true, "action": "send", "sessionId": id })),
