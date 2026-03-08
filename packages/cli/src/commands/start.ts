@@ -72,6 +72,11 @@ type RustLaunchConfig = {
   label: string;
 };
 
+type RustLaunchResolution = {
+  launch: RustLaunchConfig | null;
+  reason?: string;
+};
+
 function resolveBuiltinRemoteAuth(enabled: boolean): BuiltinRemoteAuth | null {
   if (!enabled) return null;
 
@@ -350,7 +355,7 @@ function loadLauncherSettings(configHint?: string | null): LauncherSettings {
     workspacePath: dirname(configPath),
     configPath,
     dashboardPort: 4747,
-    backendPort: coercePort(server["port"], coercePort(config["port"], 4748)),
+    backendPort: coercePort(server["port"], 4748),
     access: {
       requireAuth: asBoolean(access["requireAuth"]),
       defaultRole: asTrimmedString(access["defaultRole"]),
@@ -400,42 +405,62 @@ function resolveBundledRustBinary(): string | null {
   return null;
 }
 
-function resolveRustBackendLaunch(workspacePath: string, configPath: string, backendPort: number): RustLaunchConfig | null {
+function detectNativeBinaryFormat(binaryPath: string): string {
+  try {
+    const header = readFileSync(binaryPath).subarray(0, 4);
+    if (header.length >= 2 && header[0] === 0x4d && header[1] === 0x5a) {
+      return "pe";
+    }
+    if (header.length >= 4 && header[0] === 0x7f && header[1] === 0x45 && header[2] === 0x4c && header[3] === 0x46) {
+      return "elf";
+    }
+    if (header.length >= 4) {
+      const magic = header.readUInt32BE(0);
+      if (
+        magic === 0xfeedface
+        || magic === 0xcefaedfe
+        || magic === 0xfeedfacf
+        || magic === 0xcffaedfe
+        || magic === 0xcafebabe
+        || magic === 0xbebafeca
+        || magic === 0xcafebabf
+      ) {
+        return "macho";
+      }
+    }
+  } catch {
+    // ignore and treat as unknown
+  }
+
+  return "unknown";
+}
+
+function isCompatibleNativeBinary(binaryPath: string): boolean {
+  const format = detectNativeBinaryFormat(binaryPath);
+  if (process.platform === "darwin") return format === "macho";
+  if (process.platform === "linux") return format === "elf";
+  if (process.platform === "win32") return format === "pe";
+  return true;
+}
+
+function describeNativeBinaryHostMismatch(binaryPath: string): string {
+  const format = detectNativeBinaryFormat(binaryPath);
+  return `Bundled Rust backend is incompatible with ${process.platform}-${process.arch} (binary format: ${format}).`;
+}
+
+function resolveRustBackendLaunch(workspacePath: string, configPath: string, backendPort: number): RustLaunchResolution {
   const bundledBinary = resolveBundledRustBinary();
   if (bundledBinary) {
-    return {
-      cmd: bundledBinary,
-      args: [
-        "--workspace",
-        workspacePath,
-        "--config",
-        configPath,
-        "start",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(backendPort),
-      ],
-      cwd: workspacePath,
-      label: "bundled Rust backend",
-    };
-  }
-
-  const repoCargoRoot = resolveRepoCargoRoot(workspacePath);
-  if (!repoCargoRoot) {
-    return null;
-  }
-
-  const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
-  const prebuiltCandidates = [
-    join(repoCargoRoot, "target", "release", binaryName),
-    join(repoCargoRoot, "target", "debug", binaryName),
-  ];
-
-  for (const candidate of prebuiltCandidates) {
-    if (existsSync(candidate)) {
+    if (!isCompatibleNativeBinary(bundledBinary)) {
       return {
-        cmd: candidate,
+        launch: null,
+        reason: describeNativeBinaryHostMismatch(bundledBinary),
+      };
+    }
+
+    return {
+      launch: {
+        cmd: bundledBinary,
         args: [
           "--workspace",
           workspacePath,
@@ -447,31 +472,70 @@ function resolveRustBackendLaunch(workspacePath: string, configPath: string, bac
           "--port",
           String(backendPort),
         ],
-        cwd: repoCargoRoot,
-        label: "prebuilt Rust backend",
+        cwd: workspacePath,
+        label: "bundled Rust backend",
+      },
+    };
+  }
+
+  const repoCargoRoot = resolveRepoCargoRoot(workspacePath);
+  if (!repoCargoRoot) {
+    return {
+      launch: null,
+      reason: "No compatible bundled Rust backend was found, and this install does not have a repo-local Cargo fallback.",
+    };
+  }
+
+  const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
+  const prebuiltCandidates = [
+    join(repoCargoRoot, "target", "release", binaryName),
+    join(repoCargoRoot, "target", "debug", binaryName),
+  ];
+
+  for (const candidate of prebuiltCandidates) {
+    if (existsSync(candidate)) {
+      return {
+        launch: {
+          cmd: candidate,
+          args: [
+            "--workspace",
+            workspacePath,
+            "--config",
+            configPath,
+            "start",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            String(backendPort),
+          ],
+          cwd: repoCargoRoot,
+          label: "prebuilt Rust backend",
+        },
       };
     }
   }
 
   return {
-    cmd: "cargo",
-    args: [
-      "run",
-      "-p",
-      "conductor-cli",
-      "--",
-      "--workspace",
-      workspacePath,
-      "--config",
-      configPath,
-      "start",
-      "--host",
-      "127.0.0.1",
-      "--port",
-      String(backendPort),
-    ],
-    cwd: repoCargoRoot,
-    label: "cargo-run Rust backend",
+    launch: {
+      cmd: "cargo",
+      args: [
+        "run",
+        "-p",
+        "conductor-cli",
+        "--",
+        "--workspace",
+        workspacePath,
+        "--config",
+        configPath,
+        "start",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(backendPort),
+      ],
+      cwd: repoCargoRoot,
+      label: "cargo-run Rust backend",
+    },
   };
 }
 
@@ -607,13 +671,15 @@ export function registerStart(program: Command): void {
 
         if (shouldLaunchBackend) {
           const backendSpinner = ora(`Starting Rust backend on http://127.0.0.1:${backendPort}`).start();
-          const launch = resolveRustBackendLaunch(workspacePath, configPath, backendPort);
+          const resolution = resolveRustBackendLaunch(workspacePath, configPath, backendPort);
+          const launch = resolution.launch;
 
           if (!launch) {
-            backendSpinner.warn("Rust backend binary was not found. Build or package the Rust backend first.");
+            throw new Error(resolution.reason ?? "Rust backend binary was not found. Build or package the Rust backend first.");
           } else {
             try {
               await killStalePortListener(backendPort);
+              let backendStartError: Error | null = null;
               backendProcess = spawn(launch.cmd, launch.args, {
                 cwd: launch.cwd,
                 stdio: "inherit",
@@ -623,16 +689,20 @@ export function registerStart(program: Command): void {
                 },
               });
 
-              backendProcess.on("error", () => {
-                backendSpinner.warn("Rust backend failed to start.");
+              backendProcess.once("error", (error) => {
+                backendStartError = error;
               });
 
               const backendReady = await waitForHttpService(`${backendUrl}/api/health`);
-              if (backendReady) {
-                backendSpinner.succeed(`Rust backend running on ${backendUrl} (${launch.label})`);
-              } else {
-                backendSpinner.warn(`Rust backend did not become ready at ${backendUrl} in time.`);
+              if (!backendReady) {
+                const reason = (backendStartError ? String(backendStartError) : null)
+                  || (backendProcess.exitCode !== null
+                    ? `Rust backend exited with code ${backendProcess.exitCode}`
+                    : `Rust backend did not become ready at ${backendUrl} in time.`);
+                throw new Error(reason);
               }
+
+              backendSpinner.succeed(`Rust backend running on ${backendUrl} (${launch.label})`);
 
               shutdownTasks.push(() => {
                 if (backendProcess && backendProcess.exitCode === null) {
@@ -640,7 +710,8 @@ export function registerStart(program: Command): void {
                 }
               });
             } catch (error) {
-              backendSpinner.warn(`Rust backend failed: ${error}`);
+              backendSpinner.fail(`Rust backend failed: ${error}`);
+              throw error;
             }
           }
         } else if (explicitBackendUrl) {
