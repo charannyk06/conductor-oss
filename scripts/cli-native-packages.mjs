@@ -25,7 +25,7 @@ function copyOptionalFile(sourcePath, destinationPath) {
 export const CLI_NATIVE_TARGETS = [
   {
     id: "darwin-universal",
-    packageName: "@conductor-oss/native-darwin-universal",
+    packageName: "conductor-oss-native-darwin-universal",
     os: ["darwin"],
     cpu: ["arm64", "x64"],
     binaryName: "conductor",
@@ -33,7 +33,7 @@ export const CLI_NATIVE_TARGETS = [
   },
   {
     id: "linux-x64",
-    packageName: "@conductor-oss/native-linux-x64",
+    packageName: "conductor-oss-native-linux-x64",
     os: ["linux"],
     cpu: ["x64"],
     binaryName: "conductor",
@@ -41,7 +41,7 @@ export const CLI_NATIVE_TARGETS = [
   },
   {
     id: "win32-x64",
-    packageName: "@conductor-oss/native-win32-x64",
+    packageName: "conductor-oss-native-win32-x64",
     os: ["win32"],
     cpu: ["x64"],
     binaryName: "conductor.exe",
