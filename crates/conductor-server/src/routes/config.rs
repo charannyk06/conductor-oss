@@ -441,7 +441,7 @@ fn resolve_claude_configured_model(
     family: &str,
 ) -> Option<String> {
     let normalized = configured_model?.trim().to_lowercase();
-    if available_models.iter().any(|model| *model == normalized) {
+    if available_models.contains(&normalized) {
         return Some(normalized);
     }
     if normalized == family {
