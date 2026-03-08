@@ -391,15 +391,15 @@ function resolveRepoCargoRoot(workspacePath: string): string | null {
 
 function resolveOptionalNativePackageNames(): string[] {
   if (process.platform === "darwin" && (process.arch === "arm64" || process.arch === "x64")) {
-    return ["@conductor-oss/native-darwin-universal"];
+    return ["conductor-oss-native-darwin-universal"];
   }
 
   if (process.platform === "linux" && process.arch === "x64") {
-    return ["@conductor-oss/native-linux-x64"];
+    return ["conductor-oss-native-linux-x64"];
   }
 
   if (process.platform === "win32" && process.arch === "x64") {
-    return ["@conductor-oss/native-win32-x64"];
+    return ["conductor-oss-native-win32-x64"];
   }
 
   return [];
