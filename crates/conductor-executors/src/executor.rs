@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use conductor_core::types::AgentKind;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -46,12 +47,19 @@ pub enum ExecutorOutput {
     Stdout(String),
     /// Standard error line.
     Stderr(String),
+    /// Structured tool/status event that should render as a runtime status row.
+    StructuredStatus {
+        text: String,
+        metadata: HashMap<String, Value>,
+    },
     /// Agent is requesting input.
     NeedsInput(String),
     /// Agent has completed its task.
     Completed { exit_code: i32 },
     /// Agent crashed or was killed.
     Failed { error: String, exit_code: Option<i32> },
+    /// A single transport frame expanded into multiple runtime events.
+    Composite(Vec<ExecutorOutput>),
 }
 
 /// Handle to a running executor process.

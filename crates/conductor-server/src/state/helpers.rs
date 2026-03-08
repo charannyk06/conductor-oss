@@ -285,6 +285,43 @@ pub(super) fn merge_assistant_fragment(current: &mut String, fragment: &str) {
     current.push_str(trimmed);
 }
 
+fn is_runtime_transport_event_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || !trimmed.starts_with('{') || !trimmed.contains("\"type\"") {
+        return false;
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return false;
+    };
+
+    matches!(
+        value.get("type").and_then(Value::as_str),
+        Some("system" | "assistant" | "user" | "tool_use" | "result" | "input_request" | "rate_limit_event")
+    )
+}
+
+fn is_runtime_transport_dump(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.starts_with("{\"type\":\"")
+        && (trimmed.contains("\"session_id\":\"")
+            || trimmed.contains("\"tool_use_result\":")
+            || trimmed.contains("\"parent_tool_use_id\":")
+            || trimmed.contains("\"rate_limit_info\":"))
+    {
+        return true;
+    }
+
+    let mut saw_event = false;
+    for line in trimmed.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if !is_runtime_transport_event_line(line) {
+            return false;
+        }
+        saw_event = true;
+    }
+    saw_event
+}
+
 fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
     let mut entries = Vec::new();
     let mut assistant_text = String::new();
@@ -317,6 +354,10 @@ fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
     for raw_line in session.output.lines() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with("[stderr]") {
+            continue;
+        }
+
+        if is_runtime_transport_event_line(line) {
             continue;
         }
 
@@ -495,7 +536,11 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
             .conversation
             .iter()
             .rev()
-            .find(|entry| entry.kind == "assistant_message" && entry.source == "runtime")
+            .find(|entry| {
+                entry.kind == "assistant_message"
+                    && entry.source == "runtime"
+                    && !is_runtime_transport_dump(&entry.text)
+            })
             .map(|entry| entry.id.clone())
     } else {
         None
@@ -503,7 +548,11 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let has_structured_runtime_entries = session
         .conversation
         .iter()
-        .any(|entry| matches!(entry.kind.as_str(), "assistant_message" | "status_message") && entry.source == "runtime");
+        .any(|entry| {
+            matches!(entry.kind.as_str(), "assistant_message" | "status_message")
+                && entry.source == "runtime"
+                && !is_runtime_transport_dump(&entry.text)
+        });
     let runtime_entries = if has_structured_runtime_entries {
         Vec::new()
     } else {
@@ -514,6 +563,11 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     }
 
     for entry in &session.conversation {
+        if entry.source == "runtime" && is_runtime_transport_dump(&entry.text)
+        {
+            continue;
+        }
+
         if entry.kind == "assistant_message" && entry.source == "runtime" {
             push_runtime_assistant_segments(
                 &mut feed,

@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use conductor_core::types::AgentKind;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -71,6 +72,7 @@ impl Executor for ClaudeCodeExecutor {
             "text".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
+            "--include-partial-messages".to_string(),
             "--verbose".to_string(),
         ];
 
@@ -97,18 +99,11 @@ impl Executor for ClaudeCodeExecutor {
         if let Ok(value) = serde_json::from_str::<Value>(line) {
             if let Some(msg_type) = value.get("type").and_then(|t| t.as_str()) {
                 match msg_type {
-                    "system" => {
-                        return ExecutorOutput::Stdout(String::new());
+                    "system" | "rate_limit_event" | "user" => {
+                        return ExecutorOutput::Composite(Vec::new());
                     }
                     "assistant" => {
-                        if let Some(content) = extract_assistant_text(&value) {
-                            return ExecutorOutput::Stdout(content);
-                        }
-                        return ExecutorOutput::Stdout(String::new());
-                    }
-                    "tool_use" => {
-                        let tool = value.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                        return ExecutorOutput::Stdout(format!("[tool: {tool}]"));
+                        return ExecutorOutput::Composite(extract_assistant_events(&value));
                     }
                     "result" => {
                         if value.get("is_error").and_then(|flag| flag.as_bool()).unwrap_or(false) {
@@ -134,7 +129,9 @@ impl Executor for ClaudeCodeExecutor {
                             .to_string();
                         return ExecutorOutput::NeedsInput(prompt);
                     }
-                    _ => {}
+                    _ => {
+                        return ExecutorOutput::Composite(Vec::new());
+                    }
                 }
             }
         }
@@ -144,27 +141,139 @@ impl Executor for ClaudeCodeExecutor {
     }
 }
 
-fn extract_assistant_text(value: &Value) -> Option<String> {
+fn extract_assistant_events(value: &Value) -> Vec<ExecutorOutput> {
     let content = value
         .get("message")
         .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_array())?;
+        .and_then(|content| content.as_array());
 
-    let text = content
-        .iter()
-        .filter_map(|block| {
-            if block.get("type").and_then(|value| value.as_str()) != Some("text") {
-                return None;
+    let Some(content) = content else {
+        return Vec::new();
+    };
+
+    let mut events = Vec::new();
+    for block in content {
+        match block.get("type").and_then(|value| value.as_str()) {
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) {
+                    events.push(ExecutorOutput::Stdout(text.to_string()));
+                }
             }
-            block.get("text").and_then(|value| value.as_str()).map(str::trim)
-        })
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+            Some("thinking") => {
+                let detail = block
+                    .get("thinking")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("Thinking");
+                events.push(ExecutorOutput::StructuredStatus {
+                    text: "Thinking".to_string(),
+                    metadata: tool_metadata("thinking", "Thinking", "running", vec![detail.to_string()]),
+                });
+            }
+            Some("tool_use") => {
+                let name = block
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("Tool");
+                let detail = tool_input_summary(block.get("input"));
+                let content = detail.into_iter().collect::<Vec<_>>();
+                events.push(ExecutorOutput::StructuredStatus {
+                    text: name.to_string(),
+                    metadata: tool_metadata(&normalize_tool_kind(name), name, "running", content),
+                });
+            }
+            _ => {}
+        }
+    }
 
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
+    events
+}
+
+fn normalize_tool_kind(name: &str) -> String {
+    let lower = name.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "bash" => "command".to_string(),
+        "read" => "read".to_string(),
+        "write" => "write".to_string(),
+        "edit" => "edit".to_string(),
+        "multiedit" => "multiedit".to_string(),
+        "glob" => "glob".to_string(),
+        "grep" => "grep".to_string(),
+        "task" => "task".to_string(),
+        "todowrite" => "todowrite".to_string(),
+        other => other.replace([' ', '/'], "-"),
+    }
+}
+
+fn tool_input_summary(input: Option<&Value>) -> Option<String> {
+    let Some(input) = input else {
+        return None;
+    };
+
+    for key in ["command", "path", "file_path", "query", "pattern", "url", "prompt"] {
+        if let Some(value) = input.get(key).and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) {
+            return Some(value.to_string());
+        }
+    }
+
+    serde_json::to_string(input).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn tool_metadata(
+    tool_kind: &str,
+    tool_title: &str,
+    tool_status: &str,
+    tool_content: Vec<String>,
+) -> HashMap<String, Value> {
+    let mut metadata = HashMap::new();
+    metadata.insert("toolKind".to_string(), Value::String(tool_kind.to_string()));
+    metadata.insert("toolTitle".to_string(), Value::String(tool_title.to_string()));
+    metadata.insert("toolStatus".to_string(), Value::String(tool_status.to_string()));
+    metadata.insert(
+        "toolContent".to_string(),
+        Value::Array(tool_content.into_iter().map(Value::String).collect()),
+    );
+    metadata
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_assistant_tool_use_emits_structured_status() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#;
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::Composite(events) = output else {
+            panic!("expected composite output");
+        };
+        assert_eq!(events.len(), 1);
+        let ExecutorOutput::StructuredStatus { text, metadata } = &events[0] else {
+            panic!("expected structured status");
+        };
+        assert_eq!(text, "Bash");
+        assert_eq!(metadata.get("toolTitle").and_then(Value::as_str), Some("Bash"));
+        assert_eq!(metadata.get("toolStatus").and_then(Value::as_str), Some("running"));
+    }
+
+    #[test]
+    fn parse_assistant_thinking_emits_status() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Inspecting files"}]}}"#;
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::Composite(events) = output else {
+            panic!("expected composite output");
+        };
+        let ExecutorOutput::StructuredStatus { text, metadata } = &events[0] else {
+            panic!("expected structured status");
+        };
+        assert_eq!(text, "Thinking");
+        assert_eq!(metadata.get("toolKind").and_then(Value::as_str), Some("thinking"));
     }
 }

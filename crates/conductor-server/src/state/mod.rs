@@ -62,7 +62,6 @@ impl AppState {
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;
-        state.start_session_evictor();
         state
     }
 
@@ -112,6 +111,40 @@ impl AppState {
         Ok(access)
     }
 
+    pub async fn persist_spawn_agent_selection(&self, project_id: &str, agent: &str) -> Result<()> {
+        let normalized_agent = agent.trim();
+        if normalized_agent.is_empty() {
+            return Ok(());
+        }
+
+        let mut changed = false;
+        {
+            let mut config = self.config.write().await;
+
+            {
+                let Some(project) = config.projects.get_mut(project_id) else {
+                    return Ok(());
+                };
+
+                if project.agent.as_deref() != Some(normalized_agent) {
+                    project.agent = Some(normalized_agent.to_string());
+                    changed = true;
+                }
+            }
+
+            if config.preferences.coding_agent != normalized_agent {
+                config.preferences.coding_agent = normalized_agent.to_string();
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.save_config().await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn snapshot_sessions(&self) -> Vec<Value> {
         let sessions = self.sessions.read().await;
         let mut list: Vec<&SessionRecord> = sessions
@@ -144,37 +177,6 @@ impl AppState {
 
     pub async fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
         self.sessions.read().await.get(session_id).cloned()
-    }
-
-    /// Spawn a background task that evicts terminal sessions older than 1 hour from memory.
-    fn start_session_evictor(self: &Arc<Self>) {
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                interval.tick().await;
-                let now = Utc::now();
-                let mut sessions = state.sessions.write().await;
-                let before = sessions.len();
-                sessions.retain(|_id, session| {
-                    let status = SessionStatus::from(session.status.as_str());
-                    if !status.is_terminal() {
-                        return true;
-                    }
-                    match DateTime::parse_from_rfc3339(&session.last_activity_at) {
-                        Ok(last_activity) => {
-                            let age = now.signed_duration_since(last_activity.with_timezone(&Utc));
-                            age.num_hours() < 1
-                        }
-                        Err(_) => true, // keep sessions with unparseable timestamps
-                    }
-                });
-                let evicted = before - sessions.len();
-                if evicted > 0 {
-                    tracing::info!(evicted, "Evicted terminal sessions from memory");
-                }
-            }
-        });
     }
 
     pub fn config_projects_payload(&self, config: &ConductorConfig) -> Value {

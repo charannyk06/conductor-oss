@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use conductor_core::types::AgentKind;
 use conductor_executors::executor::{ExecutorInput, ExecutorOutput, SpawnOptions};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -14,6 +15,21 @@ use super::types::{ConversationEntry, LiveSessionHandle, SessionRecord, SpawnReq
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
+
+fn persisted_output_line(event: &ExecutorOutput) -> Option<&str> {
+    match event {
+        ExecutorOutput::Stdout(line) | ExecutorOutput::Stderr(line) => {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        ExecutorOutput::StructuredStatus { .. } | ExecutorOutput::Composite(_) => None,
+        _ => None,
+    }
+}
 
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
     let normalized = text.trim_end();
@@ -56,6 +72,14 @@ fn append_runtime_assistant_break(session: &mut SessionRecord) {
 }
 
 fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) {
+    append_runtime_status_entry_with_metadata(session, text, None);
+}
+
+fn append_runtime_status_entry_with_metadata(
+    session: &mut SessionRecord,
+    text: &str,
+    explicit_metadata: Option<HashMap<String, Value>>,
+) {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return;
@@ -68,7 +92,9 @@ fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) {
     }
 
     let mut metadata = HashMap::new();
-    if let Some(tool_metadata) = runtime_tool_metadata(trimmed) {
+    if let Some(explicit_metadata) = explicit_metadata {
+        metadata = explicit_metadata;
+    } else if let Some(tool_metadata) = runtime_tool_metadata(trimmed) {
         if let Some(object) = tool_metadata.as_object() {
             for (key, value) in object {
                 metadata.insert(key.clone(), value.clone());
@@ -197,11 +223,22 @@ impl AppState {
             .cloned()
             .with_context(|| format!("Unknown project: {}", request.project_id))?;
 
-        let project_agent = request
+        let requested_agent = request
             .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+
+        let project_agent = requested_agent
             .clone()
             .or_else(|| project.agent.clone())
             .unwrap_or_else(|| config.preferences.coding_agent.clone());
+
+        if let Some(agent) = requested_agent.as_deref() {
+            self.persist_spawn_agent_selection(&request.project_id, agent).await?;
+        }
+
         let agent_kind = AgentKind::parse(&project_agent);
         let executors = self.executors.read().await;
         let executor = executors
@@ -218,6 +255,7 @@ impl AppState {
         let workspace_path = self
             .prepare_workspace(
                 &request.project_id,
+                &session_id,
                 &project,
                 request.use_worktree.unwrap_or(true),
                 branch.as_deref(),
@@ -246,6 +284,14 @@ impl AppState {
             _ => matches!(project.agent_config.permissions.as_deref(), Some("skip")),
         };
 
+        let mut spawn_env = HashMap::new();
+        if executor.kind() == AgentKind::ClaudeCode {
+            spawn_env.insert("CLAUDECODE".to_string(), String::new());
+            // Mirror the JS Claude launcher behavior so the local Claude login
+            // is used instead of any inherited API key billing context.
+            spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
+        }
+
         let handle = executor
             .spawn(SpawnOptions {
                 cwd: workspace_path.clone(),
@@ -253,7 +299,7 @@ impl AppState {
                 model: request.model.clone(),
                 skip_permissions,
                 extra_args: Vec::new(),
-                env: HashMap::new(),
+                env: spawn_env,
                 branch: branch.clone(),
             })
             .await?;
@@ -305,11 +351,11 @@ impl AppState {
                 match event {
                     ExecutorOutput::Stdout(line) => {
                         let mapped = executor.parse_output(&line);
-                        let _ = state.append_and_apply(&session_id, &line, mapped).await;
+                        let _ = state.apply_parsed_output(&session_id, mapped).await;
                     }
                     ExecutorOutput::Stderr(line) => {
                         let prefixed = format!("[stderr] {line}");
-                        let _ = state.append_and_apply(&session_id, &prefixed, ExecutorOutput::Stderr(line)).await;
+                        let _ = state.append_and_apply(&session_id, Some(&prefixed), ExecutorOutput::Stderr(line)).await;
                     }
                     other => {
                         let _ = state.apply_runtime_event(&session_id, other).await;
@@ -321,8 +367,38 @@ impl AppState {
         Ok(record)
     }
 
+    async fn apply_parsed_output(&self, session_id: &str, event: ExecutorOutput) -> Result<()> {
+        let mut events = vec![event];
+        while let Some(event) = events.pop() {
+            match event {
+                ExecutorOutput::Composite(mut nested) => {
+                    nested.reverse();
+                    events.extend(nested);
+                }
+                ExecutorOutput::Stdout(line) => {
+                    let output = ExecutorOutput::Stdout(line);
+                    let persisted = persisted_output_line(&output).map(str::to_string);
+                    self.append_and_apply(session_id, persisted.as_deref(), output).await?;
+                }
+                ExecutorOutput::StructuredStatus { text, metadata } => {
+                    self.append_and_apply(
+                        session_id,
+                        None,
+                        ExecutorOutput::StructuredStatus { text, metadata },
+                    )
+                    .await?;
+                }
+                other => {
+                    self.apply_runtime_event(session_id, other).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Combined append + apply to avoid acquiring the sessions write lock twice per line.
-    pub(crate) async fn append_and_apply(&self, session_id: &str, line: &str, event: ExecutorOutput) -> Result<()> {
+    pub(crate) async fn append_and_apply(&self, session_id: &str, line: Option<&str>, event: ExecutorOutput) -> Result<()> {
         let clear_live_handle = matches!(
             event,
             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
@@ -344,7 +420,9 @@ impl AppState {
         }
 
         // Append output (inline)
-        append_output(session, line);
+        if let Some(output_line) = line {
+            append_output(session, output_line);
+        }
         session.last_activity_at = Utc::now().to_rfc3339();
 
         // Apply event (inline from apply_runtime_event logic)
@@ -376,6 +454,13 @@ impl AppState {
                 }
                 session.metadata.insert("lastStderr".to_string(), stderr_line.clone());
             }
+            ExecutorOutput::StructuredStatus { ref text, ref metadata } => {
+                if is_live && !is_terminal_status(&session.status) {
+                    session.status = "working".to_string();
+                    session.activity = Some("active".to_string());
+                }
+                append_runtime_status_entry_with_metadata(session, text, Some(metadata.clone()));
+            }
             _ => {}
         }
 
@@ -385,9 +470,11 @@ impl AppState {
             self.live_sessions.write().await.remove(session_id);
         }
         self.persist_session(&updated).await?;
-        let _ = self
-            .output_updates
-            .send((updated.id.clone(), line.to_string()));
+        if let Some(output_line) = line {
+            let _ = self
+                .output_updates
+                .send((updated.id.clone(), output_line.to_string()));
+        }
         self.publish_snapshot().await;
         Ok(())
     }
@@ -442,6 +529,13 @@ impl AppState {
                     session.metadata.insert("summary".to_string(), line.trim().to_string());
                 }
                 session.metadata.insert("lastStderr".to_string(), line);
+            }
+            ExecutorOutput::StructuredStatus { text, metadata } => {
+                if is_live && !is_terminal_status(&session.status) {
+                    session.status = "working".to_string();
+                    session.activity = Some("active".to_string());
+                }
+                append_runtime_status_entry_with_metadata(session, &text, Some(metadata));
             }
             ExecutorOutput::NeedsInput(prompt) => {
                 if is_live && !is_terminal_status(&session.status) {
@@ -514,6 +608,7 @@ impl AppState {
                     clear_parser_state(session);
                 }
             }
+            ExecutorOutput::Composite(_) => {}
         }
 
         let updated = session.clone();
@@ -701,11 +796,11 @@ impl AppState {
                 match event {
                     ExecutorOutput::Stdout(line) => {
                         let mapped = executor.parse_output(&line);
-                        let _ = state.append_and_apply(&session_id, &line, mapped).await;
+                        let _ = state.apply_parsed_output(&session_id, mapped).await;
                     }
                     ExecutorOutput::Stderr(line) => {
                         let prefixed = format!("[stderr] {line}");
-                        let _ = state.append_and_apply(&session_id, &prefixed, ExecutorOutput::Stderr(line)).await;
+                        let _ = state.append_and_apply(&session_id, Some(&prefixed), ExecutorOutput::Stderr(line)).await;
                     }
                     other => {
                         let _ = state.apply_runtime_event(&session_id, other).await;
