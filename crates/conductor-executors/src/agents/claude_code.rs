@@ -209,9 +209,7 @@ fn normalize_tool_kind(name: &str) -> String {
 }
 
 fn tool_input_summary(input: Option<&Value>) -> Option<String> {
-    let Some(input) = input else {
-        return None;
-    };
+    let input = input?;
 
     for key in ["command", "path", "file_path", "query", "pattern", "url", "prompt"] {
         if let Some(value) = input.get(key).and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) {

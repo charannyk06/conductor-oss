@@ -173,7 +173,7 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 
 fn verify_builtin_session(secret: &str, value: &str) -> bool {
     let separator = value.find('.');
-    if separator == None || separator == Some(0) || separator == Some(value.len() - 1) {
+    if separator.is_none() || separator == Some(0) || separator == Some(value.len() - 1) {
         return false;
     }
     let separator = separator.unwrap_or(0);
@@ -194,7 +194,7 @@ fn verify_builtin_session(secret: &str, value: &str) -> bool {
     };
     mac.update(payload.as_bytes());
     let expected = hex::encode(mac.finalize().into_bytes());
-    return constant_time_equal(expected.as_bytes(), signature.as_bytes());
+    constant_time_equal(expected.as_bytes(), signature.as_bytes())
 }
 
 fn matches_domain(email: &str, domains: &[String]) -> bool {
@@ -223,10 +223,10 @@ fn resolve_role_for_email(
     access: &DashboardAccessConfig,
 ) -> (Option<String>, bool, bool) {
     let normalized = email.trim().to_ascii_lowercase();
-    let mut admin_emails = access.roles.admins.iter().cloned().collect::<Vec<_>>();
+    let mut admin_emails = access.roles.admins.to_vec();
     admin_emails.extend(legacy_admin_emails());
 
-    let mut operator_emails = access.roles.operators.iter().cloned().collect::<Vec<_>>();
+    let mut operator_emails = access.roles.operators.to_vec();
     operator_emails.extend(legacy_allowlist_emails());
 
     let viewer_emails = access.roles.viewers.clone();
