@@ -720,7 +720,7 @@ fn claude_access_for_model(model: &str) -> Vec<&'static str> {
         return vec!["max", "api"];
     }
     if normalized == "haiku" || normalized.contains("claude-haiku") {
-        return vec!["api"];
+        return vec!["pro", "max", "api"];
     }
     vec!["pro", "max", "api"]
 }
@@ -914,4 +914,15 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
             })
         },
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::claude_access_for_model;
+
+    #[test]
+    fn claude_access_for_model_keeps_haiku_visible_for_subscription_access() {
+        assert_eq!(claude_access_for_model("claude-haiku-4-5"), vec!["pro", "max", "api"]);
+        assert_eq!(claude_access_for_model("haiku"), vec!["pro", "max", "api"]);
+    }
 }

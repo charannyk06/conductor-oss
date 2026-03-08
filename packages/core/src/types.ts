@@ -660,6 +660,12 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
           ["pro", "max", "api"],
           "Claude Sonnet 4.6",
         ),
+        modelOption(
+          "claude-haiku-4-5",
+          "Fast Claude model for lightweight tasks.",
+          ["pro", "max", "api"],
+          "Claude Haiku 4.5",
+        ),
       ],
       max: [
         modelOption(
@@ -673,6 +679,12 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
           "Highest-capability Claude Code model for deeper reasoning.",
           ["max", "api"],
           "Claude Opus 4.6",
+        ),
+        modelOption(
+          "claude-haiku-4-5",
+          "Fast Claude model for lightweight tasks.",
+          ["pro", "max", "api"],
+          "Claude Haiku 4.5",
         ),
       ],
       api: [
@@ -690,8 +702,8 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
         ),
         modelOption(
           "claude-haiku-4-5",
-          "Fast Claude API model for lightweight tasks.",
-          ["api"],
+          "Fast Claude model for lightweight tasks.",
+          ["pro", "max", "api"],
           "Claude Haiku 4.5",
         ),
       ],

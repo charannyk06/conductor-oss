@@ -36,7 +36,6 @@ import {
   Hand,
   List,
   Loader2,
-  Paperclip,
   PlugZap,
   RefreshCcw,
   Search,
@@ -2876,10 +2875,6 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                     </DropdownMenu.Portal>
                   </DropdownMenu.Root>
 
-                  <div className="inline-flex h-[29px] w-[29px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">
-                    <ChevronsRight className="h-[15px] w-[15px]" />
-                  </div>
-
                   <DropdownMenu.Root>
                     <DropdownMenu.Trigger asChild>
                       <button
@@ -2909,15 +2904,6 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                       </DropdownMenu.Content>
                     </DropdownMenu.Portal>
                   </DropdownMenu.Root>
-
-                  <button
-                    type="button"
-                    onClick={onOpenAddWorkspace}
-                    className="inline-flex h-[29px] w-[20px] items-center justify-center text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
-                    aria-label="Add workspace"
-                  >
-                    <Paperclip className="h-[18px] w-[18px]" />
-                  </button>
 
                   <DropdownMenu.Root>
                     <DropdownMenu.Trigger asChild>
