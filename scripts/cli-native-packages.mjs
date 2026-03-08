@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
+const NPM_EXECUTABLE = process.platform === "win32" ? "npm.cmd" : "npm";
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -137,7 +139,7 @@ export function packCliNativeReleasePackage({
   const destinationDir = packDestination ? resolve(packDestination) : stage.stageDir;
   mkdirSync(destinationDir, { recursive: true });
 
-  const tarballName = execFileSync("npm", ["pack", "--silent", "--pack-destination", destinationDir], {
+  const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
     cwd: stage.stageDir,
     encoding: "utf8",
   }).trim();

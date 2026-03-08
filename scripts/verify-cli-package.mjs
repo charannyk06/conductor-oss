@@ -11,6 +11,8 @@ import {
   resolveHostCliNativeTargetId,
 } from "./cli-native-packages.mjs";
 
+const NPM_EXECUTABLE = process.platform === "win32" ? "npm.cmd" : "npm";
+
 function fail(message) {
   throw new Error(`release preflight failed: ${message}`);
 }
@@ -730,11 +732,11 @@ try {
   });
   tempDirs.push(nativeStageDir);
 
-  execFileSync("npm", ["init", "-y"], {
+  execFileSync(NPM_EXECUTABLE, ["init", "-y"], {
     cwd: installDir,
     stdio: "ignore",
   });
-  execFileSync("npm", ["install", "--cache", npmCacheDir, "--omit=optional", tarballPath, nativeStageDir], {
+  execFileSync(NPM_EXECUTABLE, ["install", "--cache", npmCacheDir, "--omit=optional", tarballPath, nativeStageDir], {
     cwd: installDir,
     stdio: "inherit",
   });
