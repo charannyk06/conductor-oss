@@ -1,4 +1,4 @@
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
@@ -14,8 +14,13 @@ type ApiResponse = (StatusCode, Json<Value>);
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/repositories", get(list_repositories).put(save_repository))
-        .route("/api/repositories/{id}", delete(delete_repository))
+        .route(
+            "/api/repositories",
+            get(list_repositories)
+                .put(save_repository)
+                .delete(delete_repository_by_query),
+        )
+        .route("/api/repositories/{id}", delete(delete_repository_by_path))
 }
 
 fn ok(value: Value) -> ApiResponse {
@@ -44,6 +49,11 @@ struct SaveRepositoryBody {
     cleanup_script: Option<String>,
     archive_script: Option<String>,
     copy_files: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteRepositoryQuery {
+    id: String,
 }
 
 async fn list_repositories(State(state): State<Arc<AppState>>) -> ApiResponse {
@@ -93,10 +103,21 @@ async fn save_repository(
     }))
 }
 
-async fn delete_repository(
+async fn delete_repository_by_query(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DeleteRepositoryQuery>,
+) -> ApiResponse {
+    delete_repository_by_id(state, query.id).await
+}
+
+async fn delete_repository_by_path(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> ApiResponse {
+    delete_repository_by_id(state, id).await
+}
+
+async fn delete_repository_by_id(state: Arc<AppState>, id: String) -> ApiResponse {
     let mut config = state.config.write().await;
     if !config.projects.contains_key(&id) {
         return error(StatusCode::NOT_FOUND, format!("Repository not found: {id}"));
@@ -136,8 +157,8 @@ fn repository_payload(id: &str, project: &ProjectConfig, default_agent: &str, wo
         "agent": project.agent.clone().unwrap_or_else(|| default_agent.to_string()),
         "agentModel": project.agent_config.model.clone(),
         "agentReasoningEffort": project.agent_config.reasoning_effort.clone(),
-        "workspaceMode": "local",
-        "runtimeMode": project.runtime.clone().unwrap_or_else(|| "rust".to_string()),
+        "workspaceMode": project.workspace.clone().unwrap_or_else(|| "worktree".to_string()),
+        "runtimeMode": project.runtime.clone().unwrap_or_else(|| "tmux".to_string()),
         "scmMode": "git",
         "defaultWorkingDirectory": project.default_working_directory.clone().unwrap_or_default(),
         "defaultBranch": project.default_branch.clone(),
