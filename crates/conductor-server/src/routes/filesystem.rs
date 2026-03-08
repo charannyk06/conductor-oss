@@ -34,8 +34,14 @@ async fn read_directory(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DirectoryQuery>,
 ) -> ApiResponse {
-    let requested = query.path.as_deref().map(str::trim).filter(|value| !value.is_empty());
-    let path = requested.map(|value| expand_path(value, &state.workspace_path)).unwrap_or_else(|| state.workspace_path.clone());
+    let requested = query
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let path = requested
+        .map(|value| expand_path(value, &state.workspace_path))
+        .unwrap_or_else(|| state.workspace_path.clone());
     let current_path = if path.is_file() {
         path.parent().map(Path::to_path_buf).unwrap_or(path)
     } else {
@@ -44,6 +50,16 @@ async fn read_directory(
 
     if !current_path.exists() {
         return error(StatusCode::NOT_FOUND, "Directory not found");
+    }
+
+    let current_path = canonicalize_for_access(&current_path);
+
+    // Restrict browsing to allowed root directories to prevent path traversal.
+    if !is_within_allowed_roots(&current_path, &state.workspace_path) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "Access to this directory is not allowed",
+        );
     }
     if !current_path.is_dir() {
         return error(StatusCode::BAD_REQUEST, "Path is not a directory");
@@ -57,7 +73,10 @@ async fn read_directory(
                 .map(|entry| {
                     let path = entry.path();
                     let file_type = entry.file_type().ok();
-                    let is_directory = file_type.as_ref().map(|value| value.is_dir()).unwrap_or(false);
+                    let is_directory = file_type
+                        .as_ref()
+                        .map(|value| value.is_dir())
+                        .unwrap_or(false);
                     json!({
                         "name": entry.file_name().to_string_lossy().to_string(),
                         "path": path.to_string_lossy().to_string(),
@@ -70,7 +89,10 @@ async fn read_directory(
                 let left_dir = left["isDirectory"].as_bool().unwrap_or(false);
                 let right_dir = right["isDirectory"].as_bool().unwrap_or(false);
                 right_dir.cmp(&left_dir).then_with(|| {
-                    left["name"].as_str().unwrap_or_default().cmp(right["name"].as_str().unwrap_or_default())
+                    left["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .cmp(right["name"].as_str().unwrap_or_default())
                 })
             });
             items
@@ -83,6 +105,45 @@ async fn read_directory(
         })),
         Err(response) => response,
     }
+}
+
+/// Allowed root directories for filesystem browsing.
+fn allowed_browse_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        roots.push(home);
+    }
+    // On macOS, /Volumes is common for external drives.
+    #[cfg(target_os = "macos")]
+    roots.push(PathBuf::from("/Volumes"));
+    // On Linux, common project locations.
+    #[cfg(target_os = "linux")]
+    {
+        roots.push(PathBuf::from("/home"));
+        roots.push(PathBuf::from("/opt"));
+    }
+    roots
+}
+
+fn canonicalize_for_access(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn is_within_allowed_roots(path: &Path, workspace_path: &Path) -> bool {
+    let path = canonicalize_for_access(path);
+    let workspace_path = canonicalize_for_access(workspace_path);
+
+    // Always allow workspace path itself.
+    if path.starts_with(workspace_path) {
+        return true;
+    }
+
+    // Check against allowed roots.
+    let roots = allowed_browse_roots();
+    roots
+        .into_iter()
+        .map(|root| canonicalize_for_access(&root))
+        .any(|root| path.starts_with(root))
 }
 
 fn expand_path(value: &str, workspace_path: &Path) -> PathBuf {
@@ -102,7 +163,10 @@ fn expand_path(value: &str, workspace_path: &Path) -> PathBuf {
 async fn pick_directory() -> ApiResponse {
     let result = if cfg!(target_os = "macos") {
         tokio::process::Command::new("osascript")
-            .args(["-e", "POSIX path of (choose folder with prompt \"Select a folder\")"])
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"Select a folder\")",
+            ])
             .output()
             .await
     } else if cfg!(target_os = "windows") {
@@ -143,5 +207,28 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
             ok(json!({ "path": final_path }))
         }
         Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_within_allowed_roots;
+    use std::fs;
+
+    #[test]
+    fn allowed_root_check_rejects_workspace_relative_path_traversal() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let workspace_path = root.join("workspace");
+        let outside_path = root.join("outside");
+        fs::create_dir_all(&workspace_path).unwrap();
+        fs::create_dir_all(&outside_path).unwrap();
+
+        let traversal_path = workspace_path.join("..").join("outside");
+
+        assert!(is_within_allowed_roots(&workspace_path, &workspace_path));
+        assert!(!is_within_allowed_roots(&traversal_path, &workspace_path));
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }

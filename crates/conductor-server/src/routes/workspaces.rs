@@ -336,6 +336,52 @@ fn repo_name_from_url(value: &str) -> Option<&str> {
         .filter(|segment| !segment.is_empty())
 }
 
+/// Validate that a git URL looks like a legitimate repository URL
+/// and does not attempt to inject CLI flags or target internal services.
+fn validate_git_url(url: &str) -> Result<(), String> {
+    let trimmed = url.trim();
+    // Reject flag injection: URLs starting with "-" could be interpreted as git flags.
+    if trimmed.starts_with('-') {
+        return Err("Invalid git URL: must not start with '-'".to_string());
+    }
+    // Only allow known protocols.
+    let has_known_protocol = trimmed.starts_with("https://")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("git://")
+        || trimmed.starts_with("git@")
+        || trimmed.starts_with("ssh://");
+    if !has_known_protocol {
+        return Err(
+            "Invalid git URL: must use https://, http://, git://, ssh://, or git@ protocol"
+                .to_string(),
+        );
+    }
+    // Block requests to cloud metadata endpoints (SSRF).
+    let lower = trimmed.to_lowercase();
+    if lower.contains("169.254.169.254")
+        || lower.contains("metadata.google")
+        || lower.contains("[fd00:")
+        || lower.contains("localhost")
+        || lower.contains("127.0.0.1")
+        || lower.contains("[::1]")
+    {
+        return Err("Invalid git URL: internal/metadata addresses are not allowed".to_string());
+    }
+    Ok(())
+}
+
+/// Validate that a branch name is safe for use as a CLI argument.
+fn validate_branch_name(branch: &str) -> Result<(), String> {
+    let trimmed = branch.trim();
+    if trimmed.starts_with('-') {
+        return Err("Invalid branch name: must not start with '-'".to_string());
+    }
+    if trimmed.contains("..") {
+        return Err("Invalid branch name: must not contain '..'".to_string());
+    }
+    Ok(())
+}
+
 fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -385,11 +431,15 @@ fn ensure_project_root_board(project_path: &Path, project_id: &str) -> std::io::
 }
 
 async fn clone_repository(git_url: &str, path: &Path, branch: &str) -> anyhow::Result<()> {
+    validate_git_url(git_url).map_err(|e| anyhow::anyhow!(e))?;
+    validate_branch_name(branch).map_err(|e| anyhow::anyhow!(e))?;
+
     let output = Command::new("git")
         .args([
             "clone",
             "--branch",
             branch,
+            "--", // End of options: prevents git_url from being interpreted as a flag
             git_url,
             path.to_string_lossy().as_ref(),
         ])
@@ -402,11 +452,12 @@ async fn clone_repository(git_url: &str, path: &Path, branch: &str) -> anyhow::R
 }
 
 async fn init_repository(path: &Path, branch: &str) -> anyhow::Result<()> {
+    validate_branch_name(branch).map_err(|e| anyhow::anyhow!(e))?;
     if !path.exists() {
         std::fs::create_dir_all(path)?;
     }
     let output = Command::new("git")
-        .args(["init", "-b", branch, path.to_string_lossy().as_ref()])
+        .args(["init", "-b", branch, "--", path.to_string_lossy().as_ref()])
         .output()
         .await?;
     if !output.status.success() {
@@ -458,8 +509,10 @@ async fn detect_local_branches(path: &Path) -> anyhow::Result<(Vec<String>, Opti
 }
 
 async fn detect_remote_branches(git_url: &str) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    validate_git_url(git_url).map_err(|e| anyhow::anyhow!(e))?;
+
     let branch_output = Command::new("git")
-        .args(["ls-remote", "--heads", git_url])
+        .args(["ls-remote", "--heads", "--", git_url])
         .output()
         .await?;
     if !branch_output.status.success() {
@@ -474,7 +527,7 @@ async fn detect_remote_branches(git_url: &str) -> anyhow::Result<(Vec<String>, O
     branches.sort();
 
     let head_output = Command::new("git")
-        .args(["ls-remote", "--symref", git_url, "HEAD"])
+        .args(["ls-remote", "--symref", "--", git_url, "HEAD"])
         .output()
         .await?;
     let default_branch = if head_output.status.success() {

@@ -145,8 +145,9 @@ impl TaskRow {
             _ => TaskState::Inbox,
         };
 
-        let priority: Priority = serde_json::from_str(&format!("\"{}\"", self.priority.trim_matches('"')))
-            .unwrap_or_default();
+        let priority: Priority =
+            serde_json::from_str(&format!("\"{}\"", self.priority.trim_matches('"')))
+                .unwrap_or_default();
 
         Ok(Task {
             id: Uuid::parse_str(&self.id)?,
@@ -165,7 +166,11 @@ impl TaskRow {
             parent_id: self.parent_id.and_then(|id| Uuid::parse_str(&id).ok()),
             created_at: DateTime::parse_from_rfc3339(&self.created_at)?.with_timezone(&chrono::Utc),
             updated_at: DateTime::parse_from_rfc3339(&self.updated_at)?.with_timezone(&chrono::Utc),
-            completed_at: self.completed_at.and_then(|t| DateTime::parse_from_rfc3339(&t).ok().map(|d| d.with_timezone(&chrono::Utc))),
+            completed_at: self.completed_at.and_then(|t| {
+                DateTime::parse_from_rfc3339(&t)
+                    .ok()
+                    .map(|d| d.with_timezone(&chrono::Utc))
+            }),
         })
     }
 }

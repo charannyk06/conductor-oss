@@ -43,10 +43,7 @@ impl Executor for CodexExecutor {
     }
 
     async fn version(&self) -> Result<String> {
-        let output = Command::new(&self.binary)
-            .arg("--version")
-            .output()
-            .await?;
+        let output = Command::new(&self.binary).arg("--version").output().await?;
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
@@ -80,7 +77,12 @@ impl Executor for CodexExecutor {
             args.push(model.clone());
         }
 
-        args.extend(options.extra_args.clone());
+        if let Some(reasoning_effort) = &options.reasoning_effort {
+            args.push("-c".to_string());
+            args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+        }
+
+        args.extend(options.sanitized_extra_args());
 
         // codex exec takes the prompt as a positional argument in headless mode.
         args.push(options.prompt.clone());
@@ -111,17 +113,32 @@ impl Executor for CodexExecutor {
                         if let Some(item) = value.get("item") {
                             match item.get("type").and_then(|v| v.as_str()) {
                                 Some("command_execution") => {
-                                    if let Some(command) = item.get("command").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+                                    if let Some(command) = item
+                                        .get("command")
+                                        .and_then(|v| v.as_str())
+                                        .map(str::trim)
+                                        .filter(|v| !v.is_empty())
+                                    {
                                         return ExecutorOutput::StructuredStatus {
                                             text: "Command".to_string(),
-                                            metadata: tool_metadata("command", "Command", "running", vec![command.to_string()]),
+                                            metadata: tool_metadata(
+                                                "command",
+                                                "Command",
+                                                "running",
+                                                vec![command.to_string()],
+                                            ),
                                         };
                                     }
                                 }
                                 Some("reasoning") => {
                                     return ExecutorOutput::StructuredStatus {
                                         text: "Thinking".to_string(),
-                                        metadata: tool_metadata("thinking", "Thinking", "running", Vec::new()),
+                                        metadata: tool_metadata(
+                                            "thinking",
+                                            "Thinking",
+                                            "running",
+                                            Vec::new(),
+                                        ),
                                     };
                                 }
                                 Some("mcp_tool_call") => {
@@ -149,8 +166,12 @@ impl Executor for CodexExecutor {
                                     }
                                 }
                                 Some("reasoning") => return ExecutorOutput::Stdout(String::new()),
-                                Some("command_execution") => return ExecutorOutput::Stdout(String::new()),
-                                Some("mcp_tool_call") => return ExecutorOutput::Stdout(String::new()),
+                                Some("command_execution") => {
+                                    return ExecutorOutput::Stdout(String::new())
+                                }
+                                Some("mcp_tool_call") => {
+                                    return ExecutorOutput::Stdout(String::new())
+                                }
                                 _ => {}
                             }
                         }
@@ -198,7 +219,12 @@ impl Executor for CodexExecutor {
 }
 
 fn tool_title_from_item(item: &Value) -> String {
-    if let Some(tool) = item.get("tool").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(tool) = item
+        .get("tool")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         return tool
             .split(['_', '-'])
             .filter(|segment| !segment.is_empty())
@@ -209,7 +235,9 @@ fn tool_title_from_item(item: &Value) -> String {
                     _ => {
                         let mut chars = lower.chars();
                         match chars.next() {
-                            Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                            Some(first) => {
+                                format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+                            }
                             None => String::new(),
                         }
                     }
@@ -233,13 +261,28 @@ fn tool_kind_from_item(item: &Value) -> String {
 
 fn tool_content_from_item(item: &Value) -> Vec<String> {
     let mut content = Vec::new();
-    if let Some(server) = item.get("server").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(server) = item
+        .get("server")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         content.push(format!("server: {server}"));
     }
     if let Some(arguments) = item.get("arguments") {
-        if let Some(path) = arguments.get("path").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(path) = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             content.push(path.to_string());
-        } else if let Some(pattern) = arguments.get("pattern").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+        } else if let Some(pattern) = arguments
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             content.push(pattern.to_string());
         } else if let Ok(serialized) = serde_json::to_string(arguments) {
             if !serialized.trim().is_empty() && serialized != "{}" {
@@ -258,8 +301,14 @@ fn tool_metadata(
 ) -> HashMap<String, Value> {
     let mut metadata = HashMap::new();
     metadata.insert("toolKind".to_string(), Value::String(tool_kind.to_string()));
-    metadata.insert("toolTitle".to_string(), Value::String(tool_title.to_string()));
-    metadata.insert("toolStatus".to_string(), Value::String(tool_status.to_string()));
+    metadata.insert(
+        "toolTitle".to_string(),
+        Value::String(tool_title.to_string()),
+    );
+    metadata.insert(
+        "toolStatus".to_string(),
+        Value::String(tool_status.to_string()),
+    );
     metadata.insert(
         "toolContent".to_string(),
         Value::Array(tool_content.into_iter().map(Value::String).collect()),
@@ -281,12 +330,40 @@ mod tests {
             panic!("expected structured status");
         };
         assert_eq!(text, "Read Text File");
-        assert_eq!(metadata.get("toolKind").and_then(Value::as_str), Some("read_text_file"));
+        assert_eq!(
+            metadata.get("toolKind").and_then(Value::as_str),
+            Some("read_text_file")
+        );
+    }
+
+    #[test]
+    fn build_args_includes_reasoning_effort_override() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+        });
+
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"gpt-5".to_string()));
+        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"model_reasoning_effort=\"high\"".to_string()));
     }
 }
 
 fn extract_text(value: &Value) -> Option<String> {
-    if let Some(text) = value.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(text) = value
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         return Some(text.to_string());
     }
 

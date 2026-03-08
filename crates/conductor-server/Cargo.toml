@@ -24,4 +24,13 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
+jsonwebtoken = "9"
 libc = "0.2"
+glob = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tower = "0.5"
+base64 = "0.22"
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }

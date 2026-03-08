@@ -34,8 +34,15 @@ pub async fn discover_executors() -> HashMap<AgentKind, Arc<dyn Executor>> {
     if executors.is_empty() {
         tracing::warn!("No agent executors found. Install at least one CLI: claude, codex, gemini, amp, cursor, opencode, droid, qwen, copilot");
     } else {
-        tracing::info!("Found {} executor(s): {}", executors.len(),
-            executors.keys().map(|k| k.to_string()).collect::<Vec<_>>().join(", "));
+        tracing::info!(
+            "Found {} executor(s): {}",
+            executors.len(),
+            executors
+                .keys()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     executors

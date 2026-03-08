@@ -61,7 +61,14 @@ async fn list_repositories(State(state): State<Arc<AppState>>) -> ApiResponse {
     let repositories = config
         .projects
         .iter()
-        .map(|(id, project)| repository_payload(id, project, &config.preferences.coding_agent, &state.workspace_path))
+        .map(|(id, project)| {
+            repository_payload(
+                id,
+                project,
+                &config.preferences.coding_agent,
+                &state.workspace_path,
+            )
+        })
         .collect::<Vec<_>>();
     ok(json!({ "repositories": repositories }))
 }
@@ -75,15 +82,37 @@ async fn save_repository(
     }
 
     let mut config = state.config.write().await;
-    let project = config.projects.entry(body.id.clone()).or_insert_with(ProjectConfig::default);
-    project.name = body.display_name.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let project = config
+        .projects
+        .entry(body.id.clone())
+        .or_insert_with(ProjectConfig::default);
+    project.name = body
+        .display_name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     project.repo = Some(body.repo.trim().to_string());
     project.path = body.path.trim().to_string();
-    project.agent = body.agent.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-    project.default_branch = body.default_branch.unwrap_or_else(|| "main".to_string()).trim().to_string();
-    project.default_working_directory = body.default_working_directory.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-    project.agent_config.model = body.agent_model.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
-    project.agent_config.reasoning_effort = body.agent_reasoning_effort.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    project.agent = body
+        .agent
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    project.default_branch = body
+        .default_branch
+        .unwrap_or_else(|| "main".to_string())
+        .trim()
+        .to_string();
+    project.default_working_directory = body
+        .default_working_directory
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    project.agent_config.model = body
+        .agent_model
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    project.agent_config.reasoning_effort = body
+        .agent_reasoning_effort
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     project.run_setup_in_parallel = body.run_setup_in_parallel.unwrap_or(false);
     project.dev_server_script = split_lines(body.dev_server_script.as_deref());
     project.setup_script = split_lines(body.setup_script.as_deref());
@@ -142,7 +171,12 @@ fn split_lines(value: Option<&str>) -> Vec<String> {
         .collect()
 }
 
-fn repository_payload(id: &str, project: &ProjectConfig, default_agent: &str, workspace_path: &Path) -> Value {
+fn repository_payload(
+    id: &str,
+    project: &ProjectConfig,
+    default_agent: &str,
+    workspace_path: &Path,
+) -> Value {
     let resolved_path = resolve_project_path(workspace_path, &project.path);
     let exists = resolved_path.exists();
     let is_git_repository = resolved_path.join(".git").exists();
@@ -185,7 +219,12 @@ fn resolve_project_path(workspace_path: &Path, configured: &str) -> PathBuf {
     }
 }
 
-fn suggest_git_path(workspace_path: &Path, id: &str, project: &ProjectConfig, resolved_path: &Path) -> Option<PathBuf> {
+fn suggest_git_path(
+    workspace_path: &Path,
+    id: &str,
+    project: &ProjectConfig,
+    resolved_path: &Path,
+) -> Option<PathBuf> {
     if resolved_path.join(".git").exists() {
         return None;
     }
@@ -204,5 +243,7 @@ fn suggest_git_path(workspace_path: &Path, id: &str, project: &ProjectConfig, re
         workspace_path.join("projects").join(id),
     ];
 
-    candidates.into_iter().find(|candidate| candidate.join(".git").exists())
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join(".git").exists())
 }

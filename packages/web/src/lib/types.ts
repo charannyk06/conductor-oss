@@ -149,6 +149,9 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   ) {
     return "respond";
   }
+  if (session.status === "queued") {
+    return "pending";
+  }
   // Exited agent with non-terminal status = crashed
   if (session.activity === "exited") {
     return "respond";

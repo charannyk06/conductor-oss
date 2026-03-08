@@ -7,6 +7,7 @@ pub mod events;
 pub mod filesystem;
 pub mod github;
 pub mod health;
+pub mod middleware;
 pub mod notifications;
 pub mod projects;
 pub mod repositories;

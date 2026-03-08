@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { type FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { GitBranchIcon, LockIcon, MarkGithubIcon, RepoIcon } from "@primer/octicons-react";
 import {
   getAvailableAgentModels,
   getAvailableAgentReasoningEfforts,
@@ -32,7 +33,6 @@ import {
   FolderOpen,
   FolderGit2,
   FolderKanban,
-  Github,
   Hand,
   List,
   Loader2,
@@ -163,6 +163,77 @@ function formatCurrentModelLabel(agentName: string, modelId: string): string {
     .join("-");
 }
 
+function suggestWorkspaceId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+function extractNameFromPath(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const segments = trimmed.split(/[\\/]+/).filter(Boolean);
+  return segments.at(-1) ?? null;
+}
+
+function extractRepositoryNameFromGitUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const sshMatch = trimmed.match(/^git@[^:]+:([^/]+)\/([^/\s]+?)(?:\.git)?$/i);
+  if (sshMatch) {
+    return sshMatch[2] ?? null;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const last = segments.at(-1);
+    return last ? last.replace(/\.git$/i, "") : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeGitHubRepositoryUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const httpsMatch = trimmed.match(/^https?:\/\/github\.com\/([^/\s]+)\/([^/\s?#]+?)(?:\.git)?\/?$/i);
+  if (httpsMatch) {
+    return `https://github.com/${httpsMatch[1]}/${httpsMatch[2]}.git`;
+  }
+
+  const sshMatch = trimmed.match(/^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i);
+  if (sshMatch) {
+    return `https://github.com/${sshMatch[1]}/${sshMatch[2]}.git`;
+  }
+
+  return null;
+}
+
+function normalizeManualGitUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^(https?:\/\/|git@)/i.test(trimmed)) {
+    return trimmed;
+  }
+  return null;
+}
+
+function formatRepoUpdatedLabel(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return null;
+  return `Updated ${new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(new Date(timestamp))}`;
+}
+
 type NewWorkspacePayload = {
   mode: "git" | "local";
   projectId?: string;
@@ -206,6 +277,10 @@ type GitHubRepo = {
   sshUrl: string;
   defaultBranch: string;
   private: boolean;
+  description?: string | null;
+  updatedAt?: string | null;
+  ownerLogin?: string | null;
+  permission?: string | null;
 };
 
 type DirectoryEntry = {
@@ -937,7 +1012,7 @@ export default function DashboardClient() {
       return;
     }
 
-    if (!selectedProjectId || !projects.some((project) => project.id === selectedProjectId)) {
+    if (selectedProjectId !== null && !projects.some((project) => project.id === selectedProjectId)) {
       setSelectedProjectId(projects[0]?.id ?? null);
     }
   }, [projects, selectedProjectId]);
@@ -1380,7 +1455,6 @@ export default function DashboardClient() {
 
   const sidebarContent = useMemo(() => (
     <WorkspaceSidebarPanel
-      orgLabel="conductor-oss"
       projects={projects}
       selectedProjectId={selectedProjectId}
       onSelectProject={handleSelectProject}
@@ -1457,6 +1531,56 @@ export default function DashboardClient() {
     workspaceView,
   ]);
 
+  const projectWorkspaceContent = useMemo(() => {
+    if (!selectedProject) return workspaceMainPanel;
+
+    return (
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/70 px-3 py-3 sm:px-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                Project Workspace
+              </p>
+              <p className="mt-1 truncate text-[14px] text-[var(--vk-text-strong)]">
+                {selectedProject.id} · {selectedProject.defaultBranch || "main"}
+              </p>
+            </div>
+
+            <div className="inline-flex w-fit rounded-[6px] border border-[var(--vk-border)] p-1">
+              <button
+                type="button"
+                onClick={() => setWorkspaceView("chat")}
+                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
+                  workspaceView === "chat"
+                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                }`}
+              >
+                Chat launchpad
+              </button>
+              <button
+                type="button"
+                onClick={() => setWorkspaceView("board")}
+                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
+                  workspaceView === "board"
+                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                }`}
+              >
+                Board view
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {workspaceMainPanel}
+        </div>
+      </div>
+    );
+  }, [selectedProject, workspaceMainPanel, workspaceView]);
+
   const workspaceContent = useMemo(() => {
     if (selectedSessionId) {
       return <SessionDetail sessionId={selectedSessionId} />;
@@ -1465,7 +1589,7 @@ export default function DashboardClient() {
     if (selectedProjectId !== null) {
       return (
         <div className="min-h-0 flex-1 overflow-hidden">
-          {workspaceMainPanel}
+          {projectWorkspaceContent}
         </div>
       );
     }
@@ -1476,25 +1600,22 @@ export default function DashboardClient() {
           projects={projects}
           sessions={dashboardSessions}
           selectedProjectId={selectedProjectId}
-          workspaceView={workspaceView}
           agentCount={agentOptions.length}
           onCreateWorkspace={openWorkspaceDialog}
           onSelectProject={handleSelectProject}
           onSelectSession={handleSelectSession}
-          onShowView={setWorkspaceView}
         />
       </div>
     );
   }, [
     dashboardSessions,
+    projectWorkspaceContent,
     selectedSessionId,
-    workspaceMainPanel,
     handleSelectProject,
     handleSelectSession,
     openWorkspaceDialog,
     projects,
     selectedProjectId,
-    workspaceView,
     agentOptions.length,
   ]);
 
@@ -1570,6 +1691,7 @@ function NewWorkspaceDialog({
 }) {
   const [mode, setMode] = useState<"git" | "local">("git");
   const [projectId, setProjectId] = useState("");
+  const [projectIdTouched, setProjectIdTouched] = useState(false);
   const [gitUrl, setGitUrl] = useState("");
   const [path, setPath] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
@@ -1578,6 +1700,7 @@ function NewWorkspaceDialog({
   const [initializeGit, setInitializeGit] = useState(true);
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
   const [githubReposLoading, setGithubReposLoading] = useState(false);
+  const [githubReposLoaded, setGithubReposLoaded] = useState(false);
   const [githubReposError, setGithubReposError] = useState<string | null>(null);
   const [githubRepoSearch, setGithubRepoSearch] = useState("");
   const [selectedGithubRepo, setSelectedGithubRepo] = useState("");
@@ -1591,6 +1714,7 @@ function NewWorkspaceDialog({
     if (!open) return;
     setMode("git");
     setProjectId("");
+    setProjectIdTouched(false);
     setGitUrl("");
     setPath("");
     setDefaultBranch("main");
@@ -1598,6 +1722,7 @@ function NewWorkspaceDialog({
     setUseWorktree(true);
     setAgent(defaultAgent);
     setGithubRepos([]);
+    setGithubReposLoaded(false);
     setGithubReposError(null);
     setGithubRepoSearch("");
     setSelectedGithubRepo("");
@@ -1617,14 +1742,41 @@ function NewWorkspaceDialog({
   }, [mode, open, path]);
 
   const filteredGitHubRepos = useMemo(() => {
-    if (githubRepoSearch.trim().length === 0) return githubRepos;
     const query = githubRepoSearch.trim().toLowerCase();
-    return githubRepos.filter((repo) => {
+    const filtered = query.length === 0 ? githubRepos : githubRepos.filter((repo) => {
       return repo.fullName.toLowerCase().includes(query)
         || repo.name.toLowerCase().includes(query)
+        || (repo.ownerLogin ?? "").toLowerCase().includes(query)
+        || (repo.description ?? "").toLowerCase().includes(query)
         || repo.defaultBranch.toLowerCase().includes(query);
     });
+    return query.length === 0 ? filtered.slice(0, 10) : filtered.slice(0, 14);
   }, [githubRepoSearch, githubRepos]);
+
+  const selectedGitHubRepoData = useMemo(() => {
+    const selected = githubRepos.find((repo) => repo.httpsUrl === selectedGithubRepo);
+    if (selected) return selected;
+    if (!gitUrl.trim()) return null;
+    return githubRepos.find((repo) => repo.httpsUrl === gitUrl.trim()) ?? null;
+  }, [gitUrl, githubRepos, selectedGithubRepo]);
+
+  const normalizedGitHubSearchUrl = useMemo(
+    () => normalizeGitHubRepositoryUrl(githubRepoSearch),
+    [githubRepoSearch],
+  );
+  const normalizedManualGitUrl = useMemo(
+    () => normalizeManualGitUrl(githubRepoSearch),
+    [githubRepoSearch],
+  );
+  const selectedRepoUpdatedLabel = useMemo(
+    () => formatRepoUpdatedLabel(selectedGitHubRepoData?.updatedAt),
+    [selectedGitHubRepoData],
+  );
+  const showUseSearchValueAction = useMemo(() => {
+    const normalizedUrl = normalizedGitHubSearchUrl ?? normalizedManualGitUrl;
+    if (!normalizedUrl) return false;
+    return normalizedUrl.toLowerCase() !== gitUrl.trim().toLowerCase();
+  }, [gitUrl, normalizedGitHubSearchUrl, normalizedManualGitUrl]);
 
   const orderedAgentOptions = useMemo(() => {
     const opts = [...new Set(agentOptions)];
@@ -1647,13 +1799,12 @@ function NewWorkspaceDialog({
     }
   }, [agent, orderedAgentOptions]);
 
-  const handleFetchGitHubRepos = async () => {
+  const handleFetchGitHubRepos = async (forceRefresh = false) => {
     setGithubReposLoading(true);
     setGithubReposError(null);
     try {
-      const query = githubRepoSearch.trim();
-      const queryParam = query.length > 0 ? `?q=${encodeURIComponent(query)}` : "";
-      const res = await fetch(`/api/github/repos${queryParam}`);
+      const query = forceRefresh ? "?refresh=true" : "";
+      const res = await fetch(`/api/github/repos${query}`);
       const data = (await res.json().catch(() => null)) as
         | { repos?: GitHubRepo[]; error?: string }
         | null;
@@ -1667,9 +1818,16 @@ function NewWorkspaceDialog({
         err instanceof Error ? err.message : "Failed to load GitHub repositories",
       );
     } finally {
+      setGithubReposLoaded(true);
       setGithubReposLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!open || mode !== "git") return;
+    if (githubReposLoading || githubReposLoaded) return;
+    void handleFetchGitHubRepos();
+  }, [githubReposLoaded, githubReposLoading, mode, open]);
 
   const handleDetectBranches = async (
     sourceOverride?: { gitUrl?: string; path?: string },
@@ -1680,7 +1838,7 @@ function NewWorkspaceDialog({
     if (effectiveGitUrl.length === 0 && effectivePath.length === 0) {
       setBranchesError(
         mode === "git"
-          ? "Enter a Git URL first."
+          ? "Choose or paste a repository first."
           : "Select a local repository path first.",
       );
       return;
@@ -1732,17 +1890,39 @@ function NewWorkspaceDialog({
     if (!selected) return;
 
     setGitUrl(selected.httpsUrl);
+    setGithubRepoSearch(selected.fullName);
     setDefaultBranch(selected.defaultBranch || "main");
-    if (projectId.trim().length === 0) {
-      const suggestedProjectId = selected.name
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .slice(0, 64);
+    if (!projectIdTouched) {
+      const suggestedProjectId = suggestWorkspaceId(selected.name);
       setProjectId(suggestedProjectId || projectId);
     }
 
     await handleDetectBranches({ gitUrl: selected.httpsUrl });
+  };
+
+  const handleUseSearchValueAsRepository = async () => {
+    const normalizedUrl = normalizedGitHubSearchUrl ?? normalizedManualGitUrl;
+    if (!normalizedUrl) return;
+
+    const matchingRepo = githubRepos.find((repo) => repo.httpsUrl.toLowerCase() === normalizedUrl.toLowerCase()) ?? null;
+    if (matchingRepo) {
+      await handleSelectGitHubRepo(matchingRepo.httpsUrl);
+      return;
+    }
+
+    setSelectedGithubRepo("");
+    setGitUrl(normalizedUrl);
+    setDefaultBranch("main");
+    setBranchOptions([]);
+    setBranchesError(null);
+    if (!projectIdTouched) {
+      const repoName = extractRepositoryNameFromGitUrl(normalizedUrl);
+      if (repoName) {
+        setProjectId(suggestWorkspaceId(repoName));
+      }
+    }
+
+    await handleDetectBranches({ gitUrl: normalizedUrl });
   };
 
   const openFolderPicker = (target: "clone" | "local") => {
@@ -1803,7 +1983,7 @@ function NewWorkspaceDialog({
             <div>
               <h2 className="text-[18px] leading-[22px] text-[var(--vk-text-strong)]">Add Workspace</h2>
               <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">
-                Select a repository with a folder picker, then choose the target branch.
+                Pick a GitHub repository or local folder, then confirm the branch.
               </p>
             </div>
             <button
@@ -1828,7 +2008,7 @@ function NewWorkspaceDialog({
                     : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                 }`}
               >
-                Git Repository
+                GitHub
               </button>
               <button
                 type="button"
@@ -1843,103 +2023,198 @@ function NewWorkspaceDialog({
               </button>
             </div>
 
-            <label className="block">
-              <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Project ID (optional)</span>
-              <input
-                value={projectId}
-                onChange={(event) => setProjectId(event.target.value)}
-                placeholder="auto-derived from repo/folder"
-                className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-              />
-            </label>
-
             {mode === "git" ? (
               <>
-                <div className="rounded-[4px] border border-[var(--vk-border)] p-3">
-                  <div className="flex items-center gap-2">
-                    <Github className="h-4 w-4 text-[var(--vk-text-muted)]" />
-                    <span className="text-[12px] font-medium text-[var(--vk-text-normal)]">GitHub Integration</span>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                <div className="rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3">
+                  <div className="flex items-start gap-3">
+                    <span className="inline-flex h-9 w-9 items-center justify-center rounded-[5px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-strong)]">
+                      <MarkGithubIcon className="h-[18px] w-[18px]" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-medium text-[var(--vk-text-strong)]">GitHub Repository</p>
+                      <p className="pt-0.5 text-[12px] text-[var(--vk-text-muted)]">
+                        Search accessible repositories or paste a repository URL. Conductor fills the branch and clone URL after selection.
+                      </p>
+                    </div>
                     <button
                       type="button"
-                      onClick={handleFetchGitHubRepos}
+                      onClick={() => {
+                        setGithubReposLoaded(false);
+                        void handleFetchGitHubRepos(true);
+                      }}
                       disabled={githubReposLoading}
                       className="inline-flex h-8 items-center rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
                     >
                       {githubReposLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
                         <>
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                          Loading repos...
+                          <RefreshCcw className="mr-1.5 h-3.5 w-3.5" />
+                          Refresh
                         </>
-                      ) : "Load My GitHub Repositories"}
+                      )}
                     </button>
-                    <div className="relative min-w-[220px] flex-1">
-                      <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--vk-text-muted)]" />
-                      <input
-                        value={githubRepoSearch}
-                        onChange={(event) => setGithubRepoSearch(event.target.value)}
-                        placeholder="Filter repos..."
-                        className="h-8 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent pl-7 pr-2 text-[12px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                      />
-                    </div>
                   </div>
-                  {filteredGitHubRepos.length > 0 && (
-                    <label className="mt-2 block">
-                      <span className="mb-1 block text-[11px] text-[var(--vk-text-muted)]">Choose repository</span>
-                      <select
-                        value={selectedGithubRepo}
-                        onChange={(event) => {
-                          void handleSelectGitHubRepo(event.target.value);
-                        }}
-                        className="h-8 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[12px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                      >
-                        <option value="">Select a GitHub repo...</option>
-                        {filteredGitHubRepos.map((repo) => (
-                          <option key={repo.httpsUrl} value={repo.httpsUrl}>
-                            {repo.fullName} ({repo.defaultBranch})
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                  {githubReposError && (
-                    <p className="mt-2 text-[11px] text-[var(--vk-red)]">{githubReposError}</p>
-                  )}
-                </div>
 
-                <label className="block">
-                  <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Git URL</span>
-                  <input
-                    value={gitUrl}
-                    onChange={(event) => setGitUrl(event.target.value)}
-                    placeholder="https://github.com/org/repo.git"
-                    className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                  />
-                </label>
-
-                <label className="block">
-                  <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">
-                    Local Path (optional, clone target)
-                  </span>
-                  <div className="flex items-center gap-2">
+                  <div className="relative mt-3">
+                    <MarkGithubIcon className="pointer-events-none absolute left-3 top-1/2 h-[16px] w-[16px] -translate-y-1/2 text-[var(--vk-text-muted)]" />
                     <input
-                      value={path}
-                      readOnly
-                      onClick={() => openFolderPicker("clone")}
-                      placeholder="Use Browse to choose a clone target folder"
-                      className="h-9 w-full cursor-pointer rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                      value={githubRepoSearch}
+                      onChange={(event) => setGithubRepoSearch(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && showUseSearchValueAction) {
+                          event.preventDefault();
+                          void handleUseSearchValueAsRepository();
+                        }
+                      }}
+                      placeholder="Search GitHub repos or paste a repository URL"
+                      className="h-10 w-full rounded-[5px] border border-[var(--vk-border)] bg-transparent pl-10 pr-3 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                     />
+                  </div>
+
+                  {showUseSearchValueAction ? (
                     <button
                       type="button"
-                      onClick={() => openFolderPicker("clone")}
-                      className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-                      title="Browse folders"
+                      onClick={() => {
+                        void handleUseSearchValueAsRepository();
+                      }}
+                      className="mt-3 inline-flex items-center gap-2 rounded-[5px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
                     >
-                      <FolderOpen className="h-4 w-4" />
+                      <RepoIcon className="h-4 w-4 text-[var(--vk-text-strong)]" />
+                      <span className="truncate">
+                        Use {normalizedGitHubSearchUrl ? "this GitHub repository" : "pasted repository URL"}
+                      </span>
                     </button>
+                  ) : null}
+
+                  {githubReposLoading && githubRepos.length === 0 ? (
+                    <div className="mt-3 rounded-[5px] border border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                      Loading accessible GitHub repositories...
+                    </div>
+                  ) : null}
+
+                  {githubReposError ? (
+                    <div className="mt-3 rounded-[5px] border border-[var(--vk-red)]/40 bg-[var(--vk-bg-panel)] px-3 py-3 text-[12px] text-[var(--vk-red)]">
+                      <p>{githubReposError}</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setGithubReposLoaded(false);
+                          void handleFetchGitHubRepos(true);
+                        }}
+                        className="mt-2 inline-flex items-center rounded-[4px] border border-[var(--vk-border)] px-2 py-1 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {!githubReposError && filteredGitHubRepos.length > 0 ? (
+                    <div className="mt-3 max-h-[260px] space-y-2 overflow-y-auto pr-1">
+                      {filteredGitHubRepos.map((repo) => {
+                        const repoUpdatedLabel = formatRepoUpdatedLabel(repo.updatedAt);
+                        const selected = selectedGitHubRepoData?.httpsUrl === repo.httpsUrl;
+                        return (
+                          <button
+                            key={repo.httpsUrl}
+                            type="button"
+                            onClick={() => {
+                              void handleSelectGitHubRepo(repo.httpsUrl);
+                            }}
+                            className={`flex w-full items-start gap-3 rounded-[5px] border px-3 py-3 text-left transition ${
+                              selected
+                                ? "border-[var(--vk-orange)] bg-[var(--vk-bg-panel)]"
+                                : "border-[var(--vk-border)] bg-[var(--vk-bg-panel)] hover:bg-[var(--vk-bg-hover)]"
+                            }`}
+                          >
+                            <span className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[5px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-strong)]">
+                              <RepoIcon className="h-4 w-4" />
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="flex flex-wrap items-center gap-2">
+                                <span className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">
+                                  {repo.fullName}
+                                </span>
+                                <span className="inline-flex items-center gap-1 rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                                  {repo.private ? <LockIcon className="h-3 w-3" /> : <MarkGithubIcon className="h-3 w-3" />}
+                                  {repo.private ? "Private" : "Public"}
+                                </span>
+                                <span className="inline-flex items-center gap-1 rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                                  <GitBranchIcon className="h-3 w-3" />
+                                  {repo.defaultBranch}
+                                </span>
+                              </span>
+                              {repo.description ? (
+                                <span className="mt-1 block line-clamp-2 text-[12px] leading-[17px] text-[var(--vk-text-muted)]">
+                                  {repo.description}
+                                </span>
+                              ) : null}
+                              <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--vk-text-muted)]">
+                                {repo.ownerLogin ? <span>{repo.ownerLogin}</span> : null}
+                                {repoUpdatedLabel ? <span>{repoUpdatedLabel}</span> : null}
+                                {repo.permission ? <span>{repo.permission.toLowerCase()}</span> : null}
+                              </span>
+                            </span>
+                            <span className="ml-auto inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--vk-text-strong)]">
+                              {selected ? <Check className="h-4 w-4" /> : null}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  {!githubReposLoading && !githubReposError && filteredGitHubRepos.length === 0 ? (
+                    <p className="mt-3 text-[12px] text-[var(--vk-text-muted)]">
+                      {githubRepoSearch.trim().length > 0
+                        ? "No matching repositories. Try another search or paste a repository URL."
+                        : "No accessible GitHub repositories were found for this machine yet."}
+                    </p>
+                  ) : null}
+                </div>
+
+                {gitUrl.trim().length > 0 ? (
+                  <div className="rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3">
+                    <div className="flex items-start gap-3">
+                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-[5px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-strong)]">
+                        <RepoIcon className="h-[18px] w-[18px]" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="truncate text-[14px] font-medium text-[var(--vk-text-strong)]">
+                            {selectedGitHubRepoData?.fullName ?? gitUrl}
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                            {selectedGitHubRepoData ? (
+                              selectedGitHubRepoData.private ? <LockIcon className="h-3 w-3" /> : <MarkGithubIcon className="h-3 w-3" />
+                            ) : (
+                              <MarkGithubIcon className="h-3 w-3" />
+                            )}
+                            {selectedGitHubRepoData ? (selectedGitHubRepoData.private ? "Private" : "Public") : "Manual URL"}
+                          </span>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                            <GitBranchIcon className="h-3 w-3" />
+                            {defaultBranch || "main"}
+                          </span>
+                        </div>
+                        {selectedGitHubRepoData?.description ? (
+                          <p className="mt-1 line-clamp-2 text-[12px] leading-[17px] text-[var(--vk-text-muted)]">
+                            {selectedGitHubRepoData.description}
+                          </p>
+                        ) : (
+                          <p className="mt-1 truncate text-[12px] text-[var(--vk-text-muted)]">{gitUrl}</p>
+                        )}
+                        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--vk-text-muted)]">
+                          {selectedGitHubRepoData?.ownerLogin ? <span>{selectedGitHubRepoData.ownerLogin}</span> : null}
+                          {selectedRepoUpdatedLabel ? <span>{selectedRepoUpdatedLabel}</span> : null}
+                          {selectedGitHubRepoData?.permission ? (
+                            <span>{selectedGitHubRepoData.permission.toLowerCase()}</span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                </label>
+                ) : null}
               </>
             ) : (
               <>
@@ -1975,14 +2250,27 @@ function NewWorkspaceDialog({
               </>
             )}
 
+            <label className="block">
+              <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Workspace Name (optional)</span>
+              <input
+                value={projectId}
+                onChange={(event) => {
+                  setProjectId(event.target.value);
+                  setProjectIdTouched(true);
+                }}
+                placeholder="auto-derived from the selected repository or folder"
+                className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+              />
+            </label>
+
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               <label className="block">
-                <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Default Branch</span>
+                <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">Branch</span>
                 <div className="flex items-center gap-2">
                   <input
                     value={defaultBranch}
                     onChange={(event) => setDefaultBranch(event.target.value)}
-                    placeholder="main"
+                    placeholder="Uses the repository default branch"
                     className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                   />
                   <button
@@ -2035,20 +2323,70 @@ function NewWorkspaceDialog({
               </label>
             </div>
 
-            <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] px-2 py-2 text-[13px] text-[var(--vk-text-normal)]">
-              <input
-                type="checkbox"
-                checked={useWorktree}
-                onChange={(event) => setUseWorktree(event.target.checked)}
-                className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
-              />
-              <span>
-                Use worktree isolation
-                <span className="block text-[11px] text-[var(--vk-text-muted)]">
-                  If unchecked, sessions run directly on the selected branch in the local repo.
+            {mode === "git" ? (
+              <details className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+                <summary className="cursor-pointer list-none px-3 py-2 text-[13px] text-[var(--vk-text-normal)] marker:hidden">
+                  <span className="inline-flex items-center gap-2">
+                    <ChevronDown className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
+                    Advanced options
+                  </span>
+                </summary>
+                <div className="space-y-3 border-t border-[var(--vk-border)] px-3 py-3">
+                  <label className="block">
+                    <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">
+                      Local Copy Location (optional)
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        value={path}
+                        readOnly
+                        onClick={() => openFolderPicker("clone")}
+                        placeholder="Choose a folder only if you want a specific clone location"
+                        className="h-9 w-full cursor-pointer rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => openFolderPicker("clone")}
+                        className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                        title="Browse folders"
+                      >
+                        <FolderOpen className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] px-2 py-2 text-[13px] text-[var(--vk-text-normal)]">
+                    <input
+                      type="checkbox"
+                      checked={useWorktree}
+                      onChange={(event) => setUseWorktree(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
+                    />
+                    <span>
+                      Keep work isolated in a new worktree
+                      <span className="block text-[11px] text-[var(--vk-text-muted)]">
+                        Turn this off only if you want sessions to run directly in the selected branch.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </details>
+            ) : (
+              <label className="flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] px-2 py-2 text-[13px] text-[var(--vk-text-normal)]">
+                <input
+                  type="checkbox"
+                  checked={useWorktree}
+                  onChange={(event) => setUseWorktree(event.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
+                />
+                <span>
+                  Keep work isolated in a new worktree
+                  <span className="block text-[11px] text-[var(--vk-text-muted)]">
+                    Turn this off only if you want sessions to run directly in the selected branch.
+                  </span>
                 </span>
-              </span>
-            </label>
+              </label>
+            )}
 
             {error && <p className="text-[12px] text-[var(--vk-red)]">{error}</p>}
           </div>
@@ -2090,6 +2428,12 @@ function NewWorkspaceDialog({
           setFolderPickerOpen(false);
           if (!selectedPath) return;
           setPath(selectedPath);
+          if ((mode === "local" || folderPickerTarget === "local") && !projectIdTouched) {
+            const folderName = extractNameFromPath(selectedPath);
+            if (folderName) {
+              setProjectId(suggestWorkspaceId(folderName));
+            }
+          }
           if (mode === "local" || folderPickerTarget === "local") {
             void handleDetectBranches({ path: selectedPath });
           }

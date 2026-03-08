@@ -12,10 +12,13 @@ pub struct QwenCodeExecutor {
 }
 
 impl QwenCodeExecutor {
-    pub fn new(binary: PathBuf) -> Self { Self { binary } }
+    pub fn new(binary: PathBuf) -> Self {
+        Self { binary }
+    }
 
     pub fn discover() -> Option<Self> {
-        which::which("qwen").ok()
+        which::which("qwen")
+            .ok()
             .or_else(|| which::which("qwen-code").ok())
             .map(Self::new)
     }
@@ -23,10 +26,18 @@ impl QwenCodeExecutor {
 
 #[async_trait]
 impl Executor for QwenCodeExecutor {
-    fn kind(&self) -> AgentKind { AgentKind::QwenCode }
-    fn name(&self) -> &str { "Qwen Code" }
-    fn binary_path(&self) -> &Path { &self.binary }
-    async fn is_available(&self) -> bool { self.binary.exists() }
+    fn kind(&self) -> AgentKind {
+        AgentKind::QwenCode
+    }
+    fn name(&self) -> &str {
+        "Qwen Code"
+    }
+    fn binary_path(&self) -> &Path {
+        &self.binary
+    }
+    async fn is_available(&self) -> bool {
+        self.binary.exists()
+    }
 
     async fn version(&self) -> Result<String> {
         let output = Command::new(&self.binary).arg("--version").output().await?;
@@ -36,7 +47,13 @@ impl Executor for QwenCodeExecutor {
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
-        Ok(ExecutorHandle::new(handle.pid, self.kind(), handle.output_rx, handle.input_tx, handle.kill_tx))
+        Ok(ExecutorHandle::new(
+            handle.pid,
+            self.kind(),
+            handle.output_rx,
+            handle.input_tx,
+            handle.kill_tx,
+        ))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
@@ -48,7 +65,7 @@ impl Executor for QwenCodeExecutor {
             args.push("--model".to_string());
             args.push(model.clone());
         }
-        args.extend(options.extra_args.clone());
+        args.extend(options.sanitized_extra_args());
         args.push("--prompt".to_string());
         args.push(options.prompt.clone());
         args

@@ -1,5 +1,5 @@
 use axum::extract::Json;
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE};
+use axum::http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode};
 use axum::routing::post;
 use axum::Router;
 use hmac::{Hmac, Mac};
@@ -17,7 +17,10 @@ const BUILTIN_REMOTE_SESSION_COOKIE: &str = "conductor_session";
 const BUILTIN_REMOTE_SESSION_TTL_SECONDS: i64 = 60 * 60 * 24 * 7;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/auth/session", post(create_session).delete(delete_session))
+    Router::new().route(
+        "/api/auth/session",
+        post(create_session).delete(delete_session),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,40 +33,74 @@ async fn create_session(
     Json(body): Json<SessionRequestBody>,
 ) -> (StatusCode, HeaderMap, axum::Json<serde_json::Value>) {
     if !is_builtin_remote_auth_enabled() {
-        return (StatusCode::NOT_FOUND, HeaderMap::new(), axum::Json(json!({ "error": "Built-in remote auth is not enabled" })));
+        return (
+            StatusCode::NOT_FOUND,
+            HeaderMap::new(),
+            axum::Json(json!({ "error": "Built-in remote auth is not enabled" })),
+        );
     }
 
     let token = body.token.unwrap_or_default();
     if !is_valid_builtin_access_token(&token) {
-        return (StatusCode::FORBIDDEN, HeaderMap::new(), axum::Json(json!({ "error": "Invalid access token" })));
+        return (
+            StatusCode::FORBIDDEN,
+            HeaderMap::new(),
+            axum::Json(json!({ "error": "Invalid access token" })),
+        );
     }
 
     let cookie_value = match create_builtin_remote_session_value() {
         Ok(value) => value,
-        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), axum::Json(json!({ "error": err.to_string() }))),
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                HeaderMap::new(),
+                axum::Json(json!({ "error": err.to_string() })),
+            )
+        }
     };
 
     let mut response_headers = HeaderMap::new();
-    if let Ok(cookie_header) = HeaderValue::from_str(&build_cookie(&cookie_value, is_secure(&headers), BUILTIN_REMOTE_SESSION_TTL_SECONDS)) {
+    if let Ok(cookie_header) = HeaderValue::from_str(&build_cookie(
+        &cookie_value,
+        is_secure(&headers),
+        BUILTIN_REMOTE_SESSION_TTL_SECONDS,
+    )) {
         response_headers.insert(SET_COOKIE, cookie_header);
     }
-    (StatusCode::OK, response_headers, axum::Json(json!({ "ok": true })))
+    (
+        StatusCode::OK,
+        response_headers,
+        axum::Json(json!({ "ok": true })),
+    )
 }
 
-async fn delete_session(headers: HeaderMap) -> (StatusCode, HeaderMap, axum::Json<serde_json::Value>) {
+async fn delete_session(
+    headers: HeaderMap,
+) -> (StatusCode, HeaderMap, axum::Json<serde_json::Value>) {
     let mut response_headers = HeaderMap::new();
     if let Ok(cookie_header) = HeaderValue::from_str(&build_cookie("", is_secure(&headers), 0)) {
         response_headers.insert(SET_COOKIE, cookie_header);
     }
-    (StatusCode::OK, response_headers, axum::Json(json!({ "ok": true })))
+    (
+        StatusCode::OK,
+        response_headers,
+        axum::Json(json!({ "ok": true })),
+    )
 }
 
 fn access_token() -> Option<String> {
-    std::env::var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    std::env::var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn session_secret() -> Option<String> {
-    std::env::var(BUILTIN_REMOTE_SESSION_SECRET_ENV).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    std::env::var(BUILTIN_REMOTE_SESSION_SECRET_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn is_builtin_remote_auth_enabled() -> bool {
@@ -72,14 +109,18 @@ fn is_builtin_remote_auth_enabled() -> bool {
 
 fn is_valid_builtin_access_token(candidate: &str) -> bool {
     match access_token() {
-        Some(configured) if !candidate.trim().is_empty() => constant_time_equal(configured.as_bytes(), candidate.trim().as_bytes()),
+        Some(configured) if !candidate.trim().is_empty() => {
+            constant_time_equal(configured.as_bytes(), candidate.trim().as_bytes())
+        }
         _ => false,
     }
 }
 
 fn create_builtin_remote_session_value() -> anyhow::Result<String> {
-    let secret = session_secret().ok_or_else(|| anyhow::anyhow!("Built-in remote session secret is not configured"))?;
-    let expires_at = chrono::Utc::now().timestamp_millis() + BUILTIN_REMOTE_SESSION_TTL_SECONDS * 1000;
+    let secret = session_secret()
+        .ok_or_else(|| anyhow::anyhow!("Built-in remote session secret is not configured"))?;
+    let expires_at =
+        chrono::Utc::now().timestamp_millis() + BUILTIN_REMOTE_SESSION_TTL_SECONDS * 1000;
     let payload = expires_at.to_string();
     let signature = sign_payload(&payload, &secret)?;
     Ok(format!("{payload}.{signature}"))
@@ -104,7 +145,10 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 
 fn build_cookie(value: &str, secure: bool, max_age: i64) -> String {
     let same_site = if secure { "Strict" } else { "Lax" };
-    let mut cookie = format!("{}={}; Path=/; HttpOnly; SameSite={}; Max-Age={}", BUILTIN_REMOTE_SESSION_COOKIE, value, same_site, max_age);
+    let mut cookie = format!(
+        "{}={}; Path=/; HttpOnly; SameSite={}; Max-Age={}",
+        BUILTIN_REMOTE_SESSION_COOKIE, value, same_site, max_age
+    );
     if secure {
         cookie.push_str("; Secure");
     }
@@ -115,5 +159,9 @@ fn build_cookie(value: &str, secure: bool, max_age: i64) -> String {
 /// IMPORTANT: This trusts the header without validation. The backend MUST be behind a
 /// trusted reverse proxy that sets this header when remote auth is enabled.
 fn is_secure(headers: &HeaderMap) -> bool {
-    headers.get("x-forwarded-proto").and_then(|value| value.to_str().ok()).map(|value| value.eq_ignore_ascii_case("https")).unwrap_or(false)
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
 }

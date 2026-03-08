@@ -52,7 +52,12 @@ async fn create_task(
     let pool = state.db.pool();
     let mut task = Task::new(body.project_id, body.title);
     task.description = body.description;
-    if let Some(priority) = body.priority.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(priority) = body
+        .priority
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         task.priority = serde_json::from_value(serde_json::Value::String(priority.to_lowercase()))
             .unwrap_or(Priority::default());
     }

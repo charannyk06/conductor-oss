@@ -45,7 +45,10 @@ async fn upload_attachments(
             continue;
         }
         if files.len() >= MAX_UPLOAD_FILES {
-            return error(StatusCode::BAD_REQUEST, format!("Too many files. Max {MAX_UPLOAD_FILES} files per request."));
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("Too many files. Max {MAX_UPLOAD_FILES} files per request."),
+            );
         }
         let file_name = field.file_name().unwrap_or("upload.bin").to_string();
         let content_type = field.content_type().map(|value| value.to_string());
@@ -54,7 +57,10 @@ async fn upload_attachments(
             Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
         };
         if bytes.len() > MAX_UPLOAD_BYTES {
-            return error(StatusCode::PAYLOAD_TOO_LARGE, format!("File \"{file_name}\" exceeds 25MB limit."));
+            return error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("File \"{file_name}\" exceeds 25MB limit."),
+            );
         }
         files.push((file_name, content_type, bytes));
     }
@@ -69,10 +75,16 @@ async fn upload_attachments(
 
     let config = state.config.read().await.clone();
     if !config.projects.contains_key(&project_id) {
-        return error(StatusCode::NOT_FOUND, format!("Unknown project: {project_id}"));
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Unknown project: {project_id}"),
+        );
     }
 
-    let target_dir = state.workspace_path.join("attachments").join(normalize_token(&project_id));
+    let target_dir = state
+        .workspace_path
+        .join("attachments")
+        .join(normalize_token(&project_id));
     if let Err(err) = std::fs::create_dir_all(&target_dir) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
@@ -80,7 +92,12 @@ async fn upload_attachments(
     let mut uploaded = Vec::new();
     for (index, (file_name, content_type, bytes)) in files.into_iter().enumerate() {
         let safe_name = sanitize_file_name(&file_name);
-        let unique_name = format!("{}-{}-{}", chrono::Utc::now().timestamp_millis(), index, Uuid::new_v4().simple());
+        let unique_name = format!(
+            "{}-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            index,
+            Uuid::new_v4().simple()
+        );
         let file_path = target_dir.join(format!("{unique_name}-{safe_name}"));
         if let Err(err) = std::fs::write(&file_path, &bytes) {
             return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
@@ -107,7 +124,13 @@ fn normalize_token(value: &str) -> String {
         .trim()
         .to_lowercase()
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_') { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .trim_matches('-')
         .to_string()
@@ -115,15 +138,31 @@ fn normalize_token(value: &str) -> String {
 
 fn sanitize_file_name(value: &str) -> String {
     let normalized_path = value.replace('\\', "/");
-    let normalized = normalized_path.split('/').next_back().unwrap_or("upload.bin");
+    let normalized = normalized_path
+        .split('/')
+        .next_back()
+        .unwrap_or("upload.bin");
     let sanitized = normalized
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') { ch } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     sanitized.trim_matches('-').to_string()
 }
 
 fn is_image_path(path: &Path) -> bool {
-    let ext = path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff")
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff"
+    )
 }

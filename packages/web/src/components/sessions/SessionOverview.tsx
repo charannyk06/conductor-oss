@@ -41,6 +41,7 @@ interface SessionOverviewProps {
 
 const statusVariant: Record<string, "success" | "warning" | "error" | "info" | "default"> = {
   archived: "default",
+  queued: "info",
   running: "success",
   working: "success",
   done: "default",
@@ -123,6 +124,12 @@ function pickMetadata(session: SessionData, key: string): string | undefined {
   return undefined;
 }
 
+function parsePositiveInteger(value?: string): number | null {
+  if (!value) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 export function SessionOverview({ session }: SessionOverviewProps) {
   const { preferences } = usePreferences();
 
@@ -167,6 +174,40 @@ export function SessionOverview({ session }: SessionOverviewProps) {
     [session],
   );
 
+  const queuePosition = useMemo(
+    () => parsePositiveInteger(pickMetadata(session, "queuePosition")),
+    [session],
+  );
+  const queueDepth = useMemo(
+    () => parsePositiveInteger(pickMetadata(session, "queueDepth")),
+    [session],
+  );
+  const recoveryState = useMemo(
+    () => pickMetadata(session, "recoveryState") ?? "",
+    [session],
+  );
+  const recoverySummary = useMemo(
+    () => {
+      if (session.status === "queued") {
+        return queuePosition ? `Waiting in queue at position ${queuePosition}${queueDepth ? ` of ${queueDepth}` : ""}.` : "Waiting in the launch queue.";
+      }
+      if (recoveryState === "requeued_after_restart") {
+        return "This session was recovered after a backend restart and requeued automatically.";
+      }
+      if (recoveryState === "reattach_pending") {
+        return "Reattaching the tmux-managed runtime after backend restart.";
+      }
+      if (recoveryState === "detached_runtime") {
+        return "The backend restarted while the agent may still be running. Kill or archive this session before resuming.";
+      }
+      if (recoveryState === "resume_required") {
+        return "This session was recovered after a backend restart. Send a message to resume in the same workspace.";
+      }
+      return "";
+    },
+    [queueDepth, queuePosition, recoveryState, session.status],
+  );
+
   const remoteEditorUrl = useMemo(
     () => buildRemoteEditorUrl({
       editorId: preferences?.ide,
@@ -207,56 +248,80 @@ export function SessionOverview({ session }: SessionOverviewProps) {
         </Card>
       )}
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px]">
-        <div className="space-y-3">
-          {(session.branch || worktree) && (
-            <Card>
-              <CardHeader>
-                <GitBranch className="h-4 w-4 text-[var(--text-faint)]" />
-                <span className="text-[12px] font-semibold text-[var(--text-normal)]">Workspace</span>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {session.branch && (
-                  <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                    <GitBranch className="h-3.5 w-3.5 text-[var(--text-faint)]" />
-                    <CopyText text={session.branch} />
-                  </div>
-                )}
-                {worktree && (
-                  <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                    <FolderGit2 className="h-3.5 w-3.5 text-[var(--text-faint)]" />
-                    <CopyText text={worktree} />
-                  </div>
-                )}
-                {(remoteEditorUrl || remoteAuthority) && (
-                  <div className="surface-panel space-y-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                    {remoteEditorUrl && remoteEditorLabel ? (
-                      <a
-                        href={remoteEditorUrl}
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] transition-colors hover:text-[var(--text-strong)]"
-                      >
-                        <SquareArrowOutUpRight className="h-3.5 w-3.5" />
-                        <span>{`Open in ${remoteEditorLabel}`}</span>
-                      </a>
-                    ) : (
-                      <p className="text-[12px] text-[var(--text-muted)]">
-                        Remote deep links currently support VS Code and VS Code Insiders.
-                      </p>
-                    )}
-                    {remoteAuthority && (
-                      <p className="text-[11px] text-[var(--text-muted)]">
-                        Remote SSH: <span className="font-mono text-[var(--text-normal)]">{remoteAuthority}</span>
-                      </p>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-        </div>
+      {(session.status === "queued" || recoveryState) && (
+        <Card>
+          <CardHeader>
+            <Clock3 className="h-4 w-4 text-[var(--accent)]" />
+            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--text-faint)]">
+              Launch State
+            </span>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={statusVariant[session.status] ?? "default"}>{session.status}</Badge>
+              {queuePosition ? (
+                <Badge variant="info">
+                  Queue #{queuePosition}{queueDepth ? ` / ${queueDepth}` : ""}
+                </Badge>
+              ) : null}
+              {recoveryState ? (
+                <Badge variant="warning">{recoveryState.replaceAll("_", " ")}</Badge>
+              ) : null}
+            </div>
+            {recoverySummary ? (
+              <p className="text-[13px] leading-relaxed text-[var(--text-normal)]">{recoverySummary}</p>
+            ) : null}
+          </CardContent>
+        </Card>
+      )}
 
-        <div className="space-y-3">
+      <div className="space-y-3">
+        {(session.branch || worktree) && (
+          <Card>
+            <CardHeader>
+              <GitBranch className="h-4 w-4 text-[var(--text-faint)]" />
+              <span className="text-[12px] font-semibold text-[var(--text-normal)]">Workspace</span>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {session.branch && (
+                <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+                  <GitBranch className="h-3.5 w-3.5 text-[var(--text-faint)]" />
+                  <CopyText text={session.branch} />
+                </div>
+              )}
+              {worktree && (
+                <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+                  <FolderGit2 className="h-3.5 w-3.5 text-[var(--text-faint)]" />
+                  <CopyText text={worktree} />
+                </div>
+              )}
+              {(remoteEditorUrl || remoteAuthority) && (
+                <div className="surface-panel space-y-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+                  {remoteEditorUrl && remoteEditorLabel ? (
+                    <a
+                      href={remoteEditorUrl}
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[var(--accent)] transition-colors hover:text-[var(--text-strong)]"
+                    >
+                      <SquareArrowOutUpRight className="h-3.5 w-3.5" />
+                      <span>{`Open in ${remoteEditorLabel}`}</span>
+                    </a>
+                  ) : (
+                    <p className="text-[12px] text-[var(--text-muted)]">
+                      Remote deep links currently support VS Code and VS Code Insiders.
+                    </p>
+                  )}
+                  {remoteAuthority && (
+                    <p className="text-[11px] text-[var(--text-muted)]">
+                      Remote SSH: <span className="font-mono text-[var(--text-normal)]">{remoteAuthority}</span>
+                    </p>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         <Card>
           <CardHeader>
             <AgentTileIcon seed={{ label: agentName || "agent" }} className="h-6 w-6" />
@@ -289,7 +354,6 @@ export function SessionOverview({ session }: SessionOverviewProps) {
             />
           </CardContent>
         </Card>
-        </div>
       </div>
     </div>
   );

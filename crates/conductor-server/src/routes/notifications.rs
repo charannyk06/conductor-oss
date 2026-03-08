@@ -11,7 +11,10 @@ use crate::state::AppState;
 type ApiResponse = (StatusCode, Json<Value>);
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/notifications", get(list_notifications).post(acknowledge_notification))
+    Router::new().route(
+        "/api/notifications",
+        get(list_notifications).post(acknowledge_notification),
+    )
 }
 
 fn ok(value: Value) -> ApiResponse {
@@ -75,7 +78,12 @@ async fn list_notifications(
         })
         .collect::<Vec<_>>();
 
-    notifications.sort_by(|left, right| right["timestamp"].as_str().unwrap_or_default().cmp(left["timestamp"].as_str().unwrap_or_default()));
+    notifications.sort_by(|left, right| {
+        right["timestamp"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(left["timestamp"].as_str().unwrap_or_default())
+    });
     notifications.truncate(limit);
 
     ok(json!({

@@ -1,7 +1,8 @@
 "use client";
 
 import { memo, useMemo, useState } from "react";
-import { Layers3, Plus, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import { Plus, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { getAttentionLevel, type DashboardSession } from "@/lib/types";
 import { Sidebar } from "@/components/layout/Sidebar";
@@ -13,7 +14,6 @@ interface ProjectItem {
 }
 
 interface WorkspaceSidebarPanelProps {
-  orgLabel: string;
   projects: ProjectItem[];
   selectedProjectId: string | null;
   onSelectProject: (projectId: string | null) => void;
@@ -26,7 +26,6 @@ interface WorkspaceSidebarPanelProps {
 }
 
 export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
-  orgLabel,
   projects,
   selectedProjectId,
   onSelectProject,
@@ -56,10 +55,6 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
     return counts;
   }, [sessions]);
 
-  const totalActiveSessions = useMemo(() => {
-    return sessions.filter((session) => session.status !== "archived" && getAttentionLevel(session) !== "done").length;
-  }, [sessions]);
-
   const confirmUnlinkProject = useMemo(
     () => projects.find((project) => project.id === confirmUnlinkProjectId) ?? null,
     [confirmUnlinkProjectId, projects],
@@ -83,18 +78,10 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
     <>
       <div className="flex h-full min-h-0 w-full flex-col bg-[var(--vk-bg-panel)]">
         <section className="border-b border-[var(--vk-border)] px-4 py-4">
-          <div className="flex items-start gap-3">
-            <span className="inline-flex h-10 w-10 items-center justify-center rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]">
-              <Layers3 className="h-4 w-4" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-[15px] font-medium leading-[21px] text-[var(--vk-text-strong)]">
-                {orgLabel}
-              </p>
-              <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
-                {projects.length} projects, {totalActiveSessions} active sessions
-              </p>
-            </div>
+          <div className="flex justify-center text-center">
+            <p className="text-[22px] font-bold leading-none uppercase tracking-[0.32em] text-[var(--vk-text-strong)]">
+              Conductor
+            </p>
           </div>
 
           <button
@@ -200,67 +187,70 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
         </section>
       </div>
 
-      {confirmUnlinkProject && (
-        <div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4"
-          onClick={() => {
-            if (unlinkingId) return;
-            setConfirmUnlinkProjectId(null);
-            setUnlinkError(null);
-          }}
-        >
+      {confirmUnlinkProject && typeof document !== "undefined"
+        ? createPortal(
           <div
-            className="surface-card w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="unlink-project-title"
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4"
+            onClick={() => {
+              if (unlinkingId) return;
+              setConfirmUnlinkProjectId(null);
+              setUnlinkError(null);
+            }}
           >
-            <div className="border-b border-[var(--vk-border)] px-4 py-3">
-              <h2 id="unlink-project-title" className="text-[17px] font-medium text-[var(--vk-text-strong)]">
-                Unlink Project
-              </h2>
-              <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
-                Remove <span className="font-medium text-[var(--vk-text-normal)]">{confirmUnlinkProject.id}</span> from this workspace configuration.
-              </p>
-            </div>
+            <div
+              className="surface-card w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]"
+              onClick={(event) => event.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="unlink-project-title"
+            >
+              <div className="border-b border-[var(--vk-border)] px-4 py-3">
+                <h2 id="unlink-project-title" className="text-[17px] font-medium text-[var(--vk-text-strong)]">
+                  Unlink Project
+                </h2>
+                <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                  Remove <span className="font-medium text-[var(--vk-text-normal)]">{confirmUnlinkProject.id}</span> from this workspace configuration.
+                </p>
+              </div>
 
-            <div className="space-y-3 px-4 py-4">
-              <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
-                This only removes the project from Conductor. Repository files on disk are not deleted.
-              </p>
+              <div className="space-y-3 px-4 py-4">
+                <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
+                  This only removes the project from Conductor. Repository files on disk are not deleted.
+                </p>
 
-              {unlinkError ? (
-                <div className="rounded-[var(--radius-md)] border border-[var(--vk-red)]/35 bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
-                  {unlinkError}
-                </div>
-              ) : null}
-            </div>
+                {unlinkError ? (
+                  <div className="rounded-[var(--radius-md)] border border-[var(--vk-red)]/35 bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
+                    {unlinkError}
+                  </div>
+                ) : null}
+              </div>
 
-            <div className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => {
-                  setConfirmUnlinkProjectId(null);
-                  setUnlinkError(null);
-                }}
-                disabled={unlinkingId !== null}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                variant="danger"
-                onClick={() => void handleConfirmUnlink()}
-                disabled={unlinkingId !== null}
-              >
-                {unlinkingId === confirmUnlinkProject.id ? "Unlinking..." : "Unlink Project"}
-              </Button>
+              <div className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setConfirmUnlinkProjectId(null);
+                    setUnlinkError(null);
+                  }}
+                  disabled={unlinkingId !== null}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  variant="danger"
+                  onClick={() => void handleConfirmUnlink()}
+                  disabled={unlinkingId !== null}
+                >
+                  {unlinkingId === confirmUnlinkProject.id ? "Unlinking..." : "Unlink Project"}
+                </Button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )
+        : null}
     </>
   );
 });

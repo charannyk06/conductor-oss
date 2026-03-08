@@ -36,7 +36,10 @@ async fn list_context_files(
 ) -> ApiResponse {
     let config = state.config.read().await.clone();
     let Some(project) = config.projects.get(&query.project_id) else {
-        return error(StatusCode::NOT_FOUND, format!("Unknown project: {}", query.project_id));
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Unknown project: {}", query.project_id),
+        );
     };
 
     let project_root = resolve_project_path(&state.workspace_path, &project.path);
@@ -44,23 +47,42 @@ async fn list_context_files(
         .workspace
         .as_deref()
         .map(|configured| resolve_project_path(&state.workspace_path, configured));
-    let board_dir = project.board_dir.clone().unwrap_or_else(|| query.project_id.clone());
+    let board_dir = project
+        .board_dir
+        .clone()
+        .unwrap_or_else(|| query.project_id.clone());
     let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
     let board_absolute = state.workspace_path.join(&board_relative);
-    let attachments_root = state.workspace_path.join("attachments").join(&query.project_id);
+    let attachments_root = state
+        .workspace_path
+        .join("attachments")
+        .join(&query.project_id);
     let board_parent = board_absolute.parent().map(Path::to_path_buf);
-    let use_obsidian_sources = config.preferences.markdown_editor.trim().eq_ignore_ascii_case("obsidian");
+    let use_obsidian_sources = config
+        .preferences
+        .markdown_editor
+        .trim()
+        .eq_ignore_ascii_case("obsidian");
 
     let mut files = Vec::new();
     if board_absolute.exists() {
-        files.push(file_descriptor(&board_absolute, &state.workspace_path, Some("board")));
+        files.push(file_descriptor(
+            &board_absolute,
+            &state.workspace_path,
+            Some("board"),
+        ));
     }
     if use_obsidian_sources {
         if let Some(root) = board_parent.as_deref() {
             collect_project_files(root, &state.workspace_path, "vault", &mut files);
         }
         if board_parent.as_deref() != Some(state.workspace_path.as_path()) {
-            collect_project_files(&state.workspace_path, &state.workspace_path, "vault", &mut files);
+            collect_project_files(
+                &state.workspace_path,
+                &state.workspace_path,
+                "vault",
+                &mut files,
+            );
         }
     }
     if let Some(root) = project_workspace_root.as_deref() {
@@ -72,9 +94,19 @@ async fn list_context_files(
         }
     }
     collect_project_files(&project_root, &state.workspace_path, "project", &mut files);
-    collect_project_files(&attachments_root, &state.workspace_path, "attachment", &mut files);
+    collect_project_files(
+        &attachments_root,
+        &state.workspace_path,
+        "attachment",
+        &mut files,
+    );
 
-    files.sort_by(|left, right| left["path"].as_str().unwrap_or_default().cmp(right["path"].as_str().unwrap_or_default()));
+    files.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+    });
     files.dedup_by(|left, right| left["path"] == right["path"]);
     ok(json!({ "files": files }))
 }
@@ -91,13 +123,21 @@ fn collect_project_files(root: &Path, workspace_root: &Path, source: &str, out: 
         if out.len() >= MAX_FILES {
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
                 let hidden_dir = name.starts_with('.') && name != ".github";
-                if depth < MAX_DEPTH && !hidden_dir && !matches!(name.as_str(), "node_modules" | "target" | "dist" | "build" | ".next") {
+                if depth < MAX_DEPTH
+                    && !hidden_dir
+                    && !matches!(
+                        name.as_str(),
+                        "node_modules" | "target" | "dist" | "build" | ".next"
+                    )
+                {
                     queue.push_back((path, depth + 1));
                 }
                 continue;
@@ -118,7 +158,11 @@ fn file_descriptor(path: &Path, workspace_root: &Path, source: Option<&str>) -> 
         .strip_prefix(workspace_root)
         .map(|value| value.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| path.to_string_lossy().to_string());
-    let name = path.file_name().and_then(|value| value.to_str()).unwrap_or(&display_path).to_string();
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&display_path)
+        .to_string();
     let size_bytes = std::fs::metadata(path).ok().map(|value| value.len());
     json!({
         "path": display_path,
@@ -131,15 +175,49 @@ fn file_descriptor(path: &Path, workspace_root: &Path, source: Option<&str>) -> 
 
 fn resolve_project_path(workspace_root: &Path, configured: &str) -> PathBuf {
     let candidate = PathBuf::from(configured);
-    if candidate.is_absolute() { candidate } else { workspace_root.join(candidate) }
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        workspace_root.join(candidate)
+    }
 }
 
 fn is_candidate_file(path: &Path) -> bool {
-    let ext = path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    matches!(ext.as_str(), "md" | "txt" | "pdf" | "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "json" | "yaml" | "yml" | "toml" | "rs" | "ts" | "tsx" | "js" | "jsx")
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "md" | "txt"
+            | "pdf"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "svg"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "rs"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+    )
 }
 
 fn is_image(path: &Path) -> bool {
-    let ext = path.extension().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff")
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff"
+    )
 }

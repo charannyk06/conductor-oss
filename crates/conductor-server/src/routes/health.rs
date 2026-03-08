@@ -15,6 +15,30 @@ pub fn router() -> Router<Arc<AppState>> {
 
 async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let executors = state.executors.read().await;
+    let live_session_ids = state
+        .live_sessions
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let sessions = state.sessions.read().await;
+    let queue_depth = sessions
+        .values()
+        .filter(|session| session.status == "queued")
+        .count();
+    let recovering = sessions
+        .values()
+        .filter(|session| session.metadata.contains_key("recoveryState"))
+        .count();
+    let detached = sessions
+        .values()
+        .filter(|session| session.metadata.contains_key("detachedPid"))
+        .count();
+    let launching = sessions
+        .values()
+        .filter(|session| session.status == "spawning" || live_session_ids.contains(&session.id))
+        .count();
     (
         StatusCode::OK,
         Json(json!({
@@ -23,13 +47,23 @@ async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<V
             "uptime_secs": (chrono::Utc::now() - state.started_at).num_seconds().max(0),
             "executors": executors.len(),
             "event_subscribers": state.event_snapshots.receiver_count(),
+            "queue_depth": queue_depth,
+            "launching_sessions": launching,
+            "recovering_sessions": recovering,
+            "detached_sessions": detached,
         })),
     )
 }
 
 async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let sessions = state.all_sessions().await;
-    let live_session_ids = state.live_sessions.read().await.keys().cloned().collect::<std::collections::HashSet<_>>();
+    let live_session_ids = state
+        .live_sessions
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let now = chrono::Utc::now();
     let metrics = sessions
         .iter()
@@ -44,7 +78,11 @@ async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json
             let idle_ms = (now - last_activity).num_milliseconds();
             let health = if matches!(session.status.as_str(), "stuck" | "errored") {
                 "critical"
-            } else if matches!(session.status.as_str(), "needs_input") {
+            } else if matches!(session.status.as_str(), "queued") {
+                "pending"
+            } else if matches!(session.status.as_str(), "needs_input")
+                || session.metadata.contains_key("recoveryState")
+            {
                 "warning"
             } else {
                 "healthy"
@@ -60,6 +98,8 @@ async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json
                 "createdAt": session.created_at,
                 "lastActivityAt": session.last_activity_at,
                 "hasRuntime": live_session_ids.contains(&session.id),
+                "recoveryState": session.metadata.get("recoveryState"),
+                "detachedPid": session.metadata.get("detachedPid"),
                 "hasPR": session.pr.is_some(),
             })
         })
@@ -68,9 +108,13 @@ async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     let summary = json!({
         "total": metrics.len(),
         "healthy": metrics.iter().filter(|metric| metric["health"] == "healthy").count(),
+        "pending": metrics.iter().filter(|metric| metric["health"] == "pending").count(),
         "warning": metrics.iter().filter(|metric| metric["health"] == "warning").count(),
         "critical": metrics.iter().filter(|metric| metric["health"] == "critical").count(),
     });
 
-    (StatusCode::OK, Json(json!({ "metrics": metrics, "summary": summary })))
+    (
+        StatusCode::OK,
+        Json(json!({ "metrics": metrics, "summary": summary })),
+    )
 }

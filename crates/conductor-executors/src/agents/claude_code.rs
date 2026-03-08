@@ -44,17 +44,15 @@ impl Executor for ClaudeCodeExecutor {
     }
 
     async fn version(&self) -> Result<String> {
-        let output = Command::new(&self.binary)
-            .arg("--version")
-            .output()
-            .await?;
+        let output = Command::new(&self.binary).arg("--version").output().await?;
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Ok(version)
     }
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle = spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle =
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
 
         Ok(ExecutorHandle::new(
             handle.pid,
@@ -85,8 +83,13 @@ impl Executor for ClaudeCodeExecutor {
             args.push(model.clone());
         }
 
+        if let Some(reasoning_effort) = &options.reasoning_effort {
+            args.push("--effort".to_string());
+            args.push(reasoning_effort.clone());
+        }
+
         // Add extra args.
-        args.extend(options.extra_args.clone());
+        args.extend(options.sanitized_extra_args());
 
         // Add the prompt as the final argument.
         args.push(options.prompt.clone());
@@ -106,7 +109,11 @@ impl Executor for ClaudeCodeExecutor {
                         return ExecutorOutput::Composite(extract_assistant_events(&value));
                     }
                     "result" => {
-                        if value.get("is_error").and_then(|flag| flag.as_bool()).unwrap_or(false) {
+                        if value
+                            .get("is_error")
+                            .and_then(|flag| flag.as_bool())
+                            .unwrap_or(false)
+                        {
                             let error = value
                                 .get("result")
                                 .and_then(|result| result.as_str())
@@ -155,7 +162,12 @@ fn extract_assistant_events(value: &Value) -> Vec<ExecutorOutput> {
     for block in content {
         match block.get("type").and_then(|value| value.as_str()) {
             Some("text") => {
-                if let Some(text) = block.get("text").and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) {
+                if let Some(text) = block
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
                     events.push(ExecutorOutput::Stdout(text.to_string()));
                 }
             }
@@ -168,7 +180,12 @@ fn extract_assistant_events(value: &Value) -> Vec<ExecutorOutput> {
                     .unwrap_or("Thinking");
                 events.push(ExecutorOutput::StructuredStatus {
                     text: "Thinking".to_string(),
-                    metadata: tool_metadata("thinking", "Thinking", "running", vec![detail.to_string()]),
+                    metadata: tool_metadata(
+                        "thinking",
+                        "Thinking",
+                        "running",
+                        vec![detail.to_string()],
+                    ),
                 });
             }
             Some("tool_use") => {
@@ -211,13 +228,28 @@ fn normalize_tool_kind(name: &str) -> String {
 fn tool_input_summary(input: Option<&Value>) -> Option<String> {
     let input = input?;
 
-    for key in ["command", "path", "file_path", "query", "pattern", "url", "prompt"] {
-        if let Some(value) = input.get(key).and_then(|value| value.as_str()).map(str::trim).filter(|value| !value.is_empty()) {
+    for key in [
+        "command",
+        "path",
+        "file_path",
+        "query",
+        "pattern",
+        "url",
+        "prompt",
+    ] {
+        if let Some(value) = input
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             return Some(value.to_string());
         }
     }
 
-    serde_json::to_string(input).ok().filter(|value| !value.trim().is_empty())
+    serde_json::to_string(input)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn tool_metadata(
@@ -228,8 +260,14 @@ fn tool_metadata(
 ) -> HashMap<String, Value> {
     let mut metadata = HashMap::new();
     metadata.insert("toolKind".to_string(), Value::String(tool_kind.to_string()));
-    metadata.insert("toolTitle".to_string(), Value::String(tool_title.to_string()));
-    metadata.insert("toolStatus".to_string(), Value::String(tool_status.to_string()));
+    metadata.insert(
+        "toolTitle".to_string(),
+        Value::String(tool_title.to_string()),
+    );
+    metadata.insert(
+        "toolStatus".to_string(),
+        Value::String(tool_status.to_string()),
+    );
     metadata.insert(
         "toolContent".to_string(),
         Value::Array(tool_content.into_iter().map(Value::String).collect()),
@@ -255,8 +293,14 @@ mod tests {
             panic!("expected structured status");
         };
         assert_eq!(text, "Bash");
-        assert_eq!(metadata.get("toolTitle").and_then(Value::as_str), Some("Bash"));
-        assert_eq!(metadata.get("toolStatus").and_then(Value::as_str), Some("running"));
+        assert_eq!(
+            metadata.get("toolTitle").and_then(Value::as_str),
+            Some("Bash")
+        );
+        assert_eq!(
+            metadata.get("toolStatus").and_then(Value::as_str),
+            Some("running")
+        );
     }
 
     #[test]
@@ -272,6 +316,29 @@ mod tests {
             panic!("expected structured status");
         };
         assert_eq!(text, "Thinking");
-        assert_eq!(metadata.get("toolKind").and_then(Value::as_str), Some("thinking"));
+        assert_eq!(
+            metadata.get("toolKind").and_then(Value::as_str),
+            Some("thinking")
+        );
+    }
+
+    #[test]
+    fn build_args_includes_reasoning_effort_override() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+        });
+
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"sonnet".to_string()));
+        assert!(args.contains(&"--effort".to_string()));
+        assert!(args.contains(&"medium".to_string()));
     }
 }

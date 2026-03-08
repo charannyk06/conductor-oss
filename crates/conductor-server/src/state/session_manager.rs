@@ -8,13 +8,35 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use super::helpers::{
+    append_output, is_runtime_status_line, is_terminal_status, merge_assistant_fragment,
+    runtime_tool_metadata,
+};
+use super::tmux_runtime::{
+    runtime_mode, tmux_runtime_metadata, tmux_session_exists, TMUX_RUNTIME_MODE,
+};
+use super::types::{
+    ConversationEntry, LiveSessionHandle, SessionRecord, SpawnRequest,
+    DEFAULT_SESSION_HISTORY_LIMIT,
+};
+use super::workspace::{is_process_alive, terminate_process};
 use super::AppState;
-use super::helpers::{append_output, is_runtime_status_line, is_terminal_status, merge_assistant_fragment, runtime_tool_metadata};
-use super::types::{ConversationEntry, LiveSessionHandle, SessionRecord, SpawnRequest};
+
+const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
 
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
+
+/// Enforce a hard limit on conversation entries to prevent unbounded memory growth.
+/// Trims the oldest entries when the limit is exceeded.
+fn enforce_conversation_limit(session: &mut SessionRecord) {
+    if session.conversation.len() <= DEFAULT_SESSION_HISTORY_LIMIT {
+        return;
+    }
+    let excess = session.conversation.len() - DEFAULT_SESSION_HISTORY_LIMIT;
+    session.conversation.drain(..excess);
+}
 
 fn persisted_output_line(event: &ExecutorOutput) -> Option<&str> {
     match event {
@@ -29,6 +51,14 @@ fn persisted_output_line(event: &ExecutorOutput) -> Option<&str> {
         ExecutorOutput::StructuredStatus { .. } | ExecutorOutput::Composite(_) => None,
         _ => None,
     }
+}
+
+fn detached_runtime_pid(session: &SessionRecord) -> Option<u32> {
+    session
+        .metadata
+        .get(DETACHED_PID_METADATA_KEY)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
 }
 
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
@@ -54,6 +84,7 @@ fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
         attachments: Vec::new(),
         metadata: HashMap::new(),
     });
+    enforce_conversation_limit(session);
 }
 
 fn append_runtime_assistant_break(session: &mut SessionRecord) {
@@ -86,7 +117,8 @@ fn append_runtime_status_entry_with_metadata(
     }
 
     if let Some(last) = session.conversation.last() {
-        if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed {
+        if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed
+        {
             return;
         }
     }
@@ -111,6 +143,7 @@ fn append_runtime_status_entry_with_metadata(
         attachments: Vec::new(),
         metadata,
     });
+    enforce_conversation_limit(session);
 }
 
 fn clear_parser_state(session: &mut SessionRecord) {
@@ -215,7 +248,63 @@ fn detect_parser_state(session: &mut SessionRecord, text: &str) -> bool {
 }
 
 impl AppState {
-    pub async fn spawn_session(self: &Arc<Self>, request: SpawnRequest) -> Result<SessionRecord> {
+    async fn mark_termination_requested(&self, session_id: &str, action: &str) -> Result<()> {
+        let mut sessions = self.sessions.write().await;
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Ok(());
+        };
+        session
+            .metadata
+            .insert("terminationRequested".to_string(), action.to_string());
+        let updated = session.clone();
+        drop(sessions);
+        self.persist_session(&updated).await
+    }
+
+    pub(crate) fn start_output_consumer(
+        self: &Arc<Self>,
+        session_id: String,
+        executor: Arc<dyn conductor_executors::executor::Executor>,
+        mut output_rx: tokio::sync::mpsc::Receiver<ExecutorOutput>,
+    ) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            while let Some(event) = output_rx.recv().await {
+                match event {
+                    ExecutorOutput::Stdout(line) => {
+                        let mapped = executor.parse_output(&line);
+                        let _ = state.apply_parsed_output(&session_id, mapped).await;
+                    }
+                    ExecutorOutput::Stderr(line) => {
+                        let prefixed = format!("[stderr] {line}");
+                        let _ = state
+                            .append_and_apply(
+                                &session_id,
+                                Some(&prefixed),
+                                ExecutorOutput::Stderr(line),
+                            )
+                            .await;
+                    }
+                    other => {
+                        let should_kick = matches!(
+                            other,
+                            ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
+                        );
+                        let _ = state.apply_runtime_event(&session_id, other).await;
+                        if should_kick {
+                            state.kick_spawn_supervisor();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) async fn spawn_session_now(
+        self: &Arc<Self>,
+        request: SpawnRequest,
+        session_id_override: Option<String>,
+    ) -> Result<SessionRecord> {
         let config = self.config.read().await.clone();
         let project = config
             .projects
@@ -235,10 +324,6 @@ impl AppState {
             .or_else(|| project.agent.clone())
             .unwrap_or_else(|| config.preferences.coding_agent.clone());
 
-        if let Some(agent) = requested_agent.as_deref() {
-            self.persist_spawn_agent_selection(&request.project_id, agent).await?;
-        }
-
         let agent_kind = AgentKind::parse(&project_agent);
         let executors = self.executors.read().await;
         let executor = executors
@@ -247,11 +332,20 @@ impl AppState {
             .with_context(|| format!("Executor '{}' is not available", project_agent))?;
         drop(executors);
 
-        let session_id = Uuid::new_v4().to_string();
-        let branch = request
-            .branch
+        let session_id = session_id_override
             .clone()
-            .or_else(|| Some(format!("session/{}", session_id.get(..8).unwrap_or(&session_id))));
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let existing_record = if let Some(session_id) = session_id_override.as_deref() {
+            self.get_session(session_id).await
+        } else {
+            None
+        };
+        let branch = request.branch.clone().or_else(|| {
+            Some(format!(
+                "session/{}",
+                session_id.get(..8).unwrap_or(&session_id)
+            ))
+        });
         let workspace_path = self
             .prepare_workspace(
                 &request.project_id,
@@ -262,6 +356,17 @@ impl AppState {
                 request.base_branch.as_deref(),
             )
             .await?;
+        if let Err(err) = self.initialize_workspace(&project, &workspace_path).await {
+            let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
+            return Err(err);
+        }
+        let dev_server_log = match self.ensure_dev_server(&request.project_id, &project).await {
+            Ok(log_path) => log_path,
+            Err(err) => {
+                let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
+                return Err(err);
+            }
+        };
 
         let prompt = if request.attachments.is_empty() {
             request.prompt.clone()
@@ -292,42 +397,114 @@ impl AppState {
             spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
 
-        let handle = executor
-            .spawn(SpawnOptions {
-                cwd: workspace_path.clone(),
-                prompt: prompt.clone(),
-                model: request.model.clone(),
-                skip_permissions,
-                extra_args: Vec::new(),
-                env: spawn_env,
-                branch: branch.clone(),
-            })
-            .await?;
+        let runtime_launch = match self
+            .spawn_with_runtime(
+                &project,
+                executor.clone(),
+                &session_id,
+                SpawnOptions {
+                    cwd: workspace_path.working_directory.clone(),
+                    prompt: prompt.clone(),
+                    model: request.model.clone(),
+                    reasoning_effort: request.reasoning_effort.clone(),
+                    skip_permissions,
+                    extra_args: Vec::new(),
+                    env: spawn_env,
+                    branch: branch.clone(),
+                },
+            )
+            .await
+        {
+            Ok(handle) => handle,
+            Err(err) => {
+                let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
+                return Err(err);
+            }
+        };
 
-        let (pid, _kind, mut output_rx, input_tx, kill_tx) = handle.into_parts();
+        let (pid, _kind, output_rx, input_tx, kill_tx) = runtime_launch.handle.into_parts();
 
         let mut record = SessionRecord::new(
             session_id.clone(),
             request.project_id.clone(),
             branch.clone(),
             request.issue_id.clone(),
-            Some(workspace_path.to_string_lossy().to_string()),
+            Some(workspace_path.root_path.to_string_lossy().to_string()),
             project_agent.clone(),
             request.model.clone(),
             request.reasoning_effort.clone(),
             request.prompt.clone(),
             Some(pid),
         );
+        let started_at = Utc::now().to_rfc3339();
+        record.metadata.insert(
+            "worktree".to_string(),
+            workspace_path.root_path.to_string_lossy().to_string(),
+        );
+        record.metadata.insert(
+            "agentCwd".to_string(),
+            workspace_path
+                .working_directory
+                .to_string_lossy()
+                .to_string(),
+        );
+        if let Some(log_path) = dev_server_log {
+            record.metadata.insert("devServerLog".to_string(), log_path);
+        }
+        record.metadata.extend(runtime_launch.metadata.clone());
+        record
+            .metadata
+            .insert("startedAt".to_string(), started_at.clone());
+        record.metadata.insert(
+            "launchState".to_string(),
+            if runtime_mode(&project) == TMUX_RUNTIME_MODE {
+                "attached".to_string()
+            } else {
+                "running".to_string()
+            },
+        );
 
-        record.conversation.push(ConversationEntry {
-            id: Uuid::new_v4().to_string(),
-            kind: "user_message".to_string(),
-            source: request.source,
-            text: request.prompt.clone(),
-            created_at: Utc::now().to_rfc3339(),
-            attachments: request.attachments.clone(),
-            metadata: HashMap::new(),
-        });
+        if let Some(existing_record) = existing_record {
+            record.created_at = existing_record.created_at;
+            if !existing_record.conversation.is_empty() {
+                record.conversation = existing_record.conversation;
+            }
+            for key in [
+                "queuedAt",
+                "queueSource",
+                "launchAttempts",
+                "lastRecoveredAt",
+                "restartRecoveryCount",
+                "recoveryState",
+                "recoveryAction",
+            ] {
+                if let Some(value) = existing_record.metadata.get(key) {
+                    record.metadata.insert(key.to_string(), value.clone());
+                }
+            }
+            if let Some(queued_at) = existing_record.metadata.get("queuedAt") {
+                if let Ok(queued_at) = chrono::DateTime::parse_from_rfc3339(queued_at) {
+                    let wait_ms = (Utc::now() - queued_at.with_timezone(&Utc)).num_milliseconds();
+                    if wait_ms >= 0 {
+                        record
+                            .metadata
+                            .insert("queueWaitMs".to_string(), wait_ms.to_string());
+                    }
+                }
+            }
+        }
+
+        if record.conversation.is_empty() {
+            record.conversation.push(ConversationEntry {
+                id: Uuid::new_v4().to_string(),
+                kind: "user_message".to_string(),
+                source: request.source,
+                text: request.prompt.clone(),
+                created_at: Utc::now().to_rfc3339(),
+                attachments: request.attachments.clone(),
+                metadata: HashMap::new(),
+            });
+        }
 
         let mut kill_tx = Some(kill_tx);
         if let Err(err) = self.replace_session(record.clone()).await {
@@ -335,6 +512,7 @@ impl AppState {
             if let Some(tx) = kill_tx.take() {
                 let _ = tx.send(());
             }
+            let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
             return Err(err.context("Failed to persist session after spawn"));
         }
         self.live_sessions.write().await.insert(
@@ -344,25 +522,7 @@ impl AppState {
                 kill_tx: Mutex::new(kill_tx.take()),
             }),
         );
-
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            while let Some(event) = output_rx.recv().await {
-                match event {
-                    ExecutorOutput::Stdout(line) => {
-                        let mapped = executor.parse_output(&line);
-                        let _ = state.apply_parsed_output(&session_id, mapped).await;
-                    }
-                    ExecutorOutput::Stderr(line) => {
-                        let prefixed = format!("[stderr] {line}");
-                        let _ = state.append_and_apply(&session_id, Some(&prefixed), ExecutorOutput::Stderr(line)).await;
-                    }
-                    other => {
-                        let _ = state.apply_runtime_event(&session_id, other).await;
-                    }
-                }
-            }
-        });
+        self.start_output_consumer(session_id.clone(), executor, output_rx);
 
         Ok(record)
     }
@@ -378,7 +538,8 @@ impl AppState {
                 ExecutorOutput::Stdout(line) => {
                     let output = ExecutorOutput::Stdout(line);
                     let persisted = persisted_output_line(&output).map(str::to_string);
-                    self.append_and_apply(session_id, persisted.as_deref(), output).await?;
+                    self.append_and_apply(session_id, persisted.as_deref(), output)
+                        .await?;
                 }
                 ExecutorOutput::StructuredStatus { text, metadata } => {
                     self.append_and_apply(
@@ -398,20 +559,33 @@ impl AppState {
     }
 
     /// Combined append + apply to avoid acquiring the sessions write lock twice per line.
-    pub(crate) async fn append_and_apply(&self, session_id: &str, line: Option<&str>, event: ExecutorOutput) -> Result<()> {
+    pub(crate) async fn append_and_apply(
+        &self,
+        session_id: &str,
+        line: Option<&str>,
+        event: ExecutorOutput,
+    ) -> Result<()> {
         let clear_live_handle = matches!(
             event,
             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
         );
 
-        let mut sessions = self.sessions.write().await;
+        // IMPORTANT: Always acquire live_sessions before sessions to prevent
+        // deadlock with kill_session/archive_session which take the same order.
         let is_live = self.live_sessions.read().await.contains_key(session_id);
+        let mut sessions = self.sessions.write().await;
         let session = match sessions.get_mut(session_id) {
             Some(value) => value,
-            None => return Ok(()),
+            None => {
+                drop(sessions);
+                if clear_live_handle {
+                    self.live_sessions.write().await.remove(session_id);
+                }
+                return Ok(());
+            }
         };
 
-        if session.status == "archived" {
+        if is_terminal_status(&session.status) {
             drop(sessions);
             if clear_live_handle {
                 self.live_sessions.write().await.remove(session_id);
@@ -443,18 +617,27 @@ impl AppState {
                         append_runtime_assistant_entry(session, stdout_line.trim_end());
                     }
                     session.summary = Some(trimmed.to_string());
-                    session.metadata.insert("summary".to_string(), trimmed.to_string());
+                    session
+                        .metadata
+                        .insert("summary".to_string(), trimmed.to_string());
                 }
             }
             ExecutorOutput::Stderr(ref stderr_line) => {
                 if detect_parser_state(session, stderr_line) {
                     append_runtime_status_entry(session, stderr_line);
                     session.summary = Some(stderr_line.trim().to_string());
-                    session.metadata.insert("summary".to_string(), stderr_line.trim().to_string());
+                    session
+                        .metadata
+                        .insert("summary".to_string(), stderr_line.trim().to_string());
                 }
-                session.metadata.insert("lastStderr".to_string(), stderr_line.clone());
+                session
+                    .metadata
+                    .insert("lastStderr".to_string(), stderr_line.clone());
             }
-            ExecutorOutput::StructuredStatus { ref text, ref metadata } => {
+            ExecutorOutput::StructuredStatus {
+                ref text,
+                ref metadata,
+            } => {
                 if is_live && !is_terminal_status(&session.status) {
                     session.status = "working".to_string();
                     session.activity = Some("active".to_string());
@@ -479,20 +662,32 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) async fn apply_runtime_event(&self, session_id: &str, event: ExecutorOutput) -> Result<()> {
+    pub(crate) async fn apply_runtime_event(
+        &self,
+        session_id: &str,
+        event: ExecutorOutput,
+    ) -> Result<()> {
         let clear_live_handle = matches!(
             event,
             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
         );
 
-        let mut sessions = self.sessions.write().await;
+        // IMPORTANT: Always acquire live_sessions before sessions to prevent
+        // deadlock with kill_session/archive_session which take the same order.
         let is_live = self.live_sessions.read().await.contains_key(session_id);
+        let mut sessions = self.sessions.write().await;
         let session = match sessions.get_mut(session_id) {
             Some(value) => value,
-            None => return Ok(()),
+            None => {
+                drop(sessions);
+                if clear_live_handle {
+                    self.live_sessions.write().await.remove(session_id);
+                }
+                return Ok(());
+            }
         };
 
-        if session.status == "archived" {
+        if is_terminal_status(&session.status) {
             drop(sessions);
             if clear_live_handle {
                 self.live_sessions.write().await.remove(session_id);
@@ -501,6 +696,7 @@ impl AppState {
         }
 
         session.last_activity_at = Utc::now().to_rfc3339();
+        let termination_requested = session.metadata.get("terminationRequested").cloned();
 
         match event {
             ExecutorOutput::Stdout(line) => {
@@ -519,14 +715,18 @@ impl AppState {
                         append_runtime_assistant_entry(session, line.trim_end());
                     }
                     session.summary = Some(trimmed.to_string());
-                    session.metadata.insert("summary".to_string(), trimmed.to_string());
+                    session
+                        .metadata
+                        .insert("summary".to_string(), trimmed.to_string());
                 }
             }
             ExecutorOutput::Stderr(line) => {
                 if detect_parser_state(session, &line) {
                     append_runtime_status_entry(session, &line);
                     session.summary = Some(line.trim().to_string());
-                    session.metadata.insert("summary".to_string(), line.trim().to_string());
+                    session
+                        .metadata
+                        .insert("summary".to_string(), line.trim().to_string());
                 }
                 session.metadata.insert("lastStderr".to_string(), line);
             }
@@ -542,7 +742,9 @@ impl AppState {
                     session.status = "needs_input".to_string();
                     session.activity = Some("waiting_input".to_string());
                     session.summary = Some(prompt.clone());
-                    session.metadata.insert("summary".to_string(), prompt.clone());
+                    session
+                        .metadata
+                        .insert("summary".to_string(), prompt.clone());
                     append_runtime_status_entry(session, &prompt);
                     if !detect_parser_state(session, &prompt) {
                         set_parser_state(session, "needs_input", &prompt, None);
@@ -550,13 +752,29 @@ impl AppState {
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
-                if exit_code == 0 {
+                let requested_kill = termination_requested.as_deref() == Some("kill");
+                session.metadata.remove("terminationRequested");
+                if requested_kill {
                     clear_parser_state(session);
-                }
-                session.metadata.insert("exitCode".to_string(), exit_code.to_string());
-                if exit_code == 0 {
+                    session.status = "killed".to_string();
+                    session.activity = Some("exited".to_string());
+                    session
+                        .metadata
+                        .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+                    session.summary = Some("Interrupted".to_string());
+                    session
+                        .metadata
+                        .insert("summary".to_string(), "Interrupted".to_string());
+                } else if exit_code == 0 {
+                    clear_parser_state(session);
+                    session
+                        .metadata
+                        .insert("exitCode".to_string(), exit_code.to_string());
                     session.status = "needs_input".to_string();
                     session.activity = Some("waiting_input".to_string());
+                    session
+                        .metadata
+                        .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
                     if session
                         .summary
                         .as_ref()
@@ -568,8 +786,14 @@ impl AppState {
                         session.metadata.insert("summary".to_string(), summary);
                     }
                 } else {
+                    session
+                        .metadata
+                        .insert("exitCode".to_string(), exit_code.to_string());
                     session.status = "errored".to_string();
                     session.activity = Some("exited".to_string());
+                    session
+                        .metadata
+                        .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
                     let summary = session
                         .summary
                         .clone()
@@ -588,23 +812,30 @@ impl AppState {
             }
             ExecutorOutput::Failed { error, exit_code } => {
                 let parser_state_detected = detect_parser_state(session, &error);
-                let summary = if error == "killed" {
+                let requested_kill = termination_requested.as_deref() == Some("kill");
+                let summary = if requested_kill || error == "killed" {
                     "Interrupted".to_string()
                 } else {
                     error.clone()
                 };
-                session.status = if error == "killed" {
+                session.status = if requested_kill || error == "killed" {
                     "killed".to_string()
                 } else {
                     "errored".to_string()
                 };
                 session.activity = Some("exited".to_string());
+                session
+                    .metadata
+                    .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
                 session.summary = Some(summary.clone());
                 session.metadata.insert("summary".to_string(), summary);
                 if let Some(code) = exit_code {
-                    session.metadata.insert("exitCode".to_string(), code.to_string());
+                    session
+                        .metadata
+                        .insert("exitCode".to_string(), code.to_string());
                 }
-                if !parser_state_detected && error == "killed" {
+                session.metadata.remove("terminationRequested");
+                if !parser_state_detected && (requested_kill || error == "killed") {
                     clear_parser_state(session);
                 }
             }
@@ -649,7 +880,7 @@ impl AppState {
                     .map(|item| format!("- {item}"))
                     .collect::<Vec<_>>()
                     .join("\n")
-                )
+            )
         };
         let mut sessions = self.sessions.write().await;
         let session = sessions
@@ -665,7 +896,9 @@ impl AppState {
         }
         if let Some(reasoning) = reasoning_effort {
             session.reasoning_effort = Some(reasoning.clone());
-            session.metadata.insert("reasoningEffort".to_string(), reasoning);
+            session
+                .metadata
+                .insert("reasoningEffort".to_string(), reasoning);
         }
         session.conversation.push(ConversationEntry {
             id: Uuid::new_v4().to_string(),
@@ -680,7 +913,10 @@ impl AppState {
         drop(sessions);
         self.persist_session(&updated).await?;
         self.publish_snapshot().await;
-        handle.input_tx.send(ExecutorInput::Text(effective_message)).await?;
+        handle
+            .input_tx
+            .send(ExecutorInput::Text(effective_message))
+            .await?;
         Ok(())
     }
 
@@ -698,9 +934,19 @@ impl AppState {
             .await
             .with_context(|| format!("Session {session_id} not found"))?;
 
+        if let Some(pid) =
+            detached_runtime_pid(&session_snapshot).filter(|pid| is_process_alive(*pid))
+        {
+            return Err(anyhow::anyhow!(
+                "Session {session_id} still has a detached runtime (pid {pid}). Kill or archive it before resuming."
+            ));
+        }
+
         let workspace_path = session_snapshot
-            .workspace_path
-            .clone()
+            .metadata
+            .get("agentCwd")
+            .cloned()
+            .or_else(|| session_snapshot.workspace_path.clone())
             .with_context(|| format!("Session {session_id} has no workspace path"))?;
 
         let config = self.config.read().await.clone();
@@ -733,22 +979,37 @@ impl AppState {
         };
 
         let effective_model = model.or_else(|| session_snapshot.model.clone());
-        let effective_reasoning_effort = reasoning_effort.or_else(|| session_snapshot.reasoning_effort.clone());
+        let effective_reasoning_effort =
+            reasoning_effort.or_else(|| session_snapshot.reasoning_effort.clone());
         let skip_permissions = matches!(project.agent_config.permissions.as_deref(), Some("skip"));
 
-        let handle = executor
-            .spawn(SpawnOptions {
-                cwd: std::path::PathBuf::from(&workspace_path),
-                prompt: effective_message.clone(),
-                model: effective_model.clone(),
-                skip_permissions,
-                extra_args: Vec::new(),
-                env: HashMap::new(),
-                branch: session_snapshot.branch.clone(),
-            })
-            .await?;
+        // Apply the same environment overrides as initial spawn to avoid
+        // leaking ANTHROPIC_API_KEY on resumed sessions.
+        let mut resume_env = HashMap::new();
+        if executor.kind() == AgentKind::ClaudeCode {
+            resume_env.insert("CLAUDECODE".to_string(), String::new());
+            resume_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
+        }
 
-        let (pid, _kind, mut output_rx, input_tx, kill_tx) = handle.into_parts();
+        let handle = executor.clone();
+        let runtime_launch = self
+            .spawn_with_runtime(
+                &project,
+                handle.clone(),
+                session_id,
+                SpawnOptions {
+                    cwd: std::path::PathBuf::from(&workspace_path),
+                    prompt: effective_message.clone(),
+                    model: effective_model.clone(),
+                    reasoning_effort: effective_reasoning_effort.clone(),
+                    skip_permissions,
+                    extra_args: Vec::new(),
+                    env: resume_env,
+                    branch: session_snapshot.branch.clone(),
+                },
+            )
+            .await?;
+        let (pid, _kind, output_rx, input_tx, kill_tx) = runtime_launch.handle.into_parts();
 
         let mut sessions = self.sessions.write().await;
         let session = sessions
@@ -766,7 +1027,15 @@ impl AppState {
         session.model = effective_model.clone();
         session.reasoning_effort = effective_reasoning_effort.clone();
         session.summary = Some(message.trim().to_string());
-        session.metadata.insert("summary".to_string(), message.trim().to_string());
+        session.metadata.remove(DETACHED_PID_METADATA_KEY);
+        session.metadata.extend(runtime_launch.metadata.clone());
+        session
+            .metadata
+            .insert("summary".to_string(), message.trim().to_string());
+        session
+            .metadata
+            .insert("startedAt".to_string(), Utc::now().to_rfc3339());
+        session.metadata.remove("finishedAt");
         session.conversation.push(ConversationEntry {
             id: Uuid::new_v4().to_string(),
             kind: "user_message".to_string(),
@@ -788,26 +1057,7 @@ impl AppState {
                 kill_tx: Mutex::new(Some(kill_tx)),
             }),
         );
-
-        let state = Arc::clone(self);
-        let session_id = session_id.to_string();
-        tokio::spawn(async move {
-            while let Some(event) = output_rx.recv().await {
-                match event {
-                    ExecutorOutput::Stdout(line) => {
-                        let mapped = executor.parse_output(&line);
-                        let _ = state.apply_parsed_output(&session_id, mapped).await;
-                    }
-                    ExecutorOutput::Stderr(line) => {
-                        let prefixed = format!("[stderr] {line}");
-                        let _ = state.append_and_apply(&session_id, Some(&prefixed), ExecutorOutput::Stderr(line)).await;
-                    }
-                    other => {
-                        let _ = state.apply_runtime_event(&session_id, other).await;
-                    }
-                }
-            }
-        });
+        self.start_output_consumer(session_id.to_string(), handle, output_rx);
 
         Ok(())
     }
@@ -843,18 +1093,54 @@ impl AppState {
     }
 
     pub async fn kill_session(&self, session_id: &str) -> Result<()> {
-        if let Some(handle) = self.live_sessions.write().await.remove(session_id) {
+        let live_handle = self.live_sessions.write().await.remove(session_id);
+        self.mark_termination_requested(session_id, "kill").await?;
+        let had_live_handle = if let Some(handle) = live_handle {
             if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
                 let _ = kill_tx.send(());
             }
+            true
+        } else {
+            false
+        };
+
+        if !had_live_handle {
+            if let Some(session) = self.get_session(session_id).await {
+                if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&session) {
+                    if tmux_session_exists(&socket_path, &tmux_session).await? {
+                        super::tmux_runtime::kill_tmux_session(&socket_path, &tmux_session).await?;
+                    }
+                }
+            }
+            if let Some(pid) = self
+                .get_session(session_id)
+                .await
+                .and_then(|session| detached_runtime_pid(&session))
+                .filter(|pid| is_process_alive(*pid))
+            {
+                if !terminate_process(pid) && is_process_alive(pid) {
+                    return Err(anyhow::anyhow!(
+                        "Failed to terminate detached runtime for session {session_id} (pid {pid})"
+                    ));
+                }
+            }
         }
+
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
             session.status = "killed".to_string();
             session.activity = Some("exited".to_string());
             session.last_activity_at = Utc::now().to_rfc3339();
+            session.pid = None;
             session.summary = Some("Interrupted".to_string());
-            session.metadata.insert("summary".to_string(), "Interrupted".to_string());
+            session
+                .metadata
+                .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+            session.metadata.remove(DETACHED_PID_METADATA_KEY);
+            session.metadata.remove("terminationRequested");
+            session
+                .metadata
+                .insert("summary".to_string(), "Interrupted".to_string());
             let updated = session.clone();
             drop(sessions);
             self.replace_session(updated).await?;
@@ -863,9 +1149,37 @@ impl AppState {
     }
 
     pub async fn archive_session(&self, session_id: &str) -> Result<()> {
-        if let Some(handle) = self.live_sessions.write().await.remove(session_id) {
+        let live_handle = self.live_sessions.write().await.remove(session_id);
+        self.mark_termination_requested(session_id, "archive")
+            .await?;
+        let had_live_handle = if let Some(handle) = live_handle {
             if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
                 let _ = kill_tx.send(());
+            }
+            true
+        } else {
+            false
+        };
+
+        if !had_live_handle {
+            if let Some(session) = self.get_session(session_id).await {
+                if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&session) {
+                    if tmux_session_exists(&socket_path, &tmux_session).await? {
+                        super::tmux_runtime::kill_tmux_session(&socket_path, &tmux_session).await?;
+                    }
+                }
+            }
+            if let Some(pid) = self
+                .get_session(session_id)
+                .await
+                .and_then(|session| detached_runtime_pid(&session))
+                .filter(|pid| is_process_alive(*pid))
+            {
+                if !terminate_process(pid) && is_process_alive(pid) {
+                    return Err(anyhow::anyhow!(
+                        "Failed to terminate detached runtime for session {session_id} (pid {pid})"
+                    ));
+                }
             }
         }
 
@@ -880,14 +1194,28 @@ impl AppState {
         session.status = "archived".to_string();
         session.activity = Some("exited".to_string());
         session.last_activity_at = Utc::now().to_rfc3339();
+        session.pid = None;
         session.summary = Some("Archived".to_string());
-        session.metadata.insert("summary".to_string(), "Archived".to_string());
+        session
+            .metadata
+            .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+        session.metadata.remove(DETACHED_PID_METADATA_KEY);
+        session.metadata.remove("terminationRequested");
+        session
+            .metadata
+            .insert("summary".to_string(), "Archived".to_string());
         session
             .metadata
             .insert("archivedAt".to_string(), session.last_activity_at.clone());
 
         let updated = session.clone();
         drop(sessions);
+        let config = self.config.read().await.clone();
+        if let Some(project) = config.projects.get(&updated.project_id) {
+            if let Err(err) = self.archive_workspace(session_id, &updated, project).await {
+                tracing::warn!(session_id, error = %err, "Failed to archive workspace");
+            }
+        }
         self.replace_session(updated).await?;
         Ok(())
     }
@@ -935,5 +1263,552 @@ impl AppState {
             source: "restore".to_string(),
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use conductor_core::config::{ConductorConfig, ProjectConfig};
+    use conductor_db::Database;
+    use conductor_executors::executor::{Executor, ExecutorHandle};
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command as StdCommand};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio::time::{timeout, Duration};
+    use uuid::Uuid;
+
+    struct TestExecutor {
+        kind: AgentKind,
+    }
+
+    #[async_trait]
+    impl Executor for TestExecutor {
+        fn kind(&self) -> AgentKind {
+            self.kind.clone()
+        }
+
+        fn name(&self) -> &str {
+            "Test Executor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/bin/true")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
+            let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
+            drop(output_tx);
+            let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(8);
+            let (kill_tx, _kill_rx) = oneshot::channel();
+            Ok(ExecutorHandle::new(
+                1,
+                self.kind.clone(),
+                output_rx,
+                input_tx,
+                kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
+
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\"'\"'"))
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .expect("git command should run");
+        assert!(
+            status.success(),
+            "git command failed: git -C {} {:?}",
+            repo.display(),
+            args
+        );
+    }
+
+    fn seed_git_repo(repo: &Path) {
+        fs::create_dir_all(repo).unwrap();
+        run_git(repo, &["init", "-b", "main"]);
+        run_git(repo, &["config", "user.email", "test@example.com"]);
+        run_git(repo, &["config", "user.name", "Conductor Tests"]);
+        fs::write(repo.join("README.md"), "seed\n").unwrap();
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-m", "seed"]);
+    }
+
+    fn spawn_sleep_process() -> Child {
+        StdCommand::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep process should launch")
+    }
+
+    async fn wait_for_path(path: PathBuf) {
+        timeout(Duration::from_secs(3), async move {
+            loop {
+                if path.exists() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for path");
+    }
+
+    async fn build_state(root: &Path, project: ProjectConfig, project_id: &str) -> Arc<AppState> {
+        let mut project = project;
+        if project.runtime.is_none() {
+            project.runtime = Some(crate::state::tmux_runtime::DIRECT_RUNTIME_MODE.to_string());
+        }
+        let mut config = ConductorConfig::default();
+        config.workspace = root.to_path_buf();
+        config.preferences.coding_agent = "codex".to_string();
+        config.projects = BTreeMap::from([(project_id.to_string(), project)]);
+
+        let db = Database::in_memory().await.unwrap();
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(TestExecutor {
+                kind: AgentKind::Codex,
+            }),
+        );
+        state.executors.write().await.insert(
+            AgentKind::ClaudeCode,
+            Arc::new(TestExecutor {
+                kind: AgentKind::ClaudeCode,
+            }),
+        );
+        state
+    }
+
+    #[tokio::test]
+    async fn spawn_session_applies_workspace_hooks_and_keeps_saved_agent_defaults() {
+        let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+        fs::create_dir_all(repo.join("config")).unwrap();
+        fs::create_dir_all(repo.join("notes")).unwrap();
+        fs::write(repo.join("config/.env"), "TOKEN=test\n").unwrap();
+        fs::write(repo.join("notes/spec.md"), "# spec\n").unwrap();
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            copy_files: vec!["config/.env".to_string(), "notes/*.md".to_string()],
+            setup_script: vec!["printf ready > setup.marker".to_string()],
+            dev_server_script: vec!["printf dev-ready > devserver.marker && sleep 5".to_string()],
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: Some("claude-code".to_string()),
+                    use_worktree: Some(true),
+                    permission_mode: None,
+                    model: None,
+                    reasoning_effort: Some("high".to_string()),
+                    branch: None,
+                    base_branch: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let worktree = PathBuf::from(session.metadata["worktree"].clone());
+        assert!(worktree.exists());
+        assert_ne!(worktree, repo);
+        assert_eq!(session.agent, "claude-code");
+        assert_eq!(
+            session.metadata.get("agentCwd"),
+            Some(&worktree.to_string_lossy().to_string())
+        );
+        assert!(worktree.join("config/.env").is_file());
+        assert!(worktree.join("notes/spec.md").is_file());
+        assert!(worktree.join("setup.marker").is_file());
+
+        let dev_marker = repo.join("devserver.marker");
+        wait_for_path(dev_marker.clone()).await;
+        assert_eq!(fs::read_to_string(dev_marker).unwrap(), "dev-ready");
+        assert!(session.metadata.contains_key("devServerLog"));
+
+        let config = state.config.read().await;
+        assert_eq!(
+            config.projects["demo"].agent.as_deref(),
+            Some("codex"),
+            "spawn-time agent overrides should not rewrite project defaults"
+        );
+        assert_eq!(config.preferences.coding_agent, "codex");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn spawn_session_cleans_up_worktree_when_dev_server_bootstrap_fails() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-dev-server-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+        fs::create_dir_all(root.join(".conductor")).unwrap();
+        fs::write(root.join(".conductor/rust-backend"), "not-a-directory").unwrap();
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            dev_server_script: vec!["printf dev-ready > devserver.marker && sleep 5".to_string()],
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let error = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: None,
+                    use_worktree: Some(true),
+                    permission_mode: None,
+                    model: None,
+                    reasoning_effort: None,
+                    branch: None,
+                    base_branch: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .expect_err("dev server bootstrap should fail");
+
+        assert!(error.to_string().contains("Not a directory"));
+        let worktree_root = root.join(".conductor").join("worktrees").join("demo");
+        assert!(
+            !worktree_root.exists()
+                || fs::read_dir(&worktree_root)
+                    .map(|mut entries| entries.next().is_none())
+                    .unwrap_or(true),
+            "failed spawn should not leave an unpersisted worktree behind"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn queued_spawn_requests_are_promoted_by_the_supervisor() {
+        let root = std::env::temp_dir().join(format!("conductor-queue-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session(SpawnRequest {
+                project_id: "demo".to_string(),
+                prompt: "Queued run".to_string(),
+                issue_id: None,
+                agent: None,
+                use_worktree: Some(true),
+                permission_mode: None,
+                model: None,
+                reasoning_effort: None,
+                branch: None,
+                base_branch: None,
+                attachments: Vec::new(),
+                source: "spawn".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(session.status, "queued");
+
+        let launched = timeout(Duration::from_secs(3), async {
+            loop {
+                let current = state.get_session(&session.id).await.unwrap();
+                if current.status != "queued" && current.metadata.contains_key("worktree") {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("queued session should be promoted");
+
+        assert!(matches!(launched.status.as_str(), "spawning" | "working"));
+        assert!(launched.metadata.contains_key("worktree"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn queued_spawn_requests_ignore_paused_sessions_without_live_runtimes() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-queue-paused-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        for index in 0..5 {
+            let mut paused = SessionRecord::new(
+                format!("paused-{index}"),
+                "demo".to_string(),
+                Some(format!("session/paused-{index}")),
+                None,
+                Some(repo.to_string_lossy().to_string()),
+                "codex".to_string(),
+                None,
+                None,
+                "Paused".to_string(),
+                None,
+            );
+            paused.status = "needs_input".to_string();
+            paused.activity = Some("waiting_input".to_string());
+            paused.summary = Some("Ready for follow-up".to_string());
+            paused
+                .metadata
+                .insert("summary".to_string(), "Ready for follow-up".to_string());
+            state.replace_session(paused).await.unwrap();
+        }
+
+        let session = state
+            .spawn_session(SpawnRequest {
+                project_id: "demo".to_string(),
+                prompt: "Queued run".to_string(),
+                issue_id: None,
+                agent: None,
+                use_worktree: Some(true),
+                permission_mode: None,
+                model: None,
+                reasoning_effort: None,
+                branch: None,
+                base_branch: None,
+                attachments: Vec::new(),
+                source: "spawn".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let launched = timeout(Duration::from_secs(3), async {
+            loop {
+                let current = state.get_session(&session.id).await.unwrap();
+                if current.status != "queued" && current.metadata.contains_key("worktree") {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("queued session should not be blocked by paused sessions");
+
+        assert!(matches!(launched.status.as_str(), "spawning" | "working"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn archive_session_runs_cleanup_and_archive_hooks_and_removes_worktree() {
+        let root = std::env::temp_dir().join(format!("conductor-archive-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+        let cleanup_log = root.join("cleanup.log");
+        let archive_log = root.join("archive.log");
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            cleanup_script: vec![format!("printf cleanup >> {}", shell_quote(&cleanup_log))],
+            archive_script: vec![format!("printf archive >> {}", shell_quote(&archive_log))],
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: None,
+                    use_worktree: Some(true),
+                    permission_mode: None,
+                    model: None,
+                    reasoning_effort: None,
+                    branch: None,
+                    base_branch: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let worktree = PathBuf::from(session.metadata["worktree"].clone());
+
+        state.archive_session(&session.id).await.unwrap();
+
+        assert_eq!(fs::read_to_string(&cleanup_log).unwrap(), "cleanup");
+        assert_eq!(fs::read_to_string(&archive_log).unwrap(), "archive");
+        assert!(!worktree.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resume_session_blocks_when_detached_runtime_is_still_alive() {
+        let root = std::env::temp_dir().join(format!("conductor-resume-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        let mut child = spawn_sleep_process();
+        let pid = child.id();
+
+        let mut session = SessionRecord::new(
+            "detached-session".to_string(),
+            "demo".to_string(),
+            Some("session/demo".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(pid),
+        );
+        session.status = "stuck".to_string();
+        session.activity = Some("blocked".to_string());
+        session
+            .metadata
+            .insert(DETACHED_PID_METADATA_KEY.to_string(), pid.to_string());
+        state.replace_session(session).await.unwrap();
+
+        let error = state
+            .resume_session_with_prompt(
+                "detached-session",
+                "Continue".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .expect_err("detached runtime should block resume");
+
+        assert!(error.to_string().contains("detached runtime"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn kill_session_terminates_detached_runtime() {
+        let root = std::env::temp_dir().join(format!("conductor-kill-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        let mut child = spawn_sleep_process();
+        let pid = child.id();
+
+        let mut session = SessionRecord::new(
+            "detached-kill".to_string(),
+            "demo".to_string(),
+            Some("session/demo".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(pid),
+        );
+        session.status = "stuck".to_string();
+        session.activity = Some("blocked".to_string());
+        session
+            .metadata
+            .insert(DETACHED_PID_METADATA_KEY.to_string(), pid.to_string());
+        state.replace_session(session).await.unwrap();
+
+        state.kill_session("detached-kill").await.unwrap();
+
+        let waited = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "detached runtime should terminate");
+
+        let updated = state.get_session("detached-kill").await.unwrap();
+        assert_eq!(updated.status, "killed");
+        assert!(!updated.metadata.contains_key(DETACHED_PID_METADATA_KEY));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

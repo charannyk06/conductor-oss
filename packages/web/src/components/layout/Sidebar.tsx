@@ -4,6 +4,7 @@ import { useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { Archive, Search } from "lucide-react";
 import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
+import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { cn } from "@/lib/cn";
 
 interface SidebarProps {
@@ -55,6 +56,11 @@ function getSessionSubtitle(session: DashboardSession): string {
   }
 
   return session.id.slice(0, 8);
+}
+
+function getSessionAgent(session: DashboardSession): string | null {
+  const agent = session.metadata["agent"]?.trim();
+  return agent ? agent : null;
 }
 
 function parseDiffStats(session: DashboardSession): { additions: number; deletions: number } | null {
@@ -249,6 +255,7 @@ export function Sidebar({
               const level = getAttentionLevel(session);
               const diffStats = parseDiffStats(session);
               const statusBadge = getStatusBadge(session, level);
+              const sessionAgent = getSessionAgent(session);
               const isSelected = session.id === selectedId;
               const isRunning = level === "working";
               const isArchiving = archivingId === session.id;
@@ -272,8 +279,19 @@ export function Sidebar({
 
                   <span className="min-w-0 flex-1">
                     <span className="flex items-start gap-2">
-                      <span className="min-w-0 flex-1 truncate text-[14px] font-medium text-[var(--vk-text-strong)]">
-                        {getSessionLabel(session)}
+                      <span className="min-w-0 flex flex-1 items-center gap-2">
+                        {sessionAgent ? (
+                          <span
+                            className="inline-flex h-5 w-5 shrink-0 items-center justify-center"
+                            title={sessionAgent}
+                            aria-label={`${sessionAgent} agent`}
+                          >
+                            <AgentTileIcon seed={{ label: sessionAgent }} className="h-4 w-4" />
+                          </span>
+                        ) : null}
+                        <span className="min-w-0 truncate text-[14px] font-medium text-[var(--vk-text-strong)]">
+                          {getSessionLabel(session)}
+                        </span>
                       </span>
                       <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium">
                         {diffStats ? (
