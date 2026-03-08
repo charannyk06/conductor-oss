@@ -6,6 +6,7 @@ use conductor_core::config::ProjectConfig;
 use conductor_core::{sync_project_local_config, sync_support_files_for_directory};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
@@ -17,7 +18,10 @@ type ApiResponse = (StatusCode, Json<Value>);
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/workspaces", get(list_workspaces).post(create_workspace))
+        .route(
+            "/api/workspaces",
+            get(list_workspaces).post(create_workspace),
+        )
         .route("/api/workspaces/branches", get(detect_branches))
 }
 
@@ -74,10 +78,13 @@ async fn list_workspaces(State(state): State<Arc<AppState>>) -> ApiResponse {
     ok(json!({ "workspaces": projects }))
 }
 
-async fn detect_branches(
-    Query(query): Query<BranchQuery>,
-) -> ApiResponse {
-    if let Some(path) = query.path.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+async fn detect_branches(Query(query): Query<BranchQuery>) -> ApiResponse {
+    if let Some(path) = query
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         match detect_local_branches(Path::new(path)).await {
             Ok((branches, default_branch)) => {
                 return ok(json!({ "branches": branches, "defaultBranch": default_branch }));
@@ -86,7 +93,12 @@ async fn detect_branches(
         }
     }
 
-    if let Some(git_url) = query.git_url.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(git_url) = query
+        .git_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         match detect_remote_branches(git_url).await {
             Ok((branches, default_branch)) => {
                 return ok(json!({ "branches": branches, "defaultBranch": default_branch }));
@@ -107,16 +119,34 @@ async fn create_workspace(
         return error(StatusCode::BAD_REQUEST, "mode must be either git or local");
     }
 
-    let default_branch = body.default_branch.clone().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| "main".to_string());
+    let default_branch = body
+        .default_branch
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "main".to_string());
     let requested_agent = body.agent.clone().filter(|value| !value.trim().is_empty());
 
     if mode == "git" {
-        let Some(git_url) = body.git_url.as_deref().map(str::trim).filter(|value| !value.is_empty()) else {
+        let Some(git_url) = body
+            .git_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
             return error(StatusCode::BAD_REQUEST, "gitUrl is required for git mode");
         };
         let repo_name = repo_name_from_url(git_url).unwrap_or("workspace");
-        let project_id = body.project_id.as_deref().map(normalize_token).filter(|value| !value.is_empty()).unwrap_or_else(|| normalize_token(repo_name));
-        let path = body.path.as_deref().map(str::trim).filter(|value| !value.is_empty())
+        let project_id = body
+            .project_id
+            .as_deref()
+            .map(normalize_token)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| normalize_token(repo_name));
+        let path = body
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| state.workspace_path.join("repos").join(&project_id));
 
@@ -135,7 +165,12 @@ async fn create_workspace(
             Ok(path) => path,
             Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
         };
-        let project_id = body.project_id.as_deref().map(normalize_token).filter(|value| !value.is_empty()).unwrap_or_else(|| normalize_token(repo_name));
+        let project_id = body
+            .project_id
+            .as_deref()
+            .map(normalize_token)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| normalize_token(repo_name));
         return persist_workspace(
             state,
             &project_id,
@@ -144,9 +179,16 @@ async fn create_workspace(
             canonical_path,
             default_branch,
             body.use_worktree.unwrap_or(true),
-        ).await;
+        )
+        .await;
     } else {
-        let Some(path) = body.path.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(PathBuf::from) else {
+        let Some(path) = body
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+        else {
             return error(StatusCode::BAD_REQUEST, "path is required for local mode");
         };
 
@@ -161,8 +203,16 @@ async fn create_workspace(
             Ok(path) => path,
             Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
         };
-        let folder_name = canonical_path.file_name().and_then(|value| value.to_str()).unwrap_or("workspace");
-        let project_id = body.project_id.as_deref().map(normalize_token).filter(|value| !value.is_empty()).unwrap_or_else(|| normalize_token(folder_name));
+        let folder_name = canonical_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workspace");
+        let project_id = body
+            .project_id
+            .as_deref()
+            .map(normalize_token)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| normalize_token(folder_name));
         let repo = local_repo_name(&canonical_path).await.ok();
         return persist_workspace(
             state,
@@ -172,7 +222,8 @@ async fn create_workspace(
             canonical_path,
             default_branch,
             body.use_worktree.unwrap_or(true),
-        ).await;
+        )
+        .await;
     }
 }
 
@@ -191,14 +242,21 @@ async fn persist_workspace(
     }
 
     let mut config = state.config.write().await;
-    let project = config.projects.entry(project_id.to_string()).or_insert_with(ProjectConfig::default);
+    let project = config
+        .projects
+        .entry(project_id.to_string())
+        .or_insert_with(ProjectConfig::default);
     project.name = Some(project_id.to_string());
     project.repo = repo.or_else(|| Some(project_id.to_string()));
     project.path = path.to_string_lossy().to_string();
     project.default_branch = default_branch.clone();
     project.agent = agent;
     project.runtime = Some("tmux".to_string());
-    project.workspace = Some(if use_worktree { "worktree".to_string() } else { "local".to_string() });
+    project.workspace = Some(if use_worktree {
+        "worktree".to_string()
+    } else {
+        "local".to_string()
+    });
     project.board_dir = Some(board_dir.clone());
     let saved = project.clone();
     drop(config);
@@ -263,11 +321,19 @@ fn normalize_token(value: &str) -> String {
     while out.ends_with('-') {
         out.pop();
     }
-    if out.is_empty() { "workspace".to_string() } else { out }
+    if out.is_empty() {
+        "workspace".to_string()
+    } else {
+        out
+    }
 }
 
 fn repo_name_from_url(value: &str) -> Option<&str> {
-    value.rsplit('/').next().map(|segment| segment.trim_end_matches(".git")).filter(|segment| !segment.is_empty())
+    value
+        .rsplit('/')
+        .next()
+        .map(|segment| segment.trim_end_matches(".git"))
+        .filter(|segment| !segment.is_empty())
 }
 
 fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
@@ -282,7 +348,10 @@ fn canonicalize_existing_path(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 fn ensure_board_file(workspace_path: &Path, board_dir: &str) -> std::io::Result<()> {
-    let board_path = workspace_path.join("projects").join(board_dir).join("CONDUCTOR.md");
+    let board_path = workspace_path
+        .join("projects")
+        .join(board_dir)
+        .join("CONDUCTOR.md");
     if let Some(parent) = board_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -317,7 +386,13 @@ fn ensure_project_root_board(project_path: &Path, project_id: &str) -> std::io::
 
 async fn clone_repository(git_url: &str, path: &Path, branch: &str) -> anyhow::Result<()> {
     let output = Command::new("git")
-        .args(["clone", "--branch", branch, git_url, path.to_string_lossy().as_ref()])
+        .args([
+            "clone",
+            "--branch",
+            branch,
+            git_url,
+            path.to_string_lossy().as_ref(),
+        ])
         .output()
         .await?;
     if !output.status.success() {
@@ -361,30 +436,23 @@ async fn init_repository(path: &Path, branch: &str) -> anyhow::Result<()> {
 
 async fn detect_local_branches(path: &Path) -> anyhow::Result<(Vec<String>, Option<String>)> {
     let branch_output = Command::new("git")
-        .args(["-C", path.to_string_lossy().as_ref(), "branch", "--format=%(refname:short)"])
+        .args([
+            "-C",
+            path.to_string_lossy().as_ref(),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+        ])
         .output()
         .await?;
     if !branch_output.status.success() {
         anyhow::bail!(String::from_utf8_lossy(&branch_output.stderr).to_string());
     }
-    let mut branches = String::from_utf8_lossy(&branch_output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    branches.sort();
-
-    let head_output = Command::new("git")
-        .args(["-C", path.to_string_lossy().as_ref(), "rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .await?;
-    let default_branch = if head_output.status.success() {
-        let value = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
-        if value.is_empty() { None } else { Some(value) }
-    } else {
-        branches.first().cloned()
-    };
+    let branches = normalize_branch_refs(String::from_utf8_lossy(&branch_output.stdout).lines());
+    let default_branch = detect_local_default_branch(path)
+        .await?
+        .or_else(|| branches.first().cloned());
 
     Ok((branches, default_branch))
 }
@@ -431,7 +499,13 @@ async fn detect_remote_branches(git_url: &str) -> anyhow::Result<(Vec<String>, O
 
 async fn local_repo_name(path: &Path) -> anyhow::Result<String> {
     let output = Command::new("git")
-        .args(["-C", path.to_string_lossy().as_ref(), "remote", "get-url", "origin"])
+        .args([
+            "-C",
+            path.to_string_lossy().as_ref(),
+            "remote",
+            "get-url",
+            "origin",
+        ])
         .output()
         .await?;
     if output.status.success() {
@@ -440,5 +514,109 @@ async fn local_repo_name(path: &Path) -> anyhow::Result<String> {
             return Ok(url);
         }
     }
-    Ok(path.file_name().and_then(|value| value.to_str()).unwrap_or("workspace").to_string())
+    Ok(path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("workspace")
+        .to_string())
+}
+
+async fn detect_local_default_branch(path: &Path) -> anyhow::Result<Option<String>> {
+    let remote_head_output = Command::new("git")
+        .args([
+            "-C",
+            path.to_string_lossy().as_ref(),
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+        ])
+        .output()
+        .await?;
+    if remote_head_output.status.success() {
+        let value = String::from_utf8_lossy(&remote_head_output.stdout);
+        if let Some(branch) = normalize_branch_ref(value.trim()) {
+            return Ok(Some(branch));
+        }
+    }
+
+    let head_output = Command::new("git")
+        .args([
+            "-C",
+            path.to_string_lossy().as_ref(),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .output()
+        .await?;
+    if !head_output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(normalize_branch_ref(
+        String::from_utf8_lossy(&head_output.stdout).trim(),
+    ))
+}
+
+fn normalize_branch_refs<'a>(refs: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    refs.into_iter()
+        .filter_map(normalize_branch_ref)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn normalize_branch_ref(ref_name: &str) -> Option<String> {
+    let trimmed = ref_name.trim();
+    if trimmed.is_empty() || trimmed == "HEAD" {
+        return None;
+    }
+
+    if let Some(branch) = trimmed.strip_prefix("refs/heads/") {
+        return Some(branch.to_string());
+    }
+
+    if let Some(remote_ref) = trimmed.strip_prefix("refs/remotes/") {
+        let (_, branch) = remote_ref.split_once('/')?;
+        return (branch != "HEAD").then(|| branch.to_string());
+    }
+
+    if let Some(branch) = trimmed.strip_prefix("origin/") {
+        return (branch != "HEAD").then(|| branch.to_string());
+    }
+
+    Some(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_branch_ref, normalize_branch_refs};
+
+    #[test]
+    fn normalize_branch_refs_merges_local_and_remote_refs() {
+        let branches = normalize_branch_refs([
+            "refs/heads/main",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/feature/review-fix",
+            "refs/remotes/upstream/feature/review-fix",
+        ]);
+
+        assert_eq!(
+            branches,
+            vec!["feature/review-fix".to_string(), "main".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_branch_ref_handles_short_remote_refs() {
+        assert_eq!(
+            normalize_branch_ref("origin/main"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            normalize_branch_ref("feature/review"),
+            Some("feature/review".to_string())
+        );
+        assert_eq!(normalize_branch_ref("origin/HEAD"), None);
+    }
 }

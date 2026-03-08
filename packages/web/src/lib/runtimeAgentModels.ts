@@ -362,7 +362,7 @@ function getClaudeAccessForModel(model: string): AgentModelAccess[] {
     return ["max", "api"];
   }
   if (normalized === "haiku" || normalized.includes("claude-haiku")) {
-    return ["api"];
+    return ["pro", "max", "api"];
   }
   return ["pro", "max", "api"];
 }

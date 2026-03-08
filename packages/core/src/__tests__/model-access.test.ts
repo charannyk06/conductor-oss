@@ -51,6 +51,14 @@ test("core exposes stable fallback model and reasoning catalogs", () => {
   );
   assert.equal(getDefaultAgentModel("codex", { codex: "chatgpt" }), "gpt-5.4");
   assert.deepEqual(
+    getAvailableAgentModels("claude-code", { claudeCode: "pro" }).map((model) => model.id),
+    ["claude-sonnet-4-6", "claude-haiku-4-5"],
+  );
+  assert.deepEqual(
+    getAvailableAgentModels("claude-code", { claudeCode: "max" }).map((model) => model.id),
+    ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
+  );
+  assert.deepEqual(
     getAvailableAgentReasoningEfforts("claude-code", { claudeCode: "max" }).map((option) => option.id),
     ["low", "medium", "high"],
   );

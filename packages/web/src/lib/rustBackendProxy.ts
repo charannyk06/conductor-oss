@@ -28,6 +28,66 @@ export function hasRustBackend(): boolean {
   return backendUrl.length > 0;
 }
 
+function isEventStreamResponse(response: Response): boolean {
+  return response.headers.get("content-type")?.toLowerCase().includes("text/event-stream") ?? false;
+}
+
+function isIgnorableStreamTermination(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    name?: string;
+    code?: string;
+    message?: string;
+    cause?: unknown;
+  };
+
+  if (candidate.name === "AbortError" || candidate.code === "UND_ERR_SOCKET") {
+    return true;
+  }
+
+  if (candidate.message?.toLowerCase().includes("terminated")) {
+    return true;
+  }
+
+  return candidate.cause ? isIgnorableStreamTermination(candidate.cause) : false;
+}
+
+function wrapEventStreamBody(body: ReadableStream<Uint8Array> | null): ReadableStream<Uint8Array> | null {
+  if (!body) {
+    return null;
+  }
+
+  const reader = body.getReader();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        if (!isIgnorableStreamTermination(error)) {
+          controller.error(error);
+          return;
+        }
+        controller.close();
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } catch {
+        // Ignore cancellations from an already-closed upstream SSE socket.
+      }
+    },
+  });
+}
+
 export async function proxyToRust(request: Request, pathname: string): Promise<Response> {
   if (!hasRustBackend()) {
     throw new Error("Rust backend URL is not configured");
@@ -68,7 +128,7 @@ export async function proxyToRust(request: Request, pathname: string): Promise<R
     }
   });
 
-  return new Response(response.body, {
+  return new Response(isEventStreamResponse(response) ? wrapEventStreamBody(response.body) : response.body, {
     status: response.status,
     statusText: response.statusText,
     headers: responseHeaders,
