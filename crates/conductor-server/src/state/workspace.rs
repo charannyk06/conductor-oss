@@ -471,9 +471,9 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
         use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE,
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
         if pid == 0 {
@@ -535,11 +535,12 @@ pub(crate) fn terminate_process(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::{
             OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
-            PROCESS_TERMINATE, SYNCHRONIZE, WAIT_OBJECT_0,
+            PROCESS_TERMINATE,
         };
+        const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
 
         if pid == 0 {
             return false;
@@ -551,7 +552,7 @@ pub(crate) fn terminate_process(pid: u32) -> bool {
         // SAFETY: OpenProcess/TerminateProcess target a specific pid and handle is closed before returning.
         unsafe {
             let handle = OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
                 0,
                 pid,
             );
