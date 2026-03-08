@@ -49,7 +49,11 @@ async fn get_session_files(
         return error(StatusCode::NOT_FOUND, "Session workspace is unavailable");
     }
 
-    if let Some(relative_path) = query.path.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(relative_path) = query
+        .path
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         match read_workspace_file(&workspace, relative_path) {
             Some(value) => ok(value),
             None => error(StatusCode::NOT_FOUND, "File not found"),
@@ -105,7 +109,9 @@ fn list_workspace_files(workspace: &FsPath) -> Value {
     let mut truncated = false;
 
     while let Some(current) = stack.pop() {
-        let Ok(entries) = read_dir(&current) else { continue };
+        let Ok(entries) = read_dir(&current) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let file_name = entry.file_name();
@@ -141,12 +147,20 @@ fn list_workspace_files(workspace: &FsPath) -> Value {
 }
 
 fn read_workspace_file(workspace: &FsPath, relative_path: &str) -> Option<Value> {
-    let cleaned = relative_path.replace('\\', "/").trim().trim_start_matches('/').to_string();
+    let cleaned = relative_path
+        .replace('\\', "/")
+        .trim()
+        .trim_start_matches('/')
+        .to_string();
     if cleaned.is_empty() || cleaned.contains("../") {
         return None;
     }
     let resolved = workspace.join(&cleaned);
-    if !resolved.starts_with(workspace) || !resolved.is_file() {
+    // Canonicalize to resolve symlinks before checking containment,
+    // preventing symlink-based path traversal out of the workspace.
+    let canonical_workspace = workspace.canonicalize().ok()?;
+    let canonical_resolved = resolved.canonicalize().ok()?;
+    if !canonical_resolved.starts_with(&canonical_workspace) || !canonical_resolved.is_file() {
         return None;
     }
     let raw = read(&resolved).ok()?;
@@ -170,11 +184,23 @@ fn read_workspace_file(workspace: &FsPath, relative_path: &str) -> Option<Value>
 
 async fn load_diff_payload(workspace: &FsPath) -> anyhow::Result<Value> {
     let diff_output = tokio::process::Command::new("git")
-        .args(["-C", workspace.to_string_lossy().as_ref(), "diff", "--no-color", "--no-ext-diff"])
+        .args([
+            "-C",
+            workspace.to_string_lossy().as_ref(),
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+        ])
         .output()
         .await?;
     let status_output = tokio::process::Command::new("git")
-        .args(["-C", workspace.to_string_lossy().as_ref(), "status", "--short", "--untracked-files=all"])
+        .args([
+            "-C",
+            workspace.to_string_lossy().as_ref(),
+            "status",
+            "--short",
+            "--untracked-files=all",
+        ])
         .output()
         .await?;
 
@@ -183,7 +209,12 @@ async fn load_diff_payload(workspace: &FsPath) -> anyhow::Result<Value> {
     let untracked = raw_status
         .lines()
         .filter(|line| line.trim_start().starts_with("??"))
-        .map(|line| line.trim_start().trim_start_matches("??").trim().to_string())
+        .map(|line| {
+            line.trim_start()
+                .trim_start_matches("??")
+                .trim()
+                .to_string()
+        })
         .collect::<Vec<_>>();
 
     let files = parse_git_diff(&raw_diff);
@@ -207,7 +238,12 @@ fn parse_git_diff(raw: &str) -> Vec<Value> {
     let mut old_line = 1_i64;
     let mut new_line = 1_i64;
 
-    let flush = |files: &mut Vec<Value>, path: &mut String, status: &mut String, lines: &mut Vec<Value>, additions: &mut i32, deletions: &mut i32| {
+    let flush = |files: &mut Vec<Value>,
+                 path: &mut String,
+                 status: &mut String,
+                 lines: &mut Vec<Value>,
+                 additions: &mut i32,
+                 deletions: &mut i32| {
         if path.is_empty() {
             return;
         }
@@ -228,11 +264,22 @@ fn parse_git_diff(raw: &str) -> Vec<Value> {
 
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
-            flush(&mut files, &mut current_path, &mut current_status, &mut current_lines, &mut additions, &mut deletions);
+            flush(
+                &mut files,
+                &mut current_path,
+                &mut current_status,
+                &mut current_lines,
+                &mut additions,
+                &mut deletions,
+            );
             let mut parts = rest.split_whitespace();
             let left = parts.next().unwrap_or_default().trim_start_matches("a/");
             let right = parts.next().unwrap_or_default().trim_start_matches("b/");
-            current_path = if right.is_empty() { left.to_string() } else { right.to_string() };
+            current_path = if right.is_empty() {
+                left.to_string()
+            } else {
+                right.to_string()
+            };
             old_line = 1;
             new_line = 1;
             continue;
@@ -319,7 +366,14 @@ fn parse_git_diff(raw: &str) -> Vec<Value> {
         }));
     }
 
-    flush(&mut files, &mut current_path, &mut current_status, &mut current_lines, &mut additions, &mut deletions);
+    flush(
+        &mut files,
+        &mut current_path,
+        &mut current_status,
+        &mut current_lines,
+        &mut additions,
+        &mut deletions,
+    );
     files
 }
 

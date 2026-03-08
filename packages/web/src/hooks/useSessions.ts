@@ -42,6 +42,19 @@ function sessionsEqual(left: Session[], right: Session[]): boolean {
     ) {
       return false;
     }
+
+    const aMetadata = (a["metadata"] as Record<string, string> | undefined) ?? {};
+    const bMetadata = (b["metadata"] as Record<string, string> | undefined) ?? {};
+    const aMetadataKeys = Object.keys(aMetadata);
+    const bMetadataKeys = Object.keys(bMetadata);
+    if (aMetadataKeys.length !== bMetadataKeys.length) {
+      return false;
+    }
+    for (const key of aMetadataKeys) {
+      if (aMetadata[key] !== bMetadata[key]) {
+        return false;
+      }
+    }
   }
 
   return true;

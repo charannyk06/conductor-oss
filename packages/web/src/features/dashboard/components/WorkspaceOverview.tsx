@@ -15,18 +15,14 @@ import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { getAttentionLevel, type DashboardSession } from "@/lib/types";
 import type { ConfigProject } from "@/hooks/useConfig";
 
-type WorkspaceView = "chat" | "board";
-
 interface WorkspaceOverviewProps {
   projects: ConfigProject[];
   sessions: DashboardSession[];
   selectedProjectId: string | null;
-  workspaceView: WorkspaceView;
   agentCount: number;
   onCreateWorkspace: () => void;
   onSelectProject: (projectId: string | null) => void;
   onSelectSession: (sessionId: string) => void;
-  onShowView: (view: WorkspaceView) => void;
 }
 
 type ProjectSummary = {
@@ -50,6 +46,7 @@ function formatRelativeTime(isoDate: string): string {
 
 function getStatusTone(session: DashboardSession): "success" | "warning" | "error" | "outline" {
   const level = getAttentionLevel(session);
+  if (session.status === "queued") return "outline";
   if (level === "merge") return "success";
   if (level === "review" || level === "respond") return "warning";
   if (session.status === "errored" || session.status === "killed") return "error";
@@ -57,6 +54,18 @@ function getStatusTone(session: DashboardSession): "success" | "warning" | "erro
 }
 
 function getStatusLabel(session: DashboardSession): string {
+  if (session.status === "queued") {
+    const queuePosition = Number.parseInt(session.metadata.queuePosition ?? "", 10);
+    return Number.isFinite(queuePosition) && queuePosition > 0
+      ? `Queued #${queuePosition}`
+      : "Queued";
+  }
+  if (session.metadata.recoveryState === "reattach_pending") {
+    return "Reattaching";
+  }
+  if (session.metadata.recoveryState === "detached_runtime") {
+    return "Recover";
+  }
   const level = getAttentionLevel(session);
   if (level === "merge") return "Ready";
   if (level === "respond") return "Needs input";
@@ -70,12 +79,10 @@ export function WorkspaceOverview({
   projects,
   sessions,
   selectedProjectId,
-  workspaceView,
   agentCount,
   onCreateWorkspace,
   onSelectProject,
   onSelectSession,
-  onShowView,
 }: WorkspaceOverviewProps) {
   const visibleSessions = useMemo(
     () => sessions.filter((session) => session.status !== "archived"),
@@ -182,31 +189,6 @@ export function WorkspaceOverview({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <div className="inline-flex rounded-[6px] border border-[var(--vk-border)] p-1">
-              <button
-                type="button"
-                onClick={() => onShowView("chat")}
-                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
-                  workspaceView === "chat"
-                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                }`}
-              >
-                Chat launchpad
-              </button>
-              <button
-                type="button"
-                onClick={() => onShowView("board")}
-                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
-                  workspaceView === "board"
-                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                }`}
-              >
-                Board view
-              </button>
-            </div>
-
             <Button variant="outline" size="md" onClick={onCreateWorkspace}>
               Add workspace
             </Button>

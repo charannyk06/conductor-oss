@@ -105,10 +105,13 @@ export default function SessionPageClient() {
       onToggleSidebar={toggleSidebar}
       sidebar={
         <WorkspaceSidebarPanel
-          orgLabel="conductor-oss"
           projects={projects}
           selectedProjectId={selectedProjectId}
           onSelectProject={(projectId) => {
+            if (projectId === null) {
+              router.push("/");
+              return;
+            }
             setSelectedProjectId(projectId);
           }}
           sessions={dashboardSessions}
