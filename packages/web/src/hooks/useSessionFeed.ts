@@ -4,9 +4,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NormalizedChatEntry } from "@/lib/chatFeed";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import { TERMINAL_STATUSES, type SSESnapshotEvent } from "@/lib/types";
-const ACTIVE_POLL_INTERVAL_MS = 1000;
-const HIDDEN_POLL_INTERVAL_MS = 1000;
-const TERMINAL_POLL_INTERVAL_MS = 10_000;
+const ACTIVE_POLL_INTERVAL_MS = 4_000;
+const HIDDEN_POLL_INTERVAL_MS = 15_000;
+const TERMINAL_POLL_INTERVAL_MS = 30_000;
 
 interface SessionFeedResponse {
   entries?: NormalizedChatEntry[];
@@ -209,24 +209,27 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
     window.addEventListener("focus", handleWindowFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    let intervalId: number | null = null;
+    let pollTimeoutId: number | null = null;
+
+    const stopPolling = () => {
+      if (pollTimeoutId === null) return;
+      window.clearTimeout(pollTimeoutId);
+      pollTimeoutId = null;
+    };
 
     const startPolling = () => {
-      if (intervalId !== null) return;
+      stopPolling();
       const interval = terminalRef.current
         ? TERMINAL_POLL_INTERVAL_MS
         : document.visibilityState === "visible"
           ? ACTIVE_POLL_INTERVAL_MS
           : HIDDEN_POLL_INTERVAL_MS;
-      intervalId = window.setInterval(() => {
-        void refresh();
+      pollTimeoutId = window.setTimeout(async () => {
+        await refresh();
+        if (mountedRef.current) {
+          startPolling();
+        }
       }, interval);
-    };
-
-    const stopPolling = () => {
-      if (intervalId === null) return;
-      window.clearInterval(intervalId);
-      intervalId = null;
     };
 
     startPolling();
@@ -247,6 +250,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
       }
       snapshotSignatureRef.current = signature;
       void refresh();
+      startPolling();
     });
 
     return () => {

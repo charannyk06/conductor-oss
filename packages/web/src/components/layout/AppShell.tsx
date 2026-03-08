@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { PanelLeftOpen, PanelRightClose } from "lucide-react";
 import { cn } from "@/lib/cn";
 
@@ -11,13 +11,63 @@ interface AppShellProps {
   onToggleSidebar: () => void;
 }
 
+const DEFAULT_SIDEBAR_WIDTH = 356;
+const MIN_SIDEBAR_WIDTH = 296;
+const MAX_SIDEBAR_WIDTH = 460;
+const SIDEBAR_WIDTH_STORAGE_KEY = "conductor-workspace-sidebar-width";
+
 export function AppShell({
   sidebar,
   children,
   sidebarOpen,
   onToggleSidebar,
 }: AppShellProps) {
-  const shellStyle = { "--workspace-sidebar-width": "356px" } as CSSProperties;
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [resizing, setResizing] = useState(false);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+      const parsed = stored ? Number.parseInt(stored, 10) : Number.NaN;
+      if (Number.isFinite(parsed)) {
+        setSidebarWidth(Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, parsed)));
+      }
+    } catch {
+      // Ignore invalid persisted width values.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!resizing) return;
+
+    const handlePointerMove = (event: MouseEvent) => {
+      const nextWidth = Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, event.clientX));
+      setSidebarWidth(nextWidth);
+    };
+
+    const handlePointerUp = () => {
+      setResizing(false);
+    };
+
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", handlePointerUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    return () => {
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", handlePointerUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      try {
+        window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(sidebarWidth));
+      } catch {
+        // Ignore storage write failures.
+      }
+    };
+  }, [resizing, sidebarWidth]);
+
+  const shellStyle = { "--workspace-sidebar-width": `${sidebarWidth}px` } as CSSProperties;
 
   return (
     <div
@@ -44,6 +94,16 @@ export function AppShell({
       >
         {sidebar}
       </aside>
+
+      {sidebarOpen ? (
+        <div
+          className="absolute bottom-0 left-[var(--workspace-sidebar-width)] top-0 z-30 hidden w-2 -translate-x-1/2 cursor-col-resize lg:block"
+          onMouseDown={() => setResizing(true)}
+          aria-hidden="true"
+        >
+          <div className="mx-auto h-full w-px bg-transparent transition-colors hover:bg-[var(--vk-border)]" />
+        </div>
+      ) : null}
 
       {sidebarOpen && (
         <button

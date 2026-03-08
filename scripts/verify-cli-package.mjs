@@ -19,6 +19,13 @@ function getInstalledCliEntry(installDir) {
   return join(installDir, "node_modules", "conductor-oss", "dist", "index.js");
 }
 
+function verifyNodeShebang(path, label) {
+  const firstLine = readTextFile(path).split("\n", 1)[0]?.trim() ?? "";
+  if (firstLine !== "#!/usr/bin/env node") {
+    fail(`${label} must start with #!/usr/bin/env node (found: ${firstLine || "<empty>"})`);
+  }
+}
+
 function readTextFile(path) {
   return readFileSync(path, "utf8");
 }
@@ -810,6 +817,7 @@ try {
     cwd: installDir,
     stdio: "inherit",
   });
+  verifyNodeShebang(getInstalledCliEntry(installDir), "installed CLI entrypoint");
   execFileSync("node", [getInstalledCliEntry(installDir), "--version"], {
     cwd: installDir,
     stdio: "inherit",

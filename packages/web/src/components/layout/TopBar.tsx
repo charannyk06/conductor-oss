@@ -18,17 +18,19 @@ export const TopBar = memo(function TopBar({ session, fallbackTitle, onOpenPrefe
       <div className="min-w-0 flex-1 text-center">
         <span className="block truncate">{title}</span>
       </div>
-      <div className="ml-1 flex shrink-0">
-        <button
-          type="button"
-          onClick={onOpenPreferences}
-          className="inline-flex h-6 w-6 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-          aria-label="Open preferences"
-          title="Preferences"
-        >
-          <Settings className="h-3.5 w-3.5" />
-        </button>
-      </div>
+      {onOpenPreferences ? (
+        <div className="ml-1 flex shrink-0">
+          <button
+            type="button"
+            onClick={onOpenPreferences}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            aria-label="Open preferences"
+            title="Preferences"
+          >
+            <Settings className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ) : null}
     </header>
   );
 });

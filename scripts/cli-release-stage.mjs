@@ -2,9 +2,12 @@ import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -84,6 +87,48 @@ function copyDirectoryResolvingSymlinks(sourcePath, destinationPath) {
     ],
     { stdio: "inherit" },
   );
+}
+
+function hydrateStandaloneNodeModules(standaloneRoot) {
+  const nodeModulesDir = join(standaloneRoot, "node_modules");
+  const pnpmLinksDir = join(nodeModulesDir, ".pnpm", "node_modules");
+
+  if (!existsSync(pnpmLinksDir)) {
+    return;
+  }
+
+  const hydrateFrom = (sourceDir, destinationDir) => {
+    for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+      if (entry.name === ".bin") {
+        continue;
+      }
+
+      const sourcePath = join(sourceDir, entry.name);
+      const destinationPath = join(destinationDir, entry.name);
+      const stat = lstatSync(sourcePath);
+
+      if (stat.isSymbolicLink()) {
+        rmSync(destinationPath, { recursive: true, force: true });
+        copyDirectoryResolvingSymlinks(realpathSync(sourcePath), destinationPath);
+        continue;
+      }
+
+      if (!stat.isDirectory()) {
+        continue;
+      }
+
+      if (existsSync(join(sourcePath, "package.json"))) {
+        rmSync(destinationPath, { recursive: true, force: true });
+        copyDirectoryResolvingSymlinks(sourcePath, destinationPath);
+        continue;
+      }
+
+      mkdirSync(destinationPath, { recursive: true });
+      hydrateFrom(sourcePath, destinationPath);
+    }
+  };
+
+  hydrateFrom(pnpmLinksDir, nodeModulesDir);
 }
 
 function sanitizePublishedPackage(pkg, dependencies) {
@@ -227,6 +272,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
 
   const webOutputDir = join(outputDir, "web");
   copyDirectoryResolvingSymlinks(webBundle.standaloneDir, join(webOutputDir, ".next", "standalone"));
+  hydrateStandaloneNodeModules(join(webOutputDir, ".next", "standalone"));
   cpSync(webBundle.staticDir, join(webOutputDir, ".next", "static"), { recursive: true });
   cpSync(
     webBundle.staticDir,

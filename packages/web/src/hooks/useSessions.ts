@@ -18,6 +18,9 @@ interface UseSessionsReturn {
   refresh: () => Promise<void>;
 }
 
+const ACTIVE_FALLBACK_POLL_INTERVAL_MS = 15_000;
+const HIDDEN_FALLBACK_POLL_INTERVAL_MS = 45_000;
+
 function sessionsEqual(left: Session[], right: Session[]): boolean {
   if (left === right) return true;
   if (left.length !== right.length) return false;
@@ -90,17 +93,26 @@ export function useSessions(projectId?: string | null): UseSessionsReturn {
 
     let pollingId: number | null = null;
 
-    const startPolling = () => {
-      if (pollingId !== null) return;
-      pollingId = window.setInterval(() => {
-        if (mountedRef.current) void fetchSessions();
-      }, 3000);
-    };
+    const getPollDelay = () =>
+      document.visibilityState === "visible"
+        ? ACTIVE_FALLBACK_POLL_INTERVAL_MS
+        : HIDDEN_FALLBACK_POLL_INTERVAL_MS;
 
     const stopPolling = () => {
       if (pollingId === null) return;
-      window.clearInterval(pollingId);
+      window.clearTimeout(pollingId);
       pollingId = null;
+    };
+
+    const startPolling = () => {
+      stopPolling();
+      pollingId = window.setTimeout(async () => {
+        if (!mountedRef.current) return;
+        await fetchSessions();
+        if (mountedRef.current) {
+          startPolling();
+        }
+      }, getPollDelay());
     };
 
     startPolling();
@@ -112,10 +124,28 @@ export function useSessions(projectId?: string | null): UseSessionsReturn {
       setLoading(false);
     });
 
+    const refresh = () => {
+      void fetchSessions();
+      startPolling();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refresh();
+      } else {
+        startPolling();
+      }
+    };
+
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
       mountedRef.current = false;
       unsubscribe();
       stopPolling();
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [applySessions, fetchSessions, projectId]);
 
