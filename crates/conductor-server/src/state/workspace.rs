@@ -458,13 +458,47 @@ fn sanitize_token(value: &str) -> String {
 }
 
 pub(crate) fn is_process_alive(pid: u32) -> bool {
-    if pid == 0 || pid > i32::MAX as u32 {
-        return false;
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
+        let pid = pid as libc::pid_t;
+        // SAFETY: libc::kill with signal 0 only checks process existence.
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    let pid = pid as libc::pid_t;
-    // SAFETY: libc::kill with signal 0 only checks process existence.
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, STILL_ACTIVE,
+        };
+
+        if pid == 0 {
+            return false;
+        }
+
+        // SAFETY: OpenProcess/GetExitCodeProcess only inspect an explicit pid.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+
+            let mut exit_code = 0u32;
+            let result = GetExitCodeProcess(handle, &mut exit_code);
+            CloseHandle(handle);
+            result != 0 && exit_code == STILL_ACTIVE
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 pub(crate) fn terminate_process(pid: u32) -> bool {
@@ -499,7 +533,44 @@ pub(crate) fn terminate_process(pid: u32) -> bool {
         let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
         killed == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_TERMINATE, SYNCHRONIZE, WAIT_OBJECT_0,
+        };
+
+        if pid == 0 {
+            return false;
+        }
+        if !is_process_alive(pid) {
+            return true;
+        }
+
+        // SAFETY: OpenProcess/TerminateProcess target a specific pid and handle is closed before returning.
+        unsafe {
+            let handle = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+                0,
+                pid,
+            );
+            if handle.is_null() {
+                return false;
+            }
+
+            let terminated = TerminateProcess(handle, 1);
+            let wait_result = if terminated != 0 {
+                WaitForSingleObject(handle, 2_000)
+            } else {
+                1
+            };
+            CloseHandle(handle);
+
+            wait_result == WAIT_OBJECT_0 || !is_process_alive(pid)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false

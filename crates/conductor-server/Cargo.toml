@@ -34,3 +34,6 @@ tower = "0.5"
 base64 = "0.22"
 rand = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
