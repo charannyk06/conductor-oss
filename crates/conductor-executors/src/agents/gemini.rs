@@ -18,7 +18,7 @@ impl GeminiExecutor {
     }
 
     pub fn discover() -> Option<Self> {
-        which::which("gemini").ok().map(|p| Self::new(p))
+        which::which("gemini").ok().map(Self::new)
     }
 }
 

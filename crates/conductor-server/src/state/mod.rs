@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 /// Shared application state for the HTTP server.
 pub struct AppState {
@@ -38,6 +38,8 @@ pub struct AppState {
     /// Sends (session_id, delta_line) for incremental output updates.
     pub output_updates: broadcast::Sender<(String, String)>,
     pub started_at: DateTime<Utc>,
+    /// Serializes board-triggered spawns to prevent TOCTOU races in limit checks.
+    pub spawn_guard: Mutex<()>,
 }
 
 impl AppState {
@@ -56,9 +58,11 @@ impl AppState {
             event_snapshots,
             output_updates,
             started_at: Utc::now(),
+            spawn_guard: Mutex::new(()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;
+        state.start_session_evictor();
         state
     }
 
@@ -132,6 +136,37 @@ impl AppState {
 
     pub async fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
         self.sessions.read().await.get(session_id).cloned()
+    }
+
+    /// Spawn a background task that evicts terminal sessions older than 1 hour from memory.
+    fn start_session_evictor(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                let now = Utc::now();
+                let mut sessions = state.sessions.write().await;
+                let before = sessions.len();
+                sessions.retain(|_id, session| {
+                    let status = SessionStatus::from(session.status.as_str());
+                    if !status.is_terminal() {
+                        return true;
+                    }
+                    match DateTime::parse_from_rfc3339(&session.last_activity_at) {
+                        Ok(last_activity) => {
+                            let age = now.signed_duration_since(last_activity.with_timezone(&Utc));
+                            age.num_hours() < 1
+                        }
+                        Err(_) => true, // keep sessions with unparseable timestamps
+                    }
+                });
+                let evicted = before - sessions.len();
+                if evicted > 0 {
+                    tracing::info!(evicted, "Evicted terminal sessions from memory");
+                }
+            }
+        });
     }
 
     pub fn config_projects_payload(&self, config: &ConductorConfig) -> Value {

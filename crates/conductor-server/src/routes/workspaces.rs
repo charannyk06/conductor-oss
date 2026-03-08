@@ -3,11 +3,13 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use conductor_core::config::ProjectConfig;
+use conductor_core::{sync_project_local_config, sync_support_files_for_directory};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
+use tracing::info;
 
 use crate::state::AppState;
 
@@ -127,13 +129,17 @@ async fn create_workspace(
             }
         }
 
+        let canonical_path = match canonicalize_existing_path(&path) {
+            Ok(path) => path,
+            Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        };
         let project_id = body.project_id.as_deref().map(normalize_token).filter(|value| !value.is_empty()).unwrap_or_else(|| normalize_token(repo_name));
         return persist_workspace(
             state,
             &project_id,
             requested_agent,
             Some(git_url.to_string()),
-            path,
+            canonical_path,
             default_branch,
             body.use_worktree.unwrap_or(true),
         ).await;
@@ -149,15 +155,19 @@ async fn create_workspace(
             }
         }
 
-        let folder_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("workspace");
+        let canonical_path = match canonicalize_existing_path(&path) {
+            Ok(path) => path,
+            Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        };
+        let folder_name = canonical_path.file_name().and_then(|value| value.to_str()).unwrap_or("workspace");
         let project_id = body.project_id.as_deref().map(normalize_token).filter(|value| !value.is_empty()).unwrap_or_else(|| normalize_token(folder_name));
-        let repo = local_repo_name(&path).await.ok();
+        let repo = local_repo_name(&canonical_path).await.ok();
         return persist_workspace(
             state,
             &project_id,
             requested_agent,
             repo,
-            path,
+            canonical_path,
             default_branch,
             body.use_worktree.unwrap_or(true),
         ).await;
@@ -185,7 +195,7 @@ async fn persist_workspace(
     project.repo = repo.or_else(|| Some(project_id.to_string()));
     project.path = path.to_string_lossy().to_string();
     project.default_branch = default_branch.clone();
-    project.agent = agent.or_else(|| Some(default_agent));
+    project.agent = agent.or(Some(default_agent));
     project.runtime = Some(if use_worktree { "worktree".to_string() } else { "direct".to_string() });
     project.workspace = Some(path.to_string_lossy().to_string());
     project.board_dir = Some(board_dir.clone());
@@ -195,6 +205,23 @@ async fn persist_workspace(
     if let Err(err) = state.save_config().await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
+
+    let config = state.config.read().await.clone();
+    info!(project_id, path = %path.display(), "Persisted workspace project; syncing local scaffold");
+    if let Err(err) = ensure_project_root_board(&path, project_id) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    let mirrored = match sync_project_local_config(&config, &state.workspace_path, project_id) {
+        Ok(mirrored) => mirrored,
+        Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    if let Err(err) = sync_support_files_for_directory(&config, &path) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    if let Err(err) = sync_support_files_for_directory(&config, &state.workspace_path) {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    info!(project_id, mirrored, path = %path.display(), "Finished syncing workspace project scaffold");
 
     created(json!({
         "project": {
@@ -249,6 +276,10 @@ fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn canonicalize_existing_path(path: &Path) -> std::io::Result<PathBuf> {
+    std::fs::canonicalize(path)
+}
+
 fn ensure_board_file(workspace_path: &Path, board_dir: &str) -> std::io::Result<()> {
     let board_path = workspace_path.join("projects").join(board_dir).join("CONDUCTOR.md");
     if let Some(parent) = board_path.parent() {
@@ -261,6 +292,26 @@ fn ensure_board_file(workspace_path: &Path, board_dir: &str) -> std::io::Result<
         )?;
     }
     Ok(())
+}
+
+fn ensure_project_root_board(project_path: &Path, project_id: &str) -> std::io::Result<()> {
+    let board_path = project_path.join("CONDUCTOR.md");
+    if board_path.exists() {
+        return Ok(());
+    }
+
+    let display_name = project_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(project_id);
+
+    std::fs::write(
+        board_path,
+        format!(
+            "# {display_name}\n\n> Conductor AI agent orchestrator. Tags: `#project/{project_id}` `#agent/claude-code` `#agent/codex` `#agent/gemini`\n\n## Inbox\n\n> Drop rough ideas here.\n\n## Ready to Dispatch\n\n> Move tagged tasks here to dispatch an agent.\n\n## Dispatching\n\n## In Progress\n\n## Review\n\n## Done\n\n## Blocked\n"
+        ),
+    )
 }
 
 async fn clone_repository(git_url: &str, path: &Path, branch: &str) -> anyhow::Result<()> {
@@ -284,6 +335,25 @@ async fn init_repository(path: &Path, branch: &str) -> anyhow::Result<()> {
         .await?;
     if !output.status.success() {
         anyhow::bail!(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let commit_output = Command::new("git")
+        .args([
+            "-C",
+            path.to_string_lossy().as_ref(),
+            "-c",
+            "user.name=Conductor",
+            "-c",
+            "user.email=conductor@local",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initialize Conductor workspace",
+        ])
+        .output()
+        .await?;
+    if !commit_output.status.success() {
+        anyhow::bail!(String::from_utf8_lossy(&commit_output.stderr).to_string());
     }
     Ok(())
 }

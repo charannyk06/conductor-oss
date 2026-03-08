@@ -9,6 +9,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
@@ -388,8 +389,38 @@ function resolveRepoCargoRoot(workspacePath: string): string | null {
   return null;
 }
 
+function resolveOptionalNativePackageNames(): string[] {
+  if (process.platform === "darwin" && (process.arch === "arm64" || process.arch === "x64")) {
+    return ["@conductor-oss/native-darwin-universal"];
+  }
+
+  if (process.platform === "linux" && process.arch === "x64") {
+    return ["@conductor-oss/native-linux-x64"];
+  }
+
+  if (process.platform === "win32" && process.arch === "x64") {
+    return ["@conductor-oss/native-win32-x64"];
+  }
+
+  return [];
+}
+
 function resolveBundledRustBinary(): string | null {
   const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
+  const require = createRequire(import.meta.url);
+
+  for (const packageName of resolveOptionalNativePackageNames()) {
+    try {
+      const packageJsonPath = require.resolve(`${packageName}/package.json`);
+      const candidate = join(dirname(packageJsonPath), "bin", binaryName);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Optional native package is not installed for this environment.
+    }
+  }
+
   const cliDir = new URL(".", import.meta.url).pathname;
   const candidates = [
     resolve(cliDir, "..", "..", "native", binaryName),

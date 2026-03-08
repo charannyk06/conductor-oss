@@ -15,7 +15,7 @@ impl DroidExecutor {
     pub fn new(binary: PathBuf) -> Self { Self { binary } }
 
     pub fn discover() -> Option<Self> {
-        which::which("droid").ok().map(|p| Self::new(p))
+        which::which("droid").ok().map(Self::new)
     }
 }
 

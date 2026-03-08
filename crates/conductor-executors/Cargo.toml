@@ -16,3 +16,6 @@ async-trait = { workspace = true }
 which = { workspace = true }
 regex = { workspace = true }
 portable-pty = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }

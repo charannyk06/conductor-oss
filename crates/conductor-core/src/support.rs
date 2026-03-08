@@ -117,56 +117,58 @@ pub fn startup_config_sync(
             continue;
         }
 
-        let local_config_path = project_root.join("conductor.yaml");
-        let expected = build_expected_project_yaml(config, project_id, project);
-
-        match read_managed_state(&local_config_path)? {
-            ManagedState::Missing => {
-                fs::write(&local_config_path, expected)?;
-                result.regenerated += 1;
-            }
-            ManagedState::Managed(existing) => {
-                if normalize_generated_yaml(&existing) != normalize_generated_yaml(&expected) {
-                    fs::write(&local_config_path, expected)?;
-                    result.regenerated += 1;
-                }
-            }
-            ManagedState::Unmanaged => {
-                if force {
-                    fs::write(&local_config_path, expected)?;
-                    result.regenerated += 1;
-                } else {
-                    result.skipped_unmanaged += 1;
-                }
-            }
+        match sync_project_local_config_with_force(config, workspace_path, project_id, force)? {
+            ProjectLocalConfigSync::Regenerated => result.regenerated += 1,
+            ProjectLocalConfigSync::SkippedUnmanaged => result.skipped_unmanaged += 1,
+            ProjectLocalConfigSync::Unchanged | ProjectLocalConfigSync::SkippedMissingDir => {}
         }
     }
 
     Ok(result)
 }
 
+pub fn sync_project_local_config(
+    config: &ConductorConfig,
+    workspace_path: &Path,
+    project_id: &str,
+) -> Result<bool> {
+    Ok(matches!(
+        sync_project_local_config_with_force(config, workspace_path, project_id, false)?,
+        ProjectLocalConfigSync::Regenerated
+    ))
+}
+
 pub fn sync_workspace_support_files(
     config: &ConductorConfig,
     workspace_path: &Path,
 ) -> Result<usize> {
-    let tags_content = build_conductor_tags_content(config);
-    let snippets_json = serde_json::to_string_pretty(&build_conductor_code_snippets(config))?;
     let support_directories = resolve_support_directories(config, workspace_path);
     let mut synced = 0usize;
 
     for directory in support_directories {
-        if !directory.is_dir() {
-            continue;
+        if sync_support_files_for_directory(config, &directory)? {
+            synced += 1;
         }
-
-        fs::write(directory.join("CONDUCTOR-TAGS.md"), &tags_content)?;
-        let vscode_dir = directory.join(".vscode");
-        fs::create_dir_all(&vscode_dir)?;
-        fs::write(vscode_dir.join("conductor.code-snippets"), &snippets_json)?;
-        synced += 1;
     }
 
     Ok(synced)
+}
+
+pub fn sync_support_files_for_directory(
+    config: &ConductorConfig,
+    directory: &Path,
+) -> Result<bool> {
+    if !directory.is_dir() {
+        return Ok(false);
+    }
+
+    let tags_content = build_conductor_tags_content(config);
+    let snippets_json = serde_json::to_string_pretty(&build_conductor_code_snippets(config))?;
+    fs::write(directory.join("CONDUCTOR-TAGS.md"), &tags_content)?;
+    let vscode_dir = directory.join(".vscode");
+    fs::create_dir_all(&vscode_dir)?;
+    fs::write(vscode_dir.join("conductor.code-snippets"), &snippets_json)?;
+    Ok(true)
 }
 
 pub fn resolve_project_path(workspace_path: &Path, configured: &str) -> PathBuf {
@@ -609,6 +611,55 @@ enum ManagedState {
     Missing,
     Managed(String),
     Unmanaged,
+}
+
+enum ProjectLocalConfigSync {
+    Regenerated,
+    Unchanged,
+    SkippedUnmanaged,
+    SkippedMissingDir,
+}
+
+fn sync_project_local_config_with_force(
+    config: &ConductorConfig,
+    workspace_path: &Path,
+    project_id: &str,
+    force: bool,
+) -> Result<ProjectLocalConfigSync> {
+    let Some(project) = config.projects.get(project_id) else {
+        anyhow::bail!("Unknown project id: {project_id}");
+    };
+
+    let project_root = resolve_project_path(workspace_path, &project.path);
+    if !project_root.is_dir() {
+        return Ok(ProjectLocalConfigSync::SkippedMissingDir);
+    }
+
+    let local_config_path = project_root.join("conductor.yaml");
+    let expected = build_expected_project_yaml(config, project_id, project);
+
+    match read_managed_state(&local_config_path)? {
+        ManagedState::Missing => {
+            fs::write(&local_config_path, expected)?;
+            Ok(ProjectLocalConfigSync::Regenerated)
+        }
+        ManagedState::Managed(existing) => {
+            if normalize_generated_yaml(&existing) != normalize_generated_yaml(&expected) {
+                fs::write(&local_config_path, expected)?;
+                Ok(ProjectLocalConfigSync::Regenerated)
+            } else {
+                Ok(ProjectLocalConfigSync::Unchanged)
+            }
+        }
+        ManagedState::Unmanaged => {
+            if force {
+                fs::write(&local_config_path, expected)?;
+                Ok(ProjectLocalConfigSync::Regenerated)
+            } else {
+                Ok(ProjectLocalConfigSync::SkippedUnmanaged)
+            }
+        }
+    }
 }
 
 fn read_managed_state(path: &Path) -> Result<ManagedState> {

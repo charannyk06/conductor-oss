@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { CLI_NATIVE_TARGETS } from "./cli-native-packages.mjs";
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -131,7 +132,10 @@ function hydrateStandaloneNodeModules(standaloneRoot) {
   hydrateFrom(pnpmLinksDir, nodeModulesDir);
 }
 
-function sanitizePublishedPackage(pkg, dependencies) {
+function sanitizePublishedPackage(pkg, {
+  dependencies = {},
+  optionalDependencies = undefined,
+} = {}) {
   const sanitized = {
     name: pkg.name,
     version: pkg.version,
@@ -147,6 +151,10 @@ function sanitizePublishedPackage(pkg, dependencies) {
     repository: pkg.repository,
     dependencies,
   };
+
+  if (optionalDependencies && Object.keys(optionalDependencies).length > 0) {
+    sanitized.optionalDependencies = optionalDependencies;
+  }
 
   if (pkg.exports) {
     sanitized.exports = pkg.exports;
@@ -189,19 +197,6 @@ function ensureWebBundle(rootDir) {
   return { standaloneDir, staticDir, publicDir };
 }
 
-function ensureRustBundle(rootDir) {
-  const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
-  const binaryPath = resolve(rootDir, "target", "release", binaryName);
-
-  if (!existsSync(binaryPath)) {
-    throw new Error(
-      `Missing Rust backend binary at ${binaryPath}. Run \`cargo build --release -p conductor-cli\` first.`,
-    );
-  }
-
-  return { binaryName, binaryPath };
-}
-
 function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagingRoot }) {
   const cliPackage = readJson(resolve(rootDir, "packages", "cli", "package.json"));
   const workspacePackages = createWorkspacePackageMap(rootDir);
@@ -239,7 +234,7 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
       }
     }
 
-    const sanitizedManifest = sanitizePublishedPackage(sourceManifest, dependencies);
+    const sanitizedManifest = sanitizePublishedPackage(sourceManifest, { dependencies });
     writeJson(join(packageStageDir, "package.json"), sanitizedManifest);
     copyDistDirectory(sourceDistDir, join(packageStageDir, "dist"));
 
@@ -259,7 +254,6 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   const cliPackage = readJson(resolve(resolvedRootDir, "packages", "cli", "package.json"));
   const webPackage = readJson(resolve(resolvedRootDir, "packages", "web", "package.json"));
   const webBundle = ensureWebBundle(resolvedRootDir);
-  const rustBundle = ensureRustBundle(resolvedRootDir);
 
   const outputDir = stageDir
     ? resolve(stageDir)
@@ -304,10 +298,6 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     type: "module",
   });
 
-  const nativeOutputDir = join(outputDir, "native");
-  mkdirSync(nativeOutputDir, { recursive: true });
-  cpSync(rustBundle.binaryPath, join(nativeOutputDir, rustBundle.binaryName));
-
   const stagedDependencies = {};
   for (const [dependencyName, specifier] of Object.entries(cliPackage.dependencies ?? {})) {
     stagedDependencies[dependencyName] = tarballs.has(dependencyName)
@@ -323,8 +313,15 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     }
   }
 
-  const stagedManifest = sanitizePublishedPackage(cliPackage, stagedDependencies);
-  stagedManifest.files = ["dist/", "web/", "native/", "README.md", "LICENSE"];
+  const publishedOptionalDependencies = Object.fromEntries(
+    CLI_NATIVE_TARGETS.map((target) => [target.packageName, cliPackage.version]),
+  );
+
+  const stagedManifest = sanitizePublishedPackage(cliPackage, {
+    dependencies: stagedDependencies,
+    optionalDependencies: publishedOptionalDependencies,
+  });
+  stagedManifest.files = ["dist/", "web/", "README.md", "LICENSE"];
   stagedManifest.bundleDependencies = internalDependencyNames;
   writeJson(join(outputDir, "package.json"), stagedManifest);
 
@@ -335,7 +332,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   // If that still attempts to resolve unpublished internal versions, fall back to
   // installing only external deps and unpack internal tarballs manually.
   try {
-    execFileSync("npm", ["install", "--silent", "--omit=dev", "--no-package-lock", "--install-strategy=shallow"], {
+    execFileSync("npm", ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
       cwd: outputDir,
       stdio: ["ignore", "ignore", "pipe"],
     });
@@ -354,7 +351,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     manifest.dependencies = externalDeps;
     writeJson(join(outputDir, "package.json"), manifest);
 
-    execFileSync("npm", ["install", "--silent", "--omit=dev", "--no-package-lock"], {
+    execFileSync("npm", ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
       cwd: outputDir,
       stdio: "inherit",
     });
@@ -390,8 +387,11 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     }
   }
 
-  const publishedManifest = sanitizePublishedPackage(cliPackage, publishedDependencies);
-  publishedManifest.files = ["dist/", "web/", "native/", "README.md", "LICENSE"];
+  const publishedManifest = sanitizePublishedPackage(cliPackage, {
+    dependencies: publishedDependencies,
+    optionalDependencies: publishedOptionalDependencies,
+  });
+  publishedManifest.files = ["dist/", "web/", "README.md", "LICENSE"];
   publishedManifest.bundleDependencies = internalDependencyNames;
   writeJson(join(outputDir, "package.json"), publishedManifest);
   rmSync(join(outputDir, "node_modules", ".package-lock.json"), { force: true });

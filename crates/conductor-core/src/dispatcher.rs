@@ -185,11 +185,13 @@ impl Dispatcher {
     }
 
     /// Drain the queue and return requests that can be spawned.
-    /// Holds the queue write lock for the entire operation and uses acquire()
-    /// to atomically reserve slots, avoiding TOCTOU races.
+    /// Releases the queue lock before acquiring limiter slots to reduce contention.
     pub async fn drain_ready(&self) -> Vec<DispatchRequest> {
-        let mut queue = self.queue.write().await;
-        let pending = queue.drain(..).collect::<Vec<_>>();
+        let pending = {
+            let mut queue = self.queue.write().await;
+            queue.drain(..).collect::<Vec<_>>()
+        };
+        // Lock released here
 
         let mut ready = Vec::new();
         let mut remaining = Vec::new();
@@ -203,7 +205,7 @@ impl Dispatcher {
         }
 
         if !remaining.is_empty() {
-            *queue = remaining;
+            self.queue.write().await.extend(remaining);
         }
 
         ready

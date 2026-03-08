@@ -16,7 +16,8 @@ pub use event::{Event, EventBus};
 pub use project::Project;
 pub use session::{Session, SessionState};
 pub use support::{
-    resolve_project_path, startup_config_sync, sync_workspace_support_files, ConfigSyncResult,
+    resolve_project_path, startup_config_sync, sync_project_local_config,
+    sync_support_files_for_directory, sync_workspace_support_files, ConfigSyncResult,
     GENERATED_MARKER_KEY,
 };
 pub use task::{Task, TaskState};

@@ -742,7 +742,7 @@ fn insert_task_into_board(path: &Path, role: &str, task: &BoardTaskRecord, proje
 }
 
 fn normalize_role(value: &str) -> &'static str {
-    match value.trim().to_lowercase().replace('-', "").replace('_', "").replace(' ', "").as_str() {
+    match value.trim().to_lowercase().replace(['-', '_', ' '], "").as_str() {
         "todo" | "intake" | "inbox" | "backlog" => "intake",
         "ready" | "readytodispatch" => "ready",
         "dispatching" => "dispatching",

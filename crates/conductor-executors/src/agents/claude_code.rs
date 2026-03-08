@@ -20,7 +20,7 @@ impl ClaudeCodeExecutor {
 
     /// Try to find claude in PATH.
     pub fn discover() -> Option<Self> {
-        which::which("claude").ok().map(|p| Self::new(p))
+        which::which("claude").ok().map(Self::new)
     }
 }
 

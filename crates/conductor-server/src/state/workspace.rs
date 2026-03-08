@@ -53,7 +53,7 @@ impl AppState {
 
         let session_branch = branch.unwrap_or("session");
         let base_ref = base_branch
-            .or_else(|| Some(project.default_branch.as_str()))
+            .or(Some(project.default_branch.as_str()))
             .unwrap_or("HEAD");
 
         if !is_safe_git_ref(session_branch) {

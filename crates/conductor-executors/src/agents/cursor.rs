@@ -15,7 +15,7 @@ impl CursorExecutor {
     pub fn new(binary: PathBuf) -> Self { Self { binary } }
 
     pub fn discover() -> Option<Self> {
-        which::which("cursor").ok().map(|p| Self::new(p))
+        which::which("cursor").ok().map(Self::new)
     }
 }
 

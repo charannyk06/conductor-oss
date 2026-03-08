@@ -464,10 +464,10 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
     if let Some(summary_text) = summary {
         parts.push(summary_text.to_string());
     }
-    if normalized_status != "done" || parts.is_empty() {
-        if !session.status.trim().is_empty() {
-            parts.push(format!("Session status: {}", session.status));
-        }
+    if (normalized_status != "done" || parts.is_empty())
+        && !session.status.trim().is_empty()
+    {
+        parts.push(format!("Session status: {}", session.status));
     }
 
     if parts.is_empty() {
@@ -531,7 +531,7 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
             "status_message" => "status",
             _ => "status",
         };
-        let tool_kind_present = entry.metadata.get("toolTitle").is_some();
+        let tool_kind_present = entry.metadata.contains_key("toolTitle");
         let label = match entry.kind.as_str() {
             "user_message" if entry.source == "feedback" => "Feedback",
             "user_message" => "You",

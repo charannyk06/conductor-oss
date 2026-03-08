@@ -15,7 +15,7 @@ impl OpenCodeExecutor {
     pub fn new(binary: PathBuf) -> Self { Self { binary } }
 
     pub fn discover() -> Option<Self> {
-        which::which("opencode").ok().map(|p| Self::new(p))
+        which::which("opencode").ok().map(Self::new)
     }
 }
 

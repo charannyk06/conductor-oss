@@ -58,9 +58,8 @@ impl GitOps {
     /// Remove a worktree.
     pub fn remove_worktree(&self, name: &str) -> Result<()> {
         let worktree = self.repo.find_worktree(name)?;
-        if worktree.is_locked().is_ok() {
-            worktree.unlock()?;
-        }
+        // Try to unlock; ignore error if already unlocked
+        let _ = worktree.unlock();
         worktree.prune(Some(
             git2::WorktreePruneOptions::new()
                 .working_tree(true)

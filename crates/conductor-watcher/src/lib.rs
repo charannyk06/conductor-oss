@@ -43,7 +43,9 @@ impl BoardWatcher {
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
-                    let _ = watcher_tx.blocking_send(event);
+                    if watcher_tx.try_send(event).is_err() {
+                        // Channel full or closed — drop event (debounce will catch next change)
+                    }
                 }
             },
             Config::default(),
@@ -99,7 +101,7 @@ impl BoardWatcher {
                             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                                 let new_hash = content_hash(&content);
                                 let mut hashes = paths.lock().unwrap();
-                                let changed = hashes.get(&path).map_or(true, |old| old != &new_hash);
+                                let changed = hashes.get(&path) != Some(&new_hash);
                                 if changed {
                                     hashes.insert(path.clone(), new_hash);
                                     if let Some(project_id) = board_map.get(&path) {

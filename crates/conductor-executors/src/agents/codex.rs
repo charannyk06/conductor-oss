@@ -19,7 +19,7 @@ impl CodexExecutor {
     }
 
     pub fn discover() -> Option<Self> {
-        which::which("codex").ok().map(|p| Self::new(p))
+        which::which("codex").ok().map(Self::new)
     }
 }
 

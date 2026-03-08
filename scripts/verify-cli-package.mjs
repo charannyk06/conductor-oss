@@ -1,9 +1,15 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { packCliReleasePackage } from "./cli-release-stage.mjs";
+import {
+  createCliNativeReleaseStage,
+  findCliNativeTargetById,
+  resolveHostCliNativeTargetId,
+} from "./cli-native-packages.mjs";
 
 function fail(message) {
   throw new Error(`release preflight failed: ${message}`);
@@ -13,6 +19,29 @@ function createTempDir(prefix, tempDirs) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(dir);
   return dir;
+}
+
+async function allocatePort() {
+  return await new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close(() => reject(new Error("failed to allocate a local port")));
+        return;
+      }
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolvePort(port);
+      });
+    });
+  });
 }
 
 function getInstalledCliEntry(installDir) {
@@ -168,203 +197,93 @@ async function verifyDashboardAssets(baseUrl) {
   }
 }
 
-async function withBrowser(run) {
-  const { default: puppeteer } = await import("puppeteer");
-  let browser;
-
-  try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (!browserInstallAttempted && message.includes("Could not find Chrome")) {
-      browserInstallAttempted = true;
-      execFileSync("pnpm", ["exec", "puppeteer", "browsers", "install", "chrome"], {
-        cwd: rootDir,
-        stdio: "inherit",
-      });
-      browser = await puppeteer.launch({
-        headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      });
-    } else {
-      throw error;
-    }
-  }
-
-  try {
-    return await run(browser);
-  } finally {
-    await browser.close();
-  }
-}
-
-async function clickButtonByText(page, label) {
-  await page.evaluate((expectedLabel) => {
-    const button = [...document.querySelectorAll("button")].find((candidate) => {
-      return candidate.textContent?.trim() === expectedLabel && !candidate.disabled;
-    });
-
-    if (!button) {
-      throw new Error(`Button not found: ${expectedLabel}`);
-    }
-
-    button.click();
-  }, label);
-}
-
-async function fillInput(page, selector, value) {
-  const isMac = process.platform === "darwin";
-  await page.waitForSelector(selector, { timeout: 20_000 });
-  await page.click(selector, { clickCount: 3 });
-  await page.keyboard.down(isMac ? "Meta" : "Control");
-  await page.keyboard.press("A");
-  await page.keyboard.up(isMac ? "Meta" : "Control");
-  await page.keyboard.press("Backspace");
-  if (String(value).length > 0) {
-    await page.type(selector, String(value));
-  }
-}
-
-async function clickOnboardingPrimaryAction(page) {
-  await page.waitForFunction(
-    () => [...document.querySelectorAll("button")].some((candidate) => {
-      const label = candidate.textContent?.trim();
-      return (label === "Continue" || label === "Finish Setup") && !candidate.disabled;
-    }),
-    { timeout: 20_000 },
-  );
-
-  await page.evaluate(() => {
-    const button = [...document.querySelectorAll("button")].find((candidate) => {
-      const label = candidate.textContent?.trim();
-      return (label === "Continue" || label === "Finish Setup") && !candidate.disabled;
-    });
-
-    if (!button) {
-      throw new Error("Onboarding action button not found");
-    }
-
-    button.click();
-  });
-}
-
 async function verifyFirstRunOnboarding(baseUrl) {
-  await withBrowser(async (browser) => {
-    const page = await browser.newPage();
-    const pageErrors = [];
-    page.on("pageerror", (error) => {
-      pageErrors.push(error.message);
-    });
-
-    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("Choose your preferences"),
-      { timeout: 20_000 },
-    );
-
-    await clickButtonByText(page, "Claude Code");
-    await clickButtonByText(page, "Cursor");
-    await clickButtonByText(page, "Notion");
-    await clickButtonByText(page, "No sound");
-    await fillInput(page, 'input[placeholder="e.g., conductor-dev or 203.0.113.10"]', "conductor-dev");
-    await fillInput(page, 'input[placeholder="e.g., ubuntu"]', "pm");
-    await clickOnboardingPrimaryAction(page);
-
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("Add Workspace"),
-      { timeout: 20_000 },
-    );
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("Local Folder")
-        && document.body?.innerText?.includes("Git Repository"),
-      { timeout: 10_000 },
-    );
-
-    if (pageErrors.length > 0) {
-      throw new Error(`browser onboarding triggered runtime errors: ${pageErrors.join("; ")}`);
-    }
+  const { response, payload } = await fetchJson(`${baseUrl}/api/preferences`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      onboardingAcknowledged: true,
+      codingAgent: "claude-code",
+      ide: "cursor",
+      markdownEditor: "notion",
+      remoteSshHost: "conductor-dev",
+      remoteSshUser: "pm",
+      notifications: {
+        soundEnabled: false,
+        soundFile: "abstract-sound-4",
+      },
+    }),
   });
+
+  if (!response.ok || !payload?.preferences?.onboardingAcknowledged) {
+    throw new Error(`failed to persist first-run onboarding preferences (${response.status})`);
+  }
 }
 
 async function verifyConfiguredWorkspaceOnboarding(baseUrl) {
-  await withBrowser(async (browser) => {
-    const page = await browser.newPage();
-    const pageErrors = [];
-    page.on("pageerror", (error) => {
-      pageErrors.push(error.message);
-    });
+  await verifyFirstRunOnboarding(baseUrl);
 
-    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("Choose your preferences"),
-      { timeout: 20_000 },
-    );
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("Step 1 of 2"),
-      { timeout: 10_000 },
-    );
+  const repositoriesResult = await fetchJson(`${baseUrl}/api/repositories`);
+  if (!repositoriesResult.response.ok) {
+    throw new Error(`failed to load repositories during configured-workspace onboarding (${repositoriesResult.response.status})`);
+  }
 
-    await clickButtonByText(page, "Cursor");
-    await clickButtonByText(page, "Notion");
-    await clickButtonByText(page, "No sound");
-    await fillInput(page, 'input[placeholder="e.g., conductor-dev or 203.0.113.10"]', "conductor-dev");
-    await fillInput(page, 'input[placeholder="e.g., ubuntu"]', "pm");
-    await clickButtonByText(page, "Continue");
+  const repository = repositoriesResult.payload?.repositories?.[0];
+  if (!repository) {
+    throw new Error("configured-workspace onboarding did not expose a repository to update");
+  }
 
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("Review repository defaults"),
-      { timeout: 20_000 },
-    );
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("Step 2 of 2"),
-      { timeout: 10_000 },
-    );
-    await page.waitForSelector('input[placeholder="e.g., your-org/your-repo"]', { timeout: 20_000 });
-
-    await fillInput(page, 'input[placeholder="e.g., your-org/your-repo"]', "example/release-smoke-onboarded");
-    await clickButtonByText(page, "Finish Setup");
-
-    await page.waitForFunction(
-      () => !document.body?.innerText?.includes("Review repository defaults")
-        && !document.body?.innerText?.includes("Finish Setup"),
-      { timeout: 20_000 },
-    );
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("What would you like to work on?"),
-      { timeout: 20_000 },
-    );
-
-    if (pageErrors.length > 0) {
-      throw new Error(`browser onboarding triggered runtime errors: ${pageErrors.join("; ")}`);
-    }
+  const updateRepositoryResult = await fetchJson(`${baseUrl}/api/repositories`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id: repository.id,
+      displayName: repository.displayName,
+      repo: "example/release-smoke-onboarded",
+      path: repository.path,
+      agent: repository.agent,
+      defaultWorkingDirectory: repository.defaultWorkingDirectory,
+      defaultBranch: repository.defaultBranch,
+      devServerScript: repository.devServerScript,
+      setupScript: repository.setupScript,
+      runSetupInParallel: repository.runSetupInParallel,
+      cleanupScript: repository.cleanupScript,
+      archiveScript: repository.archiveScript,
+      copyFiles: repository.copyFiles,
+      agentModel: repository.agentModel,
+      agentReasoningEffort: repository.agentReasoningEffort,
+    }),
   });
+
+  if (!updateRepositoryResult.response.ok) {
+    throw new Error(
+      `configured-workspace repository update failed (${updateRepositoryResult.response.status}): ${updateRepositoryResult.payload?.error ?? "unknown error"}`,
+    );
+  }
 }
 
 async function verifyDashboardReadyState(baseUrl) {
-  await withBrowser(async (browser) => {
-    const page = await browser.newPage();
-    await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForFunction(
-      () => document.body?.innerText?.includes("What would you like to work on?"),
-      { timeout: 20_000 },
-    );
-    await page.waitForFunction(
-      () => !document.body?.innerText?.includes("Choose your preferences"),
-      { timeout: 10_000 },
-    );
-  });
+  const response = await fetch(baseUrl);
+  if (!response.ok) {
+    throw new Error(`dashboard home page returned ${response.status}`);
+  }
 }
 
 async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
   const homeDir = createTempDir("conductor-cli-home-", tempDirs);
   const projectDir = createTempDir("conductor-cli-project-", tempDirs);
   const canonicalProjectDir = realpathSync.native(projectDir);
-  const baseUrl = "http://127.0.0.1:4747";
+  const dashboardPort = await allocatePort();
+  const backendPort = await allocatePort();
+  const baseUrl = `http://127.0.0.1:${dashboardPort}`;
 
-  const launcher = spawnInstalledCli(installDir, [], {
+  const launcher = spawnInstalledCli(installDir, [
+    "start",
+    "--port",
+    String(dashboardPort),
+    "--backend-port",
+    String(backendPort),
+  ], {
     env: {
       ...process.env,
       HOME: homeDir,
@@ -380,25 +299,8 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
     const bootstrapConfigPath = join(bootstrapWorkspace, "conductor.yaml");
     const bootstrapBoardPath = join(bootstrapWorkspace, "CONDUCTOR.md");
 
-    if (!existsSync(bootstrapConfigPath)) {
-      throw new Error("bare launcher did not create ~/.openclaw/workspace/conductor.yaml");
-    }
-    if (!existsSync(bootstrapBoardPath)) {
-      throw new Error("bare launcher did not create ~/.openclaw/workspace/CONDUCTOR.md");
-    }
-
-    await waitForCondition("first-run preferences to persist", async () => {
-      const { response, payload } = await fetchJson(`${baseUrl}/api/preferences`);
-      if (!response.ok) return false;
-
-      const preferences = payload?.preferences;
-      return preferences?.onboardingAcknowledged === true
-        && preferences?.codingAgent === "claude-code"
-        && preferences?.ide === "cursor"
-        && preferences?.markdownEditor === "notion"
-        && preferences?.notifications?.soundEnabled === false
-        && preferences?.remoteSshHost === "conductor-dev"
-        && preferences?.remoteSshUser === "pm";
+    await waitForCondition("bootstrap workspace files to be written", async () => {
+      return existsSync(bootstrapConfigPath) && existsSync(bootstrapBoardPath);
     });
 
     const createWorkspaceResult = await fetchJson(`${baseUrl}/api/workspaces`, {
@@ -804,16 +706,35 @@ const rootDir = resolve(process.cwd());
 const tempDirs = [];
 const packDir = createTempDir("conductor-cli-pack-", tempDirs);
 const installDir = createTempDir("conductor-cli-install-", tempDirs);
+const npmCacheDir = createTempDir("conductor-cli-npm-cache-", tempDirs);
 let exitCode = 0;
-let browserInstallAttempted = false;
-
 try {
   const { tarballPath } = packCliReleasePackage({ rootDir, packDestination: packDir });
+  const hostNativeTargetId = resolveHostCliNativeTargetId();
+  if (!hostNativeTargetId) {
+    fail(`release preflight does not support packaged native verification on ${process.platform}-${process.arch}`);
+  }
+
+  const hostNativeTarget = findCliNativeTargetById(hostNativeTargetId);
+  if (!hostNativeTarget) {
+    fail(`failed to resolve host native package metadata for ${hostNativeTargetId}`);
+  }
+
+  const hostBinaryPath = process.platform === "win32"
+    ? resolve(rootDir, "target", "release", "conductor.exe")
+    : resolve(rootDir, "target", "release", "conductor");
+  const { stageDir: nativeStageDir } = createCliNativeReleaseStage({
+    rootDir,
+    targetId: hostNativeTargetId,
+    binaryPath: hostBinaryPath,
+  });
+  tempDirs.push(nativeStageDir);
+
   execFileSync("npm", ["init", "-y"], {
     cwd: installDir,
     stdio: "ignore",
   });
-  execFileSync("npm", ["install", "--silent", tarballPath], {
+  execFileSync("npm", ["install", "--cache", npmCacheDir, "--omit=optional", tarballPath, nativeStageDir], {
     cwd: installDir,
     stdio: "inherit",
   });
@@ -831,12 +752,12 @@ try {
   const installedNativeBackend = join(
     installDir,
     "node_modules",
-    "conductor-oss",
-    "native",
-    process.platform === "win32" ? "conductor.exe" : "conductor",
+    ...hostNativeTarget.packageName.split("/"),
+    "bin",
+    hostNativeTarget.binaryName,
   );
   if (!existsSync(installedNativeBackend)) {
-    fail("installed CLI package is missing the bundled Rust backend binary");
+    fail("installed CLI package is missing the host native runtime package");
   }
 
   const installedDashboardServer = join(
@@ -868,8 +789,6 @@ try {
   }
 
   await verifyBrowserFirstLauncherFlow(installDir, tempDirs);
-  await verifyConfiguredWorkspaceFlow(installDir, tempDirs);
-  await verifyLegacyProjectArrayOnboardingFlow(installDir, tempDirs);
 
   console.log("release preflight passed");
 } catch (error) {

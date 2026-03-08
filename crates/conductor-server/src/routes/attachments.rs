@@ -115,7 +115,7 @@ fn normalize_token(value: &str) -> String {
 
 fn sanitize_file_name(value: &str) -> String {
     let normalized_path = value.replace('\\', "/");
-    let normalized = normalized_path.split('/').last().unwrap_or("upload.bin");
+    let normalized = normalized_path.split('/').next_back().unwrap_or("upload.bin");
     let sanitized = normalized
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') { ch } else { '-' })

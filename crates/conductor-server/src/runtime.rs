@@ -184,6 +184,9 @@ async fn process_board_change(
         return Ok(());
     }
 
+    // Serialize board-triggered spawns to prevent TOCTOU races in limit checks
+    let _spawn_guard = state.spawn_guard.lock().await;
+
     let (active_global, active_project) = active_session_counts(&state, &project_id).await;
     let mut available_global = MAX_GLOBAL_AUTODISPATCH_SESSIONS.saturating_sub(active_global);
     let mut available_project = MAX_PROJECT_AUTODISPATCH_SESSIONS.saturating_sub(active_project);
