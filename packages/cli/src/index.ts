@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 /**
  * Conductor CLI — `co`
@@ -7,6 +7,7 @@
  * Dispatch tasks from a kanban board, track PRs, CI, and reviews.
  */
 
+import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import { registerSpawn } from "./commands/spawn.js";
 import { registerList } from "./commands/list.js";
@@ -28,12 +29,16 @@ import { registerTask } from "./commands/task.js";
 import { registerFeedback } from "./commands/feedback.js";
 import { registerSetup } from "./commands/setup.js";
 
+const cliPackage = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version?: string };
+
 const program = new Command();
 
 program
   .name("co")
   .description("Conductor — markdown-native AI agent orchestrator")
-  .version("0.2.6");
+  .version(cliPackage.version || "0.0.0");
 
 registerSpawn(program);
 registerList(program);

@@ -1,9 +1,9 @@
 "use client";
 
-import { memo } from "react";
-import { Plus } from "lucide-react";
+import { memo, useMemo } from "react";
+import { Layers3, Plus } from "lucide-react";
 import { cn } from "@/lib/cn";
-import type { DashboardSession } from "@/lib/types";
+import { getAttentionLevel, type DashboardSession } from "@/lib/types";
 import { Sidebar } from "@/components/layout/Sidebar";
 
 interface ProjectItem {
@@ -34,16 +34,47 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
   onArchiveSession,
   onCreateWorkspace,
 }: WorkspaceSidebarPanelProps) {
+  const sessionCountByProject = useMemo(() => {
+    const counts = new Map<string, { total: number; active: number }>();
+
+    for (const session of sessions) {
+      if (session.status === "archived") continue;
+      const current = counts.get(session.projectId) ?? { total: 0, active: 0 };
+      current.total += 1;
+      if (getAttentionLevel(session) !== "done") {
+        current.active += 1;
+      }
+      counts.set(session.projectId, current);
+    }
+
+    return counts;
+  }, [sessions]);
+
+  const totalActiveSessions = useMemo(() => {
+    return sessions.filter((session) => session.status !== "archived" && getAttentionLevel(session) !== "done").length;
+  }, [sessions]);
+
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[var(--vk-bg-panel)]">
-      <section className="flex h-[57px] items-center border-b border-[var(--vk-border)] px-4">
-        <p className="truncate text-[15px] font-medium leading-[21px] text-[var(--vk-text-strong)]">
-          {orgLabel}
-        </p>
+      <section className="border-b border-[var(--vk-border)] px-4 py-4">
+        <div className="flex items-start gap-3">
+          <span className="inline-flex h-10 w-10 items-center justify-center rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]">
+            <Layers3 className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[15px] font-medium leading-[21px] text-[var(--vk-text-strong)]">
+              {orgLabel}
+            </p>
+            <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+              {projects.length} projects, {totalActiveSessions} active sessions
+            </p>
+          </div>
+        </div>
+
         <button
           type="button"
           onClick={onCreateWorkspace}
-          className="ml-auto inline-flex h-7 items-center gap-1 rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+          className="mt-3 inline-flex h-8 w-full items-center justify-center gap-1 rounded-[6px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
           aria-label="Add workspace"
         >
           <Plus className="h-3.5 w-3.5" />
@@ -56,8 +87,24 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
           <p className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">Projects</p>
         </div>
         <div className="max-h-[260px] overflow-y-auto px-2">
+          <button
+            type="button"
+            onClick={() => onSelectProject(null)}
+            className={cn(
+              "mb-1.5 flex w-full items-center gap-3 rounded-[6px] px-3 py-2.5 text-left text-[14px] leading-[21px]",
+              selectedProjectId === null
+                ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+                : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
+            )}
+          >
+            <span className="h-2.5 w-2.5 rounded-full bg-[var(--vk-text-muted)]" />
+            <span className="truncate">All projects</span>
+            <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{sessions.length}</span>
+          </button>
+
           {projects.map((project) => {
             const selected = selectedProjectId === project.id;
+            const counts = sessionCountByProject.get(project.id) ?? { total: 0, active: 0 };
             return (
               <button
                 key={project.id}
@@ -70,8 +117,19 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                     : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
                 )}
               >
-                <span className="h-2.5 w-2.5 rounded-full bg-[#3c83f6]" />
-                <span className="truncate">{project.id}</span>
+                <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-[#3c83f6]" />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate">{project.id}</span>
+                  {project.description ? (
+                    <span className="block truncate text-[11px] text-[var(--vk-text-muted)]">
+                      {project.description}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="shrink-0 text-right">
+                  <span className="block text-[11px] text-[var(--vk-text-normal)]">{counts.active} active</span>
+                  <span className="block text-[10px] text-[var(--vk-text-muted)]">{counts.total} total</span>
+                </span>
               </button>
             );
           })}

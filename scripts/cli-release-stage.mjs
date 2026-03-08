@@ -2,9 +2,12 @@ import { execFileSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -86,6 +89,48 @@ function copyDirectoryResolvingSymlinks(sourcePath, destinationPath) {
   );
 }
 
+function hydrateStandaloneNodeModules(standaloneRoot) {
+  const nodeModulesDir = join(standaloneRoot, "node_modules");
+  const pnpmLinksDir = join(nodeModulesDir, ".pnpm", "node_modules");
+
+  if (!existsSync(pnpmLinksDir)) {
+    return;
+  }
+
+  const hydrateFrom = (sourceDir, destinationDir) => {
+    for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+      if (entry.name === ".bin") {
+        continue;
+      }
+
+      const sourcePath = join(sourceDir, entry.name);
+      const destinationPath = join(destinationDir, entry.name);
+      const stat = lstatSync(sourcePath);
+
+      if (stat.isSymbolicLink()) {
+        rmSync(destinationPath, { recursive: true, force: true });
+        copyDirectoryResolvingSymlinks(realpathSync(sourcePath), destinationPath);
+        continue;
+      }
+
+      if (!stat.isDirectory()) {
+        continue;
+      }
+
+      if (existsSync(join(sourcePath, "package.json"))) {
+        rmSync(destinationPath, { recursive: true, force: true });
+        copyDirectoryResolvingSymlinks(sourcePath, destinationPath);
+        continue;
+      }
+
+      mkdirSync(destinationPath, { recursive: true });
+      hydrateFrom(sourcePath, destinationPath);
+    }
+  };
+
+  hydrateFrom(pnpmLinksDir, nodeModulesDir);
+}
+
 function sanitizePublishedPackage(pkg, dependencies) {
   const sanitized = {
     name: pkg.name,
@@ -111,6 +156,20 @@ function sanitizePublishedPackage(pkg, dependencies) {
   }
 
   return sanitized;
+}
+
+function addDependency(target, dependencyName, specifier, sourceLabel) {
+  const existing = target[dependencyName];
+  if (!existing) {
+    target[dependencyName] = specifier;
+    return;
+  }
+
+  if (existing !== specifier) {
+    throw new Error(
+      `Conflicting dependency specifiers for ${dependencyName}: ${existing} vs ${specifier} (${sourceLabel})`,
+    );
+  }
 }
 
 function ensureWebBundle(rootDir) {
@@ -140,6 +199,7 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
   ];
 
   const tarballs = new Map();
+  const externalDependencies = {};
 
   for (const packageName of internalDependencyNames) {
     const sourceDir = workspacePackages.get(packageName);
@@ -158,9 +218,12 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
 
     const dependencies = {};
     for (const [dependencyName, specifier] of Object.entries(sourceManifest.dependencies ?? {})) {
-      dependencies[dependencyName] = internalDependencyNames.includes(dependencyName)
-        ? cliVersion
-        : specifier;
+      if (internalDependencyNames.includes(dependencyName)) {
+        dependencies[dependencyName] = cliVersion;
+      } else {
+        dependencies[dependencyName] = specifier;
+        addDependency(externalDependencies, dependencyName, specifier, packageName);
+      }
     }
 
     const sanitizedManifest = sanitizePublishedPackage(sourceManifest, dependencies);
@@ -175,7 +238,7 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
     tarballs.set(packageName, join(tarballRoot, tarballName));
   }
 
-  return { internalDependencyNames, tarballs };
+  return { internalDependencyNames, tarballs, externalDependencies };
 }
 
 export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}) {
@@ -196,7 +259,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   mkdirSync(internalStagingRoot, { recursive: true });
   mkdirSync(internalTarballRoot, { recursive: true });
 
-  const { internalDependencyNames, tarballs } = buildInternalPackageTarballs({
+  const { internalDependencyNames, tarballs, externalDependencies } = buildInternalPackageTarballs({
     rootDir: resolvedRootDir,
     cliVersion: cliPackage.version,
     tarballRoot: internalTarballRoot,
@@ -209,6 +272,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
 
   const webOutputDir = join(outputDir, "web");
   copyDirectoryResolvingSymlinks(webBundle.standaloneDir, join(webOutputDir, ".next", "standalone"));
+  hydrateStandaloneNodeModules(join(webOutputDir, ".next", "standalone"));
   cpSync(webBundle.staticDir, join(webOutputDir, ".next", "static"), { recursive: true });
   cpSync(
     webBundle.staticDir,
@@ -230,9 +294,12 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
       ? `file:${tarballs.get(dependencyName)}`
       : specifier;
   }
+  for (const [dependencyName, specifier] of Object.entries(externalDependencies)) {
+    addDependency(stagedDependencies, dependencyName, specifier, "internal workspace package");
+  }
   for (const [dependencyName, specifier] of Object.entries(webPackage.dependencies ?? {})) {
-    if (!dependencyName.startsWith("@conductor-oss/") && !stagedDependencies[dependencyName]) {
-      stagedDependencies[dependencyName] = specifier;
+    if (!dependencyName.startsWith("@conductor-oss/")) {
+      addDependency(stagedDependencies, dependencyName, specifier, "@conductor-oss/web");
     }
   }
 
@@ -294,9 +361,12 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
       ? cliPackage.version
       : specifier;
   }
+  for (const [dependencyName, specifier] of Object.entries(externalDependencies)) {
+    addDependency(publishedDependencies, dependencyName, specifier, "internal workspace package");
+  }
   for (const [dependencyName, specifier] of Object.entries(webPackage.dependencies ?? {})) {
-    if (!dependencyName.startsWith("@conductor-oss/") && !publishedDependencies[dependencyName]) {
-      publishedDependencies[dependencyName] = specifier;
+    if (!dependencyName.startsWith("@conductor-oss/")) {
+      addDependency(publishedDependencies, dependencyName, specifier, "@conductor-oss/web");
     }
   }
 
