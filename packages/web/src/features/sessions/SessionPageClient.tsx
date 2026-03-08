@@ -30,6 +30,17 @@ export default function SessionPageClient() {
     () => dashboardSessions.find((session) => session.id === params.id) ?? null,
     [dashboardSessions, params.id],
   );
+  const topBarTitle = useMemo(() => {
+    if (selectedSession) {
+      return [selectedSession.projectId, selectedSession.branch].filter(Boolean).join(" \u00b7 ");
+    }
+
+    if (selectedProjectId) {
+      return selectedProjectId;
+    }
+
+    return "Session";
+  }, [selectedProjectId, selectedSession]);
 
   useEffect(() => {
     if (selectedSession?.projectId) {
@@ -114,8 +125,7 @@ export default function SessionPageClient() {
       }
     >
       <TopBar
-        session={selectedSession}
-        fallbackTitle={selectedSession?.projectId ?? "Session"}
+        title={topBarTitle}
       />
       <div className="min-h-0 flex-1 overflow-hidden">
         <SessionDetail sessionId={params.id} />

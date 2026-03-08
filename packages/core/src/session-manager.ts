@@ -690,7 +690,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           if (project) {
             const sessionsDir = getProjectSessionsDir(project);
             const fields: Record<string, string> = {};
-            if (info.summary) fields["summary"] = info.summary;
+            if (info.summary && !info.summaryIsFallback) fields["summary"] = info.summary;
             if (info.cost) fields["cost"] = JSON.stringify(info.cost);
             if (Object.keys(fields).length > 0) {
               updateMetadata(sessionsDir, session.id, fields);
