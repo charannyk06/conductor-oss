@@ -74,7 +74,7 @@ async fn list_github_repositories(Query(query): Query<RepoQuery>) -> ApiResponse
             .into_iter()
             .filter_map(|item| {
                 let full_name = item.name_with_owner?;
-                let name = full_name.split('/').last().unwrap_or(&full_name).to_string();
+                let name = full_name.split('/').next_back().unwrap_or(&full_name).to_string();
                 let https_url = item.url.clone().map(|value| format!("{value}.git")).unwrap_or_else(|| format!("https://github.com/{full_name}.git"));
                 let ssh_url = item.ssh_url.unwrap_or_else(|| format!("git@github.com:{full_name}.git"));
                 Some(json!({

@@ -49,7 +49,7 @@ async fn read_directory(
 
     let entries = std::fs::read_dir(&current_path)
         .map_err(|err| error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
-        .and_then(|entries| {
+        .map(|entries| {
             let mut items = entries
                 .flatten()
                 .map(|entry| {
@@ -71,7 +71,7 @@ async fn read_directory(
                     left["name"].as_str().unwrap_or_default().cmp(right["name"].as_str().unwrap_or_default())
                 })
             });
-            Ok(items)
+            items
         });
 
     match entries {

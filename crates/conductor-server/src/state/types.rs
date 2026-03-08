@@ -138,6 +138,7 @@ pub struct SessionRecord {
 }
 
 impl SessionRecord {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: String,
         project_id: String,

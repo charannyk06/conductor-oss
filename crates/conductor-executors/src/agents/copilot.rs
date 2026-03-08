@@ -17,7 +17,7 @@ impl CopilotExecutor {
     pub fn discover() -> Option<Self> {
         which::which("github-copilot").ok()
             .or_else(|| which::which("copilot").ok())
-            .map(|p| Self::new(p))
+            .map(Self::new)
     }
 }
 

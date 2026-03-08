@@ -15,7 +15,7 @@ impl AmpExecutor {
     pub fn new(binary: PathBuf) -> Self { Self { binary } }
 
     pub fn discover() -> Option<Self> {
-        which::which("amp").ok().map(|p| Self::new(p))
+        which::which("amp").ok().map(Self::new)
     }
 }
 

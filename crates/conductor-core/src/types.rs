@@ -9,19 +9,14 @@ pub type EntityId = Uuid;
 pub type Timestamp = DateTime<Utc>;
 
 /// Priority levels for tasks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Priority {
     Critical,
     High,
+    #[default]
     Normal,
     Low,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Agent type identifier.

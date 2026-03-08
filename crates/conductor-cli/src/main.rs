@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 use conductor_core::config::ConductorConfig;
@@ -123,7 +124,9 @@ async fn main() -> Result<()> {
             println!("\n{} project(s)", config.projects.len());
         }
         Commands::Status { port } => {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()?;
             let response = client
                 .get(format!("http://127.0.0.1:{port}/api/health"))
                 .send()
@@ -142,7 +145,9 @@ async fn main() -> Result<()> {
             model,
             port,
         } => {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()?;
             let response = client
                 .post(format!(
                     "http://127.0.0.1:{}/api/spawn",

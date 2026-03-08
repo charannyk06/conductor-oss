@@ -18,6 +18,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         ("001_init", MIGRATION_001_INIT),
         ("002_session_logs", MIGRATION_002_SESSION_LOGS),
         ("003_board_snapshots", MIGRATION_003_BOARD_SNAPSHOTS),
+        ("004_indexes", MIGRATION_004_INDEXES),
     ];
 
     for (name, sql) in migrations {
@@ -154,4 +155,11 @@ CREATE TABLE IF NOT EXISTS board_snapshots (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_board_snapshots_project ON board_snapshots(project_id);
+"#;
+
+const MIGRATION_004_INDEXES: &str = r#"
+-- Additional indexes for common query patterns
+CREATE INDEX IF NOT EXISTS idx_sessions_project_state ON sessions(project_id, state);
+CREATE INDEX IF NOT EXISTS idx_sessions_pid ON sessions(pid);
+CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity_at);
 "#;

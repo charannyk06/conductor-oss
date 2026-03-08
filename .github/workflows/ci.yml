@@ -40,7 +40,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
-        continue-on-error: true
 
       - name: Test
         run: cargo test --workspace

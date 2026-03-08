@@ -132,8 +132,24 @@ pub async fn spawn_process_with_pty_size(
                     let child = Arc::clone(&child);
                     let _ = tokio::task::spawn_blocking(move || {
                         let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+                        // Try graceful SIGTERM first (Unix only), then fall back to SIGKILL
+                        #[cfg(unix)]
+                        {
+                            if let Some(pid) = child.process_id() {
+                                let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
+                                let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
+                                // Wait up to 5 seconds for graceful exit
+                                for _ in 0..50 {
+                                    std::thread::sleep(Duration::from_millis(100));
+                                    if let Ok(Some(_)) = child.try_wait() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        // SIGKILL fallback (or non-Unix)
                         let _ = child.kill();
-                        let _ = child.wait(); // reap zombie process
+                        let _ = child.wait();
                     }).await;
                     // Drop the master handle to close PTY file descriptors.
                     if let Ok(mut guard) = master_for_cleanup.lock() {
@@ -258,6 +274,23 @@ pub async fn spawn_process_no_stdin(
             }
             signal = kill_rx => {
                 if signal.is_ok() {
+                    // Try graceful SIGTERM first (Unix only)
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
+                        let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
+                        for _ in 0..50 {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            if let Ok(Some(_)) = child.try_wait() {
+                                let _ = exit_tx.send(ExecutorOutput::Failed {
+                                    error: "killed".to_string(),
+                                    exit_code: Some(-15),
+                                }).await;
+                                return;
+                            }
+                        }
+                    }
+                    // SIGKILL fallback
                     let _ = child.kill().await;
                     let _ = exit_tx.send(ExecutorOutput::Failed {
                         error: "killed".to_string(),

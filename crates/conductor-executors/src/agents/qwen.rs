@@ -17,7 +17,7 @@ impl QwenCodeExecutor {
     pub fn discover() -> Option<Self> {
         which::which("qwen").ok()
             .or_else(|| which::which("qwen-code").ok())
-            .map(|p| Self::new(p))
+            .map(Self::new)
     }
 }
 

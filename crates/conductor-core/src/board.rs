@@ -110,11 +110,11 @@ impl Board {
             }
 
             // Column header (## Column Name).
-            if line.starts_with("## ") {
+            if let Some(header) = line.strip_prefix("## ") {
                 if let Some(col) = current_column.take() {
                     columns.push(col);
                 }
-                let name = line[3..].trim().to_string();
+                let name = header.trim().to_string();
                 let state = column_to_state(&name);
                 current_column = Some(Column {
                     name,
@@ -132,9 +132,8 @@ impl Board {
                     let content = &trimmed[6..];
                     let card = parse_card(content, completed, line);
                     col.cards.push(card);
-                } else if trimmed.starts_with("- ") {
+                } else if let Some(content) = trimmed.strip_prefix("- ") {
                     // Plain list item (no checkbox).
-                    let content = &trimmed[2..];
                     let card = parse_card(content, false, line);
                     col.cards.push(card);
                 }
@@ -256,10 +255,8 @@ fn parse_card(content: &str, completed: bool, raw: &str) -> Card {
     let mut metadata = HashMap::new();
 
     for word in content.split_whitespace() {
-        if word.starts_with('@') {
-            tags.push(word[1..].to_string());
-        } else if word.starts_with('#') {
-            tags.push(word[1..].to_string());
+        if let Some(tag) = word.strip_prefix('@').or_else(|| word.strip_prefix('#')) {
+            tags.push(tag.to_string());
         } else if word.contains(':') && word.len() > 2 {
             let parts: Vec<&str> = word.splitn(2, ':').collect();
             if parts.len() == 2 {

@@ -148,6 +148,36 @@ impl SessionRepo {
         .await?;
         Ok(rows)
     }
+
+    /// Delete all but the most recent N logs for a session.
+    pub async fn cleanup_old_logs(
+        pool: &SqlitePool,
+        session_id: &str,
+        keep_count: i64,
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM session_logs WHERE session_id = ? AND id NOT IN (
+                SELECT id FROM session_logs WHERE session_id = ? ORDER BY id DESC LIMIT ?
+            )",
+        )
+        .bind(session_id)
+        .bind(session_id)
+        .bind(keep_count)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Delete logs older than N days across all sessions.
+    pub async fn cleanup_stale_logs(pool: &SqlitePool, older_than_days: i64) -> Result<u64> {
+        let result = sqlx::query(
+            "DELETE FROM session_logs WHERE created_at < datetime('now', ? || ' days')",
+        )
+        .bind(-older_than_days)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]

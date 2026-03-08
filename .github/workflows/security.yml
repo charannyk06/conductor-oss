@@ -30,6 +30,13 @@ jobs:
         run: npx audit-ci --high
         continue-on-error: true
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo audit
+        run: cargo install cargo-audit && cargo audit
+        continue-on-error: true
+
   secret-scan:
     name: Secret Scanning
     runs-on: ubuntu-latest
