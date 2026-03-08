@@ -37,6 +37,7 @@ import { useAgents } from "@/hooks/useAgents";
 import { useSessionFeed } from "@/hooks/useSessionFeed";
 import type { NormalizedChatEntry } from "@/lib/chatFeed";
 import { normalizeAgentName } from "@/lib/agentUtils";
+import { getAvailableAgentModels, resolveAgentModelAccess } from "@conductor-oss/core/types";
 
 interface ChatPanelProps {
   sessionId: string;
@@ -127,6 +128,17 @@ function getModelOptions(
 ): ModelOption[] {
   const options = new Map<string, ModelOption>();
   const normalizedAgentName = normalizeAgentName(agentName);
+
+  const fallbackModels = getAvailableAgentModels(agentName, undefined);
+  for (const model of fallbackModels) {
+    const id = model.id.trim();
+    if (!id || options.has(id)) continue;
+    options.set(id, {
+      id,
+      label: model.label.trim() || id,
+      helper: "Built-in catalog",
+    });
+  }
 
   for (const agent of agents) {
     if (normalizedAgentName && normalizeAgentName(agent.name) !== normalizedAgentName) {

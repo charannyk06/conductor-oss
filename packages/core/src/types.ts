@@ -507,6 +507,13 @@ export interface AgentModelCatalog {
   accessOptions: AgentModelAccessOption[];
 }
 
+type StaticAgentModelCatalog = {
+  modelsByAccess: Partial<Record<AgentModelAccess, AgentModelOption[]>>;
+  defaultModelByAccess: Partial<Record<AgentModelAccess, string>>;
+  reasoningOptionsByAccess?: Partial<Record<AgentModelAccess, AgentReasoningOption[]>>;
+  defaultReasoningByAccess?: Partial<Record<AgentModelAccess, string>>;
+};
+
 const DEFAULT_MODEL_ACCESS_PREFERENCES: Required<ModelAccessPreferences> = {
   claudeCode: "pro",
   codex: "chatgpt",
@@ -594,6 +601,180 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
   },
 };
 
+const DEFAULT_REASONING_OPTIONS: AgentReasoningOption[] = [
+  {
+    id: "low",
+    label: "Low",
+    description: "Fast responses with lighter reasoning.",
+  },
+  {
+    id: "medium",
+    label: "Medium",
+    description: "Balanced speed and reasoning depth for everyday tasks.",
+  },
+  {
+    id: "high",
+    label: "High",
+    description: "Deeper reasoning for more complex tasks.",
+  },
+];
+
+const CODEX_REASONING_OPTIONS: AgentReasoningOption[] = [
+  ...DEFAULT_REASONING_OPTIONS,
+  {
+    id: "xhigh",
+    label: "Extra High",
+    description: "Maximum reasoning depth for the hardest tasks.",
+  },
+];
+
+function formatModelLabel(raw: string): string {
+  return raw
+    .trim()
+    .split(/[-_]+/g)
+    .filter(Boolean)
+    .map((part) => {
+      const lower = part.toLowerCase();
+      if (lower === "gpt") return "GPT";
+      return part[0]?.toUpperCase() + part.slice(1);
+    })
+    .join(" ");
+}
+
+function modelOption(
+  id: string,
+  description: string,
+  access: AgentModelAccess[],
+  label = formatModelLabel(id),
+): AgentModelOption {
+  return { id, label, description, access };
+}
+
+const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelCatalog> = {
+  "claude-code": {
+    modelsByAccess: {
+      pro: [
+        modelOption(
+          "claude-sonnet-4-6",
+          "Balanced Claude Code model for day-to-day coding tasks.",
+          ["pro", "max", "api"],
+          "Claude Sonnet 4.6",
+        ),
+      ],
+      max: [
+        modelOption(
+          "claude-sonnet-4-6",
+          "Balanced Claude Code model for day-to-day coding tasks.",
+          ["pro", "max", "api"],
+          "Claude Sonnet 4.6",
+        ),
+        modelOption(
+          "claude-opus-4-6",
+          "Highest-capability Claude Code model for deeper reasoning.",
+          ["max", "api"],
+          "Claude Opus 4.6",
+        ),
+      ],
+      api: [
+        modelOption(
+          "claude-sonnet-4-6",
+          "Balanced Claude Code model for day-to-day coding tasks.",
+          ["pro", "max", "api"],
+          "Claude Sonnet 4.6",
+        ),
+        modelOption(
+          "claude-opus-4-6",
+          "Highest-capability Claude Code model for deeper reasoning.",
+          ["max", "api"],
+          "Claude Opus 4.6",
+        ),
+        modelOption(
+          "claude-haiku-4-5",
+          "Fast Claude API model for lightweight tasks.",
+          ["api"],
+          "Claude Haiku 4.5",
+        ),
+      ],
+    },
+    defaultModelByAccess: {
+      pro: "claude-sonnet-4-6",
+      max: "claude-opus-4-6",
+      api: "claude-sonnet-4-6",
+    },
+    reasoningOptionsByAccess: {
+      pro: DEFAULT_REASONING_OPTIONS,
+      max: DEFAULT_REASONING_OPTIONS,
+      api: DEFAULT_REASONING_OPTIONS,
+    },
+    defaultReasoningByAccess: {
+      pro: "medium",
+      max: "high",
+      api: "medium",
+    },
+  },
+  codex: {
+    modelsByAccess: {
+      chatgpt: [
+        modelOption("gpt-5.4", "Latest frontier coding model exposed by Codex.", ["chatgpt", "api"], "GPT-5.4"),
+        modelOption("gpt-5.3-codex", "Balanced Codex coding model.", ["chatgpt", "api"], "GPT-5.3-Codex"),
+        modelOption("gpt-5.3-codex-spark", "Fast Codex model optimized for rapid iteration.", ["chatgpt"], "GPT-5.3-Codex-Spark"),
+        modelOption("gpt-5.2-codex", "Previous generation Codex coding model.", ["chatgpt", "api"], "GPT-5.2-Codex"),
+        modelOption("gpt-5.1-codex-max", "High-capability legacy Codex model.", ["chatgpt", "api"], "GPT-5.1-Codex-Max"),
+        modelOption("gpt-5.1-codex-mini", "Smaller Codex model for quick tasks.", ["chatgpt", "api"], "GPT-5.1-Codex-Mini"),
+      ],
+      api: [
+        modelOption("gpt-5.4", "Latest frontier coding model exposed by Codex.", ["chatgpt", "api"], "GPT-5.4"),
+        modelOption("gpt-5.3-codex", "Balanced Codex coding model.", ["chatgpt", "api"], "GPT-5.3-Codex"),
+        modelOption("gpt-5.2-codex", "Previous generation Codex coding model.", ["chatgpt", "api"], "GPT-5.2-Codex"),
+        modelOption("gpt-5.1-codex-max", "High-capability legacy Codex model.", ["chatgpt", "api"], "GPT-5.1-Codex-Max"),
+        modelOption("gpt-5.1-codex-mini", "Smaller Codex model for quick tasks.", ["chatgpt", "api"], "GPT-5.1-Codex-Mini"),
+      ],
+    },
+    defaultModelByAccess: {
+      chatgpt: "gpt-5.4",
+      api: "gpt-5.4",
+    },
+    reasoningOptionsByAccess: {
+      chatgpt: CODEX_REASONING_OPTIONS,
+      api: CODEX_REASONING_OPTIONS,
+    },
+    defaultReasoningByAccess: {
+      chatgpt: "high",
+      api: "high",
+    },
+  },
+  gemini: {
+    modelsByAccess: {
+      oauth: [
+        modelOption("gemini-3.1-pro-preview", "High-capability Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3.1 Pro Preview"),
+        modelOption("gemini-3-flash-preview", "Fast Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3 Flash Preview"),
+      ],
+      api: [
+        modelOption("gemini-3.1-pro-preview", "High-capability Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3.1 Pro Preview"),
+        modelOption("gemini-3-flash-preview", "Fast Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3 Flash Preview"),
+      ],
+    },
+    defaultModelByAccess: {
+      oauth: "gemini-3.1-pro-preview",
+      api: "gemini-3.1-pro-preview",
+    },
+  },
+  "qwen-code": {
+    modelsByAccess: {
+      oauth: [
+        modelOption("coder-model", "Model discovered in the local Qwen Code installation.", ["oauth", "api"], "Coder Model"),
+      ],
+      api: [
+        modelOption("coder-model", "Model discovered in the local Qwen Code installation.", ["oauth", "api"], "Coder Model"),
+      ],
+    },
+    defaultModelByAccess: {
+      oauth: "coder-model",
+      api: "coder-model",
+    },
+  },
+};
+
 function normalizeModelAgent(agent: string): SupportedModelAgent | null {
   const normalized = agent
     .trim()
@@ -641,31 +822,61 @@ export function resolveAgentModelAccess(
  * The core package only owns access-mode metadata.
  */
 export function getAvailableAgentModels(
-  _agent: string,
-  _preferences?: ModelAccessPreferences | null,
+  agent: string,
+  preferences?: ModelAccessPreferences | null,
 ): AgentModelOption[] {
-  return [];
+  const normalized = normalizeModelAgent(agent);
+  if (!normalized) return [];
+  const access = resolveAgentModelAccess(normalized, preferences);
+  if (!access) return [];
+  const staticCatalog = STATIC_AGENT_MODEL_CATALOGS[normalized];
+  const scoped = staticCatalog.modelsByAccess[access] ?? [];
+  if (scoped.length > 0) return [...scoped];
+
+  const merged: AgentModelOption[] = [];
+  const seen = new Set<string>();
+  for (const list of Object.values(staticCatalog.modelsByAccess)) {
+    if (!Array.isArray(list)) continue;
+    for (const model of list) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
+      merged.push(model);
+    }
+  }
+  return merged;
 }
 
 export function getDefaultAgentModel(
-  _agent: string,
-  _preferences?: ModelAccessPreferences | null,
+  agent: string,
+  preferences?: ModelAccessPreferences | null,
 ): string | null {
-  return null;
+  const normalized = normalizeModelAgent(agent);
+  if (!normalized) return null;
+  const access = resolveAgentModelAccess(normalized, preferences);
+  if (!access) return null;
+  return STATIC_AGENT_MODEL_CATALOGS[normalized].defaultModelByAccess[access] ?? null;
 }
 
 export function getAvailableAgentReasoningEfforts(
-  _agent: string,
-  _preferences?: ModelAccessPreferences | null,
+  agent: string,
+  preferences?: ModelAccessPreferences | null,
 ): AgentReasoningOption[] {
-  return [];
+  const normalized = normalizeModelAgent(agent);
+  if (!normalized) return [];
+  const access = resolveAgentModelAccess(normalized, preferences);
+  if (!access) return [];
+  return STATIC_AGENT_MODEL_CATALOGS[normalized].reasoningOptionsByAccess?.[access] ?? [];
 }
 
 export function getDefaultAgentReasoningEffort(
-  _agent: string,
-  _preferences?: ModelAccessPreferences | null,
+  agent: string,
+  preferences?: ModelAccessPreferences | null,
 ): string | null {
-  return null;
+  const normalized = normalizeModelAgent(agent);
+  if (!normalized) return null;
+  const access = resolveAgentModelAccess(normalized, preferences);
+  if (!access) return null;
+  return STATIC_AGENT_MODEL_CATALOGS[normalized].defaultReasoningByAccess?.[access] ?? null;
 }
 
 export interface UserPreferences {

@@ -189,13 +189,12 @@ async fn persist_workspace(
     }
 
     let mut config = state.config.write().await;
-    let default_agent = config.preferences.coding_agent.clone();
     let project = config.projects.entry(project_id.to_string()).or_insert_with(ProjectConfig::default);
     project.name = Some(project_id.to_string());
     project.repo = repo.or_else(|| Some(project_id.to_string()));
     project.path = path.to_string_lossy().to_string();
     project.default_branch = default_branch.clone();
-    project.agent = agent.or(Some(default_agent));
+    project.agent = agent;
     project.runtime = Some(if use_worktree { "worktree".to_string() } else { "direct".to_string() });
     project.workspace = Some(path.to_string_lossy().to_string());
     project.board_dir = Some(board_dir.clone());

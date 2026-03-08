@@ -195,7 +195,21 @@ bun run dev:full
 Defaults:
 
 - web UI: `http://localhost:3000`
+- Rust backend: `http://127.0.0.1:4749`
+
+### Run the prod-like local stack
+
+```bash
+bun run prod:prepare
+bun run prod:full
+```
+
+Defaults:
+
+- dashboard: `http://localhost:4747`
 - Rust backend: `http://127.0.0.1:4748`
+
+This uses the standalone web build so it can run alongside `bun run dev:full` from the same checkout.
 
 ### Run frontend only
 
@@ -225,6 +239,8 @@ Useful root scripts:
 bun run dev
 bun run dev:backend
 bun run dev:full
+bun run prod:prepare
+bun run prod:full
 bun run build
 bun run build:frontend
 bun run clean

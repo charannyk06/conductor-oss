@@ -86,6 +86,14 @@ impl AppState {
     ) -> Result<PreferencesConfig> {
         {
             let mut config = self.config.write().await;
+            let previous_agent = config.preferences.coding_agent.clone();
+            if previous_agent != preferences.coding_agent {
+                for project in config.projects.values_mut() {
+                    if project.agent.as_deref() == Some(previous_agent.as_str()) {
+                        project.agent = None;
+                    }
+                }
+            }
             config.preferences = preferences.clone();
         }
         self.save_config().await?;

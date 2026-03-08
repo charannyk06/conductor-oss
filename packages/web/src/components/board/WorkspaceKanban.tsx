@@ -286,15 +286,15 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
   useEffect(() => {
     if (!orderedAgentOptions.includes(agent)) {
-      setAgent(orderedAgentOptions[0] ?? "qwen-code");
+      setAgent(orderedAgentOptions[0] ?? defaultAgent);
     }
-  }, [agent, orderedAgentOptions]);
+  }, [agent, defaultAgent, orderedAgentOptions]);
 
   useEffect(() => {
     if (!orderedAgentOptions.includes(editAgent)) {
-      setEditAgent(orderedAgentOptions[0] ?? "qwen-code");
+      setEditAgent(orderedAgentOptions[0] ?? defaultAgent);
     }
-  }, [editAgent, orderedAgentOptions]);
+  }, [defaultAgent, editAgent, orderedAgentOptions]);
 
   useEffect(() => {
     if (!composerOpen || !projectId) return;
@@ -625,7 +625,7 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
     setEditRole(role);
     setEditTitle(nextTitle);
     setEditDescription(nextDescription);
-    setEditAgent(task.agent ?? orderedAgentOptions[0] ?? "qwen-code");
+    setEditAgent(task.agent ?? orderedAgentOptions[0] ?? defaultAgent);
     setEditTaskType(task.type ?? "feature");
     setEditPriority(task.priority ?? "normal");
     setEditLinkedSession(task.attemptRef ?? "");

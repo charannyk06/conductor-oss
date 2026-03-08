@@ -1,6 +1,6 @@
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use conductor_core::config::ProjectConfig;
 use serde::Deserialize;
@@ -13,7 +13,9 @@ use crate::state::AppState;
 type ApiResponse = (StatusCode, Json<Value>);
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/repositories", get(list_repositories).put(save_repository))
+    Router::new()
+        .route("/api/repositories", get(list_repositories).put(save_repository))
+        .route("/api/repositories/{id}", delete(delete_repository))
 }
 
 fn ok(value: Value) -> ApiResponse {
@@ -89,6 +91,24 @@ async fn save_repository(
     ok(json!({
         "repository": repository_payload(&body.id, &saved, &default_agent, &state.workspace_path)
     }))
+}
+
+async fn delete_repository(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> ApiResponse {
+    let mut config = state.config.write().await;
+    if !config.projects.contains_key(&id) {
+        return error(StatusCode::NOT_FOUND, format!("Repository not found: {id}"));
+    }
+    config.projects.remove(&id);
+    drop(config);
+
+    if let Err(err) = state.save_config().await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+
+    ok(json!({ "ok": true }))
 }
 
 fn split_lines(value: Option<&str>) -> Vec<String> {

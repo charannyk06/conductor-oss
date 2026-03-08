@@ -1,6 +1,6 @@
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -12,7 +12,9 @@ use crate::state::AppState;
 type ApiResponse = (StatusCode, Json<Value>);
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/filesystem/directory", get(read_directory))
+    Router::new()
+        .route("/api/filesystem/directory", get(read_directory))
+        .route("/api/filesystem/pick-directory", post(pick_directory))
 }
 
 fn ok(value: Value) -> ApiResponse {
@@ -94,5 +96,52 @@ fn expand_path(value: &str, workspace_path: &Path) -> PathBuf {
         candidate
     } else {
         workspace_path.join(candidate)
+    }
+}
+
+async fn pick_directory() -> ApiResponse {
+    let result = if cfg!(target_os = "macos") {
+        tokio::process::Command::new("osascript")
+            .args(["-e", "POSIX path of (choose folder with prompt \"Select a folder\")"])
+            .output()
+            .await
+    } else if cfg!(target_os = "windows") {
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = "Select a folder"
+$dialog.ShowNewFolderButton = $true
+$result = $dialog.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dialog.SelectedPath
+}
+"#;
+        tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .await
+    } else {
+        // Linux: try zenity
+        tokio::process::Command::new("zenity")
+            .args(["--file-selection", "--directory", "--title=Select a folder"])
+            .output()
+            .await
+    };
+
+    match result {
+        Ok(output) => {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !output.status.success() || path.is_empty() {
+                return ok(json!({ "cancelled": true }));
+            }
+            let clean = path.trim_end_matches(['/', '\\']);
+            let final_path = if clean.is_empty() {
+                path
+            } else {
+                clean.to_string()
+            };
+            ok(json!({ "path": final_path }))
+        }
+        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }

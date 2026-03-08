@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { CLI_NATIVE_TARGETS } from "./cli-native-packages.mjs";
 
-const NPM_EXECUTABLE = process.platform === "win32" ? "npm.cmd" : "npm";
+const NPM_EXECUTABLE = "npm";
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -243,6 +243,7 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
     const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", tarballRoot], {
       cwd: packageStageDir,
       encoding: "utf8",
+      shell: true,
     }).trim();
 
     tarballs.set(packageName, join(tarballRoot, tarballName));
@@ -337,6 +338,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock", "--install-strategy=shallow"], {
       cwd: outputDir,
       stdio: ["ignore", "ignore", "pipe"],
+      shell: true,
     });
   } catch {
     // If shallow install fails (pre-publish), fall back to installing only external deps
@@ -356,6 +358,7 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
     execFileSync(NPM_EXECUTABLE, ["install", "--silent", "--omit=dev", "--omit=optional", "--no-package-lock"], {
       cwd: outputDir,
       stdio: "inherit",
+      shell: true,
     });
 
     // Restore full deps and manually unpack internal tarballs into node_modules
@@ -416,6 +419,7 @@ export function packCliReleasePackage({ rootDir = process.cwd(), stageDir, packD
   const tarballName = execFileSync(NPM_EXECUTABLE, ["pack", "--silent", "--pack-destination", destinationDir], {
     cwd: stage.stageDir,
     encoding: "utf8",
+    shell: true,
   }).trim();
 
   return {
