@@ -324,13 +324,129 @@ export function normalizeProjectConfigMap(value: unknown): Record<string, unknow
   return { ...(value as Record<string, unknown>) };
 }
 
+function sanitizeOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function sanitizePluginRef(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  return value;
+}
+
+function sanitizeAgentConfig(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const agentConfig = { ...(value as Record<string, unknown>) };
+  const permissions = agentConfig["permissions"];
+  if (permissions !== "skip" && permissions !== "default") {
+    delete agentConfig["permissions"];
+  }
+
+  const model = sanitizeOptionalString(agentConfig["model"]);
+  if (model === undefined) {
+    delete agentConfig["model"];
+  } else {
+    agentConfig["model"] = model;
+  }
+
+  const reasoningEffort = sanitizeOptionalString(agentConfig["reasoningEffort"]);
+  if (reasoningEffort === undefined) {
+    delete agentConfig["reasoningEffort"];
+  } else {
+    agentConfig["reasoningEffort"] = reasoningEffort;
+  }
+
+  return Object.keys(agentConfig).length > 0 ? agentConfig : undefined;
+}
+
+function sanitizeProjectConfig(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const project = { ...(value as Record<string, unknown>) };
+  const optionalStringKeys = [
+    "name",
+    "repo",
+    "path",
+    "defaultBranch",
+    "defaultWorkingDirectory",
+    "sessionPrefix",
+    "boardDir",
+    "runtime",
+    "agent",
+    "workspace",
+    "agentRules",
+    "agentRulesFile",
+    "defaultProfile",
+    "iconUrl",
+    "description",
+  ] as const;
+
+  for (const key of optionalStringKeys) {
+    const sanitized = sanitizeOptionalString(project[key]);
+    if (sanitized === undefined) {
+      delete project[key];
+    } else {
+      project[key] = sanitized;
+    }
+  }
+
+  const optionalObjectKeys = [
+    "tracker",
+    "scm",
+    "devServer",
+    "reactions",
+    "mcpServers",
+    "agentProfiles",
+  ] as const;
+  for (const key of optionalObjectKeys) {
+    const sanitized = sanitizePluginRef(project[key]);
+    if (sanitized === undefined) {
+      delete project[key];
+    } else {
+      project[key] = sanitized;
+    }
+  }
+
+  const optionalArrayKeys = [
+    "symlinks",
+    "postCreate",
+    "setupScript",
+    "cleanupScript",
+    "archiveScript",
+    "copyFiles",
+  ] as const;
+  for (const key of optionalArrayKeys) {
+    if (project[key] === null) {
+      delete project[key];
+    }
+  }
+
+  const agentConfig = sanitizeAgentConfig(project["agentConfig"]);
+  if (agentConfig) {
+    project["agentConfig"] = agentConfig;
+  } else {
+    delete project["agentConfig"];
+  }
+
+  return project;
+}
+
 function normalizeConfigInput(raw: unknown): unknown {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return raw;
   }
 
   const normalized = { ...(raw as Record<string, unknown>) };
-  normalized["projects"] = normalizeProjectConfigMap(normalized["projects"]);
+  const projects = normalizeProjectConfigMap(normalized["projects"]);
+  normalized["projects"] = Object.fromEntries(
+    Object.entries(projects).map(([projectId, project]) => [projectId, sanitizeProjectConfig(project)]),
+  );
   return normalized;
 }
 
