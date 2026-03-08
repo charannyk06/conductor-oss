@@ -335,12 +335,51 @@ jobs:
             npm publish "$tarball" --access public --provenance
           done
 
-      - name: Publish to npm
+      - name: Publish CLI to npm release-candidate
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
         run: |
-          npm publish "${{ steps.pack.outputs.tarball_path }}" --access public --provenance
-          echo "✅ Published conductor-oss@${{ needs.version.outputs.new_version }}"
+          set -euo pipefail
+          npm publish "${{ steps.pack.outputs.tarball_path }}" --access public --provenance --tag release-candidate
+
+      - name: Verify published npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.version.outputs.new_version }}"
+
+          node scripts/verify-npm-publication.mjs \
+            --package conductor-oss-native-darwin-universal \
+            --version "$version" \
+            --require-file bin/conductor
+
+          node scripts/verify-npm-publication.mjs \
+            --package conductor-oss-native-linux-x64 \
+            --version "$version" \
+            --require-file bin/conductor
+
+          node scripts/verify-npm-publication.mjs \
+            --package conductor-oss-native-win32-x64 \
+            --version "$version" \
+            --require-file bin/conductor.exe
+
+          node scripts/verify-npm-publication.mjs \
+            --package conductor-oss \
+            --version "$version" \
+            --require-file dist/launcher.js \
+            --require-file web/package.json
+
+      - name: Promote CLI npm dist-tag
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.version.outputs.new_version }}"
+          npm dist-tag add "conductor-oss@$version" latest
+          npm dist-tag rm conductor-oss release-candidate || true
+          echo "✅ Published conductor-oss@$version"
 
       - name: Tag release
         shell: bash
