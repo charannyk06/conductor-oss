@@ -47,3 +47,4 @@ pnpm-lock.yaml
 /dashboard/node_modules
 /dashboard/dist
 projects/
+packages/cli/native/
