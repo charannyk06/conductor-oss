@@ -112,25 +112,6 @@ async fn spawn_session(
         return error(StatusCode::BAD_REQUEST, "Either prompt or issueId is required to create a session");
     }
 
-    if let Some(agent) = body
-        .agent
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        {
-            let mut config = state.config.write().await;
-            if let Some(project) = config.projects.get_mut(&body.project_id) {
-                project.agent = Some(agent.to_string());
-            }
-            config.preferences.coding_agent = agent.to_string();
-        }
-
-        if let Err(err) = state.save_config().await {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-        }
-    }
-
     match state
         .spawn_session(SpawnRequest {
             project_id: body.project_id,
