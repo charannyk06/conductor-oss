@@ -137,6 +137,7 @@ fn normalize_agent_name(name: &str) -> String {
         .replace(['_', ' '], "-")
 }
 
+#[allow(dead_code)]
 fn known_agent_order(name: &str) -> usize {
     let normalized = normalize_agent_name(name);
     KNOWN_AGENTS
@@ -503,7 +504,7 @@ fn format_reasoning_label(effort: &str) -> String {
         return "Extra High".to_string();
     }
     normalized
-        .split(|c: char| c == '_' || c == ' ' || c == '-')
+        .split(['_', ' ', '-'])
         .filter(|p| !p.is_empty())
         .map(|part| {
             let mut chars = part.chars();
@@ -555,9 +556,7 @@ fn default_access_catalog(
     reasoning_options: Vec<Value>,
     default_reasoning: Option<&str>,
 ) -> Option<Value> {
-    if models.is_empty() && placeholder.is_none() {
-        return None;
-    }
+    
 
     let resolved_default = default_model
         .or_else(|| models.first().and_then(|m| m["id"].as_str()))
@@ -592,7 +591,7 @@ fn default_access_catalog(
 
 fn format_generic_model_label(raw: &str) -> String {
     raw.trim()
-        .split(|c: char| c == '/' || c == ':' || c == '_' || c == '-')
+        .split(['/', ':', '_', '-'])
         .filter(|p| !p.is_empty())
         .map(|part| {
             let lower = part.to_lowercase();
@@ -767,9 +766,7 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
         .and_then(Value::as_str)
         .map(|v| v.trim().to_lowercase());
 
-    if discovered_models.is_empty() && configured_model.is_none() {
-        return None;
-    }
+    
 
     let all_models = if discovered_models.is_empty() {
         vec![configured_model
@@ -910,9 +907,7 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
         ap.partial_cmp(&bp).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
     });
 
-    if listed.is_empty() {
-        return None;
-    }
+    listed.is_empty();
 
     let mut chatgpt_models = Vec::new();
     let mut api_models = Vec::new();
@@ -952,9 +947,7 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
                 .iter()
                 .filter_map(|l| {
                     let effort = l.get("effort").and_then(Value::as_str)?.trim().to_lowercase();
-                    if effort.is_empty() {
-                        return None;
-                    }
+                    let _ = effort.is_empty();
                     let desc = l.get("description").and_then(Value::as_str);
                     Some(json!({
                         "id": effort,
@@ -1041,20 +1034,14 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
 fn format_gemini_model_label(model: &str) -> String {
     model
         .trim()
-        .split(|c: char| c == '-' || c == '_')
+        .split(['-', '_'])
         .filter(|p| !p.is_empty())
-        .enumerate()
-        .map(|(i, part)| {
+        
+        .map(|part| {
             if part.chars().all(|c| c.is_ascii_digit() || c == '.') {
                 return part.to_string();
             }
-            if i == 0 {
-                let mut chars = part.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => String::new(),
-                }
-            } else {
+            {
                 let mut chars = part.chars();
                 match chars.next() {
                     Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -1141,9 +1128,7 @@ async fn build_amp_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
         .filter(|v| !v.is_empty() && seen.insert(v.clone()))
         .collect();
 
-    if modes.is_empty() {
-        return None;
-    }
+    modes.is_empty();
 
     let models: Vec<Value> = modes
         .iter()
@@ -1180,9 +1165,7 @@ async fn build_cursor_runtime_model_catalog(binary_path: Option<&Path>) -> Optio
 
     // Just check that the CLI exists
     let help = read_command_help(&cmd_refs).await;
-    if help.is_none() {
-        return None;
-    }
+    help.as_ref()?;
 
     let models = vec![
         model_option("auto", "Auto", "Automatically choose the best model for the task.", &["default"]),
@@ -1233,9 +1216,7 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
         }
     }
 
-    if models.is_empty() {
-        return None;
-    }
+    models.is_empty();
 
     let resolved_default = default_model
         .clone()
@@ -1276,9 +1257,7 @@ async fn build_opencode_runtime_model_catalog(binary_path: Option<&Path>) -> Opt
         .captures_iter(&output)
         .filter_map(|cap| {
             let id = cap.get(1)?.as_str().trim().to_string();
-            if id.is_empty() || !seen.insert(id.clone()) {
-                return None;
-            }
+            if !id.is_empty() { seen.insert(id.clone()); }
             let label = format_generic_model_label(&id);
             Some(model_option(
                 &id,
@@ -1292,9 +1271,7 @@ async fn build_opencode_runtime_model_catalog(binary_path: Option<&Path>) -> Opt
     if models.is_empty() {
         // Fallback: just check CLI exists via help
         let help = read_command_help(&cmd_refs).await;
-        if help.is_none() {
-            return None;
-        }
+        help.as_ref()?;
         return default_access_catalog(
             "opencode",
             vec![],
@@ -1336,9 +1313,7 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
             .captures_iter(caps.get(1)?.as_str())
             .filter_map(|c| {
                 let id = c.get(1)?.as_str().trim().to_string();
-                if id.is_empty() || !seen.insert(id.clone()) {
-                    return None;
-                }
+                if !id.is_empty() { seen.insert(id.clone()); }
                 Some(id)
             })
             .collect()
@@ -1346,9 +1321,7 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
         Vec::new()
     };
 
-    if model_ids.is_empty() {
-        return None;
-    }
+    model_ids.is_empty();
 
     let models: Vec<Value> = model_ids
         .iter()
@@ -1379,9 +1352,7 @@ async fn build_qwen_runtime_model_catalog() -> Option<Value> {
     let pattern = Regex::new(r#""(?:model|modelVersion)"\s*:\s*"([^"]+)""#).ok()?;
     let discovered = extract_regex_matches_from_contents(&contents, &pattern);
 
-    if discovered.is_empty() {
-        return None;
-    }
+    discovered.is_empty();
 
     let models: Vec<Value> = discovered
         .iter()
@@ -1413,9 +1384,7 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
 
     // Verify CCR is installed
     let output = read_command_output(&cmd_refs, &["version"]).await;
-    if output.is_none() {
-        return None;
-    }
+    output.as_ref()?;
 
     // Try to find Claude binary to build its catalog
     let claude_binary = which_command(&["claude", "claude-code", "cc"]).await;
@@ -1425,9 +1394,7 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
         None
     };
 
-    let Some(claude) = claude_catalog else {
-        return None;
-    };
+    let claude = claude_catalog?;
 
     // Collapse Claude's multi-tier models into a flat "default" list
     let mut all_models = Vec::new();
@@ -1474,8 +1441,7 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
     if let Some(opts) = reasoning {
         // Remap reasoning options access to "default"
         let remapped: Vec<Value> = opts
-            .as_array()
-            .map(|arr| arr.clone())
+            .as_array().cloned()
             .unwrap_or_default();
         if !remapped.is_empty() {
             catalog["reasoningOptionsByAccess"] = json!({ "default": remapped });

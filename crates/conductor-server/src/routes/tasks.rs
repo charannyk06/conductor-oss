@@ -116,10 +116,7 @@ async fn get_task_graph(
 
     let mut children = sessions
         .iter()
-        .filter_map(|session| {
-            (session.metadata.get("parentTaskId").map(String::as_str) == Some(id.as_str()))
-                .then(|| task_id_for_session(session))
-        })
+        .filter(|&session| session.metadata.get("parentTaskId").map(String::as_str) == Some(id.as_str()) ).map(task_id_for_session)
         .collect::<Vec<_>>();
     children.sort();
     children.dedup();

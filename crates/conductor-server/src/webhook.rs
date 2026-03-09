@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use conductor_core::config::WebhookConfig;
 use conductor_core::event::Event;
 use hmac::{Hmac, Mac};
@@ -11,20 +11,30 @@ pub async fn emit_webhook(configs: &[WebhookConfig], event: &Event) -> Result<()
     let payload = serde_json::to_string(event)?;
 
     for config in configs {
+        let url = config
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("Webhook target url is required")?;
+        let secret = config
+            .secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .with_context(|| format!("Webhook secret is required for {url}"))?;
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default();
-        let mut request = client.post(&config.url).header("Content-Type", "application/json");
-
-        // Add HMAC signature if secret is configured.
-        if let Some(secret) = &config.secret {
-            let signature = sign_payload(secret, &payload);
-            request = request.header("X-Conductor-Signature", format!("sha256={signature}"));
-        }
+        let signature = sign_payload(secret, &payload);
+        let request = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("X-Conductor-Signature", format!("sha256={signature}"));
 
         // Fire and forget with retry.
-        let url = config.url.clone();
+        let url = url.to_string();
         let req = request.body(payload.clone());
         tokio::spawn(async move {
             for attempt in 0..3 {
