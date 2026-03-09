@@ -80,3 +80,7 @@ pub struct ProjectRow {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[cfg(test)]
+#[path = "project_repo_tests.rs"]
+mod tests;

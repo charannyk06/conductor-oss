@@ -174,3 +174,7 @@ impl TaskRow {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "task_repo_tests.rs"]
+mod tests;

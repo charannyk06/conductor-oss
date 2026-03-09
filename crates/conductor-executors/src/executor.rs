@@ -416,3 +416,7 @@ mod tests {
         assert!(parsed_rx.recv().await.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "executor_ext_tests.rs"]
+mod ext_tests;
