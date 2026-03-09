@@ -65,6 +65,14 @@ impl Executor for CcrExecutor {
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
         if options.interactive {
             let mut args = vec!["code".to_string()];
+
+            if options.structured_output {
+                args.push("--output-format".to_string());
+                args.push("stream-json".to_string());
+                args.push("--include-partial-messages".to_string());
+                args.push("--verbose".to_string());
+            }
+
             if let Some(model) = &options.model {
                 args.push("--model".to_string());
                 args.push(model.clone());

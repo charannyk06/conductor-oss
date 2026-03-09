@@ -67,6 +67,11 @@ impl Executor for CodexExecutor {
         if options.interactive {
             let mut args = vec!["--no-alt-screen".to_string()];
 
+            if options.structured_output {
+                args.push("--output-format".to_string());
+                args.push("stream-json".to_string());
+            }
+
             if let Some(resume_target) = &options.resume_target {
                 args.push("resume".to_string());
 
@@ -453,6 +458,7 @@ mod tests {
             branch: None,
             timeout: None,
             interactive: false,
+            structured_output: false,
             resume_target: None,
         });
 
@@ -476,6 +482,7 @@ mod tests {
             branch: None,
             timeout: None,
             interactive: true,
+            structured_output: false,
             resume_target: Some("session-123".to_string()),
         });
 

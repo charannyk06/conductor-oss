@@ -70,6 +70,13 @@ impl Executor for ClaudeCodeExecutor {
         if options.interactive {
             let mut args = Vec::new();
 
+            if options.structured_output {
+                args.push("--output-format".to_string());
+                args.push("stream-json".to_string());
+                args.push("--include-partial-messages".to_string());
+                args.push("--verbose".to_string());
+            }
+
             if let Some(resume_target) = &options.resume_target {
                 args.push("--resume".to_string());
                 args.push(resume_target.clone());
@@ -387,6 +394,7 @@ mod tests {
             branch: None,
             timeout: None,
             interactive: false,
+            structured_output: false,
             resume_target: None,
         });
 
@@ -410,6 +418,7 @@ mod tests {
             branch: None,
             timeout: None,
             interactive: true,
+            structured_output: false,
             resume_target: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
         });
 

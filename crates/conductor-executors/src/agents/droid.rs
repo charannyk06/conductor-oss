@@ -62,6 +62,12 @@ impl Executor for DroidExecutor {
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
         if options.interactive {
             let mut args = Vec::new();
+
+            if options.structured_output {
+                args.push("--output-format".to_string());
+                args.push("json".to_string());
+            }
+
             if !options.prompt.trim().is_empty() {
                 args.push(options.prompt.clone());
             }
