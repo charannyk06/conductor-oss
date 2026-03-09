@@ -1,4 +1,5 @@
 import { existsSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +44,52 @@ function resolveNewestExistingBinary(candidates: string[]): string | null {
   return existing[0]?.candidate ?? null;
 }
 
+function resolveOptionalNativePackageNames(): string[] {
+  if (process.platform === "darwin" && (process.arch === "arm64" || process.arch === "x64")) {
+    return ["conductor-oss-native-darwin-universal"];
+  }
+
+  if (process.platform === "linux" && process.arch === "x64") {
+    return ["conductor-oss-native-linux-x64"];
+  }
+
+  if (process.platform === "win32" && process.arch === "x64") {
+    return ["conductor-oss-native-win32-x64"];
+  }
+
+  return [];
+}
+
+function resolveBundledRustCliBinary(moduleDir: string): string | null {
+  const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
+  const require = createRequire(import.meta.url);
+
+  for (const packageName of resolveOptionalNativePackageNames()) {
+    try {
+      const packageJsonPath = require.resolve(`${packageName}/package.json`);
+      const candidate = join(dirname(packageJsonPath), "bin", binaryName);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Optional native package is not installed for this environment.
+    }
+  }
+
+  const candidates = [
+    resolve(moduleDir, "..", "..", "native", binaryName),
+    resolve(moduleDir, "..", "..", "..", "native", binaryName),
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 export function resolveRustCliLaunch(): RustCliLaunch {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const repoRoot = findRepoCargoRoot(process.cwd())
@@ -70,6 +117,16 @@ export function resolveRustCliLaunch(): RustCliLaunch {
       argsPrefix: ["run", "-p", "conductor-cli", "--"],
       cwd: repoRoot,
       label: "cargo-run Rust CLI",
+    };
+  }
+
+  const bundledBinary = resolveBundledRustCliBinary(moduleDir);
+  if (bundledBinary) {
+    return {
+      cmd: bundledBinary,
+      argsPrefix: [],
+      cwd: dirname(bundledBinary),
+      label: "bundled Rust CLI",
     };
   }
 

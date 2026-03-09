@@ -6,6 +6,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import {
@@ -41,6 +43,22 @@ const SELECTION_COMPOSER_WIDTH_PX = 340;
 const SELECTION_COMPOSER_HEIGHT_PX = 280;
 const SELECTION_COMPOSER_MARGIN_PX = 12;
 const MOBILE_SELECTION_COMPOSER_BREAKPOINT_PX = 520;
+const PREVIEW_SPECIAL_KEYS = new Map<string, string>([
+  ["Backspace", "Backspace"],
+  ["Delete", "Delete"],
+  ["Enter", "Enter"],
+  ["Tab", "Tab"],
+  ["Escape", "Escape"],
+  ["ArrowUp", "ArrowUp"],
+  ["ArrowDown", "ArrowDown"],
+  ["ArrowLeft", "ArrowLeft"],
+  ["ArrowRight", "ArrowRight"],
+  ["Home", "Home"],
+  ["End", "End"],
+  ["PageUp", "PageUp"],
+  ["PageDown", "PageDown"],
+  [" ", "Space"],
+]);
 
 interface SessionPreviewProps {
   sessionId: string;
@@ -143,8 +161,10 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
   });
 
   const autoConnectRef = useRef<{ candidate: string; attemptedAt: number } | null>(null);
+  const previewCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const imageRef = useRef<HTMLImageElement | null>(null);
   const instructionRef = useRef<HTMLTextAreaElement | null>(null);
+  const previewSurfaceRef = useRef<HTMLDivElement | null>(null);
 
   const loadStatus = useCallback(async () => {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
@@ -199,6 +219,18 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
       setBusy(false);
     }
   }, [sessionId]);
+
+  const queuePreviewCommand = useCallback((command: PreviewCommandRequest, fallbackMessage: string) => {
+    previewCommandQueueRef.current = previewCommandQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await runCommand(command);
+        } catch (error) {
+          setCommandError(error instanceof Error ? error.message : fallbackMessage);
+        }
+      });
+  }, [runCommand]);
 
   const loadDom = useCallback(async (frameId?: string | null) => {
     if (!status?.connected) {
@@ -461,6 +493,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     setSendSuccess(null);
 
     if (previewMode === "navigate") {
+      previewSurfaceRef.current?.focus({ preventScroll: true });
       try {
         await runCommand({ command: "clickAtPoint", x, y });
       } catch (error) {
@@ -494,6 +527,42 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     selectedElementRenderedBounds,
     selectionComposer?.pending,
   ]);
+
+  const handlePreviewKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (previewMode !== "navigate" || !status?.connected) {
+      return;
+    }
+
+    if (event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+
+    const specialKey = PREVIEW_SPECIAL_KEYS.get(event.key);
+    if (specialKey) {
+      event.preventDefault();
+      queuePreviewCommand({ command: "pressKey", key: specialKey }, "Failed to send key to preview");
+      return;
+    }
+
+    if (event.key.length === 1) {
+      event.preventDefault();
+      queuePreviewCommand({ command: "typeText", text: event.key }, "Failed to type into preview");
+    }
+  }, [previewMode, queuePreviewCommand, status?.connected]);
+
+  const handlePreviewPaste = useCallback((event: ReactClipboardEvent<HTMLDivElement>) => {
+    if (previewMode !== "navigate" || !status?.connected) {
+      return;
+    }
+
+    const text = event.clipboardData.getData("text");
+    if (!text) {
+      return;
+    }
+
+    event.preventDefault();
+    queuePreviewCommand({ command: "typeText", text }, "Failed to paste into preview");
+  }, [previewMode, queuePreviewCommand, status?.connected]);
 
   const handleSendContext = useCallback(async (target: PreviewSendTarget) => {
     if (!projectId) {
@@ -787,7 +856,13 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                 Loading preview…
               </div>
             ) : screenshotUrl ? (
-              <div className="relative flex max-h-full max-w-full items-start justify-center overflow-auto">
+              <div
+                ref={previewSurfaceRef}
+                tabIndex={status?.connected ? 0 : -1}
+                onKeyDown={handlePreviewKeyDown}
+                onPaste={handlePreviewPaste}
+                className="relative flex max-h-full max-w-full items-start justify-center overflow-auto rounded-[6px] outline-none focus-visible:ring-2 focus-visible:ring-[var(--vk-orange)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#111]"
+              >
                 <img
                   ref={imageRef}
                   src={screenshotUrl}
@@ -906,7 +981,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
               </div>
             ) : (
               <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
-                Connect a local dev URL to start the preview browser. Use Navigate mode to click through the running app, or switch to Inspect mode to select an element and send it to the current agent.
+                Connect a local dev URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select an element and send it to the current agent.
               </div>
             )}
           </div>

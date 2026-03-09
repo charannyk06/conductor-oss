@@ -7,13 +7,30 @@
 import chalk from "chalk";
 import { execFileSync } from "node:child_process";
 import type { Command } from "commander";
-import { createServices, loadConfig } from "../services.js";
+import { apiCall, sessionTmuxTarget, type BackendSession } from "../backend.js";
 
 /** Validate tmux target contains only safe characters. */
 function assertSafeTarget(target: string): void {
   if (!/^[a-zA-Z0-9_-]+$/.test(target)) {
     throw new Error(`Invalid tmux target "${target}": must be alphanumeric, dash, or underscore only.`);
   }
+}
+
+function tmuxSessionExists(target: string): boolean {
+  try {
+    execFileSync("tmux", ["has-session", "-t", target], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function fallbackTmuxTargets(sessionId: string): string[] {
+  return [`conductor-${sessionId}`, sessionId].filter((target, index, values) =>
+    /^[a-zA-Z0-9_-]+$/.test(target) && values.indexOf(target) === index,
+  );
 }
 
 export function registerAttach(program: Command): void {
@@ -23,24 +40,31 @@ export function registerAttach(program: Command): void {
     .argument("<session>", "Session ID to attach to")
     .action(async (sessionId: string) => {
       try {
-        const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
+        let tmuxTarget: string | null = null;
 
-        const session = await sessionManager.get(sessionId);
-        if (!session) {
-          console.error(chalk.red(`Session ${sessionId} not found.`));
-          process.exit(1);
+        try {
+          const session = await apiCall<BackendSession>(
+            "GET",
+            `/api/sessions/${encodeURIComponent(sessionId)}`,
+          );
+          const candidate = sessionTmuxTarget(session);
+          assertSafeTarget(candidate);
+          tmuxTarget = candidate;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("Failed to reach Conductor backend")) {
+            throw error;
+          }
+
+          tmuxTarget = fallbackTmuxTargets(sessionId).find((candidate) => tmuxSessionExists(candidate)) ?? null;
+          if (!tmuxTarget) {
+            throw new Error(
+              `${message}\nNo matching tmux session was found locally for "${sessionId}". Start the backend with \`co start\` or restore the session first.`,
+            );
+          }
         }
 
-        const tmuxTarget = session.runtimeHandle?.id ?? sessionId;
-        assertSafeTarget(tmuxTarget);
-
-        // Verify tmux session exists before attaching
-        try {
-          execFileSync("tmux", ["has-session", "-t", tmuxTarget], {
-            stdio: "ignore",
-          });
-        } catch {
+        if (!tmuxTarget || !tmuxSessionExists(tmuxTarget)) {
           console.error(
             chalk.red(`tmux session ${chalk.bold(tmuxTarget)} does not exist.`),
           );
@@ -49,7 +73,6 @@ export function registerAttach(program: Command): void {
           );
           process.exit(1);
         }
-
         console.log(chalk.dim(`Attaching to tmux session: ${tmuxTarget}`));
         console.log(chalk.dim("Detach with Ctrl-b d\n"));
 

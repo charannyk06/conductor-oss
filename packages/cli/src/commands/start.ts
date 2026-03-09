@@ -19,7 +19,7 @@ import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
 import { parse as parseYaml } from "yaml";
-import { buildConductorBoard, buildConductorYaml } from "@conductor-oss/core";
+import { resolveRustCliLaunch } from "../rust-cli.js";
 
 function commandExists(command: string): boolean {
   const checker = process.platform === "win32" ? "where" : "which";
@@ -497,20 +497,20 @@ function ensureDashboardBootstrapWorkspace(): { workspacePath: string; configPat
 
   mkdirSync(workspacePath, { recursive: true });
 
-  if (!existsSync(configPath)) {
-    writeFileSync(configPath, buildConductorYaml({
-      preferences: {
-        onboardingAcknowledged: false,
-        codingAgent: "claude-code",
-        ide: "vscode",
-        markdownEditor: "obsidian",
+  if (!existsSync(configPath) || !existsSync(boardPath)) {
+    const launch = resolveRustCliLaunch();
+    const result = spawnSync(
+      launch.cmd,
+      [...launch.argsPrefix, "bootstrap-home", workspacePath],
+      {
+        cwd: launch.cwd,
+        encoding: "utf8",
       },
-      projects: [],
-    }), "utf8");
-  }
-
-  if (!existsSync(boardPath)) {
-    writeFileSync(boardPath, buildConductorBoard("home", "Conductor Home"), "utf8");
+    );
+    if (result.status !== 0) {
+      const details = result.stderr?.trim() || result.stdout?.trim() || "unknown error";
+      throw new Error(`Failed to bootstrap dashboard workspace via ${launch.label}: ${details}`);
+    }
   }
 
   return { workspacePath, configPath };

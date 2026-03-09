@@ -64,13 +64,52 @@ impl Executor for CodexExecutor {
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
+        if options.structured_output {
+            let mut args = vec![
+                "exec".to_string(),
+                "--color".to_string(),
+                "never".to_string(),
+            ];
+
+            if options.resume_target.is_some() {
+                args.push("resume".to_string());
+            }
+
+            args.push("--json".to_string());
+
+            if options.skip_permissions {
+                args.push("--full-auto".to_string());
+            }
+
+            if let Some(model) = &options.model {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+
+            if let Some(reasoning_effort) = &options.reasoning_effort {
+                args.push("-c".to_string());
+                args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+            }
+
+            args.extend(options.sanitized_extra_args());
+
+            if let Some(resume_target) = &options.resume_target {
+                args.push(resume_target.clone());
+                if options.prompt.trim().is_empty() {
+                    args.push("-".to_string());
+                } else {
+                    args.push(options.prompt.clone());
+                }
+            } else {
+                // codex exec takes the prompt as a positional argument in headless mode.
+                args.push(options.prompt.clone());
+            }
+
+            return args;
+        }
+
         if options.interactive {
             let mut args = vec!["--no-alt-screen".to_string()];
-
-            if options.structured_output {
-                args.push("--output-format".to_string());
-                args.push("stream-json".to_string());
-            }
 
             if let Some(resume_target) = &options.resume_target {
                 args.push("resume".to_string());
@@ -86,8 +125,6 @@ impl Executor for CodexExecutor {
                 }
 
                 if options.skip_permissions {
-                    args.push("--yolo".to_string());
-                } else {
                     args.push("--full-auto".to_string());
                 }
 
@@ -107,8 +144,6 @@ impl Executor for CodexExecutor {
             }
 
             if options.skip_permissions {
-                args.push("--yolo".to_string());
-            } else {
                 args.push("--full-auto".to_string());
             }
 
@@ -488,9 +523,61 @@ mod tests {
 
         assert_eq!(args.first().map(String::as_str), Some("--no-alt-screen"));
         assert!(args.contains(&"resume".to_string()));
-        assert!(args.contains(&"--yolo".to_string()));
+        assert!(args.contains(&"--full-auto".to_string()));
+        assert!(!args.contains(&"--yolo".to_string()));
         assert!(args.contains(&"session-123".to_string()));
         assert!(!args.contains(&"continue".to_string()));
+    }
+
+    #[test]
+    fn build_args_structured_output_uses_exec_json_in_tmux_mode() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: true,
+            resume_target: None,
+        });
+
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(!args.contains(&"--output-format".to_string()));
+        assert!(!args.contains(&"--no-alt-screen".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("hello"));
+    }
+
+    #[test]
+    fn build_args_structured_resume_reads_follow_up_from_stdin() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: String::new(),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: true,
+            resume_target: Some("session-123".to_string()),
+        });
+
+        assert_eq!(args.first().map(String::as_str), Some("exec"));
+        assert!(args.contains(&"resume".to_string()));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"session-123".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        assert!(!args.contains(&"--output-format".to_string()));
     }
 
     #[test]

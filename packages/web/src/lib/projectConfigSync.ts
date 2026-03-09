@@ -1,13 +1,6 @@
-import { join, resolve } from "node:path";
-import { stat, writeFile } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import {
-  buildConductorYaml,
-  normalizeProjectConfigMap,
-  resolveConfiguredProjectPath,
-  type ScaffoldProjectConfig,
-} from "@conductor-oss/core";
-import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
+import { resolve } from "node:path";
 
 type MutableConfig = Record<string, unknown>;
 
@@ -39,62 +32,42 @@ async function isDirectory(path: string): Promise<boolean> {
   }
 }
 
-function normalizePreferences(value: unknown) {
+function normalizeProjectConfigMap(value: unknown): Record<string, Record<string, unknown>> {
   const root = toObject(value);
-  const notifications = toObject(root["notifications"]);
-
-  return {
-    onboardingAcknowledged: root["onboardingAcknowledged"] === true,
-    codingAgent: asNonEmptyString(root["codingAgent"]) ?? "claude-code",
-    ide: asNonEmptyString(root["ide"]) ?? "vscode",
-    markdownEditor: asNonEmptyString(root["markdownEditor"]) ?? "obsidian",
-    markdownEditorPath: asNonEmptyString(root["markdownEditorPath"]) ?? "",
-    modelAccess: normalizeModelAccessPreferences(root["modelAccess"]),
-    notifications: {
-      soundEnabled: notifications["soundEnabled"] !== false,
-      soundFile: notifications["soundFile"] === null
-        ? null
-        : asNonEmptyString(notifications["soundFile"]) ?? "abstract-sound-4",
-    },
-  };
+  return Object.fromEntries(
+    Object.entries(root).map(([projectId, project]) => [projectId, toObject(project)]),
+  );
 }
 
-function buildProjectScaffold(
-  projectId: string,
-  project: Record<string, unknown>,
-  projectPath: string,
-): ScaffoldProjectConfig {
-  const agentConfig = toObject(project["agentConfig"]);
-  const githubProject = toObject(project["githubProject"]);
+function resolveConfiguredProjectPath(value: string): string {
+  if (value.startsWith("~/")) {
+    return expandHome(value);
+  }
+  return resolve(value);
+}
 
-  return {
-    projectId,
-    displayName: asNonEmptyString(project["name"]) ?? projectId,
-    repo: asNonEmptyString(project["repo"]) ?? `local-${projectId}`,
-    path: projectPath,
-    agent: asNonEmptyString(project["agent"]) ?? "claude-code",
-    defaultBranch: asNonEmptyString(project["defaultBranch"]) ?? "main",
-    defaultWorkingDirectory: asNonEmptyString(project["defaultWorkingDirectory"]),
-    sessionPrefix: asNonEmptyString(project["sessionPrefix"]),
-    workspace: asNonEmptyString(project["workspace"]),
-    runtime: asNonEmptyString(project["runtime"]),
-    scm: asNonEmptyString(project["scm"]),
-    boardDir: asNonEmptyString(project["boardDir"]),
-    githubProject: asNonEmptyString(githubProject["id"])
-      ? {
-          id: asNonEmptyString(githubProject["id"]),
-          ownerLogin: asNonEmptyString(githubProject["ownerLogin"]),
-          number: typeof githubProject["number"] === "number" ? githubProject["number"] as number : null,
-          title: asNonEmptyString(githubProject["title"]),
-          url: asNonEmptyString(githubProject["url"]),
-          statusFieldId: asNonEmptyString(githubProject["statusFieldId"]),
-          statusFieldName: asNonEmptyString(githubProject["statusFieldName"]),
-        }
-      : null,
-    agentModel: asNonEmptyString(agentConfig["model"]),
-    agentReasoningEffort: asNonEmptyString(agentConfig["reasoningEffort"]),
-    agentPermissions: agentConfig["permissions"] === "default" ? "default" : "skip",
-  };
+function backendBaseUrl(): string {
+  const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim();
+  if (!backendUrl) {
+    throw new Error("Rust backend URL is not configured");
+  }
+  return backendUrl;
+}
+
+async function requestProjectSetup(projectId: string): Promise<void> {
+  const response = await fetch(
+    new URL(`/api/projects/${encodeURIComponent(projectId)}/setup`, backendBaseUrl()),
+    {
+      method: "POST",
+      cache: "no-store",
+    },
+  );
+  if (response.ok) {
+    return;
+  }
+
+  const body = await response.text().catch(() => "");
+  throw new Error(body || `Failed to sync project ${projectId}: ${response.status}`);
 }
 
 export async function normalizeRootProjectPaths(rootConfig: MutableConfig): Promise<void> {
@@ -107,10 +80,7 @@ export async function normalizeRootProjectPaths(rootConfig: MutableConfig): Prom
       continue;
     }
 
-    const resolvedProjectPath = resolveConfiguredProjectPath(
-      rawProjectPath,
-      asNonEmptyString(project["repo"]),
-    );
+    const resolvedProjectPath = resolveConfiguredProjectPath(rawProjectPath);
 
     if (!await isDirectory(resolvedProjectPath)) {
       continue;
@@ -132,18 +102,12 @@ export async function syncProjectLocalConfig(rootConfig: MutableConfig, projectI
   if (!rawProjectPath) {
     return;
   }
-  const projectPath = resolveConfiguredProjectPath(rawProjectPath, asNonEmptyString(project["repo"]));
+  const projectPath = resolveConfiguredProjectPath(rawProjectPath);
   if (!await isDirectory(projectPath)) {
     return;
   }
 
-  const yaml = buildConductorYaml({
-    port: typeof rootConfig["port"] === "number" ? rootConfig["port"] : 4747,
-    dashboardUrl: asNonEmptyString(rootConfig["dashboardUrl"]),
-    preferences: normalizePreferences(rootConfig["preferences"]),
-    projects: [buildProjectScaffold(projectId, project, projectPath)],
-  });
-  await writeFile(join(projectPath, "conductor.yaml"), yaml, "utf8");
+  await requestProjectSetup(projectId);
 }
 
 export async function syncAllProjectLocalConfigs(rootConfig: MutableConfig): Promise<void> {

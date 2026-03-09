@@ -1,11 +1,20 @@
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import puppeteer, {
   type Browser,
   type ConsoleMessage,
   type Frame,
   type HTTPRequest,
   type HTTPResponse,
+  type KeyInput,
   type Page,
-} from "puppeteer";
+} from "puppeteer-core";
+import {
+  Browser as PuppeteerBrowser,
+  ChromeReleaseChannel,
+  computeSystemExecutablePath,
+} from "@puppeteer/browsers";
 import type {
   PreviewCommandRequest,
   PreviewDomNode,
@@ -18,6 +27,164 @@ import type {
 const VIEWPORT = { width: 1440, height: 960 };
 const LOG_LIMIT = 150;
 const DOM_NODE_LIMIT = 250;
+const LOCAL_NAVIGATION_HOSTS = ["127.0.0.1", "localhost", "::1", "0.0.0.0"] as const;
+const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
+const BARE_LOCAL_NAVIGATION_PATTERN = /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)(?::\d+)?(?:\/.*)?$/i;
+
+function commandExists(command: string): string | null {
+  const checker = process.platform === "win32" ? "where" : "which";
+  try {
+    const stdout = execFileSync(checker, [command], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const match = stdout
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .find(Boolean);
+    return match || null;
+  } catch {
+    return null;
+  }
+}
+
+function commonBrowserPaths(): string[] {
+  if (process.platform === "darwin") {
+    return [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    ];
+  }
+
+  if (process.platform === "win32") {
+    const programFiles = [
+      process.env["PROGRAMFILES"],
+      process.env["PROGRAMFILES(X86)"],
+      process.env["LOCALAPPDATA"],
+    ].filter((value): value is string => Boolean(value?.trim()));
+    return programFiles.flatMap((root) => [
+      join(root, "Google", "Chrome", "Application", "chrome.exe"),
+      join(root, "Chromium", "Application", "chrome.exe"),
+      join(root, "Microsoft", "Edge", "Application", "msedge.exe"),
+      join(root, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+    ]);
+  }
+
+  return [
+    "google-chrome-stable",
+    "google-chrome",
+    "chromium-browser",
+    "chromium",
+    "microsoft-edge",
+    "brave-browser",
+  ];
+}
+
+function resolveCommonBrowserExecutable(): string | null {
+  for (const candidate of commonBrowserPaths()) {
+    if (candidate.includes("/") || candidate.includes("\\")) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+      continue;
+    }
+
+    const resolved = commandExists(candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+function resolveChromePath(): string {
+  const envPath = process.env.PUPPETEER_EXECUTABLE_PATH?.trim();
+  if (envPath) return envPath;
+
+  const channels = [
+    ChromeReleaseChannel.STABLE,
+    ChromeReleaseChannel.CANARY,
+    ChromeReleaseChannel.BETA,
+    ChromeReleaseChannel.DEV,
+  ] as const;
+
+  for (const channel of channels) {
+    try {
+      return computeSystemExecutablePath({
+        browser: PuppeteerBrowser.CHROME,
+        channel,
+      });
+    } catch {
+      // Channel not installed, try next
+    }
+  }
+
+  const commonExecutable = resolveCommonBrowserExecutable();
+  if (commonExecutable) {
+    return commonExecutable;
+  }
+
+  throw new Error(
+    "Chrome/Chromium not found. Install a supported browser or set PUPPETEER_EXECUTABLE_PATH.",
+  );
+}
+
+function normalizeNavigationHostname(hostname: string): string {
+  return hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+}
+
+function normalizeNavigationInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  if (URL_SCHEME_PATTERN.test(trimmed)) {
+    return trimmed;
+  }
+  if (BARE_LOCAL_NAVIGATION_PATTERN.test(trimmed)) {
+    return `http://${trimmed}`;
+  }
+  return trimmed;
+}
+
+function buildNavigationCandidates(value: string): string[] {
+  const normalizedInput = normalizeNavigationInput(value);
+  try {
+    const parsed = new URL(normalizedInput);
+    const normalized = parsed.toString();
+    const hostname = normalizeNavigationHostname(parsed.hostname);
+    if (!LOCAL_NAVIGATION_HOSTS.includes(hostname as (typeof LOCAL_NAVIGATION_HOSTS)[number])) {
+      return [normalized];
+    }
+
+    const variants = new Set<string>([normalized]);
+    for (const hostname of LOCAL_NAVIGATION_HOSTS) {
+      const candidate = new URL(normalized);
+      candidate.hostname = hostname;
+      variants.add(candidate.toString());
+    }
+    return [...variants];
+  } catch {
+    return [normalizedInput];
+  }
+}
+
+function isAbortNavigationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.toLowerCase().includes("net::err_aborted");
+}
+
+function urlsShareOrigin(left: string, right: string): boolean {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    return leftUrl.origin === rightUrl.origin;
+  } catch {
+    return left === right;
+  }
+}
 
 type PreviewState = {
   sessionId: string;
@@ -61,6 +228,7 @@ class PreviewBrowserManager {
     if (!this.browserPromise) {
       this.browserPromise = puppeteer.launch({
         headless: true,
+        executablePath: resolveChromePath(),
         defaultViewport: VIEWPORT,
         args: [
           "--disable-dev-shm-usage",
@@ -229,6 +397,37 @@ class PreviewBrowserManager {
     return frames.find((frame) => this.ensureFrameId(state, frame) === targetId) ?? page.mainFrame();
   }
 
+  private async navigationProducedUsablePage(
+    page: Page,
+    targetUrl: string,
+    previousUrl: string,
+    error: unknown,
+  ): Promise<boolean> {
+    if (!isAbortNavigationError(error)) {
+      return false;
+    }
+
+    const currentUrl = page.url();
+    if (currentUrl === "about:blank") {
+      return false;
+    }
+
+    if (currentUrl === previousUrl && !urlsShareOrigin(currentUrl, targetUrl)) {
+      return false;
+    }
+
+    if (!urlsShareOrigin(currentUrl, targetUrl)) {
+      return false;
+    }
+
+    try {
+      const readyState = await page.evaluate(() => document.readyState);
+      return readyState === "interactive" || readyState === "complete";
+    } catch {
+      return false;
+    }
+  }
+
   private async snapshotElement(frame: Frame, selector?: string, point?: { x: number; y: number }): Promise<ElementSnapshot | null> {
     return frame.evaluate(({ selector: inputSelector, point: inputPoint }) => {
       function normalize(value: string | null | undefined): string {
@@ -349,15 +548,30 @@ class PreviewBrowserManager {
 
   async connect(sessionId: string, url: string): Promise<void> {
     const { state, page } = await this.ensurePage(sessionId);
-    try {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
-      state.selectedElement = null;
-      state.lastError = null;
-      state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
-    } catch (error) {
-      state.lastError = error instanceof Error ? error.message : "Failed to connect preview";
-      throw error;
+    const candidates = buildNavigationCandidates(url);
+    let lastError: unknown = null;
+
+    for (const candidate of candidates) {
+      const previousUrl = page.url();
+      try {
+        await page.goto(candidate, { waitUntil: "domcontentloaded" });
+        state.selectedElement = null;
+        state.lastError = null;
+        state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
+        return;
+      } catch (error) {
+        if (await this.navigationProducedUsablePage(page, candidate, previousUrl, error)) {
+          state.selectedElement = null;
+          state.lastError = null;
+          state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
+          return;
+        }
+        lastError = error;
+      }
     }
+
+    state.lastError = lastError instanceof Error ? lastError.message : "Failed to connect preview";
+    throw (lastError ?? new Error("Failed to connect preview"));
   }
 
   async runCommand(sessionId: string, command: PreviewCommandRequest): Promise<void> {
@@ -395,6 +609,28 @@ class PreviewBrowserManager {
           .catch(() => null);
 
         await page.mouse.click(command.x, command.y);
+        await navigation;
+        await page.waitForNetworkIdle({ idleTime: 250, timeout: 1_000 }).catch(() => null);
+        return;
+      }
+      case "typeText": {
+        const { state, page } = await this.ensurePage(sessionId);
+        if (!command.text) {
+          return;
+        }
+        await page.keyboard.type(command.text);
+        state.lastError = null;
+        return;
+      }
+      case "pressKey": {
+        const { state, page } = await this.ensurePage(sessionId);
+        state.lastError = null;
+
+        const navigation = page
+          .waitForNavigation({ waitUntil: "domcontentloaded", timeout: 1_500 })
+          .catch(() => null);
+
+        await page.keyboard.press(command.key as KeyInput);
         await navigation;
         await page.waitForNetworkIdle({ idleTime: 250, timeout: 1_000 }).catch(() => null);
         return;
