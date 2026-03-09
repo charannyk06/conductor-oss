@@ -345,6 +345,15 @@ jobs:
         run: |
           set -euo pipefail
           for tarball in .release-native/*.tgz; do
+            package_json=$(tar -xOf "$tarball" package/package.json)
+            package_name=$(printf '%s' "$package_json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).name")
+            package_version=$(printf '%s' "$package_json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+
+            if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
+              echo "Skipping ${package_name}@${package_version}; already published."
+              continue
+            fi
+
             npm publish "$tarball" --access public --provenance
           done
 
