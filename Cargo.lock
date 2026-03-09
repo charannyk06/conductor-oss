@@ -438,6 +438,7 @@ dependencies = [
  "hmac",
  "jsonwebtoken",
  "libc",
+ "notify-rust",
  "rand 0.8.5",
  "reqwest",
  "rsa",
@@ -1535,6 +1536,10 @@ dependencies = [
  "walkdir",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "notify-rust"
+version = "0.1.0"
 
 [[package]]
 name = "notify-types"

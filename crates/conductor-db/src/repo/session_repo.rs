@@ -197,3 +197,7 @@ pub struct LogRow {
     pub content: String,
     pub created_at: String,
 }
+
+#[cfg(test)]
+#[path = "session_repo_tests.rs"]
+mod tests;

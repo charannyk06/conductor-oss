@@ -146,14 +146,14 @@ impl AppState {
         let sessions = self.sessions.read().await;
         let mut list: Vec<SessionRecord> = sessions
             .values()
-            .filter(|session| session.status != "archived")
+            .filter(|session| session.status != SessionStatus::Archived)
             .cloned()
             .collect();
         list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
 
         let mut queued = list
             .iter()
-            .filter(|session| session.status == "queued")
+            .filter(|session| session.status == SessionStatus::Queued)
             .map(|session| (session.created_at.clone(), session.id.clone()))
             .collect::<Vec<_>>();
         queued.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));

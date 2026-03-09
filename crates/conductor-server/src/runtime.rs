@@ -320,15 +320,14 @@ async fn active_session_counts(state: &Arc<AppState>, project_id: &str) -> (usiz
     let mut global = 0usize;
     let mut project = 0usize;
     for session in sessions.values() {
-        let status = SessionStatus::from(session.status.as_str());
-        if status.is_terminal()
-            || status == SessionStatus::Queued
-            || matches!(session.status.as_str(), "needs_input" | "stuck" | "errored")
+        if session.status.is_terminal()
+            || session.status == SessionStatus::Queued
+            || matches!(session.status, SessionStatus::NeedsInput | SessionStatus::Stuck | SessionStatus::Errored)
         {
             continue;
         }
         let is_live = live_session_ids.contains(&session.id);
-        if session.status != "spawning" && !is_live {
+        if session.status != SessionStatus::Spawning && !is_live {
             continue;
         }
         global += 1;
@@ -519,7 +518,7 @@ mod tests {
                 .values()
                 .filter(|session| {
                     session.project_id == "demo"
-                        && matches!(session.status.as_str(), "spawning" | "working")
+                        && matches!(session.status, SessionStatus::Spawning | SessionStatus::Working)
                 })
                 .map(|session| session.id.clone())
                 .collect::<Vec<_>>();

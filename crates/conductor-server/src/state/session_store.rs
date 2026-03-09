@@ -58,7 +58,7 @@ impl AppState {
         }
         if !loaded.is_empty() {
             let mut guard = self.sessions.write().await;
-            *guard = loaded;
+            guard.extend(loaded);
         }
     }
 
