@@ -18,6 +18,7 @@ fn sanitized_extra_args_filters_blocked_flags_case_insensitively() {
         branch: None,
         timeout: None,
         interactive: false,
+        structured_output: false,
         resume_target: None,
     };
 
