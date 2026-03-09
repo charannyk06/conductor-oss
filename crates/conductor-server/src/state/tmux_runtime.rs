@@ -1368,19 +1368,24 @@ mod tests {
         .await
         .expect("tmux session should reattach");
 
-        let final_session = timeout(Duration::from_secs(10), async {
+        let output_restored = timeout(Duration::from_secs(10), async {
             loop {
                 let session = restored.get_session(session_id).await.unwrap();
-                if session.status == SessionStatus::NeedsInput
-                    && session.output.contains("phase-two")
-                {
+                if session.output.contains("phase-two") {
                     return session;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("tmux session should finish after reattach");
+        .expect("tmux session output should continue after reattach");
+
+        restored
+            .reconcile_tmux_session_activity(session_id)
+            .await
+            .expect("tmux session should reconcile after reattach");
+
+        let final_session = restored.get_session(session_id).await.unwrap();
 
         assert_eq!(
             final_session
@@ -1389,7 +1394,12 @@ mod tests {
                 .map(String::as_str),
             Some(TMUX_RUNTIME_MODE)
         );
+        assert!(output_restored.output.contains("phase-two"));
         assert!(final_session.output.contains("phase-two"));
+        assert!(matches!(
+            final_session.status,
+            SessionStatus::Working | SessionStatus::NeedsInput
+        ));
         assert!(!final_session.metadata.contains_key("recoveryState"));
 
         if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
