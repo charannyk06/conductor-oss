@@ -23,6 +23,7 @@ permissions:
   contents: write
   packages: write
   id-token: write
+  pull-requests: read
 
 env:
   NODE_VERSION: 22
@@ -395,20 +396,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh api repos/${{ github.repository }}/releases/generate-notes \
-            -f tag_name="${{ needs.version.outputs.tag_name }}" \
-            -f target_commitish=main \
-            --jq '.body' > /tmp/notes.md 2>/dev/null || true
-
-          if [ ! -s /tmp/notes.md ]; then
-            prev=$(git tag --sort=-v:refname | grep -v "${{ needs.version.outputs.tag_name }}" | head -1)
-            if [ -n "$prev" ]; then
-              echo "## What's Changed" > /tmp/notes.md
-              git log --pretty=format:"* %s" "$prev"..HEAD >> /tmp/notes.md
-            else
-              echo "## Initial Release" > /tmp/notes.md
-            fi
-          fi
+          node scripts/generate-release-notes.mjs \
+            --repo "${{ github.repository }}" \
+            --current-tag "${{ needs.version.outputs.tag_name }}" > /tmp/notes.md
 
           cat >> /tmp/notes.md << 'FOOTER'
 

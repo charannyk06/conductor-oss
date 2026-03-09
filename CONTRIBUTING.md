@@ -43,6 +43,7 @@ scripts/      — release tooling (pack, verify, publish)
 2. Make your changes
 3. Run `pnpm build && pnpm typecheck && pnpm test` to verify
 4. Open a pull request against `main`
+5. Fill in `User-Facing Release Notes` in the PR template with 1-3 plain-English bullets, or mark it `N/A - internal maintenance only`
 
 ### Commit messages
 
@@ -75,7 +76,7 @@ Releases are triggered manually via the **Release** GitHub Action (`workflow_dis
 1. Bumps versions across all packages
 2. Builds and tests
 3. Runs the full release verification (Puppeteer E2E)
-4. Creates a GitHub release with auto-generated notes
+4. Creates GitHub release notes from the merged PRs' `User-Facing Release Notes` sections
 5. Publishes to npm with provenance
 
 ## Code of Conduct
