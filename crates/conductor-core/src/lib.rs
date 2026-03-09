@@ -3,7 +3,9 @@ pub mod config;
 pub mod dispatcher;
 pub mod error;
 pub mod event;
+pub mod paths;
 pub mod project;
+pub mod scaffold;
 pub mod session;
 pub mod support;
 pub mod task;
@@ -15,6 +17,12 @@ pub use config::ConductorConfig;
 pub use dispatcher::{Dispatcher, DispatcherConfig, SpawnLimiter};
 pub use event::{Event, EventBus};
 pub use project::Project;
+pub use scaffold::{
+    build_conductor_board, build_conductor_yaml, build_project_config, resolve_scaffold_project,
+    scaffold_workspace, ConductorYamlScaffoldConfig, ResolvedScaffoldProject, ScaffoldAccessConfig,
+    ScaffoldNotificationPreferences, ScaffoldPreferencesConfig, ScaffoldProjectConfig,
+    ScaffoldTrustedHeadersConfig, ScaffoldWorkspaceOptions, ScaffoldWorkspaceResult,
+};
 pub use session::{Session, SessionState};
 pub use support::{
     resolve_project_path, startup_config_sync, sync_project_local_config,
