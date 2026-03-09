@@ -121,6 +121,16 @@ function getConfiguredBackendUrl(): string | null {
     return explicitUrl.replace(/\/+$/, "");
   }
 
+  const devPort = process.env["CONDUCTOR_DEV_BACKEND_PORT"]?.trim();
+  if (devPort) {
+    return `http://127.0.0.1:${devPort}`;
+  }
+
+  const prodPort = process.env["CONDUCTOR_PROD_BACKEND_PORT"]?.trim();
+  if (prodPort) {
+    return `http://127.0.0.1:${prodPort}`;
+  }
+
   const configuredPort = process.env["CONDUCTOR_BACKEND_PORT"]?.trim();
   if (configuredPort) {
     return `http://127.0.0.1:${configuredPort}`;
@@ -151,14 +161,23 @@ async function resolveBackendBaseUrl(): Promise<string> {
     return configured;
   }
 
-  for (const candidate of ["http://127.0.0.1:4747", "http://127.0.0.1:4748"]) {
+  const candidates = [
+    process.env["CONDUCTOR_DEV_BACKEND_PORT"]?.trim(),
+    process.env["CONDUCTOR_PROD_BACKEND_PORT"]?.trim(),
+    "4749",
+    "4748",
+  ]
+    .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index)
+    .map((port) => `http://127.0.0.1:${port}`);
+
+  for (const candidate of candidates) {
     if (await isHealthy(candidate)) {
       cachedBackendBaseUrl = candidate;
       return candidate;
     }
   }
 
-  cachedBackendBaseUrl = "http://127.0.0.1:4747";
+  cachedBackendBaseUrl = candidates[0] ?? "http://127.0.0.1:4749";
   return cachedBackendBaseUrl;
 }
 

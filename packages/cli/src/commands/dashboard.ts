@@ -91,19 +91,24 @@ async function resolveDashboardUrl(explicitPort?: string): Promise<string> {
     return `http://localhost:${parsePort(explicitPort.trim(), "dashboard")}`;
   }
 
-  const envPort = process.env["PORT"]?.trim();
-  let envCandidate: number | null = null;
-  if (envPort) {
-    try {
-      envCandidate = parsePort(envPort, "dashboard");
-    } catch {
-      envCandidate = null;
-    }
-  }
+  const envCandidates = [
+    process.env["CONDUCTOR_DEV_DASHBOARD_PORT"]?.trim(),
+    process.env["CONDUCTOR_PROD_DASHBOARD_PORT"]?.trim(),
+    process.env["PORT"]?.trim(),
+  ]
+    .map((value) => {
+      if (!value) return null;
+      try {
+        return parsePort(value, "dashboard");
+      } catch {
+        return null;
+      }
+    })
+    .filter((value, index, values): value is number => value !== null && values.indexOf(value) === index);
 
   const configuredPort = await resolveConfiguredDashboardPort();
   const candidates = [
-    envCandidate,
+    ...envCandidates,
     configuredPort,
     4747,
     3000,

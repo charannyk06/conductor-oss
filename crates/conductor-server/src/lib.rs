@@ -6,12 +6,14 @@ pub mod state;
 pub mod tracker;
 
 use anyhow::Result;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Method};
 use axum::middleware;
 use axum::Router;
 use conductor_core::{ConductorConfig, EventBus};
 use conductor_db::Database;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -91,7 +93,9 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
                     axum::http::header::ACCEPT,
                 ])
                 .allow_credentials(true)
+                .max_age(Duration::from_secs(3600))
         })
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB request body limit
         .layer(TraceLayer::new_for_http());
 
     let host = config
