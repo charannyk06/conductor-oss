@@ -239,7 +239,7 @@ pub fn build_project_config(project: &ScaffoldProjectConfig) -> ProjectConfig {
             "worktree".to_string(),
         )),
         scm: trim_option(project.scm.clone())
-            .map(|value| Value::String(value))
+            .map(Value::String)
             .or_else(|| {
                 project
                     .repo

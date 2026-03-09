@@ -59,12 +59,12 @@ impl Notification {
     pub fn show(&self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            return self.show_macos();
+            self.show_macos()
         }
 
         #[cfg(target_os = "linux")]
         {
-            return self.show_linux();
+            self.show_linux()
         }
 
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
