@@ -1,6 +1,7 @@
 pub mod board;
 pub mod config;
 pub mod dispatcher;
+pub mod error;
 pub mod event;
 pub mod project;
 pub mod session;
