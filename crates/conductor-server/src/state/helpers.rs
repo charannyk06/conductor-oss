@@ -78,7 +78,7 @@ fn consume_csi<I>(chars: &mut Peekable<I>)
 where
     I: Iterator<Item = char>,
 {
-    while let Some(next) = chars.next() {
+    for next in chars.by_ref() {
         let code = next as u32;
         if (0x40..=0x7e).contains(&code) {
             break;
@@ -91,7 +91,7 @@ where
     I: Iterator<Item = char>,
 {
     let mut previous_was_escape = false;
-    while let Some(next) = chars.next() {
+    for next in chars.by_ref() {
         if next == '\u{0007}' {
             break;
         }

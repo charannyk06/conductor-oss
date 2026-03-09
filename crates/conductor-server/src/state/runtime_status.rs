@@ -68,14 +68,12 @@ impl SessionRuntimeStatus {
             .model
             .clone()
             .or_else(|| session.metadata.get("model").cloned())
-            .map(trimmed_or_none)
-            .flatten();
+            .and_then(trimmed_or_none);
         let reasoning_effort = session
             .reasoning_effort
             .clone()
             .or_else(|| session.metadata.get("reasoningEffort").cloned())
-            .map(trimmed_or_none)
-            .flatten();
+            .and_then(trimmed_or_none);
 
         if session.agent.trim().is_empty()
             && model.is_none()

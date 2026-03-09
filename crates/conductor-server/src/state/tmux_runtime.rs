@@ -350,8 +350,7 @@ impl AppState {
             TmuxActivityState::Blocked => "blocked",
         };
 
-        let summary_changed =
-            summary.as_ref().map(|value| value.as_str()) != current.summary.as_deref();
+        let summary_changed = summary.as_deref() != current.summary.as_deref();
         let status_changed = current.status != next_status;
         let activity_changed = current.activity.as_deref() != Some(next_activity);
 
