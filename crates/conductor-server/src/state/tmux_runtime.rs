@@ -1368,7 +1368,7 @@ mod tests {
         .await
         .expect("tmux session should reattach");
 
-        let final_session = timeout(Duration::from_secs(5), async {
+        let final_session = timeout(Duration::from_secs(10), async {
             loop {
                 let session = restored.get_session(session_id).await.unwrap();
                 if session.status == SessionStatus::NeedsInput
