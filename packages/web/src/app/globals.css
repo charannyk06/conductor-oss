@@ -181,12 +181,33 @@ a:hover {
 .xterm {
   height: 100%;
   width: 100%;
+  overscroll-behavior: contain;
   touch-action: pan-y;
 }
 
 .xterm .xterm-viewport {
+  overscroll-behavior: contain;
   overflow-y: auto !important;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: #5f5751 transparent;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 10px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background: #5f5751;
+  border-radius: 999px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: #7a716a;
 }
 
 .xterm .xterm-screen {

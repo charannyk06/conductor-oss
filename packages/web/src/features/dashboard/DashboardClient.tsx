@@ -1490,7 +1490,6 @@ export default function DashboardClient() {
 
   const handleCreateSession = useCallback(async (options?: CreateSessionOptions) => {
     const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt) return;
     const resolvedModel = resolveModelSelectionValue(launchModelSelection);
     const resolvedReasoningEffort = resolveReasoningSelectionValue(launchModelSelection);
 
@@ -1552,8 +1551,7 @@ export default function DashboardClient() {
         {
           projectId,
           sessionId: data.session.id,
-          workspaceView: "chat",
-          tab: "chat",
+          tab: null,
         },
         "push",
       );
@@ -1673,7 +1671,7 @@ export default function DashboardClient() {
       {
         projectId: matchedSession?.projectId ?? selectedProjectId ?? null,
         sessionId: id,
-        tab: "chat",
+        tab: null,
       },
       "push",
     );
@@ -1815,7 +1813,7 @@ export default function DashboardClient() {
                     : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                 }`}
               >
-                Chat launchpad
+                CLI launchpad
               </button>
               <button
                 type="button"
@@ -3348,7 +3346,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                 <textarea
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
-                  placeholder="Describe the task..."
+                  placeholder="Optional launch prompt. Leave empty to open the native CLI."
                   rows={1}
                   className="min-h-[24px] w-full resize-none bg-transparent pr-8 text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
                 />
@@ -3567,10 +3565,10 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                       useWorktree,
                       permissionMode,
                     })}
-                    disabled={creating || prompt.trim().length === 0 || !effectiveProjectId}
+                    disabled={creating || !effectiveProjectId}
                     className="inline-flex min-h-[29px] items-center justify-center rounded-[3px] bg-[var(--vk-bg-hover)] px-[8px] py-[6.5px] text-[16px] leading-[16px] text-[var(--vk-text-strong)] transition-colors hover:bg-[var(--vk-bg-active)] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create"}
+                    {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Launch"}
                   </button>
                 </div>
               </div>

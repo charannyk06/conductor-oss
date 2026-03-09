@@ -1606,7 +1606,7 @@ export function ChatPanel({
       setMessage("");
       setAttachments([]);
       if (data?.sessionId && data.sessionId !== sessionId) {
-        router.push(`/sessions/${encodeURIComponent(data.sessionId)}?tab=chat`);
+        router.push(`/sessions/${encodeURIComponent(data.sessionId)}`);
         return;
       }
       await refresh();

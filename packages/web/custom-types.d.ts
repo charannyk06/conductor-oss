@@ -150,7 +150,26 @@ declare global {
    * }
    * ```
    */
-  interface RouteContext<AppRouteHandlerRoute extends AppRouteHandlerRoutes> {
+interface RouteContext<AppRouteHandlerRoute extends AppRouteHandlerRoutes> {
     params: Promise<ParamMap[AppRouteHandlerRoute]>
+  }
+}
+
+declare module "@xterm/addon-search" {
+  import type { ITerminalAddon, Terminal } from "@xterm/xterm"
+
+  export interface ISearchOptions {
+    regex?: boolean
+    wholeWord?: boolean
+    caseSensitive?: boolean
+    incremental?: boolean
+  }
+
+  export class SearchAddon implements ITerminalAddon {
+    constructor(options?: unknown)
+    activate(terminal: Terminal): void
+    dispose(): void
+    findNext(term: string, options?: ISearchOptions): boolean
+    findPrevious(term: string, options?: ISearchOptions): boolean
   }
 }
