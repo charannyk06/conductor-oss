@@ -440,6 +440,7 @@ dependencies = [
  "libc",
  "notify-rust",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "rsa",
  "serde",

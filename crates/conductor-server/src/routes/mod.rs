@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod app_update;
 pub mod attachments;
 pub mod auth;

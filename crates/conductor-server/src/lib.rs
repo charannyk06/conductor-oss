@@ -32,6 +32,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     state.publish_snapshot().await;
 
     let app = Router::new()
+        .merge(routes::agents::router())
         .merge(routes::app_update::router())
         .merge(routes::config::router())
         .merge(routes::events::router())
