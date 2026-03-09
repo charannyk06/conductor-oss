@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@primer/octicons-react": "^19.15.0",
-    "@clerk/nextjs": "^6.39.0",
+    "@clerk/nextjs": "^7.0.1",
     "@conductor-oss/core": "workspace:*",
     "@conductor-oss/plugin-agent-amp": "workspace:*",
     "@conductor-oss/plugin-agent-ccr": "workspace:*",
