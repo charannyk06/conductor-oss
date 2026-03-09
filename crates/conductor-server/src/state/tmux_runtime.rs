@@ -405,11 +405,19 @@ impl AppState {
             exit_path = shell_escape(&exit_path.to_string_lossy()),
         );
 
+        // Use a very wide terminal (32000 columns) so that stream-json output
+        // from agents like Claude Code is never wrapped by the PTY. Without
+        // this, pipe-pane captures line-wrapped fragments that break JSON
+        // parsing in the output consumer.
         run_tmux_command(
             &socket_path,
             [
                 "new-session",
                 "-d",
+                "-x",
+                "32000",
+                "-y",
+                "24",
                 "-s",
                 session_name.as_str(),
                 "-c",
