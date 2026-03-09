@@ -11,8 +11,7 @@
   "description": "Markdown-native AI agent orchestrator — dispatch coding tasks from a kanban board",
   "packageManager": "bun@1.2.0",
   "workspaces": [
-    "packages/*",
-    "packages/plugins/*"
+    "packages/*"
   ],
   "type": "module",
   "scripts": {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { Archive, Search } from "lucide-react";
 import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
@@ -24,6 +24,19 @@ const SESSION_ICON_DOTS = [
   { top: 12, left: 1, delay: "480ms", opacity: 0.6 },
   { top: 12, left: 9, delay: "600ms", opacity: 0.45 },
 ] as const;
+
+const BRAILLE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const BRAILLE_SPINNER_INTERVAL_MS = 80;
+
+interface SessionDiffStats {
+  additions: number;
+  deletions: number;
+}
+
+interface SessionDiffStatsCacheEntry {
+  key: string;
+  stats: SessionDiffStats | null;
+}
 
 function formatAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
@@ -84,6 +97,44 @@ function parseDiffStats(session: DashboardSession): { additions: number; deletio
   return null;
 }
 
+function getSessionDiffCacheKey(session: DashboardSession): string {
+  return [
+    session.id,
+    session.status,
+    session.lastActivityAt,
+    session.branch ?? "",
+    session.metadata["worktree"] ?? "",
+  ].join(":");
+}
+
+function parseSessionDiffPayload(payload: unknown): SessionDiffStats | null {
+  if (!payload || typeof payload !== "object") return null;
+
+  const files = Array.isArray((payload as { files?: unknown }).files)
+    ? (payload as { files: Array<{ additions?: unknown; deletions?: unknown }> }).files
+    : [];
+
+  let additions = 0;
+  let deletions = 0;
+
+  for (const file of files) {
+    const nextAdditions = typeof file?.additions === "number" && Number.isFinite(file.additions)
+      ? Math.max(0, file.additions)
+      : 0;
+    const nextDeletions = typeof file?.deletions === "number" && Number.isFinite(file.deletions)
+      ? Math.max(0, file.deletions)
+      : 0;
+    additions += nextAdditions;
+    deletions += nextDeletions;
+  }
+
+  if (additions <= 0 && deletions <= 0) {
+    return null;
+  }
+
+  return { additions, deletions };
+}
+
 function getStatusBadge(session: DashboardSession, level: AttentionLevel): { label: string; className: string } {
   const summary = `${session.summary ?? ""} ${session.metadata["summary"] ?? ""}`.toLowerCase();
 
@@ -128,25 +179,52 @@ function getStatusBadge(session: DashboardSession, level: AttentionLevel): { lab
   }
 }
 
-function SessionRuntimeIcon({ running }: { running: boolean }) {
+function SessionRunningSpinner() {
+  const [frameIndex, setFrameIndex] = useState(0);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setFrameIndex((current) => (current + 1) % BRAILLE_SPINNER_FRAMES.length);
+    }, BRAILLE_SPINNER_INTERVAL_MS);
+
+    return () => window.clearInterval(interval);
+  }, []);
+
   return (
-    <span className="mt-1 inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--vk-orange)]">
-      <span className="relative h-[12px] w-[10px]">
-        {SESSION_ICON_DOTS.map((dot, index) => (
-          <span
-            key={index}
-            className={cn(
-              "absolute h-[2px] w-[2px] rounded-full bg-current",
-              running && "animate-pulse",
-            )}
-            style={{
-              top: `${Math.round(dot.top * 0.75)}px`,
-              left: `${Math.round(dot.left * 0.75)}px`,
-              opacity: dot.opacity,
-              animationDelay: dot.delay,
-            }}
-          />
-        ))}
+    <span
+      aria-hidden="true"
+      className="inline-block select-none font-mono text-[18px] leading-none text-[var(--vk-text-strong)]"
+    >
+      {BRAILLE_SPINNER_FRAMES[frameIndex]}
+    </span>
+  );
+}
+
+function SessionRuntimeIcon({ running }: { running: boolean }) {
+  if (!running) return null;
+
+  return (
+    <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center">
+      <SessionRunningSpinner />
+    </span>
+  );
+}
+
+function SessionDiffBadge({
+  additions,
+  deletions,
+  isSelected,
+}: SessionDiffStats & { isSelected: boolean }) {
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded-[10px] px-3 py-1.5 font-mono text-[12px] leading-none tabular-nums",
+        isSelected ? "bg-[rgba(255,255,255,0.1)]" : "bg-[rgba(255,255,255,0.06)]",
+      )}
+    >
+      <span className="flex items-center gap-3">
+        <span className="text-[#18c58f]">+{additions}</span>
+        <span className="text-[#f26d6d]">−{deletions}</span>
       </span>
     </span>
   );
@@ -163,6 +241,7 @@ export function Sidebar({
   const [search, setSearch] = useState("");
   const [archivingId, setArchivingId] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [diffStatsBySessionId, setDiffStatsBySessionId] = useState<Record<string, SessionDiffStatsCacheEntry>>({});
 
   const filtered = useMemo(() => {
     const visibleSessions = sessions.filter((session) => session.status !== "archived");
@@ -216,6 +295,51 @@ export function Sidebar({
     );
   }, [filtered]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    const sessionsToFetch = orderedSessions.filter((session) => {
+      const cacheKey = getSessionDiffCacheKey(session);
+      return diffStatsBySessionId[session.id]?.key !== cacheKey;
+    });
+
+    if (sessionsToFetch.length === 0) {
+      return () => controller.abort();
+    }
+
+    void Promise.all(
+      sessionsToFetch.map(async (session) => {
+        const cacheKey = getSessionDiffCacheKey(session);
+        try {
+          const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/diff`, {
+            signal: controller.signal,
+          });
+          if (!response.ok) {
+            return [session.id, { key: cacheKey, stats: null }] as const;
+          }
+          const payload = await response.json();
+          return [session.id, { key: cacheKey, stats: parseSessionDiffPayload(payload) }] as const;
+        } catch (error) {
+          if ((error as Error).name === "AbortError") {
+            return null;
+          }
+          return [session.id, { key: cacheKey, stats: null }] as const;
+        }
+      }),
+    ).then((entries) => {
+      const resolvedEntries = entries.filter((entry): entry is readonly [string, SessionDiffStatsCacheEntry] => entry !== null);
+      if (resolvedEntries.length === 0) return;
+      setDiffStatsBySessionId((current) => {
+        const next = { ...current };
+        for (const [sessionId, entry] of resolvedEntries) {
+          next[sessionId] = entry;
+        }
+        return next;
+      });
+    });
+
+    return () => controller.abort();
+  }, [diffStatsBySessionId, orderedSessions]);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {showHeader && (
@@ -253,7 +377,7 @@ export function Sidebar({
           <div className="space-y-2">
             {orderedSessions.map((session) => {
               const level = getAttentionLevel(session);
-              const diffStats = parseDiffStats(session);
+              const diffStats = diffStatsBySessionId[session.id]?.stats ?? parseDiffStats(session);
               const statusBadge = getStatusBadge(session, level);
               const sessionAgent = getSessionAgent(session);
               const isSelected = session.id === selectedId;
@@ -293,16 +417,17 @@ export function Sidebar({
                           {getSessionLabel(session)}
                         </span>
                       </span>
-                      <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium">
-                        {diffStats ? (
-                          <span className="flex items-center gap-2">
-                            <span className="text-[#18c58f]">+{diffStats.additions}</span>
-                            <span className="text-[#f26d6d]">-{diffStats.deletions}</span>
-                          </span>
-                        ) : (
+                      {diffStats ? (
+                        <SessionDiffBadge
+                          additions={diffStats.additions}
+                          deletions={diffStats.deletions}
+                          isSelected={isSelected}
+                        />
+                      ) : (
+                        <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium">
                           <span className={statusBadge.className}>{statusBadge.label}</span>
-                        )}
-                      </span>
+                        </span>
+                      )}
                     </span>
                     <span className="mt-1 block truncate text-[12px] text-[var(--vk-text-muted)]">
                       {getSessionSubtitle(session)}

@@ -103,24 +103,68 @@ function resolveCatalogContext(
   return resolved;
 }
 
+function getUsageTone(percentUsed: number | null): {
+  ring: string;
+  dot: string;
+  halo: string;
+  panel: string;
+} {
+  if (percentUsed === null) {
+    return {
+      ring: "rgba(255,255,255,0.12)",
+      dot: "var(--text-faint)",
+      halo: "transparent",
+      panel: "rgba(255,255,255,0.06)",
+    };
+  }
+
+  if (percentUsed >= 85) {
+    return {
+      ring: "var(--status-error)",
+      dot: "var(--status-error)",
+      halo: "color-mix(in srgb, var(--status-error) 24%, transparent)",
+      panel: "color-mix(in srgb, var(--status-error) 12%, transparent)",
+    };
+  }
+
+  if (percentUsed >= 65) {
+    return {
+      ring: "var(--status-attention)",
+      dot: "var(--status-attention)",
+      halo: "color-mix(in srgb, var(--status-attention) 24%, transparent)",
+      panel: "color-mix(in srgb, var(--status-attention) 12%, transparent)",
+    };
+  }
+
+  return {
+    ring: "var(--status-working)",
+    dot: "var(--status-working)",
+    halo: "color-mix(in srgb, var(--status-working) 24%, transparent)",
+    panel: "color-mix(in srgb, var(--status-working) 10%, transparent)",
+  };
+}
+
 function UsageRing({ percentUsed }: { percentUsed: number | null }) {
   const clamped = percentUsed === null ? null : Math.min(100, Math.max(0, percentUsed));
   const degree = clamped === null ? 0 : clamped * 3.6;
+  const tone = getUsageTone(clamped);
   const background = clamped === null
-    ? "linear-gradient(180deg, rgba(230,230,230,0.12), rgba(230,230,230,0.12))"
-    : `conic-gradient(#ea7a2a ${degree}deg, rgba(255,255,255,0.12) ${degree}deg 360deg)`;
+    ? `linear-gradient(180deg, ${tone.ring}, ${tone.ring})`
+    : `conic-gradient(${tone.ring} ${degree}deg, rgba(255,255,255,0.12) ${degree}deg 360deg)`;
 
   return (
     <span
       aria-hidden="true"
-      className="relative inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full"
-      style={{ background }}
+      className="relative inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full"
+      style={{
+        background,
+        boxShadow: `0 0 0 1px ${tone.panel}, 0 0 18px ${tone.halo}`,
+      }}
     >
-      <span className="absolute inset-[2px] rounded-full bg-[#141414]" />
+      <span className="absolute inset-[2px] rounded-full bg-[var(--bg-panel)]" />
       <span
-        className={`relative h-[5px] w-[5px] rounded-full ${
-          clamped === null ? "bg-[#6d6d6d]" : "bg-[#ea7a2a]"
-        }`}
+        className="relative h-[6px] w-[6px] rounded-full"
+        style={{ backgroundColor: tone.dot }}
       />
     </span>
   );
@@ -166,34 +210,46 @@ export function SessionRuntimeStatusBar({
   const sourceNote = runtimeStatus?.source?.note?.trim()
     || activeContext.note
     || null;
+  const usageTone = getUsageTone(percentUsed);
 
   return (
-    <div className="mt-3 rounded-[4px] border border-[#2f2f2f] bg-[#141414] px-3 py-2">
+    <div
+      className="mt-3 overflow-hidden rounded-[6px] border border-[var(--border-soft)] bg-[var(--bg-panel)]"
+      style={{
+        boxShadow: `inset 0 1px 0 rgba(255,255,255,0.03), 0 0 0 1px ${usageTone.panel}`,
+      }}
+    >
       <Tooltip>
         <TooltipTrigger asChild>
           <button
             type="button"
-            className="flex w-full items-center gap-2 overflow-hidden text-left font-mono text-[12px] leading-[18px] text-[#bbbbbb] sm:text-[13px] sm:leading-[19px]"
+            className="flex w-full items-center gap-3 overflow-hidden bg-[linear-gradient(135deg,color-mix(in_srgb,var(--bg-panel)_88%,transparent),color-mix(in_srgb,var(--bg-surface)_76%,transparent))] px-3 py-2.5 text-left text-[12px] leading-[18px] text-[var(--text-normal)] transition hover:bg-[linear-gradient(135deg,color-mix(in_srgb,var(--bg-panel)_96%,transparent),color-mix(in_srgb,var(--bg-surface)_88%,transparent))] sm:text-[13px] sm:leading-[19px]"
           >
             <UsageRing percentUsed={percentUsed} />
-            <span className="min-w-0 flex-1 overflow-hidden whitespace-nowrap">
-              <span className="text-[#f2f2f2]">{primaryLabel}</span>
+            <span className="min-w-0 flex-1 overflow-hidden whitespace-nowrap font-sans">
+              <span className="text-[13px] font-medium tracking-[0.02em] text-[var(--text-strong)] sm:text-[14px]">
+                {primaryLabel}
+              </span>
               {usageSummary ? (
                 <>
-                  <span className="px-2 text-[#626262]">·</span>
-                  <span className="text-[#f0c39a]">{usageSummary}</span>
+                  <span className="px-2 text-[var(--text-faint)]">·</span>
+                  <span style={{ color: usageTone.ring }}>{usageSummary}</span>
                 </>
               ) : null}
-              <span className="px-2 text-[#626262]">·</span>
-              <span className="text-[#b7b7b7]">{activeContextLabel}</span>
-              <span className="px-2 text-[#626262]">·</span>
-              <span className="truncate text-[#7c7c7c]">{cwdLabel}</span>
+              <span className="px-2 text-[var(--text-faint)]">·</span>
+              <span className="text-[var(--text-muted)]">{activeContextLabel}</span>
+              <span className="px-2 text-[var(--text-faint)]">·</span>
+              <span className="truncate font-mono text-[11px] text-[var(--text-faint)] sm:text-[12px]">
+                {cwdLabel}
+              </span>
             </span>
           </button>
         </TooltipTrigger>
         <TooltipContent side="top" className="max-w-[380px] space-y-2 px-3 py-3">
           <div className="space-y-1">
-            <p className="font-mono text-[12px] text-[var(--text-strong)]">{primaryLabel}</p>
+            <p className="font-sans text-[13px] font-medium tracking-[0.02em] text-[var(--text-strong)]">
+              {primaryLabel}
+            </p>
             <p className="text-[11px] leading-[16px] text-[var(--text-muted)]">
               {activeAgentLabel} · {sourceLabel}
             </p>

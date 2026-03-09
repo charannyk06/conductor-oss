@@ -10,9 +10,6 @@
 # Web dashboard
 /packages/web/ @charannyk06
 
-# Plugins
-/packages/plugins/ @charannyk06
-
 # CI/CD and security
 /.github/ @charannyk06
 

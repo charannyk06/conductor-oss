@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
-import { createServices, loadConfig } from "../services.js";
+import { apiCall } from "../backend.js";
 
 export function registerFeedback(program: Command): void {
   program
@@ -18,12 +18,9 @@ export function registerFeedback(program: Command): void {
 
       const spinner = ora("Submitting feedback").start();
       try {
-        const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
-        const manager = sessionManager as unknown as {
-          submitFeedback: (sessionId: string, feedback: string) => Promise<void>;
-        };
-        await manager.submitFeedback(sessionId, text);
+        await apiCall("POST", `/api/sessions/${encodeURIComponent(sessionId)}/feedback`, {
+          message: text,
+        });
         spinner.succeed(`Feedback submitted to ${chalk.green(sessionId)}`);
         console.log(chalk.dim("Session moved back to working state for auto-loop."));
       } catch (err) {

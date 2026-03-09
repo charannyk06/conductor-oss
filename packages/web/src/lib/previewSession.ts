@@ -1,8 +1,10 @@
 import { readFile } from "node:fs/promises";
 import type { DashboardSession } from "@/lib/types";
 
-const LOCAL_HOST_PATTERN = /(?:127\.0\.0\.1|0\.0\.0\.0|localhost)/i;
+const LOCAL_HOST_PATTERN = /(?:127\.0\.0\.1|0\.0\.0\.0|localhost|::1|\[::1\])/i;
 const URL_PATTERN = /\bhttps?:\/\/[^\s"'<>`]+/gi;
+const URL_SCHEME_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
+const BARE_LOCAL_URL_PATTERN = /(?<!:\/\/)(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1)(?::\d+)?(?:\/[^\s"'<>`]*)?/gi;
 const DIRECT_URL_METADATA_KEYS = new Set([
   "previewUrl",
   "devServerUrl",
@@ -82,14 +84,20 @@ export async function loadPreviewSessionContext(
 
 function normalizeCandidateUrl(value: string): string {
   const trimmed = value.trim().replace(/[),.;]+$/, "");
+  const normalizedInput = URL_SCHEME_PATTERN.test(trimmed)
+    ? trimmed
+    : BARE_LOCAL_URL_PATTERN.test(trimmed)
+      ? `http://${trimmed}`
+      : trimmed;
+  BARE_LOCAL_URL_PATTERN.lastIndex = 0;
   try {
-    const parsed = new URL(trimmed);
+    const parsed = new URL(normalizedInput);
     if (parsed.hostname === "0.0.0.0") {
       parsed.hostname = "127.0.0.1";
     }
     return parsed.toString();
   } catch {
-    return trimmed;
+    return normalizedInput;
   }
 }
 
@@ -118,7 +126,10 @@ async function extractUrlsFromDevServerLog(logPath: string): Promise<string[]> {
 }
 
 function extractUrlsFromText(value: string | null | undefined): string[] {
-  const matches = value?.match(URL_PATTERN) ?? [];
+  const matches = [
+    ...(value?.match(URL_PATTERN) ?? []),
+    ...(value?.match(BARE_LOCAL_URL_PATTERN) ?? []),
+  ];
   return matches.map(normalizeCandidateUrl);
 }
 

@@ -71,5 +71,7 @@ export type PreviewCommandRequest =
   | { command: "reload" }
   | { command: "selectFrame"; frameId: string | null }
   | { command: "clickAtPoint"; x: number; y: number }
+  | { command: "typeText"; text: string }
+  | { command: "pressKey"; key: string }
   | { command: "selectAtPoint"; x: number; y: number }
   | { command: "selectBySelector"; selector: string; frameId?: string | null };

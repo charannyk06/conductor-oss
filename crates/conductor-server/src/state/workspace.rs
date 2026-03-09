@@ -111,16 +111,28 @@ impl AppState {
         }
         add_command.arg(worktree_path.to_string_lossy().as_ref());
         add_command.arg(&start_ref);
-        add_command.stdout(Stdio::null()).stderr(Stdio::null());
 
-        let add_result = add_command.status().await;
+        let output = add_command.output().await.with_context(|| {
+            format!(
+                "Failed to run `git worktree add` for branch '{session_branch}' in project '{project_id}'"
+            )
+        })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let detail = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("exit status {}", output.status)
+            };
 
-        let success = add_result.map(|s| s.success()).unwrap_or(false);
-        if !success {
             return Err(anyhow!(
-                "Failed to create worktree for branch '{}' in project '{}'",
+                "Failed to create worktree for branch '{}' in project '{}': {}",
                 session_branch,
-                project_id
+                project_id,
+                detail
             ));
         }
 

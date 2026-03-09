@@ -23,6 +23,167 @@ function createTempDir(prefix, tempDirs) {
   return dir;
 }
 
+const TMUX_STREAM_AGENT_FIXTURES = [
+  {
+    agent: "claude-code",
+    binary: "claude",
+    expectedPrefix: [],
+    requiredArgs: ["--output-format", "stream-json", "--include-partial-messages", "--verbose"],
+    forbiddenArgs: [],
+  },
+  {
+    agent: "codex",
+    binary: "codex",
+    expectedPrefix: ["exec"],
+    requiredArgs: ["--json"],
+    forbiddenArgs: ["--output-format", "--yolo"],
+  },
+  {
+    agent: "gemini",
+    binary: "gemini",
+    expectedPrefix: [],
+    requiredArgs: ["--output-format", "stream-json", "--prompt-interactive"],
+    forbiddenArgs: [],
+  },
+  {
+    agent: "amp",
+    binary: "amp",
+    expectedPrefix: [],
+    requiredArgs: ["--stream-json", "--stream-json-thinking"],
+    forbiddenArgs: [],
+  },
+  {
+    agent: "cursor-cli",
+    binary: "cursor",
+    expectedPrefix: [],
+    requiredArgs: ["--output-format", "stream-json"],
+    forbiddenArgs: [],
+  },
+  {
+    agent: "opencode",
+    binary: "opencode",
+    expectedPrefix: [],
+    requiredArgs: ["--format", "json", "--thinking"],
+    forbiddenArgs: [],
+  },
+  {
+    agent: "droid",
+    binary: "droid",
+    expectedPrefix: [],
+    requiredArgs: ["--output-format", "json"],
+    forbiddenArgs: [],
+  },
+  {
+    agent: "ccr",
+    binary: "ccr",
+    expectedPrefix: ["code"],
+    requiredArgs: ["--output-format", "stream-json", "--include-partial-messages", "--verbose"],
+    forbiddenArgs: [],
+  },
+  {
+    agent: "github-copilot",
+    binary: "github-copilot",
+    expectedPrefix: [],
+    requiredArgs: ["--output-format", "json", "--stream", "on"],
+    forbiddenArgs: [],
+  },
+].map((fixture) => ({
+  ...fixture,
+  prompt: `Exercise tmux structured streaming for ${fixture.agent}`,
+  responseText: `fake ${fixture.agent} structured response`,
+}));
+
+function createFakeAgentBinDir(tempDirs) {
+  const binDir = createTempDir("conductor-fake-agents-", tempDirs);
+
+  for (const fixture of TMUX_STREAM_AGENT_FIXTURES) {
+    const scriptPath = join(binDir, fixture.binary);
+    const script = `#!/usr/bin/env node
+const fixture = ${JSON.stringify(fixture)};
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const args = process.argv.slice(2);
+
+function fail(message) {
+  process.stderr.write(\`fake-\${fixture.agent} \${message}\\n\`);
+  process.exit(2);
+}
+
+if (args.includes("--version")) {
+  process.stdout.write("fake-cli 0.0.0\\n");
+  process.exit(0);
+}
+
+for (let index = 0; index < (fixture.expectedPrefix || []).length; index += 1) {
+  if (args[index] !== fixture.expectedPrefix[index]) {
+    fail(\`expected prefix \${fixture.expectedPrefix.join(" ")} but got \${args.join(" ")}\`);
+  }
+}
+
+for (const required of fixture.requiredArgs || []) {
+  if (!args.includes(required)) {
+    fail(\`missing required arg \${required}; got \${args.join(" ")}\`);
+  }
+}
+
+for (const forbidden of fixture.forbiddenArgs || []) {
+  if (args.includes(forbidden)) {
+    fail(\`unexpected arg \${forbidden}; got \${args.join(" ")}\`);
+  }
+}
+
+if (!args.includes(fixture.prompt)) {
+  fail(\`missing prompt "\${fixture.prompt}"; got \${args.join(" ")}\`);
+}
+
+(async () => {
+  process.stdout.write("Thinking about the request\\n");
+  await delay(25);
+  process.stdout.write("Read /tmp/demo.txt\\n");
+  await delay(25);
+  process.stdout.write("git status\\n");
+  await delay(25);
+  process.stdout.write(\`\${fixture.responseText}\\n\`);
+  process.exit(0);
+})().catch((error) => {
+  process.stderr.write(String(error?.stack || error) + "\\n");
+  process.exit(1);
+});
+`;
+
+    writeFileSync(scriptPath, script, { encoding: "utf8", mode: 0o755 });
+  }
+
+  return { binDir, fixtures: TMUX_STREAM_AGENT_FIXTURES };
+}
+
+function seedGitRepo(repoDir, { cwd = repoDir, initialFiles = {} } = {}) {
+  execFileSync("git", ["init", "-b", "main", repoDir], {
+    cwd,
+    stdio: "ignore",
+  });
+  execFileSync("git", ["-C", repoDir, "config", "user.email", "test@example.com"], {
+    stdio: "ignore",
+  });
+  execFileSync("git", ["-C", repoDir, "config", "user.name", "Conductor Release Tests"], {
+    stdio: "ignore",
+  });
+
+  const entries = Object.entries({
+    "README.md": "# Release Smoke\n",
+    ...initialFiles,
+  });
+  for (const [relativePath, contents] of entries) {
+    writeFileSync(join(repoDir, relativePath), contents, "utf8");
+  }
+
+  execFileSync("git", ["-C", repoDir, "add", "."], {
+    stdio: "ignore",
+  });
+  execFileSync("git", ["-C", repoDir, "commit", "-m", "seed"], {
+    stdio: "ignore",
+  });
+}
+
 async function allocatePort() {
   return await new Promise((resolvePort, reject) => {
     const server = createServer();
@@ -559,10 +720,7 @@ async function verifyConfiguredWorkspaceFlow(installDir, tempDirs) {
   const repoDir = createTempDir("conductor-cli-repo-", tempDirs);
   const baseUrl = "http://127.0.0.1:4111";
 
-  execFileSync("git", ["init", "-b", "main", repoDir], {
-    cwd: installDir,
-    stdio: "ignore",
-  });
+  seedGitRepo(repoDir, { cwd: installDir });
 
   execFileSync(
     "node",
@@ -673,6 +831,155 @@ async function verifyConfiguredWorkspaceFlow(installDir, tempDirs) {
       throw new Error(`configured-workspace dashboard exited early with code ${dashboard.child.exitCode}\n${dashboard.getLogs()}`);
     }
   } finally {
+    await stopProcess(dashboard.child);
+  }
+}
+
+async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
+  try {
+    execFileSync("tmux", ["-V"], { stdio: "ignore" });
+  } catch {
+    throw new Error("tmux is required for packaged streaming verification");
+  }
+
+  const { binDir, fixtures } = createFakeAgentBinDir(tempDirs);
+  const repoDir = createTempDir("conductor-cli-streaming-", tempDirs);
+  const baseUrl = "http://127.0.0.1:4113";
+  const configPath = join(repoDir, "conductor.yaml");
+  const boardPath = join(repoDir, "CONDUCTOR.md");
+
+  seedGitRepo(repoDir, { cwd: installDir });
+
+  writeFileSync(
+    configPath,
+    [
+      "preferences:",
+      "  codingAgent: codex",
+      "projects:",
+      "  streaming-smoke:",
+      `    path: ${repoDir}`,
+      "    agent: codex",
+      "    runtime: tmux",
+      "    defaultBranch: main",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(boardPath, "# Streaming Smoke\n", "utf8");
+
+  const dashboard = spawnInstalledCli(installDir, [
+    "start",
+    "--no-watcher",
+    "--port",
+    "4113",
+    "--workspace",
+    repoDir,
+  ], {
+    env: {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      CONDUCTOR_WORKSPACE: repoDir,
+      CO_CONFIG_PATH: configPath,
+    },
+  });
+
+  let createdSessionId = null;
+  try {
+    await waitForDashboard(`${baseUrl}/api/agents`, 20_000);
+
+    const agentsResult = await fetchJson(`${baseUrl}/api/agents`);
+    if (!agentsResult.response.ok) {
+      throw new Error(`failed to load agents for streaming verification (${agentsResult.response.status})`);
+    }
+    const readyAgents = new Set(
+      (agentsResult.payload?.agents ?? [])
+        .filter((agent) => agent?.ready)
+        .map((agent) => agent?.name),
+    );
+
+    for (const fixture of fixtures) {
+      if (!readyAgents.has(fixture.agent)) {
+        throw new Error(`expected packaged streaming verification to discover ${fixture.agent}`);
+      }
+    }
+
+    for (const fixture of fixtures) {
+      const spawnResult = await fetchJson(`${baseUrl}/api/spawn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: "streaming-smoke",
+          prompt: fixture.prompt,
+          agent: fixture.agent,
+        }),
+      });
+
+      if (!spawnResult.response.ok) {
+        throw new Error(
+          `streaming smoke spawn failed for ${fixture.agent} (${spawnResult.response.status}): ${spawnResult.payload?.error ?? "unknown error"}`,
+        );
+      }
+
+      createdSessionId = spawnResult.payload?.session?.id;
+      if (typeof createdSessionId !== "string" || createdSessionId.length === 0) {
+        throw new Error(`streaming smoke spawn did not return a session id for ${fixture.agent}`);
+      }
+
+      try {
+        await waitForCondition(`packaged tmux structured streaming feed for ${fixture.agent}`, async () => {
+          const feedResult = await fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`);
+          if (!feedResult.response.ok) {
+            return false;
+          }
+
+          const serializedEntries = JSON.stringify(feedResult.payload?.entries ?? []);
+          return feedResult.payload?.sessionStatus === "needs_input"
+            && serializedEntries.includes("\"toolKind\":\"thinking\"")
+            && serializedEntries.includes("\"toolKind\":\"read\"")
+            && serializedEntries.includes("\"toolKind\":\"command\"")
+            && serializedEntries.includes(fixture.responseText);
+        }, 20_000);
+      } catch (error) {
+        const [feedResult, outputResult] = await Promise.all([
+          fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`).catch(() => ({ payload: null })),
+          fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/output`).catch(() => ({ payload: null })),
+        ]);
+        throw new Error(
+          [
+            error instanceof Error ? error.message : String(error),
+            `agent: ${fixture.agent}`,
+            `feed: ${JSON.stringify(feedResult.payload)}`,
+            `output: ${outputResult.payload?.output ?? ""}`,
+            `logs: ${dashboard.getLogs()}`,
+          ].join("\n"),
+        );
+      }
+
+      const outputResult = await fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/output`);
+      const output = outputResult.payload?.output ?? "";
+      if (output.includes(`fake-${fixture.agent}`)) {
+        throw new Error(`packaged tmux streaming used an invalid ${fixture.agent} launch path\n${output}`);
+      }
+
+      await fetch(`${baseUrl}/api/sessions/${createdSessionId}/kill`, {
+        method: "POST",
+      }).catch(() => {
+        // Best-effort cleanup.
+      });
+      createdSessionId = null;
+    }
+
+    if (dashboard.child.exitCode !== null && dashboard.child.exitCode !== 0) {
+      throw new Error(`streaming smoke dashboard exited early with code ${dashboard.child.exitCode}\n${dashboard.getLogs()}`);
+    }
+  } finally {
+    if (createdSessionId) {
+      await fetch(`${baseUrl}/api/sessions/${createdSessionId}/kill`, {
+        method: "POST",
+      }).catch(() => {
+        // Best-effort cleanup.
+      });
+    }
     await stopProcess(dashboard.child);
   }
 }
@@ -832,6 +1139,7 @@ try {
   }
 
   await verifyBrowserFirstLauncherFlow(installDir, tempDirs);
+  await verifyPackagedTmuxStructuredStreaming(installDir, tempDirs);
 
   console.log("release preflight passed");
 } catch (error) {
