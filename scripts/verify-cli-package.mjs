@@ -12,9 +12,17 @@ import {
 } from "./cli-native-packages.mjs";
 
 const NPM_EXECUTABLE = "npm";
+const CARGO_EXECUTABLE = "cargo";
 
 function fail(message) {
   throw new Error(`release preflight failed: ${message}`);
+}
+
+function buildHostNativeBinary(rootDir) {
+  execFileSync(CARGO_EXECUTABLE, ["build", "-p", "conductor-cli", "--release"], {
+    cwd: rootDir,
+    stdio: "inherit",
+  });
 }
 
 function createTempDir(prefix, tempDirs) {
@@ -1071,6 +1079,7 @@ try {
   const hostBinaryPath = process.platform === "win32"
     ? resolve(rootDir, "target", "release", "conductor.exe")
     : resolve(rootDir, "target", "release", "conductor");
+  buildHostNativeBinary(rootDir);
   const { stageDir: nativeStageDir } = createCliNativeReleaseStage({
     rootDir,
     targetId: hostNativeTargetId,
