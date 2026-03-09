@@ -24,6 +24,18 @@ function parseArgs(argv) {
       continue;
     }
 
+    if (arg === "--published-name") {
+      options.publishedName = argv[index + 1];
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--publish-registry") {
+      options.publishRegistry = argv[index + 1];
+      index += 1;
+      continue;
+    }
+
     throw new Error(`Unknown argument: ${arg}`);
   }
 

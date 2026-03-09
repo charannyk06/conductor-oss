@@ -316,6 +316,18 @@ jobs:
           tarball_path=$(node scripts/pack-cli-release.mjs --pack-destination .release-artifacts | tail -n 1)
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
 
+      - name: Pack CLI for GitHub Packages
+        id: pack_github
+        shell: bash
+        run: |
+          set -eo pipefail
+          mkdir -p .release-artifacts
+          tarball_path=$(node scripts/pack-cli-release.mjs \
+            --pack-destination .release-artifacts \
+            --published-name @charannyk06/conductor-oss \
+            --publish-registry https://npm.pkg.github.com | tail -n 1)
+          echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
+
       - name: Verify packaged CLI
         run: node scripts/verify-cli-package.mjs
 
@@ -381,6 +393,21 @@ jobs:
           npm dist-tag add "conductor-oss@$version" latest
           npm dist-tag rm conductor-oss release-candidate || true
           echo "✅ Published conductor-oss@$version"
+
+      - name: Setup Node.js for GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://npm.pkg.github.com
+          scope: "@charannyk06"
+
+      - name: Publish CLI to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm publish "${{ steps.pack_github.outputs.tarball_path }}" --access public
 
       - name: Tag release
         shell: bash

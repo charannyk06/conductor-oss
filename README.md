@@ -2,7 +2,7 @@
 
 # Conductor OSS
 
-**Local-first coding agent orchestration with a board, chat UI, worktree isolation, and resumable multi-session runs.**
+**Local-first orchestration for terminal coding agents, with a browser dashboard, markdown board, tmux runtime, and worktree-aware repo management.**
 
 <br>
 
@@ -15,248 +15,112 @@
 
 </div>
 
-## What is Conductor?
+Conductor OSS is a local-first control plane for coding-agent CLIs. It runs on your machine, talks to the agent tools you already have installed, and keeps project state in local files plus a local SQLite database.
 
-Conductor OSS is a local-first dashboard for controlling coding-agent CLIs from a structured browser UI.
+The current app combines:
 
-It combines:
+- a workspace dashboard for projects, sessions, and agents
+- a markdown-backed kanban board stored in `CONDUCTOR.md`
+- tmux-backed session execution with restore/retry/archive flows
+- worktree or in-place repo execution
+- a Rust API/backend with a Next.js dashboard frontend
 
-- a markdown-native board for tasks and issues
-- a chat-oriented execution surface for agent runs
-- local branch mode or isolated worktree mode
-- multiple concurrent sessions against the same repo
-- a Rust backend with a Bun/Next frontend
+## What The App Does Today
 
-Conductor is not a hosted managed agent platform. It runs on your machine, uses your locally installed agent CLIs, and keeps state in your local workspace.
+- Add a workspace from an existing local repo or clone one from a Git URL.
+- Persist project settings in `conductor.yaml`, including default agent/model choices and preview-server settings.
+- Create and manage board tasks from the UI, with human-readable task refs, comments, attachments, and linked session attempts.
+- Spawn multiple agent sessions against the same repo, either on the main checkout or in isolated worktrees.
+- Stream session chat and terminal output into the dashboard with interrupt, send, kill, archive, restore, and retry actions.
+- Inspect a session's diff and a live preview tab. The preview surface can capture page context and send screenshots, DOM data, console logs, or network logs back to the active session as attachments.
+- Discover installed agent CLIs, surface model selection where supported, and keep session history resumable instead of treating runs as disposable.
+- Integrate with GitHub repositories and GitHub Projects v2 through `gh`, plus receive signed GitHub webhooks on `/api/github/webhook`.
+- Apply dashboard access controls with viewer/operator/admin roles, trusted-header auth, optional Clerk wiring, and Tailscale-managed private remote access.
 
----
+## Current Architecture
 
-## Why Conductor?
+### Frontend
 
-| | Manual workflow | Terminal-only agent use | **Conductor OSS** |
-|---|---|---|---|
-| Task tracking | Separate tickets / notes | Separate from execution | **Board-linked tasks and runs** |
-| Session management | Manual tabs and branches | One terminal at a time | **Multiple parallel sessions** |
-| Workspace isolation | Manual branches/worktrees | Manual | **Built-in local/worktree session modes** |
-| Agent UX | Raw CLI only | Raw CLI only | **Structured chat + tool-call UI** |
-| Resume after completion | Manual | Manual | **Session stays resumable until archived** |
-| Storage | Mixed tools | Local shell history | **Local SQLite + board files** |
-| Deployment model | Varies | Local | **Local-first** |
-
----
-
-## Repository Links
-
-- GitHub Repository: https://github.com/charannyk06/conductor-oss
-- Issues: https://github.com/charannyk06/conductor-oss/issues
-- Pull Requests: https://github.com/charannyk06/conductor-oss/pulls
-- CI: https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml
-- NPM Package: https://www.npmjs.com/package/conductor-oss
-
----
-
-## Current product shape
-
-The app is currently organized around three core objects:
-
-1. `Task`
-   - a board card or issue tracked in `CONDUCTOR.md`
-2. `Session`
-   - one run or attempt against that task with a specific agent, model, workspace, and branch
-3. `Workspace`
-   - the local repo or worktree used by that run
-
-Current capabilities include:
-
-- board-linked tasks with human-readable task refs
-- multiple runs attached to a single board task
-- local branch mode or worktree isolation mode
-- resumable sessions that remain in `needs_input` after a successful run
-- archive as the explicit cleanup action for a run
-- grouped tool-call rendering in chat
-- per-agent model selection
-- local-first execution with installed coding-agent CLIs
-- workspace and remote access configuration in the dashboard
-
----
-
-## Architecture
-
-Conductor currently ships as a Rust backend with a Bun/Next.js frontend.
+- `packages/web`: Next.js 16, React 19, Tailwind CSS 4 dashboard
+- Main surfaces: workspace overview, workspace board, session detail, session diff, session preview, repository/settings panels
+- API routes in the Next app proxy or coordinate with the Rust backend and the local preview/remote-access helpers
 
 ### Backend
 
 Rust crates under `crates/`:
 
-- `conductor-cli`: local launcher and app entrypoint
-- `conductor-server`: Axum API server, session manager, board/session routes
-- `conductor-executors`: agent adapters and PTY-backed process handling
-- `conductor-db`: local SQLite persistence
-- `conductor-git`: git/worktree operations
-- `conductor-watcher`: watcher logic
-- `conductor-core`: shared core types
-
-### Frontend
-
-Web app under `packages/web/`:
-
-- Next.js 16
-- React 19
-- Bun workspace scripts
-- browser UI for board, settings, chat, sessions, and linked runs
+- `conductor-cli`: Rust backend entrypoint
+- `conductor-server`: Axum server and API routes
+- `conductor-db`: SQLite persistence and migrations
+- `conductor-executors`: runtime/session execution plumbing
+- `conductor-git`: Git and worktree operations
+- `conductor-watcher`: watcher support
+- `conductor-core`: shared types and config model
 
 ### Persistence
 
-Conductor is local-first, but not database-free.
+Conductor is local-first, but not stateless. Current data lives in:
 
-Current state is stored in:
-
+- `conductor.yaml`: workspace and repository configuration
 - `.conductor/conductor.db`: local SQLite state
-- `CONDUCTOR.md`: board/task planning surface
-- workspace and worktree files in the selected project path
+- `CONDUCTOR.md`: project-local markdown board
+- `attachments/<project>/...`: uploaded files used in board tasks and session replies
 
----
+## Supported Agents
 
-## Session lifecycle
-
-A session is the unit of execution.
-
-Each session has:
-
-- an agent
-- a model
-- a workspace path
-- a branch or worktree
-- chat history
-- tool-call history
-- local runtime output
-
-Current lifecycle behavior:
-
-- active runs stream into the chat view
-- tool calls are rendered as grouped structured rows
-- after a successful run, the session moves to `needs_input`
-- replying continues the same session instead of spawning a duplicate session entry
-- archiving is the explicit teardown and cleanup path
-
----
-
-## Supported agents
-
-Conductor currently detects and uses agent CLIs that are installed locally.
-
-Common supported agents in the app today:
+The repo currently ships built-in adapters and UI metadata for:
 
 - Claude Code
 - Codex
 - Gemini
 - Qwen Code
+- Amp
+- Cursor Agent
 - OpenCode
+- Droid
 - GitHub Copilot
+- CCR
 
-Actual availability depends on what is installed and authenticated on your machine.
+Actual availability depends on what is installed and authenticated on your machine. Conductor does not bypass upstream auth, billing, or provider-side limits.
 
-Notes:
+## Runtime Model
 
-- upstream auth and billing constraints still apply
-- some CLIs may be present but unusable until their normal terminal auth flow is completed
-- Conductor does not bypass provider-side limits, auth, or subscription checks
+The current runtime path is tmux-centric.
 
----
+- Sessions are launched under tmux.
+- Session recovery and `co attach` assume tmux is available.
+- Workspaces can run in `worktree` mode or `local` mode.
+- Preview support depends on either a configured local dev server or a preview URL already associated with the session/PR.
 
-## Board model
+## Quick Start From Source
 
-The board is the planning surface. Sessions are the execution surface.
+### Requirements
 
-Current behavior:
+- Bun `>= 1.2`
+- Node.js `>= 18` if you want to install the published npm CLI
+- Rust toolchain
+- Git
+- tmux
+- one or more supported coding-agent CLIs
 
-- tasks live in the board file and can be moved or edited from the web UI
-- a task can link to multiple session runs
-- one run can be marked as the primary linked run
-- board cards surface linked runs and jump directly into the session chat
-- task refs are human-readable instead of raw UUID-only identifiers
+Useful optional tools:
 
----
+- GitHub CLI `gh` for repo discovery and GitHub Projects sync
+- Tailscale for managed private remote access
 
-## Quick Start
-
-### Install dependencies
+### Install and run
 
 ```bash
 bun install
-```
-
-### Run the full app
-
-```bash
 bun run dev:full
 ```
 
-Defaults:
+Default dev ports:
 
-- web UI: `http://localhost:3000`
+- dashboard: `http://localhost:3000`
 - Rust backend: `http://127.0.0.1:4749`
 
-### Run the prod-like local stack
-
-```bash
-bun run prod:prepare
-bun run prod:full
-```
-
-Defaults:
-
-- dashboard: `http://localhost:4747`
-- Rust backend: `http://127.0.0.1:4748`
-
-This uses the standalone web build so it can run alongside `bun run dev:full` from the same checkout.
-
-Production notes:
-
-- Root package scripts automatically source `./.env.local` when present.
-- To enable signed GitHub webhook ingestion, set `CONDUCTOR_GITHUB_WEBHOOK_SECRET` in `.env.local` or your process environment.
-- GitHub Projects V2 sync requires `gh` auth with project scopes. Refresh once with:
-
-```bash
-gh auth refresh --scopes read:project,project
-```
-
-- The public GitHub webhook target is `/api/github/webhook` on whatever dashboard origin you expose in production.
-
-### Run frontend only
-
-```bash
-bun run dev
-```
-
-### Local preview mapping
-
-If you want the session Preview tab to auto-connect to a local app, set the repository dev server config in `conductor.yaml` or in Settings -> Repositories:
-
-- `devServer.command`: optional command Conductor should launch
-- `devServer.cwd`: optional subdirectory for monorepos
-- `devServer.port` / `devServer.host` / `devServer.path` / `devServer.https`: explicit local preview mapping
-- `devServer.url`: explicit preview URL override for a known external preview URL
-
-If you leave `devServer.command` blank, Conductor will still auto-connect the preview as soon as your local app comes up on the mapped URL.
-
-### Run backend only
-
-```bash
-bun run dev:backend
-```
-
-### Build
-
-```bash
-bun run build
-```
-
----
-
-## Workspace scripts
-
-Useful root scripts:
+Other useful scripts:
 
 ```bash
 bun run dev
@@ -269,9 +133,170 @@ bun run build:frontend
 bun run clean
 ```
 
----
+### Prod-like local stack
 
-## Repository layout
+```bash
+bun run prod:prepare
+bun run prod:full
+```
+
+Default prod-like local ports:
+
+- dashboard: `http://127.0.0.1:4747`
+- Rust backend: `http://127.0.0.1:4748`
+
+Notes:
+
+- Root scripts automatically source `./.env.local` when present.
+- Set `CONDUCTOR_GITHUB_WEBHOOK_SECRET` if you want webhook signature verification.
+- GitHub Projects v2 sync requires a `gh` login with project scopes:
+
+```bash
+gh auth refresh --scopes read:project,project
+```
+
+## Getting A Workspace Into Conductor
+
+You can do this from the dashboard or from the CLI.
+
+### Dashboard flow
+
+From the workspace overview, add either:
+
+- an existing local repository
+- a Git repository to clone into a managed location
+
+When a workspace is added, Conductor persists it into `conductor.yaml`, ensures a board file exists, and syncs project support files.
+
+### CLI flow
+
+Inside a repo:
+
+```bash
+co init
+co start --workspace .
+```
+
+Or, after installing the npm package:
+
+```bash
+npm install -g conductor-oss
+co
+```
+
+Or without a global install:
+
+```bash
+npx conductor-oss@latest
+```
+
+The CLI package exposes `conductor`, `conductor-oss`, and `co`.
+
+## CLI Surface
+
+The current CLI commands include:
+
+- `co start`: launch the dashboard and backend
+- `co dashboard`: open the dashboard in a browser
+- `co setup`: guided environment/bootstrap flow
+- `co init`: scaffold `conductor.yaml` and `CONDUCTOR.md`
+- `co spawn`: create a new session for a project
+- `co list`: list sessions
+- `co status`: group active sessions by attention level
+- `co send`: send a follow-up message to a session
+- `co attach`: attach to the tmux session
+- `co restore`: relaunch a dead/exited session
+- `co retry`: create a fresh attempt from a prior session or task
+- `co feedback`: send reviewer feedback and requeue work
+- `co kill`: terminate a session
+- `co cleanup`: reclaim completed session resources
+- `co doctor`: diagnose config, board, and watcher issues
+- `co task show`: inspect task graph and attempts
+- `co mcp-server`: start the MCP server command path
+
+## Configuration
+
+The app's main configuration file is `conductor.yaml`.
+
+Representative shape:
+
+```yaml
+workspace: /absolute/path/to/control-workspace
+server:
+  host: 127.0.0.1
+  port: 4749
+projects:
+  my-app:
+    name: My App
+    repo: https://github.com/acme/my-app.git
+    path: /absolute/path/to/my-app
+    defaultBranch: main
+    runtime: tmux
+    workspace: worktree
+    boardDir: my-app
+    agent: codex
+    agentConfig:
+      permissions: default
+      model: o4-mini
+      reasoningEffort: medium
+    devServer:
+      command: bun dev
+      cwd: packages/web
+      port: 3001
+preferences:
+  codingAgent: codex
+access:
+  requireAuth: false
+```
+
+Useful project-level fields supported by the current code:
+
+- `defaultWorkingDirectory`
+- `setupScript`
+- `cleanupScript`
+- `archiveScript`
+- `copyFiles`
+- `devServer.command`
+- `devServer.cwd`
+- `devServer.url`
+- `devServer.port`
+- `devServer.host`
+- `devServer.path`
+- `devServer.https`
+
+## GitHub Integration
+
+The current GitHub integration is deeper than simple repo linking:
+
+- discover accessible repositories via `gh`
+- link a Conductor project to GitHub Projects v2
+- sync board state with a linked GitHub Project
+- accept signed webhook deliveries at `/api/github/webhook`
+
+This path assumes normal `gh` authentication and GitHub permissions on the local machine.
+
+## Access Control And Remote Use
+
+The safest way to run Conductor is on loopback only. The Rust backend explicitly refuses non-loopback binding unless you opt into:
+
+```bash
+CONDUCTOR_UNSAFE_ALLOW_REMOTE_BACKEND=true
+```
+
+The current repo also includes support for:
+
+- viewer/operator/admin roles in config
+- trusted auth headers
+- Cloudflare Access-style trusted-header validation
+- optional Clerk-backed sign-in wiring in the web app
+- Tailscale-managed private remote access from the dashboard
+
+Relevant env examples live in:
+
+- [`.env.example`](.env.example)
+- [`packages/web/.env.example`](packages/web/.env.example)
+
+## Repository Layout
 
 ```text
 crates/
@@ -283,58 +308,34 @@ crates/
   conductor-server/
   conductor-watcher/
 packages/
-  web/
+  cli/
+  core/
   plugins/
+  web/
+scripts/
+docs/
 ```
 
----
+## Operational Realities
 
-## Development prerequisites
+Important current constraints from the codebase:
 
-Install locally:
+- The runtime is tmux-first, so tmux is effectively required for the core session workflow.
+- Agent behavior depends heavily on the upstream CLI you install and how that CLI handles auth, rate limits, prompts, and output formatting.
+- GitHub repo discovery and GitHub Projects sync depend on `gh` being installed and authenticated.
+- Preview tooling is strongest when the repo has an explicit dev-server mapping in config.
+- Conductor is local-first orchestration software, not a hosted agent platform.
 
-- Bun `>= 1.2`
-- Rust toolchain
-- Git
-- one or more supported coding-agent CLIs
+## Links
 
-Common optional tools:
+- GitHub: <https://github.com/charannyk06/conductor-oss>
+- Issues: <https://github.com/charannyk06/conductor-oss/issues>
+- Pull requests: <https://github.com/charannyk06/conductor-oss/pulls>
+- npm package: <https://www.npmjs.com/package/conductor-oss>
 
-- GitHub CLI
-- tmux
-
----
-
-## What the app is optimized for
-
-Conductor OSS is currently best suited for:
-
-- local-first development workflows
-- multiple coding-agent sessions against the same repo
-- linking execution back to markdown board tasks
-- isolating risky work in worktrees while keeping review in one dashboard
-- preserving resumable session history instead of treating every run as disposable
-
----
-
-## Current limitations
-
-This repo is still evolving quickly.
-
-Important current realities:
-
-- reliability depends partly on the installed upstream CLI behavior
-- some providers require normal terminal auth or billing setup before their agent works here
-- the chat view is a structured projection over terminal-backed execution
-- UX and output rendering are still being tightened actively
-- documentation can drift quickly unless it is updated alongside implementation changes
-
----
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=charannyk06/conductor-oss&type=Date)](https://star-history.com/#charannyk06/conductor-oss&Date)
-
----
 
 ## License
 
