@@ -518,6 +518,7 @@ impl AppState {
                         .session_timeout_secs
                         .map(std::time::Duration::from_secs),
                     interactive: false,
+                    structured_output: false,
                     resume_target: None,
                 },
             )
@@ -1202,6 +1203,7 @@ impl AppState {
                         .session_timeout_secs
                         .map(std::time::Duration::from_secs),
                     interactive: false,
+                    structured_output: false,
                     resume_target: native_resume_target.clone(),
                 },
             )

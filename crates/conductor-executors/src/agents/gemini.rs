@@ -66,6 +66,12 @@ impl Executor for GeminiExecutor {
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
         if options.interactive {
             let mut args = vec![];
+
+            if options.structured_output {
+                args.push("--output-format".to_string());
+                args.push("stream-json".to_string());
+            }
+
             if let Some(model) = &options.model {
                 args.push("--model".to_string());
                 args.push(model.clone());
@@ -280,6 +286,7 @@ mod tests {
             branch: None,
             timeout: None,
             interactive: false,
+            structured_output: false,
             resume_target: None,
         });
 
@@ -301,6 +308,7 @@ mod tests {
             branch: None,
             timeout: None,
             interactive: true,
+            structured_output: false,
             resume_target: Some("latest".to_string()),
         });
 

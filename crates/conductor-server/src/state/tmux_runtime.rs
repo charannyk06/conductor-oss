@@ -205,6 +205,7 @@ impl AppState {
         match runtime_mode(project) {
             TMUX_RUNTIME_MODE => {
                 options.interactive = true;
+                options.structured_output = true;
                 self.spawn_tmux_runtime(executor, session_id, options).await
             }
             _ => {
@@ -405,11 +406,19 @@ impl AppState {
             exit_path = shell_escape(&exit_path.to_string_lossy()),
         );
 
+        // Use a very wide terminal (32000 columns) so that stream-json output
+        // from agents like Claude Code is never wrapped by the PTY. Without
+        // this, pipe-pane captures line-wrapped fragments that break JSON
+        // parsing in the output consumer.
         run_tmux_command(
             &socket_path,
             [
                 "new-session",
                 "-d",
+                "-x",
+                "32000",
+                "-y",
+                "24",
                 "-s",
                 session_name.as_str(),
                 "-c",
@@ -687,6 +696,7 @@ impl AppState {
             mut offset,
         } = forwarder;
         let mut partial = Vec::new();
+        let mut json_buffer = String::new();
         let mut exit_deadline = None;
 
         loop {
@@ -694,6 +704,23 @@ impl AppState {
                 read_tmux_log_delta(&log_path, offset, &mut partial).await?
             {
                 for line in lines {
+                    // JSON line reassembly for structured output
+                    if !json_buffer.is_empty() || line.starts_with('{') {
+                        json_buffer.push_str(&line);
+                        // Check if braces are balanced
+                        let open = json_buffer.chars().filter(|c| *c == '{').count();
+                        let close = json_buffer.chars().filter(|c| *c == '}').count();
+                        if open > 0 && open == close {
+                            // Complete JSON line
+                            let complete = std::mem::take(&mut json_buffer);
+                            if output_tx.send(ExecutorOutput::Stdout(complete)).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        // else: incomplete, keep buffering
+                        continue;
+                    }
+                    // Non-JSON line, send as-is
                     if output_tx.send(ExecutorOutput::Stdout(line)).await.is_err() {
                         return Ok(());
                     }
@@ -1256,6 +1283,7 @@ mod tests {
                     branch: None,
                     timeout: None,
                     interactive: false,
+                    structured_output: false,
                     resume_target: None,
                 },
             )
@@ -1362,6 +1390,7 @@ mod tests {
                     branch: None,
                     timeout: None,
                     interactive: false,
+                    structured_output: false,
                     resume_target: None,
                 },
             )
@@ -1527,6 +1556,7 @@ mod tests {
                     branch: None,
                     timeout: None,
                     interactive: false,
+                    structured_output: false,
                     resume_target: None,
                 },
             )
