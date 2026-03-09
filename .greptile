@@ -1,0 +1,41 @@
+# Greptile Review Context
+
+## Architecture
+
+This is a hybrid Rust + TypeScript project:
+- Primary backend: Rust (crates/) with axum, tokio, sqlx/SQLite
+- Dashboard: Next.js 16 (packages/web/) with App Router
+- CLI: Node.js launcher that spawns the native Rust binary
+
+The Rust backend is the source of truth for types and logic. TypeScript packages are being progressively superseded by Rust.
+
+## Review Priorities
+
+1. **Safety:** No unwrap() in library Rust code. Use ? or explicit error handling.
+2. **Local-first:** Reject any changes that add cloud relay, hosted state, or credential proxying.
+3. **Type consistency:** SessionStatus is an enum in conductor-core. Never use raw strings for it.
+4. **Concurrency:** Shared state uses Arc<RwLock<T>> or DashMap. Watch for deadlocks.
+5. **SSE streaming:** Production SSE uses direct fetch-and-pipe, not Next.js blob buffering.
+6. **Write guard:** Board file writes must respect the 15-second content-aware write guard.
+7. **Package manager:** This project uses Bun, not pnpm or npm.
+
+## Patterns to Enforce
+
+- Conventional commits (feat:, fix:, docs:, chore:, refactor:)
+- No default exports in TypeScript library code
+- API routes return Result<Json<T>, ApiError>
+- SQLite migrations go through conductor-db
+- New agent adapters follow the pattern in crates/conductor-executors/src/agents/claude_code.rs
+
+## Known Complexity
+
+- `crates/conductor-server/src/state/session_manager.rs` - Core session lifecycle, high change risk
+- `crates/conductor-server/src/state/tmux_runtime.rs` - tmux interaction, platform-sensitive
+- `crates/conductor-executors/src/process.rs` - Process management, platform-specific (macOS/Linux/Windows)
+- `packages/cli/launcher.ts` - Native binary discovery and launch, cross-platform edge cases
+
+## Do Not Flag
+
+- Large PRs from the TS-to-Rust migration are expected
+- Multiple files changing in conductor-core for type consolidation is normal
+- Test files may contain #[allow(dead_code)] for test helpers
