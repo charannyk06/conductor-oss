@@ -168,7 +168,18 @@ impl Board {
                             .join(" ")
                     )
                 };
-                output.push_str(&format!("- {} {}{}\n", checkbox, card.title, tags));
+                let meta = if card.metadata.is_empty() {
+                    String::new()
+                } else {
+                    let mut pairs: Vec<_> = card
+                        .metadata
+                        .iter()
+                        .map(|(k, v)| format!("{k}:{v}"))
+                        .collect();
+                    pairs.sort();
+                    format!(" {}", pairs.join(" "))
+                };
+                output.push_str(&format!("- {} {}{}{}\n", checkbox, card.title, tags, meta));
             }
             output.push('\n');
         }
@@ -370,6 +381,34 @@ mod tests {
         assert_eq!(board.columns[0].cards.len(), 0);
         assert_eq!(board.columns[1].cards.len(), 1);
         assert_eq!(board.columns[1].cards[0].title, "Task A");
+    }
+
+    #[test]
+    fn test_metadata_roundtrip() {
+        let content = r#"## Inbox
+- [ ] Build feature model:gpt-5 reasoningEffort:high
+"#;
+        let board = Board::parse(content);
+        assert_eq!(board.columns[0].cards[0].title, "Build feature");
+        assert_eq!(
+            board.columns[0].cards[0].metadata.get("model").map(|s| s.as_str()),
+            Some("gpt-5")
+        );
+        assert_eq!(
+            board.columns[0].cards[0].metadata.get("reasoningEffort").map(|s| s.as_str()),
+            Some("high")
+        );
+
+        let output = board.to_markdown();
+        let reparsed = Board::parse(&output);
+        assert_eq!(
+            reparsed.columns[0].cards[0].metadata.get("model").map(|s| s.as_str()),
+            Some("gpt-5")
+        );
+        assert_eq!(
+            reparsed.columns[0].cards[0].metadata.get("reasoningEffort").map(|s| s.as_str()),
+            Some("high")
+        );
     }
 
     #[test]
