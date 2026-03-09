@@ -8,7 +8,11 @@
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
-import { createServices, loadConfig } from "../services.js";
+import {
+  apiCall,
+  fetchConfiguredProjects,
+  type CleanupResponse,
+} from "../backend.js";
 
 export function registerCleanup(program: Command): void {
   program
@@ -18,16 +22,14 @@ export function registerCleanup(program: Command): void {
     .option("--dry-run", "Show what would be cleaned without doing it")
     .action(async (project: string | undefined, opts: { dryRun?: boolean }) => {
       try {
-        const config = await loadConfig();
+        const configuredProjects = await fetchConfiguredProjects();
 
-        if (project && !config.projects[project]) {
+        if (project && !configuredProjects.has(project)) {
           console.error(
-            chalk.red(`Unknown project: ${project}\nAvailable: ${Object.keys(config.projects).join(", ")}`),
+            chalk.red(`Unknown project: ${project}\nAvailable: ${[...configuredProjects.keys()].join(", ")}`),
           );
           process.exit(1);
         }
-
-        const { sessionManager } = await createServices(config);
 
         if (opts.dryRun) {
           console.log(chalk.bold("Dry run -- checking for cleanable sessions...\n"));
@@ -35,7 +37,10 @@ export function registerCleanup(program: Command): void {
 
         const spinner = opts.dryRun ? null : ora("Cleaning up sessions").start();
 
-        const result = await sessionManager.cleanup(project, { dryRun: Boolean(opts.dryRun) });
+        const result = await apiCall<CleanupResponse>("POST", "/api/sessions/cleanup", {
+          projectId: project,
+          dryRun: Boolean(opts.dryRun),
+        });
 
         spinner?.stop();
 

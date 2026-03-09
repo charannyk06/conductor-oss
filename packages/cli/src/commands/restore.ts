@@ -8,7 +8,13 @@
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
-import { createServices, loadConfig } from "../services.js";
+import {
+  apiCall,
+  sessionTmuxTarget,
+  sessionWorktree,
+  type BackendSession,
+  type SessionResponse,
+} from "../backend.js";
 
 export function registerRestore(program: Command): void {
   program
@@ -19,27 +25,24 @@ export function registerRestore(program: Command): void {
       const spinner = ora(`Restoring session ${sessionId}`).start();
 
       try {
-        const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
-
         // Verify session exists
-        const existing = await sessionManager.get(sessionId);
-        if (!existing) {
-          spinner.fail(`Session ${chalk.red(sessionId)} not found.`);
-          process.exit(1);
-        }
+        await apiCall<BackendSession>("GET", `/api/sessions/${encodeURIComponent(sessionId)}`);
 
-        const session = await sessionManager.restore(sessionId);
+        const { session } = await apiCall<SessionResponse>(
+          "POST",
+          `/api/sessions/${encodeURIComponent(sessionId)}/restore`,
+        );
         spinner.succeed(`Session ${chalk.green(sessionId)} restored.`);
 
-        if (session.workspacePath) {
-          console.log(chalk.dim(`  Worktree: ${session.workspacePath}`));
+        const worktree = sessionWorktree(session);
+        if (worktree) {
+          console.log(chalk.dim(`  Worktree: ${worktree}`));
         }
         if (session.branch) {
           console.log(chalk.dim(`  Branch:   ${session.branch}`));
         }
 
-        const tmuxTarget = session.runtimeHandle?.id ?? sessionId;
+        const tmuxTarget = sessionTmuxTarget(session);
         console.log(chalk.dim(`  Attach:   tmux attach -t ${tmuxTarget}`));
       } catch (err) {
         spinner.fail("Failed to restore session");

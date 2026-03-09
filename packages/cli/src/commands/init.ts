@@ -1,16 +1,7 @@
-/**
- * `co init`
- *
- * Scaffolds a new Conductor workspace with a CONDUCTOR.md kanban board
- * and a conductor.yaml config file. Dead-simple onboarding.
- */
-
-import { execFileSync } from "node:child_process";
-import { writeFileSync, existsSync, statSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import chalk from "chalk";
 import type { Command } from "commander";
-import { buildConductorBoard, buildConductorYaml } from "@conductor-oss/core";
+import { resolveRustCliLaunch } from "../rust-cli.js";
 
 export type InitOptions = {
   force?: boolean;
@@ -43,127 +34,61 @@ export type InitProjectConfig = {
   dashboardUrl: string | null;
 };
 
-function slugifyProjectId(value: string): string {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
-  return normalized || "my-app";
-}
-
-function runGit(cwd: string, args: string[]): string | null {
-  try {
-    const output = execFileSync("git", args, {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return output.length > 0 ? output : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseRepoSlug(remoteUrl: string | null): string | null {
-  if (!remoteUrl) return null;
-
-  const sshMatch = remoteUrl.match(/^git@[^:]+:(.+)$/);
-  const candidate = sshMatch ? sshMatch[1] : remoteUrl;
-
-  try {
-    const parsed = new URL(candidate);
-    return parsed.pathname.replace(/^\/+/, "").replace(/\.git$/i, "") || null;
-  } catch {
-    return candidate.replace(/\.git$/i, "").replace(/^\/+/, "") || null;
-  }
-}
-
-function detectDefaultBranch(repoPath: string): string | null {
-  const remoteHead = runGit(repoPath, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-  if (remoteHead) {
-    return remoteHead.replace(/^origin\//, "");
-  }
-
-  return runGit(repoPath, ["branch", "--show-current"]);
-}
-
-export function resolveInitProjectConfig(cwd: string, options: InitOptions): InitProjectConfig {
-  const repoPath = resolve(cwd, options.path?.trim() || ".");
-  const detectedRepo = parseRepoSlug(runGit(repoPath, ["remote", "get-url", "origin"]));
-  const detectedBranch = detectDefaultBranch(repoPath);
-  const detectedName = basename(repoPath);
-  const repoSlug = options.repo?.trim() || detectedRepo || `your-org/${detectedName}`;
-  const displayName = options.displayName?.trim() || detectedName;
-  const projectId = options.projectId?.trim() || slugifyProjectId(repoSlug.split("/").pop() || detectedName);
-  const agent = options.agent?.trim() || "claude-code";
-  const agentModel = options.model?.trim() || null;
-  const agentReasoningEffort = options.reasoningEffort?.trim().toLowerCase() || null;
-  const ide = options.ide?.trim() || "vscode";
-  const markdownEditor = options.markdownEditor?.trim() || "obsidian";
-  const defaultBranch = options.defaultBranch?.trim() || detectedBranch || "main";
-  const defaultWorkingDirectory = options.defaultWorkingDirectory?.trim() || null;
-  const dashboardUrl = options.dashboardUrl?.trim() || null;
-
-  return {
-    projectId,
-    displayName,
-    repo: repoSlug,
-    path: repoPath,
-    agent,
-    agentModel,
-    agentReasoningEffort,
-    ide,
-    markdownEditor,
-    defaultBranch,
-    defaultWorkingDirectory,
-    dashboardUrl,
-  };
-}
-
-export function runInitScaffold(cwd: string, opts: InitOptions): {
+type InitScaffoldResult = {
   created: number;
   project: InitProjectConfig;
   boardPath: string;
   configPath: string;
-} {
-  const project = resolveInitProjectConfig(cwd, opts);
-  const boardPath = resolve(project.path, "CONDUCTOR.md");
-  const configPath = resolve(project.path, "conductor.yaml");
+};
 
-  let created = 0;
+function buildInitArgs(opts: InitOptions, json = false): string[] {
+  const args = ["init", opts.path?.trim() || "."];
 
-  if (!existsSync(project.path) || !statSync(project.path).isDirectory()) {
-    throw new Error(`Repository path does not exist: ${project.path}`);
+  if (opts.force) args.push("--force");
+  if (opts.projectId) args.push("--project-id", opts.projectId);
+  if (opts.displayName) args.push("--display-name", opts.displayName);
+  if (opts.repo) args.push("--repo", opts.repo);
+  if (opts.agent) args.push("--agent", opts.agent);
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.reasoningEffort) args.push("--reasoning-effort", opts.reasoningEffort);
+  if (opts.ide) args.push("--ide", opts.ide);
+  if (opts.markdownEditor) args.push("--markdown-editor", opts.markdownEditor);
+  if (opts.defaultBranch) args.push("--default-branch", opts.defaultBranch);
+  if (opts.defaultWorkingDirectory) {
+    args.push("--default-working-directory", opts.defaultWorkingDirectory);
+  }
+  if (opts.dashboardUrl) args.push("--dashboard-url", opts.dashboardUrl);
+  if (json) args.push("--json");
+
+  return args;
+}
+
+export function runInitScaffold(cwd: string, opts: InitOptions): InitScaffoldResult {
+  const launch = resolveRustCliLaunch();
+  const result = spawnSync(
+    launch.cmd,
+    [...launch.argsPrefix, ...buildInitArgs(opts, true)],
+    {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const message = result.stderr?.trim() || result.stdout?.trim() || "Rust init failed";
+    throw new Error(message);
   }
 
-  if (!existsSync(boardPath) || opts.force) {
-    writeFileSync(boardPath, buildConductorBoard(project.projectId, project.displayName), "utf-8");
-    console.log(chalk.green("✔") + "  Created CONDUCTOR.md");
-    created++;
-  } else {
-    console.log(chalk.dim("  CONDUCTOR.md already exists (use --force to overwrite)"));
+  const payload = result.stdout?.trim();
+  if (!payload) {
+    throw new Error("Rust init returned no scaffold result");
   }
 
-  if (!existsSync(configPath) || opts.force) {
-    writeFileSync(configPath, buildConductorYaml({
-      dashboardUrl: project.dashboardUrl,
-      preferences: {
-        onboardingAcknowledged: false,
-        codingAgent: project.agent,
-        ide: project.ide,
-        markdownEditor: project.markdownEditor,
-      },
-      projects: [project],
-    }), "utf-8");
-    console.log(chalk.green("✔") + "  Created conductor.yaml");
-    created++;
-  } else {
-    console.log(chalk.dim("  conductor.yaml already exists (use --force to overwrite)"));
-  }
-
-  return { created, project, boardPath, configPath };
+  return JSON.parse(payload) as InitScaffoldResult;
 }
 
 export function registerInit(program: Command): void {
@@ -185,25 +110,21 @@ export function registerInit(program: Command): void {
     .option("--dashboard-url <url>", "Public dashboard URL written into conductor.yaml")
     .action((opts: InitOptions) => {
       try {
-        const cwd = process.cwd();
-        const { created, project } = runInitScaffold(cwd, opts);
+        const launch = resolveRustCliLaunch();
+        const result = spawnSync(
+          launch.cmd,
+          [...launch.argsPrefix, ...buildInitArgs(opts)],
+          {
+            cwd: process.cwd(),
+            stdio: "inherit",
+          },
+        );
 
-        if (created > 0) {
-          console.log();
-          console.log(chalk.bold("Detected project defaults:"));
-          console.log(chalk.dim("  project id:"), chalk.cyan(project.projectId));
-          console.log(chalk.dim("  repo:"), chalk.cyan(project.repo));
-          console.log(chalk.dim("  path:"), chalk.cyan(project.path));
-          console.log(chalk.dim("  default branch:"), chalk.cyan(project.defaultBranch));
-          console.log(chalk.dim("  agent:"), chalk.cyan(project.agent));
-          console.log();
-          console.log(chalk.bold("Next steps:"));
-          console.log(chalk.dim("  1."), chalk.cyan("co start"), chalk.dim("— start the orchestrator"));
-          console.log(chalk.dim("  2."), chalk.cyan("Open dashboard"), chalk.dim("— review Repository Settings and Preferences"));
-          console.log(chalk.dim("  3."), chalk.cyan("Open CONDUCTOR.md"), chalk.dim("— write a task in 'Ready to Dispatch'"));
-          console.log();
-          console.log(chalk.dim("  Tip: Running `npx conductor-oss@latest init` from a repo root now auto-detects origin + branch."));
-          console.log();
+        if (result.error) {
+          throw result.error;
+        }
+        if (typeof result.status === "number" && result.status !== 0) {
+          process.exit(result.status);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

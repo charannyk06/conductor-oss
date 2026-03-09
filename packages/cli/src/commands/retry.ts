@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
-import { createServices, loadConfig } from "../services.js";
+import { apiCall, type SessionResponse } from "../backend.js";
 
 interface RetryOptions {
   agent?: string;
@@ -24,22 +24,17 @@ export function registerRetry(program: Command): void {
     .action(async (sessionOrTask: string, opts: RetryOptions) => {
       const spinner = ora("Creating retry attempt").start();
       try {
-        const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
-        const manager = sessionManager as unknown as {
-          retry: (
-            target: string,
-            options?: { agent?: string; model?: string; reasoningEffort?: string; baseBranch?: string; profile?: string },
-          ) => Promise<{ id: string; projectId: string; branch: string | null; metadata: Record<string, string> }>;
-        };
-
-        const next = await manager.retry(sessionOrTask, {
+        const { session: next } = await apiCall<SessionResponse>(
+          "POST",
+          `/api/sessions/${encodeURIComponent(sessionOrTask)}/retry`,
+          {
           agent: opts.agent,
           model: opts.model,
           reasoningEffort: opts.reasoningEffort?.trim().toLowerCase() || undefined,
           baseBranch: opts.baseBranch,
           profile: opts.profile,
-        });
+          },
+        );
 
         spinner.succeed(`New attempt started: ${chalk.green(next.id)}`);
         console.log(`  Project:  ${chalk.dim(next.projectId)}`);

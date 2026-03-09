@@ -15,8 +15,9 @@ use tokio_stream::{self as stream, StreamExt};
 
 use crate::state::{
     build_normalized_chat_feed, build_session_runtime_status, session_to_dashboard_value,
-    trim_lines_tail, AppState, SessionRecord, SpawnRequest,
+    trim_lines_tail, AppState, SessionRecord, SessionStatus, SpawnRequest,
 };
+use uuid::Uuid;
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -65,19 +66,23 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .merge(spawn_route)
         .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions/spawn", post(spawn_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/conversation", get(get_conversation))
         .route("/api/sessions/{id}/feed", get(get_feed))
         .route("/api/sessions/{id}/feed/stream", get(feed_stream))
         .route("/api/sessions/{id}/output", get(get_output))
         .route("/api/sessions/{id}/output/stream", get(output_stream))
+        .route("/api/sessions/{id}/input", post(send_to_session))
         .route("/api/sessions/{id}/send", post(send_to_session))
         .route("/api/sessions/{id}/interrupt", post(interrupt_session))
         .route("/api/sessions/{id}/kill", post(kill_session))
         .route("/api/sessions/{id}/archive", post(archive_session))
+        .route("/api/sessions/{id}/retry", post(retry_session))
         .route("/api/sessions/{id}/restore", post(restore_session))
         .route("/api/sessions/{id}/feedback", post(submit_feedback))
         .route("/api/sessions/{id}/actions", post(apply_action))
+        .route("/api/sessions/cleanup", post(cleanup_sessions))
         .route("/api/sessions/{id}/keys", post(send_keys))
 }
 
@@ -91,6 +96,14 @@ fn created(value: Value) -> ApiResponse {
 
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
     (status, Json(json!({ "error": message.into() })))
+}
+
+fn task_id_for_session(session: &SessionRecord) -> String {
+    session
+        .metadata
+        .get("taskId")
+        .cloned()
+        .unwrap_or_else(|| format!("t-{}", session.id))
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +200,11 @@ async fn spawn_session(
             reasoning_effort: body.reasoning_effort,
             branch: body.branch,
             base_branch: body.base_branch,
+            task_id: None,
+            attempt_id: None,
+            parent_task_id: None,
+            retry_of_session_id: None,
+            profile: None,
             attachments: body.attachments.unwrap_or_default(),
             source: "spawn".to_string(),
         })
@@ -447,6 +465,156 @@ async fn restore_session(
         Ok(session) => ok(json!({ "session": session_to_dashboard_value(&session) })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetryBody {
+    agent: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    base_branch: Option<String>,
+    profile: Option<String>,
+}
+
+async fn retry_session(
+    State(state): State<Arc<AppState>>,
+    Path(target): Path<String>,
+    Json(body): Json<RetryBody>,
+) -> ApiResponse {
+    let sessions = state.all_sessions().await;
+    let source = state.get_session(&target).await.or_else(|| {
+        sessions
+            .into_iter()
+            .filter(|session| task_id_for_session(session) == target)
+            .max_by(|left, right| left.created_at.cmp(&right.created_at))
+    });
+
+    let Some(source) = source else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("No session/task found for retry target: {target}"),
+        );
+    };
+
+    let next_attempt_id = format!("a-{}", Uuid::new_v4().simple());
+    let mut source_update = source.clone();
+    source_update
+        .metadata
+        .insert("attemptStatus".to_string(), "archived".to_string());
+    source_update.metadata.insert(
+        "supersededByAttemptId".to_string(),
+        next_attempt_id.clone(),
+    );
+
+    if let Err(err) = state.replace_session(source_update).await {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+
+    match state
+        .spawn_session(SpawnRequest {
+            project_id: source.project_id.clone(),
+            prompt: source.prompt.clone(),
+            issue_id: source.issue_id.clone(),
+            agent: body.agent.or_else(|| Some(source.agent.clone())),
+            use_worktree: Some(true),
+            permission_mode: None,
+            model: body.model.or_else(|| source.model.clone()),
+            reasoning_effort: body
+                .reasoning_effort
+                .or_else(|| source.reasoning_effort.clone()),
+            branch: None,
+            base_branch: body.base_branch.or_else(|| source.branch.clone()),
+            task_id: Some(task_id_for_session(&source)),
+            attempt_id: Some(next_attempt_id),
+            parent_task_id: source.metadata.get("parentTaskId").cloned(),
+            retry_of_session_id: Some(source.id.clone()),
+            profile: body.profile.or_else(|| source.metadata.get("profile").cloned()),
+            attachments: Vec::new(),
+            source: "retry".to_string(),
+        })
+        .await
+    {
+        Ok(session) => ok(json!({ "session": session_to_dashboard_value(&session) })),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CleanupBody {
+    project_id: Option<String>,
+    dry_run: Option<bool>,
+}
+
+async fn cleanup_sessions(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CleanupBody>,
+) -> ApiResponse {
+    let mut result = json!({
+        "killed": Vec::<String>::new(),
+        "skipped": Vec::<String>::new(),
+        "errors": Vec::<Value>::new(),
+    });
+    let dry_run = body.dry_run.unwrap_or(false);
+
+    for session in state.all_sessions().await {
+        if session.status == SessionStatus::Archived {
+            continue;
+        }
+
+        if let Some(project_id) = body.project_id.as_deref() {
+            if session.project_id != project_id {
+                continue;
+            }
+        }
+
+        if session.metadata.get("role").map(String::as_str) == Some("orchestrator")
+            || session.id.ends_with("-orchestrator")
+        {
+            result["skipped"]
+                .as_array_mut()
+                .expect("skipped is array")
+                .push(Value::String(session.id.clone()));
+            continue;
+        }
+
+        if !session.status.is_terminal() {
+            result["skipped"]
+                .as_array_mut()
+                .expect("skipped is array")
+                .push(Value::String(session.id.clone()));
+            continue;
+        }
+
+        if dry_run {
+            result["killed"]
+                .as_array_mut()
+                .expect("killed is array")
+                .push(Value::String(session.id.clone()));
+            continue;
+        }
+
+        match state.archive_session(&session.id).await {
+            Ok(()) => {
+                result["killed"]
+                    .as_array_mut()
+                    .expect("killed is array")
+                    .push(Value::String(session.id.clone()));
+            }
+            Err(err) => {
+                result["errors"]
+                    .as_array_mut()
+                    .expect("errors is array")
+                    .push(json!({
+                        "sessionId": session.id,
+                        "error": err.to_string(),
+                    }));
+            }
+        }
+    }
+
+    ok(result)
 }
 
 #[derive(Debug, Deserialize)]

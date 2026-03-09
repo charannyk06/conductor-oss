@@ -1,6 +1,6 @@
 import chalk from "chalk";
 import type { Command } from "commander";
-import { createServices, loadConfig } from "../services.js";
+import { apiCall, type TaskGraphResponse } from "../backend.js";
 
 export function registerTask(program: Command): void {
   const task = program
@@ -14,28 +14,15 @@ export function registerTask(program: Command): void {
     .option("--json", "Output raw JSON")
     .action(async (taskId: string, opts: { json?: boolean }) => {
       try {
-        const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
-        const manager = sessionManager as unknown as {
-          taskGraph: (taskId: string) => Promise<{
-            taskId: string;
-            parentTaskId: string | null;
-            childrenTaskIds: string[];
-            attempts: Array<{
-              attemptId: string;
-              sessionId: string;
-              status: string;
-              agent?: string;
-              model?: string;
-              branch?: string | null;
-            }>;
-          } | null>;
-        };
-        const graph = await manager.taskGraph(taskId);
+        const graph = await apiCall<TaskGraphResponse | null>(
+          "GET",
+          `/api/tasks/${encodeURIComponent(taskId)}/graph`,
+        );
 
         if (!graph) {
           console.log(chalk.dim(`No task found for ${taskId}`));
           process.exit(1);
+          return;
         }
 
         if (opts.json) {

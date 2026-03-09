@@ -7,8 +7,13 @@
 
 import chalk from "chalk";
 import type { Command } from "commander";
-import type { Session, SessionStatus, ActivityState } from "@conductor-oss/core";
-import { createServices, loadConfig } from "../services.js";
+import {
+  apiCall,
+  fetchConfiguredProjects,
+  fetchProjects,
+  type BackendSession,
+  type SessionsResponse,
+} from "../backend.js";
 
 // ---- Formatting helpers ----
 
@@ -30,7 +35,7 @@ function formatAge(date: Date): string {
   return `${Math.floor(diff / 86400)}d`;
 }
 
-function statusColor(status: SessionStatus): string {
+function statusColor(status: string): string {
   switch (status) {
     case "working":
     case "approved":
@@ -59,7 +64,7 @@ function statusColor(status: SessionStatus): string {
   }
 }
 
-function activityLabel(activity: ActivityState | null): string {
+function activityLabel(activity: string | null): string {
   switch (activity) {
     case "active":
       return chalk.green("active");
@@ -109,8 +114,8 @@ function printHeader(): void {
   console.log(chalk.dim(`  ${"─".repeat(totalWidth)}`));
 }
 
-function printRow(session: Session): void {
-  const summary = session.agentInfo?.summary ?? session.metadata["summary"] ?? "-";
+function printRow(session: BackendSession): void {
+  const summary = session.summary ?? session.metadata["summary"] ?? "-";
   const row =
     padCol(chalk.green(session.id), COL.id) +
     padCol(statusColor(session.status), COL.status) +
@@ -118,7 +123,7 @@ function printRow(session: Session): void {
     padCol(session.branch ? chalk.cyan(truncate(session.branch, COL.branch - 1)) : chalk.dim("-"), COL.branch) +
     padCol(session.issueId ? chalk.blue(session.issueId) : chalk.dim("-"), COL.issue) +
     padCol(chalk.dim(truncate(summary, COL.summary - 1)), COL.summary) +
-    chalk.dim(formatAge(session.createdAt));
+    chalk.dim(formatAge(new Date(session.createdAt)));
 
   console.log(`  ${row}`);
 }
@@ -135,17 +140,20 @@ export function registerList(program: Command): void {
     .option("--all", "Include terminal (killed/done/merged) sessions")
     .action(async (project: string | undefined, opts: { json?: boolean; all?: boolean }) => {
       try {
-        const config = await loadConfig();
+        const [configuredProjects, projects] = await Promise.all([
+          fetchConfiguredProjects(),
+          fetchProjects(),
+        ]);
 
-        if (project && !config.projects[project]) {
+        if (project && !configuredProjects.has(project)) {
           console.error(
-            chalk.red(`Unknown project: ${project}\nAvailable: ${Object.keys(config.projects).join(", ")}`),
+            chalk.red(`Unknown project: ${project}\nAvailable: ${[...configuredProjects.keys()].join(", ")}`),
           );
           process.exit(1);
         }
 
-        const { sessionManager } = await createServices(config);
-        let sessions = await sessionManager.list(project);
+        const query = project ? `?project=${encodeURIComponent(project)}` : "";
+        let sessions = (await apiCall<SessionsResponse>("GET", `/api/sessions${query}`)).sessions;
 
         // Filter out terminal sessions unless --all is passed
         const TERMINAL: ReadonlySet<string> = new Set(["killed", "terminated", "done", "cleanup", "errored", "merged"]);
@@ -167,7 +175,7 @@ export function registerList(program: Command): void {
         }
 
         // Group by project
-        const byProject = new Map<string, Session[]>();
+        const byProject = new Map<string, BackendSession[]>();
         for (const s of sessions) {
           const list = byProject.get(s.projectId) ?? [];
           list.push(s);
@@ -175,8 +183,7 @@ export function registerList(program: Command): void {
         }
 
         for (const [projectId, projectSessions] of byProject) {
-          const projectConfig = config.projects[projectId];
-          const label = projectConfig?.name ?? projectId;
+          const label = projects.get(projectId)?.name ?? projectId;
           console.log(chalk.bold(`\n${label}`));
           printHeader();
           for (const s of projectSessions.sort((a, b) => a.id.localeCompare(b.id))) {

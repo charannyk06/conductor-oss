@@ -8,7 +8,7 @@ import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
 import { createInterface } from "node:readline";
-import { createServices, loadConfig } from "../services.js";
+import { apiCall, sessionWorktree, type BackendSession } from "../backend.js";
 
 function confirm(prompt: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -31,23 +31,17 @@ export function registerKill(program: Command): void {
     .option("-f, --force", "Skip confirmation prompt")
     .action(async (sessionId: string, opts: { force?: boolean }) => {
       try {
-        const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
-
         // Verify session exists
-        const session = await sessionManager.get(sessionId);
-        if (!session) {
-          console.error(chalk.red(`Session ${sessionId} not found.`));
-          process.exit(1);
-        }
+        const session = await apiCall<BackendSession>("GET", `/api/sessions/${encodeURIComponent(sessionId)}`);
 
         // Show what we're about to kill
         console.log(chalk.yellow(`\nAbout to kill session: ${chalk.bold(sessionId)}`));
         if (session.branch) {
           console.log(chalk.dim(`  Branch:    ${session.branch}`));
         }
-        if (session.workspacePath) {
-          console.log(chalk.dim(`  Worktree:  ${session.workspacePath}`));
+        const worktree = sessionWorktree(session);
+        if (worktree) {
+          console.log(chalk.dim(`  Worktree:  ${worktree}`));
         }
         console.log(chalk.dim(`  Status:    ${session.status}`));
         console.log();
@@ -61,7 +55,7 @@ export function registerKill(program: Command): void {
         }
 
         const spinner = ora("Killing session").start();
-        await sessionManager.kill(sessionId);
+        await apiCall("POST", `/api/sessions/${encodeURIComponent(sessionId)}/kill`);
         spinner.succeed(`Session ${chalk.green(sessionId)} killed.`);
       } catch (err) {
         console.error(chalk.red(`Failed to kill session: ${err}`));

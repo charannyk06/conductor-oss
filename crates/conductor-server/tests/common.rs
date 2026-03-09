@@ -331,6 +331,11 @@ pub fn spawn_request(prompt: &str) -> conductor_server::state::SpawnRequest {
         reasoning_effort: None,
         branch: None,
         base_branch: None,
+        task_id: None,
+        attempt_id: None,
+        parent_task_id: None,
+        retry_of_session_id: None,
+        profile: None,
         attachments: Vec::new(),
         source: "integration_test".to_string(),
     }
