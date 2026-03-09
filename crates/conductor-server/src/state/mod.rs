@@ -14,8 +14,11 @@ pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDe
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
-pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
-pub(crate) use tmux_runtime::{tmux_runtime_metadata, tmux_session_exists};
+pub use runtime_status::{SessionRuntimeStatus, build_session_runtime_status};
+pub(crate) use tmux_runtime::{
+    TMUX_LOG_PATH_METADATA_KEY, capture_tmux_pane, disable_tmux_status, tmux_runtime_metadata,
+    tmux_session_exists,
+};
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus, SpawnRequest,
 };
@@ -29,11 +32,11 @@ use conductor_core::support::{startup_config_sync, sync_workspace_support_files}
 use conductor_core::types::AgentKind;
 use conductor_db::Database;
 use conductor_executors::executor::Executor;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
 pub(crate) struct DevServerRecord {
     pub pid: u32,

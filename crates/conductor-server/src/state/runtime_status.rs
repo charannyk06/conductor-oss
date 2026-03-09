@@ -949,9 +949,7 @@ mod tests {
         fs::create_dir_all(&chats_dir).unwrap();
         fs::write(
             chats_dir.join("session.jsonl"),
-            concat!(
-                "{\"type\":\"system\",\"subtype\":\"ui_telemetry\",\"cwd\":\"/tmp/demo\",\"systemPayload\":{\"uiEvent\":{\"event.name\":\"qwen-code.api_response\",\"model\":\"coder-model\",\"input_token_count\":1400,\"output_token_count\":120,\"cached_content_token_count\":350,\"thoughts_token_count\":20,\"tool_token_count\":5,\"total_token_count\":1895}}}\n"
-            ),
+            "{\"type\":\"system\",\"subtype\":\"ui_telemetry\",\"cwd\":\"/tmp/demo\",\"systemPayload\":{\"uiEvent\":{\"event.name\":\"qwen-code.api_response\",\"model\":\"coder-model\",\"input_token_count\":1400,\"output_token_count\":120,\"cached_content_token_count\":350,\"thoughts_token_count\":20,\"tool_token_count\":5,\"total_token_count\":1895}}}\n",
         )
         .unwrap();
 

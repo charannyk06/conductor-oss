@@ -70,6 +70,10 @@ impl Executor for CopilotExecutor {
                 args.push("on".to_string());
             }
 
+            if options.skip_permissions {
+                args.push("--allow-all".to_string());
+            }
+
             if !options.prompt.trim().is_empty() {
                 args.push(options.prompt.clone());
             }

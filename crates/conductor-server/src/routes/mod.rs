@@ -21,7 +21,9 @@ pub mod terminal;
 pub mod workspaces;
 
 #[cfg(test)]
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
+#[cfg(test)]
+use tokio::sync::Mutex;
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

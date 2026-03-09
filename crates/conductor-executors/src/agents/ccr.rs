@@ -67,6 +67,7 @@ impl Executor for CcrExecutor {
             let mut args = vec!["code".to_string()];
 
             if options.structured_output {
+                args.push("--print".to_string());
                 args.push("--output-format".to_string());
                 args.push("stream-json".to_string());
                 args.push("--include-partial-messages".to_string());

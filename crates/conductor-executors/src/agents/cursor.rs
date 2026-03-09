@@ -68,6 +68,10 @@ impl Executor for CursorExecutor {
                 args.push("stream-json".to_string());
             }
 
+            if options.skip_permissions {
+                args.push("--force".to_string());
+            }
+
             if !options.prompt.trim().is_empty() {
                 args.push(options.prompt.clone());
             }

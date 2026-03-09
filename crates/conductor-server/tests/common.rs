@@ -253,10 +253,15 @@ pub async fn build_state(
         project.runtime = Some("direct".to_string());
     }
 
-    let mut config = ConductorConfig::default();
-    config.workspace = root.to_path_buf();
-    config.preferences.coding_agent = "codex".to_string();
-    config.projects = BTreeMap::from([(project_id.to_string(), project)]);
+    let config = ConductorConfig {
+        workspace: root.to_path_buf(),
+        preferences: conductor_core::config::PreferencesConfig {
+            coding_agent: "codex".to_string(),
+            ..conductor_core::config::PreferencesConfig::default()
+        },
+        projects: BTreeMap::from([(project_id.to_string(), project)]),
+        ..ConductorConfig::default()
+    };
 
     let db = Database::in_memory().await.unwrap();
     let state = AppState::new(root.join("conductor.yaml"), config, db).await;

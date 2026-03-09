@@ -1,10 +1,10 @@
 use conductor_executors::executor::ExecutorInput;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 // Re-export core types so existing imports within the server crate continue to work.
 pub use conductor_core::types::{
-    ConversationEntry, SessionPrInfo, SessionRecord, SessionRecordBuilder, SessionStatus,
-    SpawnRequest, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT,
+    ConversationEntry, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT, SessionPrInfo,
+    SessionRecord, SessionRecordBuilder, SessionStatus, SpawnRequest,
 };
 
 pub struct LiveSessionHandle {

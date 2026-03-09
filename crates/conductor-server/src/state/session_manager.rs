@@ -9,20 +9,20 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use super::AppState;
 use super::helpers::{
     append_output, is_runtime_status_line, merge_assistant_fragment, runtime_tool_metadata,
     sanitize_terminal_text,
 };
 use super::runtime_status::resolve_native_resume_target;
 use super::tmux_runtime::{
-    runtime_mode, tmux_runtime_metadata, tmux_session_exists, TMUX_RUNTIME_MODE,
+    TMUX_RUNTIME_MODE, runtime_mode, tmux_runtime_metadata, tmux_session_exists,
 };
 use super::types::{
-    ConversationEntry, LiveSessionHandle, SessionRecord, SessionStatus, SpawnRequest,
-    DEFAULT_SESSION_HISTORY_LIMIT,
+    ConversationEntry, DEFAULT_SESSION_HISTORY_LIMIT, LiveSessionHandle, SessionRecord,
+    SessionStatus, SpawnRequest,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::AppState;
 
 const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
 
@@ -1531,7 +1531,7 @@ mod tests {
     use std::process::{Child, Command as StdCommand};
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
     use uuid::Uuid;
 
     struct TestExecutor {
@@ -1725,10 +1725,15 @@ mod tests {
         if project.runtime.is_none() {
             project.runtime = Some(crate::state::tmux_runtime::DIRECT_RUNTIME_MODE.to_string());
         }
-        let mut config = ConductorConfig::default();
-        config.workspace = root.to_path_buf();
-        config.preferences.coding_agent = "codex".to_string();
-        config.projects = BTreeMap::from([(project_id.to_string(), project)]);
+        let config = ConductorConfig {
+            workspace: root.to_path_buf(),
+            preferences: conductor_core::config::PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..conductor_core::config::PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(project_id.to_string(), project)]),
+            ..ConductorConfig::default()
+        };
 
         let db = Database::in_memory().await.unwrap();
         let state = AppState::new(root.join("conductor.yaml"), config, db).await;
@@ -1754,6 +1759,9 @@ mod tests {
         assert!(project_defaults_to_skip_permissions(&project));
         assert!(resolve_skip_permissions(None, &project));
         assert!(resolve_skip_permissions(Some("default"), &project));
+        assert!(!resolve_skip_permissions(Some("ask"), &project));
+        assert!(!resolve_skip_permissions(Some("plan"), &project));
+        assert!(resolve_skip_permissions(Some("auto"), &project));
     }
 
     #[test]

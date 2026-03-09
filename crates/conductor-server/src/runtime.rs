@@ -466,18 +466,23 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = ConductorConfig::default();
-        config.workspace = root.clone();
-        config.preferences.coding_agent = "codex".to_string();
-        config.projects = BTreeMap::from([(
-            "demo".to_string(),
-            ProjectConfig {
-                path: project_root.to_string_lossy().to_string(),
-                agent: Some("codex".to_string()),
-                runtime: Some("direct".to_string()),
-                ..ProjectConfig::default()
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: conductor_core::config::PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..conductor_core::config::PreferencesConfig::default()
             },
-        )]);
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: project_root.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("direct".to_string()),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
 
         let db = Database::in_memory().await.unwrap();
         let config_path = root.join("conductor.yaml");

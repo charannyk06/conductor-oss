@@ -52,6 +52,10 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return None;
     }
 
+    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/token") {
+        return Some(AccessRole::Operator);
+    }
+
     if path.starts_with("/api/access") {
         return Some(AccessRole::Admin);
     }
@@ -95,10 +99,12 @@ mod tests {
     use tower::util::ServiceExt;
 
     async fn build_state(access: DashboardAccessConfig) -> Arc<AppState> {
-        let mut config = ConductorConfig::default();
-        config.workspace =
-            std::env::temp_dir().join(format!("middleware-test-{}", uuid::Uuid::new_v4()));
-        config.access = access;
+        let config = ConductorConfig {
+            workspace: std::env::temp_dir()
+                .join(format!("middleware-test-{}", uuid::Uuid::new_v4())),
+            access,
+            ..ConductorConfig::default()
+        };
         let db = Database::in_memory().await.unwrap();
         AppState::new(
             std::env::temp_dir().join("middleware-test.yaml"),
@@ -139,6 +145,10 @@ mod tests {
             required_access_role(&Method::GET, "/api/sessions/abc/output/stream"),
             Some(AccessRole::Viewer)
         );
+        assert_eq!(
+            required_access_role(&Method::GET, "/api/sessions/abc/terminal/token"),
+            Some(AccessRole::Operator)
+        );
     }
 
     #[tokio::test]
@@ -175,9 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_rejects_unauthenticated_views_when_builtin_remote_auth_is_enabled() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         unsafe {
             std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
             std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
@@ -219,9 +227,7 @@ mod tests {
     #[tokio::test]
     async fn middleware_allows_local_views_when_share_links_are_disabled_even_if_runtime_tokens_exist(
     ) {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         unsafe {
             std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
             std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");

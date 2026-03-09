@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -6,24 +6,31 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::future::pending;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::mpsc;
 
 use crate::routes::config::access_control_enabled;
-use crate::state::{tmux_runtime_metadata, tmux_session_exists, AppState};
+use crate::state::{
+    AppState, SessionRecord, TMUX_LOG_PATH_METADATA_KEY, capture_tmux_pane, disable_tmux_status,
+    tmux_runtime_metadata, tmux_session_exists, trim_lines_tail,
+};
 
 type ApiResponse = (StatusCode, Json<Value>);
 type HmacSha256 = Hmac<sha2::Sha256>;
 
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
+const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 200000;
+const MAX_TERMINAL_SNAPSHOT_LINES: usize = 200000;
+const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
@@ -33,6 +40,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
+        .route(
+            "/api/sessions/{id}/terminal/snapshot",
+            get(terminal_snapshot),
+        )
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
@@ -44,6 +55,11 @@ struct TerminalQuery {
     cols: Option<u16>,
     rows: Option<u16>,
     token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalSnapshotQuery {
+    lines: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -95,6 +111,8 @@ impl TmuxAttachClient {
 
         let mut command = CommandBuilder::new("tmux");
         command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        command.env("TMUX", "");
         command.arg("-S");
         command.arg(socket_path.to_string_lossy().to_string());
         command.arg("attach-session");
@@ -235,10 +253,7 @@ async fn terminal_websocket(
     ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, id, cols, rows))
 }
 
-async fn terminal_token(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
+async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     if state.get_session(&id).await.is_none() {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     }
@@ -251,6 +266,90 @@ async fn terminal_token(
     };
 
     Json(json!({ "token": token })).into_response()
+}
+
+async fn terminal_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<TerminalSnapshotQuery>,
+) -> Response {
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
+
+    let lines = query
+        .lines
+        .unwrap_or(DEFAULT_TERMINAL_SNAPSHOT_LINES)
+        .clamp(50, MAX_TERMINAL_SNAPSHOT_LINES);
+
+    match build_terminal_snapshot(&session, lines).await {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn build_terminal_snapshot(session: &SessionRecord, lines: usize) -> Result<Value> {
+    if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(session) {
+        if tmux_session_exists(&socket_path, &tmux_session)
+            .await
+            .unwrap_or(false)
+        {
+            if let Ok(snapshot) = capture_tmux_pane(&socket_path, &tmux_session, lines).await {
+                if !snapshot.trim().is_empty() {
+                    return Ok(json!({
+                        "snapshot": snapshot,
+                        "source": "tmux_live",
+                        "live": true,
+                        "restored": true,
+                    }));
+                }
+            }
+        }
+    }
+
+    if let Some(log_path) = session
+        .metadata
+        .get(TMUX_LOG_PATH_METADATA_KEY)
+        .map(PathBuf::from)
+    {
+        if let Some(snapshot) = read_terminal_log_tail(&log_path, lines).await? {
+            return Ok(json!({
+                "snapshot": snapshot,
+                "source": "tmux_log",
+                "live": false,
+                "restored": true,
+            }));
+        }
+    }
+
+    let snapshot = trim_lines_tail(&session.output, lines);
+    Ok(json!({
+        "snapshot": snapshot,
+        "source": if session.output.trim().is_empty() { "empty" } else { "session_output" },
+        "live": false,
+        "restored": !session.output.trim().is_empty(),
+    }))
+}
+
+async fn read_terminal_log_tail(path: &StdPath, lines: usize) -> Result<Option<String>> {
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let len = file.metadata().await?.len();
+    let start = len.saturating_sub(MAX_TERMINAL_LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).await?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    let snapshot = trim_lines_tail(String::from_utf8_lossy(&bytes).as_ref(), lines);
+    if snapshot.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(snapshot))
+    }
 }
 
 async fn handle_terminal_socket(
@@ -408,6 +507,7 @@ async fn maybe_attach_tmux_client(
         return Ok(None);
     }
 
+    disable_tmux_status(&socket_path, &tmux_session).await?;
     let client = TmuxAttachClient::spawn(socket_path, tmux_session, cols, rows)?;
     Ok(Some(client))
 }
@@ -659,9 +759,7 @@ mod tests {
 
     #[test]
     fn verify_terminal_token_accepts_valid_signature() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::set_var(TERMINAL_TOKEN_SECRET_ENV, "test-secret");
         }
@@ -681,9 +779,7 @@ mod tests {
 
     #[test]
     fn terminal_token_is_not_required_for_local_auth_only_configs() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
             std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
@@ -700,9 +796,7 @@ mod tests {
 
     #[test]
     fn terminal_token_round_trip_works_without_env_secret() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
         }
