@@ -1,5 +1,5 @@
 mod common;
-
+use conductor_core::types::SessionStatus;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{build_app, spawn_request, wait_for_condition, TestExecutor, TestHarness};
@@ -180,7 +180,7 @@ async fn board_change_events_drive_session_spawns_with_board_metadata() {
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == "working" && session.metadata.contains_key("worktree"))
+                (session.status == SessionStatus::Working && session.metadata.contains_key("worktree"))
                     .then_some(session)
             })
         }

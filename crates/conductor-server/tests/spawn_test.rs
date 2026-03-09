@@ -2,7 +2,7 @@ mod common;
 
 use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
-use std::sync::Arc;
+use conductor_core::types::SessionStatus;use std::sync::Arc;
 
 #[tokio::test]
 async fn spawn_session_runs_from_queue_to_follow_up_ready_state() {
@@ -20,14 +20,14 @@ async fn spawn_session_runs_from_queue_to_follow_up_ready_state() {
         .spawn_session(spawn_request("Ship the test harness"))
         .await
         .unwrap();
-    assert_eq!(queued.status, "queued");
+    assert_eq!(queued.status, SessionStatus::Queued);
 
     let session = wait_for_condition("spawned session to reach follow-up state", || {
         let state = harness.state.clone();
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == "needs_input"
+                (session.status == SessionStatus::NeedsInput
                     && session.output.contains("prompt:Ship the test harness")
                     && session.metadata.contains_key("worktree"))
                 .then_some(session)

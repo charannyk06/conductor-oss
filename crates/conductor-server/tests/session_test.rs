@@ -1,5 +1,5 @@
 mod common;
-
+use conductor_core::types::SessionStatus;
 use common::{
     spawn_request, wait_for_condition, TestExecutor, TestHarness, TmuxResumeExecutor,
 };
@@ -27,7 +27,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == "working" && session.metadata.contains_key("worktree"))
+                (session.status == SessionStatus::Working && session.metadata.contains_key("worktree"))
                     .then_some(session)
             })
         }
@@ -71,7 +71,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = session.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == "killed").then_some(session)
+                (session.status == SessionStatus::Killed).then_some(session)
             })
         }
     })
@@ -88,7 +88,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == "working" && session.metadata.contains_key("worktree"))
+                (session.status == SessionStatus::Working && session.metadata.contains_key("worktree"))
                     .then_some(session)
             })
         }
@@ -102,7 +102,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = archivable.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == "archived").then_some(session)
+                (session.status == SessionStatus::Archived).then_some(session)
             })
         }
     })
@@ -116,7 +116,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = restored.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == "working" || session.status == "needs_input")
+                (session.status == SessionStatus::Working || session.status == SessionStatus::NeedsInput)
                     .then_some(session)
             })
         }
