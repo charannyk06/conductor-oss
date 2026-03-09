@@ -41,7 +41,39 @@ type CliUpdateContext = {
   installMode: CliInstallMode;
 };
 
-function quoteCliArg(value: string): string {
+export function quoteWindowsCliArg(value: string): string {
+  let escaped = "";
+  let backslashCount = 0;
+
+  for (const char of value) {
+    if (char === "\\") {
+      backslashCount += 1;
+      continue;
+    }
+
+    if (char === "\"") {
+      escaped += "\\".repeat(backslashCount * 2 + 1);
+      escaped += "\"";
+      backslashCount = 0;
+      continue;
+    }
+
+    if (backslashCount > 0) {
+      escaped += "\\".repeat(backslashCount);
+      backslashCount = 0;
+    }
+
+    escaped += char;
+  }
+
+  if (backslashCount > 0) {
+    escaped += "\\".repeat(backslashCount * 2);
+  }
+
+  return `"${escaped}"`;
+}
+
+export function quoteCliArg(value: string): string {
   if (value.length === 0) {
     return process.platform === "win32" ? "\"\"" : "''";
   }
@@ -51,7 +83,7 @@ function quoteCliArg(value: string): string {
   }
 
   if (process.platform === "win32") {
-    return `"${value.replace(/"/g, "\\\"")}"`;
+    return quoteWindowsCliArg(value);
   }
 
   return "'" + value.replace(/'/g, "'\"'\"'") + "'";

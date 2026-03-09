@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { isLoopbackHost, resolveRustBackendLaunch } from "../commands/start.js";
+import { isLoopbackHost, quoteWindowsCliArg, resolveRustBackendLaunch } from "../commands/start.js";
 
 test("isLoopbackHost recognizes local-only bind hosts", () => {
   assert.equal(isLoopbackHost("127.0.0.1"), true);
@@ -42,4 +42,10 @@ test("resolveRustBackendLaunch prefers the newest repo-local Rust binary over bu
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("quoteWindowsCliArg escapes quotes and trailing backslashes", () => {
+  assert.equal(quoteWindowsCliArg("C:\\Program Files\\Conductor"), "\"C:\\Program Files\\Conductor\"");
+  assert.equal(quoteWindowsCliArg("C:\\path with spaces\\"), "\"C:\\path with spaces\\\\\"");
+  assert.equal(quoteWindowsCliArg("say \"hello\""), "\"say \\\"hello\\\"\"");
 });
