@@ -166,8 +166,6 @@ pub fn build_runtime_env(
 }
 
 fn candidate_paths(dir: &Path, command: &str) -> Vec<PathBuf> {
-    let candidates = vec![dir.join(command)];
-
     #[cfg(windows)]
     {
         let pathext = env::var_os("PATHEXT")
@@ -180,12 +178,19 @@ fn candidate_paths(dir: &Path, command: &str) -> Vec<PathBuf> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()]);
-        for ext in pathext {
-            candidates.push(dir.join(format!("{command}{ext}")));
-        }
+        std::iter::once(dir.join(command))
+            .chain(
+                pathext
+                    .into_iter()
+                    .map(|ext| dir.join(format!("{command}{ext}"))),
+            )
+            .collect()
     }
 
-    candidates
+    #[cfg(not(windows))]
+    {
+        vec![dir.join(command)]
+    }
 }
 
 fn is_executable_candidate(candidate: &Path) -> bool {
