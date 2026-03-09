@@ -135,11 +135,13 @@ function hydrateStandaloneNodeModules(standaloneRoot) {
 }
 
 function sanitizePublishedPackage(pkg, {
+  packageName = pkg.name,
   dependencies = {},
   optionalDependencies = undefined,
+  publishConfig = undefined,
 } = {}) {
   const sanitized = {
-    name: pkg.name,
+    name: packageName,
     version: pkg.version,
     license: pkg.license,
     type: pkg.type,
@@ -156,6 +158,10 @@ function sanitizePublishedPackage(pkg, {
 
   if (optionalDependencies && Object.keys(optionalDependencies).length > 0) {
     sanitized.optionalDependencies = optionalDependencies;
+  }
+
+  if (publishConfig && Object.keys(publishConfig).length > 0) {
+    sanitized.publishConfig = publishConfig;
   }
 
   if (pkg.exports) {
@@ -252,11 +258,18 @@ function buildInternalPackageTarballs({ rootDir, cliVersion, tarballRoot, stagin
   return { internalDependencyNames, tarballs, externalDependencies };
 }
 
-export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}) {
+export function createCliReleaseStage({
+  rootDir = process.cwd(),
+  stageDir,
+  publishedName,
+  publishRegistry,
+} = {}) {
   const resolvedRootDir = resolve(rootDir);
   const cliPackage = readJson(resolve(resolvedRootDir, "packages", "cli", "package.json"));
   const webPackage = readJson(resolve(resolvedRootDir, "packages", "web", "package.json"));
   const webBundle = ensureWebBundle(resolvedRootDir);
+  const packageName = publishedName ?? cliPackage.name;
+  const publishConfig = publishRegistry ? { registry: publishRegistry } : undefined;
 
   const outputDir = stageDir
     ? resolve(stageDir)
@@ -321,8 +334,10 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   );
 
   const stagedManifest = sanitizePublishedPackage(cliPackage, {
+    packageName,
     dependencies: stagedDependencies,
     optionalDependencies: publishedOptionalDependencies,
+    publishConfig,
   });
   stagedManifest.files = ["dist/", "web/", "README.md", "LICENSE"];
   stagedManifest.bundleDependencies = internalDependencyNames;
@@ -393,8 +408,10 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   }
 
   const publishedManifest = sanitizePublishedPackage(cliPackage, {
+    packageName,
     dependencies: publishedDependencies,
     optionalDependencies: publishedOptionalDependencies,
+    publishConfig,
   });
   publishedManifest.files = ["dist/", "web/", "README.md", "LICENSE"];
   publishedManifest.bundleDependencies = internalDependencyNames;
@@ -406,13 +423,19 @@ export function createCliReleaseStage({ rootDir = process.cwd(), stageDir } = {}
   return {
     stageDir: outputDir,
     version: cliPackage.version,
-    packageName: cliPackage.name,
+    packageName,
     internalDependencyNames,
   };
 }
 
-export function packCliReleasePackage({ rootDir = process.cwd(), stageDir, packDestination } = {}) {
-  const stage = createCliReleaseStage({ rootDir, stageDir });
+export function packCliReleasePackage({
+  rootDir = process.cwd(),
+  stageDir,
+  packDestination,
+  publishedName,
+  publishRegistry,
+} = {}) {
+  const stage = createCliReleaseStage({ rootDir, stageDir, publishedName, publishRegistry });
   const destinationDir = packDestination ? resolve(packDestination) : stage.stageDir;
   mkdirSync(destinationDir, { recursive: true });
 

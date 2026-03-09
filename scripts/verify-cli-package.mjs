@@ -504,16 +504,28 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
         );
       }
 
-      await waitForCondition("repo-local config to reflect spawn agent selection", async () => {
+      const createdSessionId = spawnResult.payload?.session?.id;
+      await waitForCondition("spawned session to reflect requested agent", async () => {
+        const session = spawnResult.payload?.session;
+        if (session?.metadata?.agent === spawnAgent) {
+          return true;
+        }
+        if (typeof createdSessionId !== "string" || createdSessionId.length === 0) {
+          return false;
+        }
+        const sessionResult = await fetchJson(`${baseUrl}/api/sessions/${createdSessionId}`);
+        return sessionResult.payload?.metadata?.agent === spawnAgent;
+      });
+
+      await waitForCondition("repo-local config to retain saved defaults after spawn", async () => {
         const projectYaml = readTextFile(projectConfigPath);
-        return projectYaml.includes(`codingAgent: ${spawnAgent}`)
+        return projectYaml.includes("codingAgent: claude-code")
           && yamlContainsProject(projectYaml, createdProjectId)
-          && projectYaml.includes(`agent: ${spawnAgent}`)
+          && projectYaml.includes("agent: claude-code")
           && projectYaml.includes(`path: ${canonicalProjectDir}`)
           && !projectYaml.includes(`path: ${legacyMarkdownPath}`);
       });
 
-      const createdSessionId = spawnResult.payload?.session?.id;
       if (typeof createdSessionId === "string" && createdSessionId.length > 0) {
         await fetch(`${baseUrl}/api/sessions/${createdSessionId}/kill`, {
           method: "POST",
