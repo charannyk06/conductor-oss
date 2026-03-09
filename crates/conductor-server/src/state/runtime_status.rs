@@ -12,6 +12,7 @@ use tokio::task;
 use super::types::SessionRecord;
 
 const CODEX_TAIL_PATTERN: &str = ".codex/sessions/**/*.jsonl";
+const CODEX_TAIL_BYTES: u64 = 262_144;
 const CLAUDE_TAIL_BYTES: u64 = 262_144;
 const GEMINI_SESSION_PREFIX: &str = "session-";
 const QWEN_TAIL_PATTERN: &str = ".qwen/projects/**/chats/*.jsonl";
@@ -200,45 +201,48 @@ fn read_codex_runtime_status_from_home(home: &Path, cwd: &str) -> Option<Session
         note: Some("Codex has not reported a context window yet.".to_string()),
     };
 
-    let file = File::open(&file_path).ok()?;
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
+    let lines = parse_json_lines_from_tail(&file_path, CODEX_TAIL_BYTES);
 
+    for value in lines.iter().rev() {
         match value.get("type").and_then(Value::as_str) {
             Some("turn_context") => {
-                if let Some(next_model) = value.pointer("/payload/model").and_then(Value::as_str) {
-                    model = trimmed_or_none(next_model);
+                if model.is_none() {
+                    model = value
+                        .pointer("/payload/model")
+                        .and_then(Value::as_str)
+                        .and_then(trimmed_or_none);
                 }
             }
             Some("event_msg")
                 if value.pointer("/payload/type").and_then(Value::as_str)
                     == Some("token_count") =>
             {
-                if let Some(info) = value.pointer("/payload/info") {
-                    if let Some(total_usage) = info.get("total_token_usage") {
-                        usage.input_tokens = json_u64(total_usage.get("input_tokens"));
-                        usage.output_tokens = json_u64(total_usage.get("output_tokens"));
-                        usage.cached_input_tokens =
-                            json_u64(total_usage.get("cached_input_tokens"));
-                        usage.reasoning_tokens =
-                            json_u64(total_usage.get("reasoning_output_tokens"));
-                        usage.total_tokens = json_u64(total_usage.get("total_tokens"));
-                    }
-                    if let Some(max_tokens) = json_u64(info.get("model_context_window")) {
-                        context_window.max_tokens = Some(max_tokens);
-                        context_window.source = "cli".to_string();
-                        context_window.note =
-                            Some("Reported directly by the active Codex session.".to_string());
+                if usage.total_tokens.is_none() {
+                    if let Some(info) = value.pointer("/payload/info") {
+                        if let Some(total_usage) = info.get("total_token_usage") {
+                            usage.input_tokens = json_u64(total_usage.get("input_tokens"));
+                            usage.output_tokens = json_u64(total_usage.get("output_tokens"));
+                            usage.cached_input_tokens =
+                                json_u64(total_usage.get("cached_input_tokens"));
+                            usage.reasoning_tokens =
+                                json_u64(total_usage.get("reasoning_output_tokens"));
+                            usage.total_tokens = json_u64(total_usage.get("total_tokens"));
+                        }
+                        if let Some(max_tokens) = json_u64(info.get("model_context_window")) {
+                            context_window.max_tokens = Some(max_tokens);
+                            context_window.source = "cli".to_string();
+                            context_window.note = Some(
+                                "Reported directly by the active Codex session.".to_string(),
+                            );
+                        }
                     }
                 }
             }
             _ => {}
+        }
+
+        if model.is_some() && usage.total_tokens.is_some() {
+            break;
         }
     }
 
