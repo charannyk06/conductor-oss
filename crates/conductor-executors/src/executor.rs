@@ -52,6 +52,10 @@ pub struct SpawnOptions {
     /// Whether the runtime expects a long-lived interactive session.
     pub interactive: bool,
 
+    /// Request structured (JSON/stream-json) output even in interactive mode.
+    /// Used by tmux runtime to get parseable output while maintaining session persistence.
+    pub structured_output: bool,
+
     /// Native CLI session target to resume instead of launching a fresh session.
     pub resume_target: Option<String>,
 }

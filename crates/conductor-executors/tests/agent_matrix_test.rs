@@ -23,6 +23,7 @@ fn options(prompt: &str) -> SpawnOptions {
         branch: None,
         timeout: None,
         interactive: false,
+        structured_output: false,
         resume_target: None,
     }
 }
