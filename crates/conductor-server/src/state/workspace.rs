@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 
-use super::{AppState, SessionRecord};
+use super::{AppState, DevServerLaunch, SessionRecord};
 
 const SETUP_COMMAND_TIMEOUT: Duration = Duration::from_secs(900);
 const WORKSPACE_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
@@ -115,7 +115,8 @@ impl AppState {
 
         let add_result = add_command.status().await;
 
-        if add_result.is_err() || !add_result.unwrap().success() {
+        let success = add_result.map(|s| s.success()).unwrap_or(false);
+        if !success {
             return Err(anyhow!(
                 "Failed to create worktree for branch '{}' in project '{}'",
                 session_branch,
@@ -177,16 +178,26 @@ impl AppState {
         &self,
         project_id: &str,
         project: &ProjectConfig,
-    ) -> Result<Option<String>> {
+    ) -> Result<DevServerLaunch> {
         let script = join_script_lines(&project.dev_server_script);
+        let preview_url = project.resolved_dev_server_url();
+        let preview_port = project.dev_server_port;
         let Some(script) = script else {
-            return Ok(None);
+            return Ok(DevServerLaunch {
+                log_path: None,
+                preview_url,
+                preview_port,
+            });
         };
 
         let mut dev_servers = self.dev_servers.lock().await;
         if let Some(existing) = dev_servers.get(project_id) {
             if is_process_alive(existing.pid) {
-                return Ok(Some(existing.log_path.clone()));
+                return Ok(DevServerLaunch {
+                    log_path: Some(existing.log_path.clone()),
+                    preview_url,
+                    preview_port,
+                });
             }
         }
 
@@ -207,11 +218,34 @@ impl AppState {
         command
             .arg("-lc")
             .arg(script)
-            .current_dir(self.resolve_project_path(project))
+            .current_dir(resolve_dev_server_cwd(
+                &self.resolve_project_path(project),
+                project,
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .kill_on_drop(false);
+        if let Some(url) = preview_url.as_deref() {
+            command.env("CONDUCTOR_PREVIEW_URL", url);
+        }
+        if let Some(port) = preview_port {
+            let port_text = port.to_string();
+            command.env("PORT", &port_text);
+            command.env("CONDUCTOR_PREVIEW_PORT", &port_text);
+        }
+        if let Some(host) = project
+            .dev_server_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+        {
+            command.env("HOST", host);
+            command.env(
+                "CONDUCTOR_PREVIEW_HOST",
+                normalized_dev_server_host(project),
+            );
+        }
 
         let child = command.spawn().context("Failed to start dev server")?;
         let pid = child
@@ -228,7 +262,11 @@ impl AppState {
             },
         );
 
-        Ok(Some(log_path))
+        Ok(DevServerLaunch {
+            log_path: Some(log_path),
+            preview_url,
+            preview_port,
+        })
     }
 
     pub(crate) async fn archive_workspace(
@@ -439,6 +477,39 @@ fn join_script_lines(lines: &[String]) -> Option<String> {
         None
     } else {
         Some(scripts.join("\n"))
+    }
+}
+
+fn resolve_dev_server_cwd(project_root: &Path, project: &ProjectConfig) -> PathBuf {
+    let cwd = project
+        .dev_server_cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match cwd {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                project_root.join(path)
+            }
+        }
+        None => project_root.to_path_buf(),
+    }
+}
+
+fn normalized_dev_server_host(project: &ProjectConfig) -> String {
+    let host = project
+        .dev_server_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("127.0.0.1");
+    if host == "0.0.0.0" {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
     }
 }
 

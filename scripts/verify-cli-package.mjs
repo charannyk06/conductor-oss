@@ -241,8 +241,6 @@ async function verifyFirstRunOnboarding(baseUrl) {
       codingAgent: "claude-code",
       ide: "cursor",
       markdownEditor: "notion",
-      remoteSshHost: "conductor-dev",
-      remoteSshUser: "pm",
       notifications: {
         soundEnabled: false,
         soundFile: "abstract-sound-4",
@@ -400,8 +398,6 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
         && projectYaml.includes("ide: cursor")
         && projectYaml.includes("markdownEditor: notion")
         && projectYaml.includes("soundEnabled: false")
-        && projectYaml.includes("remoteSshHost: conductor-dev")
-        && projectYaml.includes("remoteSshUser: pm")
         && projectYaml.includes(`path: ${canonicalProjectDir}`)
         && projectYaml.includes("agent: claude-code");
     });
@@ -467,8 +463,6 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
         onboardingAcknowledged: true,
         codingAgent: "claude-code",
         ide: "vscode",
-        remoteSshHost: "conductor-prod",
-        remoteSshUser: "pm-team",
         markdownEditor: "obsidian",
         notifications: {
           soundEnabled: true,
@@ -489,9 +483,7 @@ async function verifyBrowserFirstLauncherFlow(installDir, tempDirs) {
         && projectYaml.includes("ide: vscode")
         && projectYaml.includes("markdownEditor: obsidian")
         && projectYaml.includes("soundEnabled: true")
-        && projectYaml.includes("soundFile: abstract-sound-4")
-        && projectYaml.includes("remoteSshHost: conductor-prod")
-        && projectYaml.includes("remoteSshUser: pm-team");
+        && projectYaml.includes("soundFile: abstract-sound-4");
     });
 
     const spawnAgent = await resolveSpawnAgent(baseUrl);
@@ -633,7 +625,6 @@ async function verifyConfiguredWorkspaceFlow(installDir, tempDirs) {
       if (nextPreferences.ide !== "cursor") return false;
       if (nextPreferences.markdownEditor !== "notion") return false;
       if (nextPreferences.notifications?.soundEnabled !== false) return false;
-      if (nextPreferences.remoteSshHost !== "conductor-dev" || nextPreferences.remoteSshUser !== "pm") return false;
 
       preferences = nextPreferences;
       return true;
@@ -724,9 +715,7 @@ async function verifyLegacyProjectArrayOnboardingFlow(installDir, tempDirs) {
         && preferences?.codingAgent === "claude-code"
         && preferences?.ide === "cursor"
         && preferences?.markdownEditor === "notion"
-        && preferences?.notifications?.soundEnabled === false
-        && preferences?.remoteSshHost === "conductor-dev"
-        && preferences?.remoteSshUser === "pm";
+        && preferences?.notifications?.soundEnabled === false;
     });
 
     const persistedConfig = readTextFile(configPath);

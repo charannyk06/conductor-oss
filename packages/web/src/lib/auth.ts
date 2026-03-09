@@ -2,11 +2,12 @@ import { existsSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { findConfigFile, loadConfig } from "@conductor-oss/core";
 import type { DashboardAccessConfig, DashboardRole, OrchestratorConfig } from "@conductor-oss/core/types";
-import { cookies, headers } from "next/headers";
+import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRoleForEmail, roleMeetsRequirement, isLoopbackHost } from "@/lib/accessControl";
 import { verifyTrustedEdgeIdentity } from "@/lib/edgeAuth";
-import { BUILTIN_REMOTE_SESSION_COOKIE, isBuiltinRemoteAuthEnabled, verifyBuiltinRemoteSession } from "@/lib/remoteAuth";
+import { readRemoteAccessRuntimeState } from "@/lib/remoteAccessRuntime";
+import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
 
 const clerkConfigured = Boolean(
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
@@ -14,8 +15,8 @@ const clerkConfigured = Boolean(
 
 type DashboardIdentityProvider =
   | "local"
-  | "builtin"
   | "clerk"
+  | "tailscale"
   | "trusted-header"
   | "cloudflare-access";
 
@@ -28,7 +29,7 @@ export interface DashboardAccess {
   reason?: string;
 }
 
-type DashboardConfigSnapshot = {
+export type DashboardConfigSnapshot = {
   access: DashboardAccessConfig | null;
   dashboardUrl: string | null;
 };
@@ -215,6 +216,15 @@ function loadDashboardConfigSnapshot(): DashboardConfigSnapshot {
   }
 }
 
+export function getDashboardConfigSnapshot(): DashboardConfigSnapshot {
+  return loadDashboardConfigSnapshot();
+}
+
+export function allowBuiltinRemoteAccess(access: DashboardAccessConfig | null | undefined): boolean {
+  void access;
+  return false;
+}
+
 function getDefaultRole(access: DashboardAccessConfig | null): DashboardRole | null {
   const configured = process.env.CONDUCTOR_ACCESS_DEFAULT_ROLE?.trim().toLowerCase();
   if (configured === "viewer" || configured === "operator" || configured === "admin") {
@@ -300,36 +310,34 @@ async function resolveTrustedHeaderAccess(
   };
 }
 
-async function resolveBuiltinRemoteAccess(): Promise<DashboardAccess | null> {
-  if (!isBuiltinRemoteAuthEnabled()) return null;
+async function resolveTailscaleAccess(
+  request: Request | undefined,
+  access: DashboardAccessConfig | null,
+  loopbackRequest: boolean,
+): Promise<DashboardAccess | null> {
+  const runtimeState = readRemoteAccessRuntimeState();
+  if (runtimeState?.provider !== "tailscale" || runtimeState.status !== "ready") {
+    return null;
+  }
 
-  const cookieStore = await cookies();
-  const session = cookieStore.get(BUILTIN_REMOTE_SESSION_COOKIE)?.value ?? null;
-  if (!session) {
+  const headerStore = await currentHeaders(request);
+  const login = headerStore.get("Tailscale-User-Login")?.trim().toLowerCase() ?? "";
+  if (!login) {
+    if (loopbackRequest) {
+      return null;
+    }
     return {
       ok: false,
       authenticated: false,
-      reason: "Remote sign-in required",
-      provider: "builtin",
+      provider: "tailscale",
+      reason: "Private network sign-in required",
     };
   }
 
-  const validSession = await verifyBuiltinRemoteSession(session);
-  if (!validSession) {
-    return {
-      ok: false,
-      authenticated: false,
-      reason: "Remote sign-in required",
-      provider: "builtin",
-    };
-  }
-
+  const resolved = resolveRoleForAuthenticatedEmail(login, access);
   return {
-    ok: true,
-    authenticated: true,
-    role: "admin",
-    email: "builtin",
-    provider: "builtin",
+    ...resolved,
+    provider: "tailscale",
   };
 }
 
@@ -400,30 +408,27 @@ export async function getDashboardAccess(request?: Request): Promise<DashboardAc
   const dashboardConfig = loadDashboardConfigSnapshot();
   const access = dashboardConfig.access;
   const host = await currentHost(request);
+  const loopbackRequest = isLoopbackHost(host);
+  const localAccess: DashboardAccess = {
+    ok: true,
+    authenticated: false,
+    role: "admin",
+    email: "local",
+    provider: "local",
+  };
 
   const trustedHeaderAccess = await resolveTrustedHeaderAccess(request, access);
   if (trustedHeaderAccess) return trustedHeaderAccess;
 
-  const builtinAccess = await resolveBuiltinRemoteAccess();
-  if (builtinAccess) return builtinAccess;
+  const tailscaleAccess = await resolveTailscaleAccess(request, access, loopbackRequest);
+  if (tailscaleAccess) return tailscaleAccess;
 
   const clerkAccess = await resolveClerkAccess(access);
   if (clerkAccess) return clerkAccess;
 
   const requireAuth = access?.requireAuth === true || envRequiresAuth() || hasLegacyAllowListConfigured();
 
-  // Trust the configured dashboardUrl host (for remote access via tunnels like ngrok).
-  let isTrustedDashboardHost = false;
-  if (dashboardConfig.dashboardUrl) {
-    try {
-      const dashboardHost = new URL(dashboardConfig.dashboardUrl).hostname.toLowerCase();
-      isTrustedDashboardHost = host.toLowerCase() === dashboardHost;
-    } catch {
-      // Ignore malformed dashboard URLs and continue with default host checks.
-    }
-  }
-
-  if (!isLoopbackHost(host) && !isTrustedDashboardHost) {
+  if (!loopbackRequest) {
     return {
       ok: false,
       authenticated: false,
@@ -431,21 +436,9 @@ export async function getDashboardAccess(request?: Request): Promise<DashboardAc
     };
   }
 
-  if (requireAuth) {
-    return {
-      ok: false,
-      authenticated: false,
-      reason: "Authentication required",
-    };
-  }
+  if (requireAuth) return localAccess;
 
-  return {
-    ok: true,
-    authenticated: false,
-    role: "admin",
-    email: "local",
-    provider: "local",
-  };
+  return localAccess;
 }
 
 export async function guardApiAccess(
@@ -486,8 +479,24 @@ function matchesHost(value: string, expectedHost: string, allowedHosts: Set<stri
   return equivalentHost(parsed.host, expectedHost);
 }
 
+function resolveExpectedActionHost(request: NextRequest): string {
+  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
+  if (forwardedHost) {
+    const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+    const parsed = parseHostParts(
+      `${forwardedProto === "http" || forwardedProto === "https" ? forwardedProto : "https"}://${forwardedHost}`,
+      request.nextUrl.host,
+    );
+    if (parsed?.host) {
+      return parsed.host;
+    }
+  }
+
+  return request.headers.get("host")?.trim() || request.nextUrl.host;
+}
+
 function guardActionOrigin(request: NextRequest): NextResponse | null {
-  const expectedHost = request.nextUrl.host;
+  const expectedHost = resolveExpectedActionHost(request);
   if (!expectedHost) return null;
   const allowedHosts = getAllowedActionHosts(expectedHost);
 
@@ -530,4 +539,29 @@ function guardActionOrigin(request: NextRequest): NextResponse | null {
 
 export function guardApiActionAccess(request: NextRequest): NextResponse | null {
   return guardActionOrigin(request);
+}
+
+export async function resolveDashboardPageRedirect(
+  currentPath: string,
+  requiredRole: DashboardRole = "viewer",
+): Promise<string | null> {
+  const access = await getDashboardAccess();
+  if (access.ok && access.role && roleMeetsRequirement(access.role, requiredRole)) {
+    return null;
+  }
+
+  const nextPath = sanitizeRedirectTarget(currentPath);
+  if (access.provider === "clerk" && !access.authenticated) {
+    const params = new URLSearchParams();
+    if (nextPath !== "/") {
+      params.set("redirect_url", nextPath);
+    }
+    return params.size > 0 ? `/sign-in?${params.toString()}` : "/sign-in";
+  }
+
+  const params = new URLSearchParams({ error: "unavailable" });
+  if (nextPath !== "/") {
+    params.set("next", nextPath);
+  }
+  return `/unlock?${params.toString()}`;
 }

@@ -25,6 +25,7 @@ pub(crate) const TMUX_LOG_OFFSET_METADATA_KEY: &str = "tmuxLogOffset";
 
 const TMUX_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TMUX_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const TMUX_ACTIVITY_WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct RuntimeLaunch {
     pub handle: ExecutorHandle,
@@ -51,17 +52,163 @@ struct TmuxOutputForwarder {
     offset: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TmuxActivityState {
+    Active,
+    Ready,
+    WaitingInput,
+    Blocked,
+}
+
+fn pane_lines(pane: &str) -> Vec<&str> {
+    pane.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn last_non_empty_line(pane: &str) -> &str {
+    pane.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+}
+
+fn prompt_visible(agent: &str, line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+
+    match conductor_core::types::AgentKind::parse(agent) {
+        conductor_core::types::AgentKind::Codex => {
+            line.starts_with('›')
+                || matches!(line, ">" | "$" | "#")
+                || line
+                    .split_whitespace()
+                    .next()
+                    .map(|token| token.chars().all(|ch| ch.is_ascii_digit() || ch == '%'))
+                    .unwrap_or(false)
+                    && (line.contains(" left") || line.contains(" remaining"))
+        }
+        conductor_core::types::AgentKind::Gemini => {
+            line.starts_with('❯') || matches!(line, ">" | "$" | "#")
+        }
+        _ => matches!(line, "❯" | ">" | "$" | "#"),
+    }
+}
+
+fn classify_tmux_pane(agent: &str, pane: &str) -> TmuxActivityState {
+    if pane.trim().is_empty() {
+        return TmuxActivityState::Ready;
+    }
+
+    let lines = pane_lines(pane);
+    let last_line = last_non_empty_line(pane);
+    if prompt_visible(agent, last_line) {
+        return TmuxActivityState::Ready;
+    }
+
+    let tail = lines
+        .iter()
+        .rev()
+        .take(8)
+        .copied()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+
+    if tail.contains("not authenticated")
+        || tail.contains("authentication required")
+        || tail.contains("login required")
+        || tail.contains("auth login")
+        || tail.contains("device code")
+        || tail.contains("open this url to authenticate")
+        || (tail.contains("sign in") && tail.contains("browser"))
+    {
+        return TmuxActivityState::Blocked;
+    }
+
+    if tail.contains("(y)es") && tail.contains("(n)o")
+        || tail.contains("do you want")
+        || tail.contains("confirm")
+        || tail.contains("approve")
+        || tail.contains("proceed")
+        || tail.contains("select an option")
+        || tail.contains("press enter to continue")
+        || tail.contains("bypass permissions")
+    {
+        return TmuxActivityState::WaitingInput;
+    }
+
+    if ["done", "complete", "completed", "finished", "exiting"]
+        .iter()
+        .any(|prefix| last_line.to_ascii_lowercase().starts_with(prefix))
+    {
+        return TmuxActivityState::Ready;
+    }
+
+    TmuxActivityState::Active
+}
+
+fn summarize_tmux_pane(agent: &str, pane: &str, activity: TmuxActivityState) -> Option<String> {
+    let lines = pane_lines(pane);
+    if lines.is_empty() {
+        return match activity {
+            TmuxActivityState::Active => None,
+            TmuxActivityState::Blocked => {
+                Some("Authentication or terminal input required".to_string())
+            }
+            TmuxActivityState::Ready | TmuxActivityState::WaitingInput => {
+                Some("Ready for follow-up".to_string())
+            }
+        };
+    }
+
+    let candidate = lines
+        .iter()
+        .rev()
+        .copied()
+        .find(|line| !prompt_visible(agent, line))
+        .unwrap_or_else(|| last_non_empty_line(pane));
+
+    let cleaned = candidate.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    Some(match activity {
+        TmuxActivityState::Active => cleaned.to_string(),
+        TmuxActivityState::Blocked => cleaned.to_string(),
+        TmuxActivityState::WaitingInput => cleaned.to_string(),
+        TmuxActivityState::Ready => {
+            if prompt_visible(agent, cleaned) {
+                "Ready for follow-up".to_string()
+            } else {
+                cleaned.to_string()
+            }
+        }
+    })
+}
+
 impl AppState {
     pub(crate) async fn spawn_with_runtime(
         self: &Arc<Self>,
         project: &ProjectConfig,
         executor: Arc<dyn Executor>,
         session_id: &str,
-        options: SpawnOptions,
+        mut options: SpawnOptions,
     ) -> Result<RuntimeLaunch> {
         match runtime_mode(project) {
-            TMUX_RUNTIME_MODE => self.spawn_tmux_runtime(executor, session_id, options).await,
+            TMUX_RUNTIME_MODE => {
+                options.interactive = true;
+                self.spawn_tmux_runtime(executor, session_id, options).await
+            }
             _ => {
+                options.interactive = false;
                 let handle = executor.spawn(options).await?;
                 Ok(RuntimeLaunch {
                     handle,
@@ -85,7 +232,13 @@ impl AppState {
                         .metadata
                         .get(RUNTIME_MODE_METADATA_KEY)
                         .map(|value| value == TMUX_RUNTIME_MODE)
-                        .unwrap_or(false)
+                        .unwrap_or_else(|| {
+                            session
+                                .metadata
+                                .get(TMUX_SESSION_METADATA_KEY)
+                                .map(|value| !value.trim().is_empty())
+                                .unwrap_or(false)
+                        })
                 })
                 .map(|session| session.id.clone())
                 .collect::<Vec<_>>()
@@ -96,6 +249,128 @@ impl AppState {
                 tracing::warn!(session_id, error = %err, "Failed to restore tmux runtime session");
             }
         }
+    }
+
+    pub(crate) fn start_tmux_activity_watchdog(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(TMUX_ACTIVITY_WATCH_INTERVAL);
+            loop {
+                interval.tick().await;
+
+                let session_ids = state
+                    .live_sessions
+                    .read()
+                    .await
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                for session_id in session_ids {
+                    if let Err(err) = state.reconcile_tmux_session_activity(&session_id).await {
+                        tracing::debug!(
+                            session_id,
+                            error = %err,
+                            "Failed to reconcile tmux activity"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    pub(crate) async fn ensure_session_live(self: &Arc<Self>, session_id: &str) -> Result<bool> {
+        if self.live_sessions.read().await.contains_key(session_id) {
+            return Ok(true);
+        }
+
+        let Some(session) = self.get_session(session_id).await else {
+            return Ok(false);
+        };
+
+        if matches!(session.status.as_str(), "archived" | "killed") {
+            return Ok(false);
+        }
+
+        let is_tmux_runtime = session
+            .metadata
+            .get(RUNTIME_MODE_METADATA_KEY)
+            .map(|value| value == TMUX_RUNTIME_MODE)
+            .unwrap_or_else(|| {
+                session
+                    .metadata
+                    .get(TMUX_SESSION_METADATA_KEY)
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false)
+            });
+
+        if !is_tmux_runtime {
+            return Ok(false);
+        }
+
+        self.restore_tmux_session(session_id).await?;
+        Ok(self.live_sessions.read().await.contains_key(session_id))
+    }
+
+    async fn reconcile_tmux_session_activity(&self, session_id: &str) -> Result<()> {
+        let Some(snapshot) = self.get_session(session_id).await else {
+            return Ok(());
+        };
+        if super::helpers::is_terminal_status(&snapshot.status) || snapshot.status == "queued" {
+            return Ok(());
+        }
+
+        let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&snapshot) else {
+            return Ok(());
+        };
+        if !tmux_session_exists(&socket_path, &tmux_session).await? {
+            return Ok(());
+        }
+
+        let pane = capture_tmux_pane(&socket_path, &tmux_session, 80).await?;
+        let activity = classify_tmux_pane(&snapshot.agent, &pane);
+        let summary = summarize_tmux_pane(&snapshot.agent, &pane, activity);
+
+        let mut sessions = self.sessions.write().await;
+        let Some(current) = sessions.get_mut(session_id) else {
+            return Ok(());
+        };
+        if super::helpers::is_terminal_status(&current.status) || current.status == "queued" {
+            return Ok(());
+        }
+
+        let next_status = match activity {
+            TmuxActivityState::Active => "working",
+            TmuxActivityState::Ready | TmuxActivityState::WaitingInput => "needs_input",
+            TmuxActivityState::Blocked => "stuck",
+        };
+        let next_activity = match activity {
+            TmuxActivityState::Active => "active",
+            TmuxActivityState::Ready | TmuxActivityState::WaitingInput => "waiting_input",
+            TmuxActivityState::Blocked => "blocked",
+        };
+
+        let summary_changed =
+            summary.as_ref().map(|value| value.as_str()) != current.summary.as_deref();
+        let status_changed = current.status != next_status;
+        let activity_changed = current.activity.as_deref() != Some(next_activity);
+
+        if !summary_changed && !status_changed && !activity_changed {
+            return Ok(());
+        }
+
+        current.status = next_status.to_string();
+        current.activity = Some(next_activity.to_string());
+        if let Some(summary) = summary {
+            current.summary = Some(summary.clone());
+            current.metadata.insert("summary".to_string(), summary);
+        }
+
+        let updated = current.clone();
+        drop(sessions);
+        self.persist_session(&updated).await?;
+        self.publish_snapshot().await;
+        Ok(())
     }
 
     async fn spawn_tmux_runtime(
@@ -141,7 +416,7 @@ impl AppState {
                 "-c",
                 options.cwd.to_string_lossy().as_ref(),
             ],
-            Some(format!("sh -lc {}", shell_escape(&wrapper))),
+            Some(format!("sh -c {}", shell_escape(&wrapper))),
         )
         .await
         .with_context(|| format!("Failed to create tmux session {session_name}"))?;
@@ -257,7 +532,7 @@ impl AppState {
                 }),
             );
 
-            self.start_output_consumer(session_id.to_string(), executor, output_rx);
+            self.start_output_consumer(session_id.to_string(), executor, output_rx, false, None);
 
             let mut sessions = self.sessions.write().await;
             if let Some(current) = sessions.get_mut(session_id) {
@@ -360,18 +635,11 @@ impl AppState {
             while let Some(input) = input_rx.recv().await {
                 let result = match input {
                     ExecutorInput::Text(text) => {
-                        if let Err(err) =
-                            send_tmux_literal(&input_socket, &input_session_name, &text).await
-                        {
-                            Err(err)
-                        } else if text.ends_with('\n') || text.ends_with('\r') {
-                            Ok(())
-                        } else {
-                            send_tmux_enter(&input_socket, &input_session_name).await
-                        }
+                        send_tmux_text(&input_socket, &input_session_name, &text).await
                     }
                     ExecutorInput::Raw(raw) => {
-                        send_tmux_literal(&input_socket, &input_session_name, &raw).await
+                        send_tmux_raw_bytes(&input_socket, &input_session_name, raw.as_bytes())
+                            .await
                     }
                 };
                 if let Err(err) = result {
@@ -534,6 +802,27 @@ pub(crate) async fn tmux_session_exists(socket_path: &Path, session_name: &str) 
     Ok(status.success())
 }
 
+async fn capture_tmux_pane(socket_path: &Path, session_name: &str, lines: usize) -> Result<String> {
+    let output = tokio::process::Command::new("tmux")
+        .arg("-S")
+        .arg(socket_path)
+        .arg("capture-pane")
+        .arg("-p")
+        .arg("-t")
+        .arg(session_name)
+        .arg("-S")
+        .arg(format!("-{lines}"))
+        .output()
+        .await
+        .with_context(|| format!("Failed to capture tmux pane for {session_name}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(anyhow!("tmux capture-pane failed for {session_name}"))
+    }
+}
+
 pub(crate) async fn kill_tmux_session(socket_path: &Path, session_name: &str) -> Result<()> {
     let status = tokio::process::Command::new("tmux")
         .arg("-S")
@@ -623,6 +912,47 @@ async fn send_tmux_literal(socket_path: &Path, session_name: &str, value: &str) 
     } else {
         Err(anyhow!("tmux send-keys failed for {session_name}"))
     }
+}
+
+async fn send_tmux_text(socket_path: &Path, session_name: &str, value: &str) -> Result<()> {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    let mut segments = normalized.split('\n').peekable();
+    while let Some(segment) = segments.next() {
+        if !segment.is_empty() {
+            send_tmux_literal(socket_path, session_name, segment).await?;
+        }
+
+        if segments.peek().is_some() {
+            send_tmux_enter(socket_path, session_name).await?;
+        }
+    }
+
+    if !value.ends_with('\n') && !value.ends_with('\r') {
+        send_tmux_enter(socket_path, session_name).await?;
+    }
+
+    Ok(())
+}
+
+async fn send_tmux_raw_bytes(socket_path: &Path, session_name: &str, bytes: &[u8]) -> Result<()> {
+    for byte in bytes {
+        let status = tokio::process::Command::new("tmux")
+            .arg("-S")
+            .arg(socket_path)
+            .arg("send-keys")
+            .arg("-t")
+            .arg(session_name)
+            .arg("-H")
+            .arg(format!("{byte:02x}"))
+            .status()
+            .await
+            .with_context(|| format!("Failed to send raw bytes to tmux session {session_name}"))?;
+        if !status.success() {
+            return Err(anyhow!("tmux send-keys -H failed for {session_name}"));
+        }
+    }
+
+    Ok(())
 }
 
 async fn send_tmux_enter(socket_path: &Path, session_name: &str) -> Result<()> {
@@ -745,6 +1075,33 @@ mod tests {
     use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
+    #[test]
+    fn classify_tmux_pane_marks_codex_prompt_ready() {
+        assert_eq!(
+            classify_tmux_pane("codex", "Thinking about changes\n› "),
+            TmuxActivityState::Ready
+        );
+    }
+
+    #[test]
+    fn classify_tmux_pane_marks_confirmation_waiting_input() {
+        assert_eq!(
+            classify_tmux_pane("claude-code", "Do you want to proceed?\n(Y)es/(N)o"),
+            TmuxActivityState::WaitingInput
+        );
+    }
+
+    #[test]
+    fn classify_tmux_pane_marks_auth_blocked() {
+        assert_eq!(
+            classify_tmux_pane(
+                "cursor-cli",
+                "Authentication required. Open this URL to authenticate in your browser."
+            ),
+            TmuxActivityState::Blocked
+        );
+    }
+
     struct TmuxHarnessExecutor;
 
     #[async_trait]
@@ -786,6 +1143,56 @@ mod tests {
             vec![
                 "-lc".to_string(),
                 "printf 'phase-one\\n'; sleep 2; printf 'phase-two\\n'".to_string(),
+            ]
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
+
+    struct TmuxInputHarnessExecutor;
+
+    #[async_trait]
+    impl Executor for TmuxInputHarnessExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "Tmux Input Harness"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/bin/sh")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
+            let args = self.build_args(&options);
+            let handle =
+                spawn_process(self.binary_path(), &args, &options.cwd, &options.env).await?;
+            Ok(ExecutorHandle::new(
+                handle.pid,
+                self.kind(),
+                handle.output_rx,
+                handle.input_tx,
+                handle.kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            vec![
+                "-lc".to_string(),
+                "printf 'ready\\n'; IFS= read -r line; printf 'echo:%s\\n' \"$line\"; sleep 0.2"
+                    .to_string(),
             ]
         }
 
@@ -849,6 +1256,9 @@ mod tests {
                     extra_args: Vec::new(),
                     env: HashMap::new(),
                     branch: None,
+                    timeout: None,
+                    interactive: false,
+                    resume_target: None,
                 },
             )
             .await
@@ -876,6 +1286,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(300)).await;
 
+        drop(state);
         let restored = build_state(&root).await;
         restored.restore_runtime_sessions().await;
 
@@ -909,9 +1320,270 @@ mod tests {
                 .map(String::as_str),
             Some(TMUX_RUNTIME_MODE)
         );
-        assert!(final_session.output.contains("phase-one"));
         assert!(final_session.output.contains("phase-two"));
         assert!(!final_session.metadata.contains_key("recoveryState"));
+
+        if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
+            let _ = kill_tmux_session(&socket_path, &tmux_session).await;
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn send_to_session_reattaches_tmux_runtime_on_demand() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-tmux-send-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        let session_id = "tmux-send-session";
+        let state = build_state(&root).await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TmuxInputHarnessExecutor));
+        let executor = state
+            .executors
+            .read()
+            .await
+            .get(&AgentKind::Codex)
+            .cloned()
+            .unwrap();
+
+        let launch = state
+            .spawn_tmux_runtime(
+                executor,
+                session_id,
+                SpawnOptions {
+                    cwd: repo.clone(),
+                    prompt: "Inspect".to_string(),
+                    model: None,
+                    reasoning_effort: None,
+                    skip_permissions: false,
+                    extra_args: Vec::new(),
+                    env: HashMap::new(),
+                    branch: None,
+                    timeout: None,
+                    interactive: false,
+                    resume_target: None,
+                },
+            )
+            .await
+            .unwrap();
+        let pid = launch.handle.pid;
+        let metadata = launch.metadata.clone();
+        drop(launch);
+
+        let mut record = SessionRecord::new(
+            session_id.to_string(),
+            "demo".to_string(),
+            Some("session/tmux".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Inspect".to_string(),
+            Some(pid),
+        );
+        record.status = "needs_input".to_string();
+        record.activity = Some("waiting_input".to_string());
+        record.metadata.extend(metadata);
+        state.replace_session(record).await.unwrap();
+
+        let restored = build_state(&root).await;
+        restored
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TmuxInputHarnessExecutor));
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        restored
+            .send_to_session(
+                session_id,
+                "make this panel bigger".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let final_session = timeout(Duration::from_secs(5), async {
+            loop {
+                let session = restored.get_session(session_id).await.unwrap();
+                if session.output.contains("echo:make this panel bigger") {
+                    return session;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("tmux session should accept follow-up input after reattach");
+
+        assert!(restored.live_sessions.read().await.contains_key(session_id));
+        assert!(final_session
+            .conversation
+            .iter()
+            .any(|entry| entry.kind == "user_message" && entry.text == "make this panel bigger"));
+
+        if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
+            let _ = kill_tmux_session(&socket_path, &tmux_session).await;
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    struct TmuxRawInputHarnessExecutor;
+
+    #[async_trait]
+    impl Executor for TmuxRawInputHarnessExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "Tmux Raw Input Harness"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/bin/sh")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
+            let args = self.build_args(&options);
+            let handle =
+                spawn_process(self.binary_path(), &args, &options.cwd, &options.env).await?;
+            Ok(ExecutorHandle::new(
+                handle.pid,
+                self.kind(),
+                handle.output_rx,
+                handle.input_tx,
+                handle.kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            vec![
+                "-lc".to_string(),
+                concat!(
+                    "printf 'ready\\n'; ",
+                    "IFS= read -r line; ",
+                    "printf 'line:%s\\n' \"$line\"; ",
+                    "old_tty=$(stty -g); ",
+                    "stty raw -echo; ",
+                    "bytes=$(dd bs=1 count=3 2>/dev/null | od -An -tx1 | tr -d ' \\n'); ",
+                    "stty \"$old_tty\"; ",
+                    "printf 'bytes:%s\\n' \"$bytes\"; ",
+                    "sleep 0.2"
+                )
+                .to_string(),
+            ]
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn send_raw_to_session_preserves_escape_sequences_for_tmux_runtime() {
+        let root = std::env::temp_dir().join(format!("conductor-tmux-raw-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        let session_id = "tmux-raw-session";
+        let state = build_state(&root).await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TmuxRawInputHarnessExecutor));
+        let executor = state
+            .executors
+            .read()
+            .await
+            .get(&AgentKind::Codex)
+            .cloned()
+            .unwrap();
+
+        let launch = state
+            .spawn_tmux_runtime(
+                executor,
+                session_id,
+                SpawnOptions {
+                    cwd: repo.clone(),
+                    prompt: "Inspect".to_string(),
+                    model: None,
+                    reasoning_effort: None,
+                    skip_permissions: false,
+                    extra_args: Vec::new(),
+                    env: HashMap::new(),
+                    branch: None,
+                    timeout: None,
+                    interactive: false,
+                    resume_target: None,
+                },
+            )
+            .await
+            .unwrap();
+        let pid = launch.handle.pid;
+        let mut record = SessionRecord::new(
+            session_id.to_string(),
+            "demo".to_string(),
+            Some("session/tmux-raw".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Inspect".to_string(),
+            Some(pid),
+        );
+        record.status = "working".to_string();
+        record.activity = Some("active".to_string());
+        record.metadata.extend(launch.metadata);
+        state.replace_session(record).await.unwrap();
+
+        state
+            .send_to_session(
+                session_id,
+                "continue".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+        state
+            .send_raw_to_session(session_id, "\u{1b}[A".to_string())
+            .await
+            .unwrap();
+
+        let final_session = timeout(Duration::from_secs(5), async {
+            loop {
+                let session = state.get_session(session_id).await.unwrap();
+                if session.output.contains("line:continue")
+                    && session.output.contains("bytes:1b5b41")
+                {
+                    return session;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("tmux runtime should receive raw escape sequences");
+
+        assert!(final_session.output.contains("line:continue"));
+        assert!(final_session.output.contains("bytes:1b5b41"));
 
         if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
             let _ = kill_tmux_session(&socket_path, &tmux_session).await;

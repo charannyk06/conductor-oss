@@ -77,3 +77,29 @@ test("validateConfig sanitizes null optional project fields from mixed writers",
   assert.equal(config.projects["demo"]?.agentConfig?.model, undefined);
   assert.equal(config.projects["demo"]?.agentConfig?.reasoningEffort, undefined);
 });
+
+test("validateConfig upgrades flat dev server preview fields into nested config", () => {
+  const config = validateConfig({
+    projects: {
+      demo: {
+        repo: "org/demo",
+        path: "/tmp/demo",
+        devServerScript: "pnpm dev",
+        devServerCwd: "apps/web",
+        devServerPort: "3100",
+        devServerHost: "0.0.0.0",
+        devServerPath: "preview",
+        devServerHttps: true,
+      },
+    },
+  });
+
+  assert.deepEqual(config.projects["demo"]?.devServer, {
+    command: "pnpm dev",
+    cwd: "apps/web",
+    port: 3100,
+    host: "0.0.0.0",
+    path: "preview",
+    https: true,
+  });
+});

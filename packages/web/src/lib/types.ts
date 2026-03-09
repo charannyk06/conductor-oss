@@ -21,6 +21,14 @@ export interface MergeReadiness {
   blockers: string[];
 }
 export type PRState = "open" | "merged" | "closed";
+export type AppInstallMode =
+  | "source"
+  | "npx"
+  | "global-npm"
+  | "global-pnpm"
+  | "global-bun"
+  | "unknown";
+export type AppUpdateJobStatus = "idle" | "running" | "completed" | "failed";
 
 /**
  * Attention zone priority level, ordered by human action urgency:
@@ -78,6 +86,29 @@ export interface DashboardStats {
   needsAttention: number;
 }
 
+export interface AppUpdateStatus {
+  enabled: boolean;
+  reason: string | null;
+  packageName: string | null;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  checkedAt: string | null;
+  error: string | null;
+  installMode: AppInstallMode;
+  updateCommand: string | null;
+  canAutoUpdate: boolean;
+  canRestart: boolean;
+  restarting: boolean;
+  jobStatus: AppUpdateJobStatus;
+  jobMessage: string | null;
+  jobStartedAt: string | null;
+  jobUpdatedAt: string | null;
+  jobCompletedAt: string | null;
+  logsTail: string | null;
+  restartRequired: boolean;
+}
+
 /** SSE snapshot event from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";
@@ -95,6 +126,7 @@ export interface SSESnapshotEvent {
     summary?: string | null;
     pr?: DashboardPR | null;
   }>;
+  appUpdate?: AppUpdateStatus | null;
 }
 
 /** Session statuses that indicate the session is no longer active. */

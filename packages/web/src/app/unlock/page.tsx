@@ -1,9 +1,11 @@
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { isLoopbackHost } from "@/lib/accessControl";
 import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
-import { UnlockForm } from "./UnlockForm";
 
 function getErrorMessage(code: string | null | undefined): string | null {
   if (code === "invalid") return "That access link or token is invalid.";
-  if (code === "unavailable") return "Remote sign-in is not available for this session.";
+  if (code === "unavailable") return "Public share-link remote access is no longer available for this session.";
   return null;
 }
 
@@ -17,6 +19,19 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
   const nextValue = Array.isArray(rawNext) ? rawNext[0] : rawNext;
   const rawError = resolved.error;
   const errorValue = Array.isArray(rawError) ? rawError[0] : rawError;
+  const nextPath = sanitizeRedirectTarget(nextValue);
+  const errorMessage = getErrorMessage(errorValue);
+  const headerStore = await headers();
+  const forwardedHost = headerStore.get("x-forwarded-host")
+    ?.split(",")[0]
+    ?.trim()
+    .split(":")[0]
+    ?.toLowerCase() ?? "";
+  const requestHost = forwardedHost || (headerStore.get("host")?.split(":")[0]?.trim().toLowerCase() ?? "");
+
+  if (isLoopbackHost(requestHost)) {
+    redirect(nextPath);
+  }
 
   return (
     <main className="flex min-h-screen items-center justify-center px-4 py-10">
@@ -27,14 +42,21 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
           </p>
           <h1 className="text-2xl font-semibold text-[var(--text-strong)]">Unlock Conductor</h1>
           <p className="text-sm leading-6 text-[var(--text-muted)]">
-            Use the secure unlock link from the terminal that started this session, or paste the access token below.
+            Public share-link remote access has been removed. Use the private Tailscale link from Settings, or open the protected enterprise URL from Cloudflare Access or Clerk instead.
           </p>
         </div>
 
-        <UnlockForm
-          initialError={getErrorMessage(errorValue)}
-          nextPath={sanitizeRedirectTarget(nextValue)}
-        />
+        {errorMessage ? (
+          <p className="mt-6 rounded-[var(--radius-md)] border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            {errorMessage}
+          </p>
+        ) : null}
+
+        {nextPath !== "/" ? (
+          <p className="mt-6 text-sm leading-6 text-[var(--text-muted)]">
+            Requested path: <code>{nextPath}</code>
+          </p>
+        ) : null}
       </section>
     </main>
   );

@@ -5,6 +5,7 @@ import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 
 export interface Agent {
   name: string;
+  label?: string;
   description: string;
   installed?: boolean;
   configured?: boolean;
@@ -13,6 +14,10 @@ export interface Agent {
   model?: string;
   homepage?: string;
   iconUrl?: string;
+  installHint?: string | null;
+  installUrl?: string | null;
+  setupUrl?: string | null;
+  version?: string | null;
   runtimeModelCatalog?: RuntimeAgentModelCatalog | null;
 }
 

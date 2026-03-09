@@ -8,8 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    AgentConfig, ConductorConfig, DashboardAccessConfig, ModelAccessPreferences,
-    NotificationPreferences, PreferencesConfig, ProjectConfig, TrustedHeaderAccessConfig,
+    AgentConfig, ConductorConfig, DashboardAccessConfig, GitHubProjectConfig,
+    ModelAccessPreferences, NotificationPreferences, PreferencesConfig, ProjectConfig,
+    TrustedHeaderAccessConfig,
 };
 
 pub const GENERATED_MARKER_KEY: &str = "_generatedFromWorkspace";
@@ -72,11 +73,9 @@ struct MirrorPreferences {
     onboarding_acknowledged: bool,
     coding_agent: String,
     ide: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    remote_ssh_host: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    remote_ssh_user: String,
     markdown_editor: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    markdown_editor_path: String,
     model_access: ModelAccessPreferences,
     notifications: NotificationPreferences,
 }
@@ -102,6 +101,26 @@ struct MirrorProject {
     default_working_directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    github_project: Option<GitHubProjectConfig>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dev_server_script: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_server_cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_server_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_server_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_server_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dev_server_path: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    dev_server_https: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn startup_config_sync(
@@ -255,13 +274,12 @@ fn build_preferences(preferences: &PreferencesConfig) -> MirrorPreferences {
         } else {
             preferences.ide.clone()
         },
-        remote_ssh_host: preferences.remote_ssh_host.clone(),
-        remote_ssh_user: preferences.remote_ssh_user.clone(),
         markdown_editor: if preferences.markdown_editor.trim().is_empty() {
             "obsidian".to_string()
         } else {
             preferences.markdown_editor.clone()
         },
+        markdown_editor_path: preferences.markdown_editor_path.trim().to_string(),
         model_access: preferences.model_access.clone(),
         notifications: preferences.notifications.clone(),
     }
@@ -313,6 +331,14 @@ fn build_project(project_id: &str, project: &ProjectConfig) -> MirrorProject {
         board_dir: project.board_dir.clone(),
         default_working_directory: project.default_working_directory.clone(),
         description: project.description.clone(),
+        github_project: project.github_project.clone(),
+        dev_server_script: project.dev_server_script.clone(),
+        dev_server_cwd: project.dev_server_cwd.clone(),
+        dev_server_url: project.dev_server_url.clone(),
+        dev_server_port: project.dev_server_port,
+        dev_server_host: project.dev_server_host.clone(),
+        dev_server_path: project.dev_server_path.clone(),
+        dev_server_https: project.dev_server_https,
     }
 }
 
@@ -734,14 +760,23 @@ mod tests {
                 scm: Some(Value::String("github".to_string())),
                 icon_url: None,
                 description: Some("Demo project".to_string()),
+                github_project: None,
                 agent_config: AgentConfig {
                     permissions: Some("skip".to_string()),
                     model: None,
                     reasoning_effort: None,
+                    session_timeout_secs: None,
                 },
                 setup_script: Vec::new(),
                 run_setup_in_parallel: false,
                 dev_server_script: Vec::new(),
+                dev_server_cwd: None,
+                dev_server_url: None,
+                dev_server_port: None,
+                dev_server_host: None,
+                dev_server_path: None,
+                dev_server_https: false,
+                dev_server: None,
                 cleanup_script: Vec::new(),
                 archive_script: Vec::new(),
                 copy_files: Vec::new(),
@@ -834,10 +869,18 @@ mod tests {
             )]))),
             icon_url: None,
             description: None,
+            github_project: None,
             agent_config: AgentConfig::default(),
             setup_script: Vec::new(),
             run_setup_in_parallel: false,
             dev_server_script: Vec::new(),
+            dev_server_cwd: None,
+            dev_server_url: None,
+            dev_server_port: None,
+            dev_server_host: None,
+            dev_server_path: None,
+            dev_server_https: false,
+            dev_server: None,
             cleanup_script: Vec::new(),
             archive_script: Vec::new(),
             copy_files: Vec::new(),

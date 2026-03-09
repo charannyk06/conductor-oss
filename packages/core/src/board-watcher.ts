@@ -397,7 +397,7 @@ function enhanceTaskHeuristically(
  * (Obsidian Kanban plugin) within the guard window gets overwritten with ours.
  */
 const writeGuard = new Map<string, { content: string; at: number }>();
-const WRITE_GUARD_MS = 15_000;
+const WRITE_GUARD_MS = 3_000;  // Reduced from 15s to allow faster re-processing of user changes
 /** Nudge Obsidian to reload a file after external write. */
 function nudgeObsidian(boardPath: string): void {
   if (process.platform !== "darwin" && process.platform !== "linux") return;
@@ -492,6 +492,8 @@ async function enhanceInbox(
     });
 
     nudgeObsidian(boardPath);
+  } else {
+    console.log(`[board-watcher] No changes made to ${basename(boardPath)}`);
   }
 }
 
@@ -2090,11 +2092,11 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         try {
           const watcher = fsWatch(boardPath, { persistent: false }, (eventType) => {
             if (eventType === "change") {
-              // Debounce: wait 2s for Obsidian to finish its write cycle
+              // Quick debounce: wait 500ms for file write to complete, then enhance immediately
               setTimeout(() => {
-      void enhanceInbox(boardPath, config, supportedAgents);
+                void enhanceInbox(boardPath, config, supportedAgents);
                 void checkBoard(boardPath);
-              }, 2000);
+              }, 500);
             }
           });
 
@@ -2113,25 +2115,24 @@ export function createBoardWatcher(watcherConfig: BoardWatcherConfig): BoardWatc
         boardPaths,
         agentNames: supportedAgents,
       });
-
-      // Run initial inbox enhancement 3s after startup
       setTimeout(() => {
         for (const boardPath of boardPaths) {
           void enhanceInbox(boardPath, config, supportedAgents);
         }
-      }, 3_000);
+      }, 500);
 
-      // Run initial board check 2s after startup so existing "Ready to Dispatch"
+      // Run initial board check 1s after startup so existing "Ready to Dispatch"
       // tasks are dispatched without waiting for a file change event.
       setTimeout(() => {
         for (const boardPath of boardPaths) {
           void checkBoard(boardPath);
         }
-      }, 2000);
+      }, 1000);
 
       // Fallback poll in case fs.watch misses events (common on macOS + Obsidian).
       // Run continuously so we don't rely on file event timing quirks.
-      const pollMs = watcherConfig.pollIntervalMs ?? 2000;
+      // Use 1s interval for faster user feedback
+      const pollMs = watcherConfig.pollIntervalMs ?? 1000;
 
       pollInterval = setInterval(() => {
         for (const boardPath of boardPaths) {

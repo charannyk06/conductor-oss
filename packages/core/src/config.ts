@@ -86,8 +86,13 @@ const DEFAULT_PROJECT_PLUGINS = {
 };
 
 const DevServerConfigSchema = z.object({
-  command: z.string(),
+  command: z.string().optional(),
   cwd: z.string().optional(),
+  url: z.string().optional(),
+  port: z.number().int().positive().optional(),
+  host: z.string().optional(),
+  path: z.string().optional(),
+  https: z.boolean().optional(),
 });
 
 const ColumnAliasesSchema = z.object({
@@ -108,6 +113,16 @@ const BoardConfigEntrySchema = z.union([
   }),
 ]);
 
+const GitHubProjectConfigSchema = z.object({
+  id: z.string().optional(),
+  ownerLogin: z.string().optional(),
+  number: z.number().int().positive().optional(),
+  title: z.string().optional(),
+  url: z.string().optional(),
+  statusFieldId: z.string().optional(),
+  statusFieldName: z.string().optional(),
+});
+
 const ProjectConfigSchema = z.object({
   name: z.string().optional(),
   repo: z.string(),
@@ -120,6 +135,7 @@ const ProjectConfigSchema = z.object({
     .optional(),
   /** Maps this project to an Obsidian board directory name (when dir name != config key). */
   boardDir: z.string().optional(),
+  githubProject: GitHubProjectConfigSchema.optional(),
   runtime: z.string().optional(),
   agent: z.string().optional(),
   workspace: z.string().optional(),
@@ -172,9 +188,8 @@ const UserPreferencesSchema = z.object({
   onboardingAcknowledged: z.boolean().default(false),
   codingAgent: z.string().optional(),
   ide: z.string().optional(),
-  remoteSshHost: z.string().optional(),
-  remoteSshUser: z.string().optional(),
   markdownEditor: z.string().optional(),
+  markdownEditorPath: z.string().optional(),
   modelAccess: ModelAccessPreferencesSchema.default(getDefaultModelAccessPreferences()),
   notifications: NotificationPreferencesSchema.default({
     soundEnabled: true,
@@ -205,6 +220,7 @@ const TrustedHeaderAccessConfigSchema = z.object({
 
 const DashboardAccessConfigSchema = z.object({
   requireAuth: z.boolean().default(false),
+  allowSignedShareLinks: z.boolean().default(false),
   defaultRole: DashboardRoleSchema.optional(),
   trustedHeaders: TrustedHeaderAccessConfigSchema.optional(),
   roles: DashboardRoleBindingsSchema.optional(),
@@ -328,11 +344,77 @@ function sanitizeOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function sanitizeOptionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) {
+      return Number.parseInt(trimmed, 10);
+    }
+  }
+  return undefined;
+}
+
+function sanitizeOptionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function sanitizePluginRef(value: unknown): unknown {
   if (value === null || value === undefined) {
     return undefined;
   }
   return value;
+}
+
+function sanitizeDevServerConfig(
+  value: unknown,
+  project?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
+
+  const legacyValues = {
+    command: sanitizeOptionalString(project?.["devServerScript"]),
+    cwd: sanitizeOptionalString(project?.["devServerCwd"]),
+    url: sanitizeOptionalString(project?.["devServerUrl"]),
+    port: sanitizeOptionalNumber(project?.["devServerPort"]),
+    host: sanitizeOptionalString(project?.["devServerHost"]),
+    path: sanitizeOptionalString(project?.["devServerPath"]),
+    https: sanitizeOptionalBoolean(project?.["devServerHttps"]),
+  };
+
+  const command = sanitizeOptionalString(source["command"]) ?? legacyValues.command;
+  const cwd = sanitizeOptionalString(source["cwd"]) ?? legacyValues.cwd;
+  const url = sanitizeOptionalString(source["url"]) ?? legacyValues.url;
+  const port = sanitizeOptionalNumber(source["port"]) ?? legacyValues.port;
+  const host = sanitizeOptionalString(source["host"]) ?? legacyValues.host;
+  const path = sanitizeOptionalString(source["path"]) ?? legacyValues.path;
+  const https = sanitizeOptionalBoolean(source["https"]) ?? legacyValues.https;
+
+  if (
+    command === undefined
+    && cwd === undefined
+    && url === undefined
+    && port === undefined
+    && host === undefined
+    && path === undefined
+    && https === undefined
+  ) {
+    return undefined;
+  }
+
+  const next: Record<string, unknown> = {};
+  if (command !== undefined) next["command"] = command;
+  if (cwd !== undefined) next["cwd"] = cwd;
+  if (url !== undefined) next["url"] = url;
+  if (port !== undefined) next["port"] = port;
+  if (host !== undefined) next["host"] = host;
+  if (path !== undefined) next["path"] = path;
+  if (https !== undefined) next["https"] = https;
+  return next;
 }
 
 function sanitizeAgentConfig(value: unknown): Record<string, unknown> | undefined {
@@ -397,9 +479,9 @@ function sanitizeProjectConfig(value: unknown): unknown {
   }
 
   const optionalObjectKeys = [
+    "githubProject",
     "tracker",
     "scm",
-    "devServer",
     "reactions",
     "mcpServers",
     "agentProfiles",
@@ -411,6 +493,13 @@ function sanitizeProjectConfig(value: unknown): unknown {
     } else {
       project[key] = sanitized;
     }
+  }
+
+  const devServer = sanitizeDevServerConfig(project["devServer"], project);
+  if (devServer) {
+    project["devServer"] = devServer;
+  } else {
+    delete project["devServer"];
   }
 
   const optionalArrayKeys = [

@@ -14,8 +14,8 @@ use tokio::process::Command;
 
 use crate::state::AppState;
 use conductor_core::config::{
-    DashboardAccessConfig, DashboardRoleBindings, NotificationPreferences, PreferencesConfig,
-    TrustedHeaderAccessConfig,
+    DashboardAccessConfig, DashboardRoleBindings, ModelAccessPreferences, NotificationPreferences,
+    PreferencesConfig, TrustedHeaderAccessConfig,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -76,11 +76,9 @@ struct PreferencesBody {
     onboarding_acknowledged: Option<bool>,
     coding_agent: Option<String>,
     ide: Option<String>,
-    remote_ssh_host: Option<String>,
-    remote_ssh_user: Option<String>,
     markdown_editor: Option<String>,
+    markdown_editor_path: Option<String>,
     notifications: Option<NotificationsBody>,
-    #[allow(dead_code)]
     model_access: Option<HashMap<String, String>>,
 }
 
@@ -89,6 +87,55 @@ struct PreferencesBody {
 struct NotificationsBody {
     sound_enabled: Option<bool>,
     sound_file: Option<Option<String>>,
+}
+
+fn resolve_model_access_value(
+    incoming: Option<&String>,
+    current: &str,
+    allowed: &[&str],
+) -> String {
+    match incoming {
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            if allowed.iter().any(|candidate| *candidate == normalized) {
+                normalized
+            } else {
+                current.to_string()
+            }
+        }
+        None => current.to_string(),
+    }
+}
+
+fn merge_model_access_preferences(
+    current: &ModelAccessPreferences,
+    update: Option<&HashMap<String, String>>,
+) -> ModelAccessPreferences {
+    let values = match update {
+        Some(values) => values,
+        None => return current.clone(),
+    };
+
+    ModelAccessPreferences {
+        claude_code: resolve_model_access_value(
+            values
+                .get("claudeCode")
+                .or_else(|| values.get("claude_code")),
+            &current.claude_code,
+            &["pro", "max", "api"],
+        ),
+        codex: resolve_model_access_value(values.get("codex"), &current.codex, &["chatgpt", "api"]),
+        gemini: resolve_model_access_value(
+            values.get("gemini"),
+            &current.gemini,
+            &["oauth", "api"],
+        ),
+        qwen_code: resolve_model_access_value(
+            values.get("qwenCode").or_else(|| values.get("qwen_code")),
+            &current.qwen_code,
+            &["oauth", "api"],
+        ),
+    }
 }
 
 async fn update_preferences(
@@ -102,10 +149,14 @@ async fn update_preferences(
             .unwrap_or(current.onboarding_acknowledged),
         coding_agent: body.coding_agent.unwrap_or(current.coding_agent),
         ide: body.ide.unwrap_or(current.ide),
-        remote_ssh_host: body.remote_ssh_host.unwrap_or(current.remote_ssh_host),
-        remote_ssh_user: body.remote_ssh_user.unwrap_or(current.remote_ssh_user),
         markdown_editor: body.markdown_editor.unwrap_or(current.markdown_editor),
-        model_access: current.model_access,
+        markdown_editor_path: body
+            .markdown_editor_path
+            .unwrap_or(current.markdown_editor_path),
+        model_access: merge_model_access_preferences(
+            &current.model_access,
+            body.model_access.as_ref(),
+        ),
         notifications: NotificationPreferences {
             sound_enabled: body
                 .notifications
@@ -135,12 +186,16 @@ const TRUSTED_EMAIL_HEADER_ENV: &str = "CONDUCTOR_TRUST_AUTH_EMAIL_HEADER";
 const TRUSTED_JWT_HEADER_ENV: &str = "CONDUCTOR_TRUST_AUTH_JWT_HEADER";
 const TRUSTED_CLOUDFLARE_TEAM_DOMAIN_ENV: &str = "CONDUCTOR_CLOUDFLARE_ACCESS_TEAM_DOMAIN";
 const TRUSTED_CLOUDFLARE_AUDIENCE_ENV: &str = "CONDUCTOR_CLOUDFLARE_ACCESS_AUDIENCE";
-const TRUSTED_ALLOW_INSECURE_HEADERS_ENV: &str = "CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS";
 const PROVIDER_CLOUDFLARE_ACCESS: &str = "cloudflare-access";
 const PROVIDER_TRUSTED_HEADER: &str = "trusted-header";
 const DEFAULT_TRUSTED_EMAIL_HEADER: &str = "Cf-Access-Authenticated-User-Email";
 const DEFAULT_TRUSTED_JWT_HEADER: &str = "Cf-Access-Jwt-Assertion";
 const CLOUDFLARE_JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const PROXY_AUTHORIZED_HEADER: &str = "x-conductor-proxy-authorized";
+const PROXY_AUTHENTICATED_HEADER: &str = "x-conductor-access-authenticated";
+const PROXY_ROLE_HEADER: &str = "x-conductor-access-role";
+const PROXY_EMAIL_HEADER: &str = "x-conductor-access-email";
+const PROXY_PROVIDER_HEADER: &str = "x-conductor-access-provider";
 
 #[derive(Debug, Clone)]
 struct TrustedHeaderAuthConfig {
@@ -150,7 +205,6 @@ struct TrustedHeaderAuthConfig {
     jwt_header: String,
     team_domain: Option<String>,
     audience: Option<String>,
-    allow_insecure_email_header: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -302,7 +356,6 @@ fn resolve_trusted_header_config(access: &DashboardAccessConfig) -> TrustedHeade
             TRUSTED_CLOUDFLARE_AUDIENCE_ENV,
             &access.trusted_headers.audience,
         ),
-        allow_insecure_email_header: parse_env_bool(TRUSTED_ALLOW_INSECURE_HEADERS_ENV),
     }
 }
 
@@ -311,6 +364,36 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .get(name)
         .and_then(|value| value.to_str().ok())
         .and_then(normalize_value)
+}
+
+pub(crate) fn proxy_request_authorized(headers: &HeaderMap) -> bool {
+    headers
+        .get(PROXY_AUTHORIZED_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn resolve_proxy_access_identity(headers: &HeaderMap) -> Option<AccessIdentity> {
+    if !proxy_request_authorized(headers) {
+        return None;
+    }
+
+    // These headers are set by the Next proxy after it has already resolved dashboard access.
+    // The Rust backend is expected to remain loopback-only unless explicitly exposed unsafely.
+    let authenticated = headers
+        .get(PROXY_AUTHENTICATED_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+
+    Some(AccessIdentity {
+        authenticated,
+        role: header_value(headers, PROXY_ROLE_HEADER).and_then(|value| parse_access_role(&value)),
+        email: header_value(headers, PROXY_EMAIL_HEADER),
+        provider: header_value(headers, PROXY_PROVIDER_HEADER),
+        reason: None,
+    })
 }
 
 fn numeric_claim(payload: &Value, key: &str) -> Option<i64> {
@@ -615,8 +698,13 @@ pub(crate) fn builtin_remote_auth_enabled() -> bool {
     builtin_remote_access_token().is_some() && builtin_remote_session_secret().is_some()
 }
 
+pub(crate) fn builtin_remote_auth_allowed(access: &DashboardAccessConfig) -> bool {
+    access.allow_signed_share_links
+}
+
 pub(crate) fn access_control_enabled(access: &DashboardAccessConfig) -> bool {
-    builtin_remote_auth_enabled() || should_require_auth(access)
+    (builtin_remote_auth_allowed(access) && builtin_remote_auth_enabled())
+        || should_require_auth(access)
 }
 
 fn matches_domain(email: &str, domains: &[String]) -> bool {
@@ -721,21 +809,13 @@ async fn resolve_trusted_header_identity(
     }
 
     if config.provider == PROVIDER_TRUSTED_HEADER {
-        let email = header_value(headers, &config.email_header)?
-            .trim()
-            .to_ascii_lowercase();
-
-        if !config.allow_insecure_email_header {
-            return Some(TrustedHeaderIdentity::Unauthenticated {
-                provider: config.provider,
-                reason:
-                    "Generic trusted-header mode is disabled. Use verified Cloudflare Access, or explicitly set CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS=true."
-                        .to_string(),
-                email: Some(email),
-            });
-        }
-        return Some(TrustedHeaderIdentity::Authenticated {
+        let email = header_value(headers, &config.email_header)
+            .map(|value| value.trim().to_ascii_lowercase());
+        return Some(TrustedHeaderIdentity::Unauthenticated {
             provider: config.provider,
+            reason:
+                "Generic trusted-header mode has been removed. Configure verified Cloudflare Access instead."
+                    .to_string(),
             email,
         });
     }
@@ -787,16 +867,22 @@ pub(crate) async fn resolve_access_identity(
     headers: &HeaderMap,
     access: &DashboardAccessConfig,
 ) -> AccessIdentity {
-    if let Some(secret) = builtin_remote_session_secret() {
-        if let Some(cookie) = resolve_cookie_value(headers, BUILTIN_REMOTE_SESSION_COOKIE) {
-            if verify_builtin_session(&secret, &cookie) {
-                return AccessIdentity {
-                    authenticated: true,
-                    role: Some(AccessRole::Admin),
-                    email: Some("builtin".to_string()),
-                    provider: Some("builtin".to_string()),
-                    reason: None,
-                };
+    if let Some(identity) = resolve_proxy_access_identity(headers) {
+        return identity;
+    }
+
+    if builtin_remote_auth_allowed(access) {
+        if let Some(secret) = builtin_remote_session_secret() {
+            if let Some(cookie) = resolve_cookie_value(headers, BUILTIN_REMOTE_SESSION_COOKIE) {
+                if verify_builtin_session(&secret, &cookie) {
+                    return AccessIdentity {
+                        authenticated: true,
+                        role: Some(AccessRole::Admin),
+                        email: Some("builtin".to_string()),
+                        provider: Some("builtin".to_string()),
+                        reason: None,
+                    };
+                }
             }
         }
     }
@@ -916,6 +1002,7 @@ async fn get_access(State(state): State<Arc<AppState>>, headers: HeaderMap) -> J
 #[serde(rename_all = "camelCase")]
 struct AccessBody {
     require_auth: Option<bool>,
+    allow_signed_share_links: Option<bool>,
     default_role: Option<String>,
     trusted_headers: Option<TrustedHeadersBody>,
     roles: Option<RoleBindingsBody>,
@@ -950,6 +1037,9 @@ async fn update_access(
     let current = state.config.read().await.access.clone();
     let next = DashboardAccessConfig {
         require_auth: body.require_auth.unwrap_or(current.require_auth),
+        allow_signed_share_links: body
+            .allow_signed_share_links
+            .unwrap_or(current.allow_signed_share_links),
         default_role: body.default_role.unwrap_or(current.default_role),
         trusted_headers: body
             .trusted_headers
@@ -1083,12 +1173,12 @@ fn agent_metadata(
         ),
         conductor_core::types::AgentKind::Ccr => (
             "Claude Code Router",
-            "https://github.com/mckaywrigley/claude-code-router",
+            "https://www.npmjs.com/package/@musistudio/claude-code-router",
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/claude.svg",
         ),
         conductor_core::types::AgentKind::GithubCopilot => (
             "GitHub Copilot CLI",
-            "https://github.com/github/copilot-cli",
+            "https://docs.github.com/copilot/how-tos/copilot-cli",
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
         ),
         conductor_core::types::AgentKind::Custom(_) => ("Custom agent", "", ""),
@@ -1374,8 +1464,8 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
 #[cfg(test)]
 mod tests {
     use super::{
-        claude_access_for_model, resolve_access_identity, AccessRole, CloudflareJwk,
-        CloudflareJwksCacheEntry, CLOUDFLARE_JWKS_CACHE,
+        access_control_enabled, claude_access_for_model, resolve_access_identity, AccessRole,
+        CloudflareJwk, CloudflareJwksCacheEntry, CLOUDFLARE_JWKS_CACHE,
     };
     use axum::http::HeaderMap;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1566,5 +1656,78 @@ mod tests {
             identity.reason.as_deref(),
             Some("Cloudflare Access is enabled but team domain or audience is missing.")
         );
+    }
+
+    #[test]
+    fn access_control_ignores_builtin_remote_auth_until_share_links_are_enabled() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
+            std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
+        }
+
+        assert!(!access_control_enabled(&DashboardAccessConfig::default()));
+        assert!(access_control_enabled(&DashboardAccessConfig {
+            allow_signed_share_links: true,
+            ..DashboardAccessConfig::default()
+        }));
+
+        unsafe {
+            std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
+            std::env::remove_var("CONDUCTOR_REMOTE_SESSION_SECRET");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_rejects_legacy_generic_trusted_headers() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let access = DashboardAccessConfig {
+            require_auth: true,
+            trusted_headers: TrustedHeaderAccessConfig {
+                enabled: true,
+                provider: "generic".to_string(),
+                email_header: "x-test-email".to_string(),
+                jwt_header: String::new(),
+                team_domain: String::new(),
+                audience: String::new(),
+            },
+            ..DashboardAccessConfig::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-email", "viewer@example.com".parse().unwrap());
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(!identity.authenticated);
+        assert_eq!(identity.role, None);
+        assert_eq!(
+            identity.reason.as_deref(),
+            Some("Generic trusted-header mode has been removed. Configure verified Cloudflare Access instead.")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_accepts_forwarded_proxy_identity() {
+        let access = DashboardAccessConfig {
+            require_auth: true,
+            ..DashboardAccessConfig::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(super::PROXY_AUTHORIZED_HEADER, "true".parse().unwrap());
+        headers.insert(super::PROXY_AUTHENTICATED_HEADER, "false".parse().unwrap());
+        headers.insert(super::PROXY_ROLE_HEADER, "admin".parse().unwrap());
+        headers.insert(super::PROXY_EMAIL_HEADER, "local".parse().unwrap());
+        headers.insert(super::PROXY_PROVIDER_HEADER, "local".parse().unwrap());
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(!identity.authenticated);
+        assert_eq!(identity.role, Some(AccessRole::Admin));
+        assert_eq!(identity.email.as_deref(), Some("local"));
+        assert_eq!(identity.provider.as_deref(), Some("local"));
     }
 }

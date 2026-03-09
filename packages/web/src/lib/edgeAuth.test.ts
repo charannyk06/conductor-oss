@@ -12,33 +12,22 @@ test("resolveTrustedEdgeAuthConfig defaults to verified Cloudflare Access mode",
   assert.equal(config.jwtHeader, "Cf-Access-Jwt-Assertion");
 });
 
-test("verifyTrustedEdgeIdentity blocks generic header passthrough by default", { concurrency: false }, async () => {
-  const original = process.env.CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS;
-  delete process.env.CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS;
-
-  try {
-    const result = await verifyTrustedEdgeIdentity(
-      new Headers({
-        "Cf-Access-Authenticated-User-Email": "dev@example.com",
-      }),
-      {
-        trustedHeaders: {
-          enabled: true,
-          provider: "generic",
-          emailHeader: "Cf-Access-Authenticated-User-Email",
-        },
+test("verifyTrustedEdgeIdentity rejects legacy generic trusted-header mode", { concurrency: false }, async () => {
+  const result = await verifyTrustedEdgeIdentity(
+    new Headers({
+      "Cf-Access-Authenticated-User-Email": "dev@example.com",
+    }),
+    {
+      trustedHeaders: {
+        enabled: true,
+        provider: "generic",
+        emailHeader: "Cf-Access-Authenticated-User-Email",
       },
-    );
+    },
+  );
 
-    assert.equal(result?.ok, false);
-    assert.match(result?.reason ?? "", /disabled/i);
-  } finally {
-    if (original === undefined) {
-      delete process.env.CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS;
-    } else {
-      process.env.CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS = original;
-    }
-  }
+  assert.equal(result?.ok, false);
+  assert.match(result?.reason ?? "", /removed/i);
 });
 
 test("verifyTrustedEdgeIdentity validates a Cloudflare Access JWT before trusting the email", { concurrency: false }, async () => {

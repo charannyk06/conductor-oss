@@ -1,14 +1,16 @@
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::routing::get;
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::env;
 use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::routes::config::resolve_access_identity;
 use crate::state::{resolve_board_file, AppState};
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -33,6 +35,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/boards",
             get(get_board).post(add_board_task).patch(update_board_task),
         )
+        .route("/api/boards/comments", post(add_board_comment))
         .route("/api/health/boards", get(board_health))
 }
 
@@ -62,6 +65,7 @@ struct AddTaskBody {
     description: Option<String>,
     context_notes: Option<String>,
     attachments: Option<Vec<String>>,
+    issue_id: Option<String>,
     agent: Option<String>,
     role: Option<String>,
     r#type: Option<String>,
@@ -76,6 +80,10 @@ struct UpdateTaskBody {
     role: Option<String>,
     title: Option<String>,
     description: Option<String>,
+    context_notes: Option<String>,
+    attachments: Option<Vec<String>>,
+    issue_id: Option<String>,
+    github_item_id: Option<String>,
     agent: Option<String>,
     r#type: Option<String>,
     priority: Option<String>,
@@ -84,33 +92,43 @@ struct UpdateTaskBody {
     checked: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
-struct BoardTaskRecord {
-    id: String,
-    text: String,
-    checked: bool,
-    agent: Option<String>,
-    project: Option<String>,
-    task_type: Option<String>,
-    priority: Option<String>,
-    task_ref: Option<String>,
-    attempt_ref: Option<String>,
-    attachments: Vec<String>,
-    notes: Option<String>,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddBoardCommentBody {
+    project_id: String,
+    task_id: String,
+    body: String,
 }
 
 #[derive(Debug, Clone)]
-struct ParsedBoardColumn {
-    role: String,
-    heading: String,
-    tasks: Vec<BoardTaskRecord>,
+pub(crate) struct BoardTaskRecord {
+    pub(crate) id: String,
+    pub(crate) text: String,
+    pub(crate) checked: bool,
+    pub(crate) agent: Option<String>,
+    pub(crate) project: Option<String>,
+    pub(crate) task_type: Option<String>,
+    pub(crate) priority: Option<String>,
+    pub(crate) task_ref: Option<String>,
+    pub(crate) attempt_ref: Option<String>,
+    pub(crate) issue_id: Option<String>,
+    pub(crate) github_item_id: Option<String>,
+    pub(crate) attachments: Vec<String>,
+    pub(crate) notes: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct ParsedBoard {
-    prefix_lines: Vec<String>,
-    columns: Vec<ParsedBoardColumn>,
-    settings_block: Vec<String>,
+pub(crate) struct ParsedBoardColumn {
+    pub(crate) role: String,
+    pub(crate) heading: String,
+    pub(crate) tasks: Vec<BoardTaskRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedBoard {
+    pub(crate) prefix_lines: Vec<String>,
+    pub(crate) columns: Vec<ParsedBoardColumn>,
+    pub(crate) settings_block: Vec<String>,
 }
 
 async fn get_board(
@@ -157,13 +175,19 @@ async fn add_board_task(
         priority: body.priority.filter(|value| !value.trim().is_empty()),
         task_ref: Some(next_human_task_ref(&board, &body.project_id)),
         attempt_ref: None,
-        attachments: body.attachments.unwrap_or_default(),
+        issue_id: body.issue_id.filter(|value| !value.trim().is_empty()),
+        github_item_id: None,
+        attachments: sanitize_string_list(body.attachments),
         notes: body.context_notes.filter(|value| !value.trim().is_empty()),
     };
 
     if let Err(err) = insert_task_into_board(&board_path, role, &task, &body.project_id) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
+    state
+        .push_board_activity(&body.project_id, "board", "created task", task.text.clone())
+        .await;
+    state.publish_snapshot().await;
 
     match load_board_response(&state, &body.project_id).await {
         Ok(payload) => created(payload),
@@ -213,6 +237,7 @@ async fn update_board_task(
 
     let source_role = board.columns[source_column_index].role.clone();
     apply_task_update(&mut task, &body, &body.project_id);
+    let updated_task_text = task.text.clone();
     let target_role = body
         .role
         .as_deref()
@@ -242,9 +267,90 @@ async fn update_board_task(
     if let Err(err) = write_parsed_board(&board_path, &board, &body.project_id) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
+    state
+        .push_board_activity(&body.project_id, "board", "updated task", updated_task_text)
+        .await;
+    state.publish_snapshot().await;
 
     match load_board_response(&state, &body.project_id).await {
         Ok(payload) => ok(payload),
+        Err((status, message)) => error(status, message),
+    }
+}
+
+async fn add_board_comment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddBoardCommentBody>,
+) -> ApiResponse {
+    if body.project_id.trim().is_empty() || body.task_id.trim().is_empty() {
+        return error(StatusCode::BAD_REQUEST, "projectId and taskId are required");
+    }
+    let trimmed_body = body.body.trim();
+    if trimmed_body.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "Comment body is required");
+    }
+
+    let config = state.config.read().await.clone();
+    let Some(project) = config.projects.get(&body.project_id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Unknown project: {}", body.project_id),
+        );
+    };
+    let board_dir = project
+        .board_dir
+        .clone()
+        .unwrap_or_else(|| body.project_id.clone());
+    let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
+    let board_path = state.workspace_path.join(&board_relative);
+    let board = parse_board(&board_path, &body.project_id);
+    let Some(task) = find_task_record(&board, &body.task_id) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("Task {} not found", body.task_id),
+        );
+    };
+
+    let identity = resolve_access_identity(&headers, &config.access).await;
+    let author_email = identity
+        .email
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let provider = identity
+        .provider
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let author = author_email
+        .clone()
+        .or_else(|| provider.clone())
+        .or_else(local_author_name)
+        .unwrap_or_else(|| "local-user".to_string());
+
+    state
+        .add_board_comment(
+            &body.project_id,
+            &body.task_id,
+            author.clone(),
+            author_email,
+            provider,
+            trimmed_body.to_string(),
+        )
+        .await;
+    state
+        .push_board_activity(
+            &body.project_id,
+            "comment",
+            "added comment",
+            format!("{} on {}", author, task.text),
+        )
+        .await;
+    state.publish_snapshot().await;
+
+    match load_board_response(&state, &body.project_id).await {
+        Ok(payload) => created(payload),
         Err((status, message)) => error(status, message),
     }
 }
@@ -293,7 +399,7 @@ async fn board_health(State(state): State<Arc<AppState>>) -> ApiResponse {
     }))
 }
 
-async fn load_board_response(
+pub(crate) async fn load_board_response(
     state: &Arc<AppState>,
     project_id: &str,
 ) -> Result<Value, (StatusCode, String)> {
@@ -311,6 +417,7 @@ async fn load_board_response(
     let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
     let board_path = state.workspace_path.join(&board_relative);
     let parsed = parse_board(&board_path, project_id);
+    let task_comments = state.task_comments(project_id).await;
     let mut grouped = HashMap::<String, Vec<BoardTaskRecord>>::new();
     let mut ordered_columns = Vec::<(String, String)>::new();
 
@@ -340,6 +447,23 @@ async fn load_board_response(
                 .unwrap_or_default()
                 .into_iter()
                 .map(|task| {
+                    let comments = task_comments
+                        .get(&task.id)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|comment| {
+                            json!({
+                                "id": comment.id,
+                                "taskId": comment.task_id,
+                                "author": comment.author,
+                                "authorEmail": comment.author_email,
+                                "provider": comment.provider,
+                                "body": comment.body,
+                                "timestamp": comment.timestamp,
+                            })
+                        })
+                        .collect::<Vec<_>>();
                     json!({
                         "id": task.id,
                         "text": task.text,
@@ -350,6 +474,12 @@ async fn load_board_response(
                         "priority": task.priority,
                         "taskRef": task.task_ref,
                         "attemptRef": task.attempt_ref,
+                        "issueId": task.issue_id,
+                        "githubItemId": task.github_item_id,
+                        "attachments": task.attachments,
+                        "notes": task.notes,
+                        "commentCount": comments.len(),
+                        "comments": comments,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -361,17 +491,52 @@ async fn load_board_response(
         })
         .collect::<Vec<_>>();
 
+    let recent_actions = state
+        .recent_board_activity(project_id)
+        .await
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "id": entry.id,
+                "source": entry.source,
+                "action": entry.action,
+                "detail": entry.detail,
+                "timestamp": entry.timestamp,
+            })
+        })
+        .collect::<Vec<_>>();
+    let recent_webhook_deliveries = state
+        .recent_webhook_deliveries(project_id)
+        .await
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "id": entry.id,
+                "event": entry.event,
+                "action": entry.action,
+                "status": entry.status,
+                "detail": entry.detail,
+                "repository": entry.repository,
+                "timestamp": entry.timestamp,
+            })
+        })
+        .collect::<Vec<_>>();
+
     Ok(json!({
         "projectId": project_id,
+        "repository": project.repo.clone(),
         "boardPath": board_relative,
         "workspacePath": state.workspace_path.to_string_lossy().to_string(),
         "columns": columns,
         "primaryRoles": ordered_columns.iter().map(|(role, _)| role.as_str()).collect::<Vec<_>>(),
+        "githubProject": project.github_project.clone(),
+        "recentActions": recent_actions,
+        "recentWebhookDeliveries": recent_webhook_deliveries,
         "watcherHint": "Rust backend board persistence is active.",
     }))
 }
 
-fn parse_board(path: &Path, project_id: &str) -> ParsedBoard {
+pub(crate) fn parse_board(path: &Path, project_id: &str) -> ParsedBoard {
     if !path.exists() {
         return ParsedBoard {
             prefix_lines: Vec::new(),
@@ -458,7 +623,11 @@ fn parse_board(path: &Path, project_id: &str) -> ParsedBoard {
     }
 }
 
-fn parse_task_line(line: &str, _role: &str, project_id: &str) -> Option<BoardTaskRecord> {
+pub(crate) fn parse_task_line(
+    line: &str,
+    _role: &str,
+    project_id: &str,
+) -> Option<BoardTaskRecord> {
     let checked = if let Some(rest) = line.strip_prefix("- [ ] ") {
         (false, rest)
     } else if let Some(rest) = line.strip_prefix("- [x] ") {
@@ -517,6 +686,15 @@ fn parse_task_line(line: &str, _role: &str, project_id: &str) -> Option<BoardTas
             .remove("attemptRef")
             .map(|value| strip_inline_tags(&value).to_string())
             .filter(|value| !value.is_empty()),
+        issue_id: metadata
+            .remove("issueId")
+            .map(|value| strip_inline_tags(&value).to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| inline_tags.get("issue").cloned()),
+        github_item_id: metadata
+            .remove("githubItemId")
+            .map(|value| strip_inline_tags(&value).to_string())
+            .filter(|value| !value.is_empty()),
         attachments: metadata
             .remove("attachments")
             .map(|value| {
@@ -555,7 +733,7 @@ fn strip_inline_tags(value: &str) -> &str {
     value.split(" #").next().unwrap_or(value).trim()
 }
 
-fn default_heading_for_role(role: &str) -> &'static str {
+pub(crate) fn default_heading_for_role(role: &str) -> &'static str {
     ROLE_ORDER
         .iter()
         .find(|(candidate, _)| *candidate == role)
@@ -612,7 +790,7 @@ fn extract_task_ref_number(task_ref: &str, prefix: &str) -> Option<u32> {
         .and_then(|value| value.parse::<u32>().ok())
 }
 
-fn next_human_task_ref(board: &ParsedBoard, project_id: &str) -> String {
+pub(crate) fn next_human_task_ref(board: &ParsedBoard, project_id: &str) -> String {
     let prefix = task_ref_prefix(project_id);
     let mut highest = 0_u32;
 
@@ -629,7 +807,7 @@ fn next_human_task_ref(board: &ParsedBoard, project_id: &str) -> String {
     format!("{prefix}-{:03}", highest + 1)
 }
 
-fn split_task_text(text: &str) -> (String, Option<String>) {
+pub(crate) fn split_task_text(text: &str) -> (String, Option<String>) {
     if let Some((title, description)) = text.split_once(" - ") {
         let trimmed_description = description.trim();
         return (
@@ -643,6 +821,22 @@ fn split_task_text(text: &str) -> (String, Option<String>) {
     }
 
     (text.trim().to_string(), None)
+}
+
+fn find_task_record<'a>(board: &'a ParsedBoard, task_id: &str) -> Option<&'a BoardTaskRecord> {
+    board
+        .columns
+        .iter()
+        .flat_map(|column| column.tasks.iter())
+        .find(|task| task.id == task_id)
+}
+
+fn local_author_name() -> Option<String> {
+    env::var("USER")
+        .ok()
+        .or_else(|| env::var("USERNAME").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn apply_optional_text(target: &mut Option<String>, incoming: &Option<String>) {
@@ -681,9 +875,20 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
     apply_optional_text(&mut task.priority, &body.priority);
     apply_optional_text(&mut task.task_ref, &body.task_ref);
     apply_optional_text(&mut task.attempt_ref, &body.attempt_ref);
+    apply_optional_text(&mut task.issue_id, &body.issue_id);
+    apply_optional_text(&mut task.github_item_id, &body.github_item_id);
+    apply_optional_text(&mut task.notes, &body.context_notes);
 
     if let Some(checked) = body.checked {
         task.checked = checked;
+    }
+    if let Some(attachments) = body.attachments.as_ref() {
+        task.attachments = attachments
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
     }
     if task
         .project
@@ -695,7 +900,11 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
     }
 }
 
-fn write_parsed_board(path: &Path, board: &ParsedBoard, project_id: &str) -> std::io::Result<()> {
+pub(crate) fn write_parsed_board(
+    path: &Path,
+    board: &ParsedBoard,
+    project_id: &str,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -737,7 +946,7 @@ fn write_parsed_board(path: &Path, board: &ParsedBoard, project_id: &str) -> std
     std::fs::write(path, out)
 }
 
-fn insert_task_into_board(
+pub(crate) fn insert_task_into_board(
     path: &Path,
     role: &str,
     task: &BoardTaskRecord,
@@ -813,7 +1022,7 @@ fn insert_task_into_board(
     std::fs::write(path, out)
 }
 
-fn normalize_role(value: &str) -> &'static str {
+pub(crate) fn normalize_role(value: &str) -> &'static str {
     match value
         .trim()
         .to_lowercase()
@@ -835,7 +1044,7 @@ fn normalize_role(value: &str) -> &'static str {
     }
 }
 
-fn build_task_text(title: &str, description: Option<&str>) -> String {
+pub(crate) fn build_task_text(title: &str, description: Option<&str>) -> String {
     let description = description.unwrap_or_default().trim();
     if description.is_empty() {
         title.to_string()
@@ -860,7 +1069,7 @@ fn sanitize_tag_value(value: &str) -> String {
         .to_string()
 }
 
-fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
+pub(crate) fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
     let checkbox = if task.checked { "[x]" } else { "[ ]" };
     let mut segments = vec![
         sanitize_value(&task.text),
@@ -911,6 +1120,20 @@ fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
     {
         segments.push(format!("attemptRef:{}", sanitize_value(attempt_ref)));
     }
+    if let Some(issue_id) = task
+        .issue_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        segments.push(format!("issueId:{}", sanitize_value(issue_id)));
+    }
+    if let Some(github_item_id) = task
+        .github_item_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        segments.push(format!("githubItemId:{}", sanitize_value(github_item_id)));
+    }
     if !task.attachments.is_empty() {
         segments.push(format!(
             "attachments:{}",
@@ -960,6 +1183,13 @@ fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
     {
         inline_tags.push(format!("#priority/{}", sanitize_tag_value(priority)));
     }
+    if let Some(issue_id) = task
+        .issue_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        inline_tags.push(format!("#issue/{}", sanitize_tag_value(issue_id)));
+    }
 
     let mut line = format!("- {} {}", checkbox, segments.join(" | "));
     if !inline_tags.is_empty() {
@@ -967,4 +1197,13 @@ fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
         line.push_str(&inline_tags.join(" "));
     }
     line
+}
+
+fn sanitize_string_list(values: Option<Vec<String>>) -> Vec<String> {
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
 }

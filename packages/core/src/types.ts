@@ -454,28 +454,42 @@ export interface NotificationPreferences {
 }
 
 export const SUPPORTED_MODEL_AGENTS = [
+  "amp",
   "claude-code",
   "codex",
+  "cursor-cli",
+  "droid",
   "gemini",
+  "github-copilot",
+  "opencode",
   "qwen-code",
+  "ccr",
 ] as const;
 
 export type SupportedModelAgent = (typeof SUPPORTED_MODEL_AGENTS)[number];
+export type DefaultModelAccess = "default";
 export type ClaudeModelAccess = "pro" | "max" | "api";
 export type CodexModelAccess = "chatgpt" | "api";
 export type GeminiModelAccess = "oauth" | "api";
 export type QwenModelAccess = "oauth" | "api";
 export type AgentModelAccess =
+  | DefaultModelAccess
   | ClaudeModelAccess
   | CodexModelAccess
   | GeminiModelAccess
   | QwenModelAccess;
 
 export interface ModelAccessPreferences {
+  amp?: DefaultModelAccess;
   claudeCode?: ClaudeModelAccess;
   codex?: CodexModelAccess;
+  cursorCli?: DefaultModelAccess;
+  droid?: DefaultModelAccess;
   gemini?: GeminiModelAccess;
+  githubCopilot?: DefaultModelAccess;
+  opencode?: DefaultModelAccess;
   qwenCode?: QwenModelAccess;
+  ccr?: DefaultModelAccess;
 }
 
 export interface AgentModelAccessOption {
@@ -515,13 +529,32 @@ type StaticAgentModelCatalog = {
 };
 
 const DEFAULT_MODEL_ACCESS_PREFERENCES: Required<ModelAccessPreferences> = {
+  amp: "default",
   claudeCode: "pro",
   codex: "chatgpt",
+  cursorCli: "default",
+  droid: "default",
   gemini: "oauth",
+  githubCopilot: "default",
+  opencode: "default",
   qwenCode: "oauth",
+  ccr: "default",
 };
 
 const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
+  amp: {
+    agent: "amp",
+    label: "Amp",
+    accessKey: "amp",
+    defaultAccess: "default",
+    accessOptions: [
+      {
+        id: "default",
+        label: "Local CLI",
+        description: "Use the locally installed Amp CLI catalog and custom override support.",
+      },
+    ],
+  },
   "claude-code": {
     agent: "claude-code",
     label: "Claude Code",
@@ -563,6 +596,32 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       },
     ],
   },
+  "cursor-cli": {
+    agent: "cursor-cli",
+    label: "Cursor Agent",
+    accessKey: "cursorCli",
+    defaultAccess: "default",
+    accessOptions: [
+      {
+        id: "default",
+        label: "Local CLI",
+        description: "Use the locally installed Cursor Agent catalog and custom override support.",
+      },
+    ],
+  },
+  droid: {
+    agent: "droid",
+    label: "Droid",
+    accessKey: "droid",
+    defaultAccess: "default",
+    accessOptions: [
+      {
+        id: "default",
+        label: "Local CLI",
+        description: "Use the locally installed Droid catalog and custom override support.",
+      },
+    ],
+  },
   gemini: {
     agent: "gemini",
     label: "Gemini",
@@ -581,6 +640,32 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       },
     ],
   },
+  "github-copilot": {
+    agent: "github-copilot",
+    label: "GitHub Copilot",
+    accessKey: "githubCopilot",
+    defaultAccess: "default",
+    accessOptions: [
+      {
+        id: "default",
+        label: "Local CLI",
+        description: "Use the locally installed Copilot CLI catalog and custom override support.",
+      },
+    ],
+  },
+  opencode: {
+    agent: "opencode",
+    label: "OpenCode",
+    accessKey: "opencode",
+    defaultAccess: "default",
+    accessOptions: [
+      {
+        id: "default",
+        label: "Local CLI",
+        description: "Use the locally installed OpenCode catalog and custom override support.",
+      },
+    ],
+  },
   "qwen-code": {
     agent: "qwen-code",
     label: "Qwen Code",
@@ -596,6 +681,19 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
         id: "api",
         label: "DashScope / Custom API",
         description: "Use DashScope or another OpenAI-compatible endpoint configured for Qwen Code.",
+      },
+    ],
+  },
+  ccr: {
+    agent: "ccr",
+    label: "CCR",
+    accessKey: "ccr",
+    defaultAccess: "default",
+    accessOptions: [
+      {
+        id: "default",
+        label: "Local CLI",
+        description: "Use the locally installed Claude Code Router catalog and custom override support.",
       },
     ],
   },
@@ -651,6 +749,19 @@ function modelOption(
 }
 
 const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelCatalog> = {
+  amp: {
+    modelsByAccess: {
+      default: [
+        modelOption("free", "Amp Free mode prioritizes lower-cost execution.", ["default"], "Amp Free"),
+        modelOption("rush", "Amp Rush mode prioritizes faster turnaround.", ["default"], "Amp Rush"),
+        modelOption("smart", "Amp Smart mode balances quality, speed, and tool choice.", ["default"], "Amp Smart"),
+        modelOption("deep", "Amp Deep mode enables the highest-capability reasoning path.", ["default"], "Amp Deep"),
+      ],
+    },
+    defaultModelByAccess: {
+      default: "smart",
+    },
+  },
   "claude-code": {
     modelsByAccess: {
       pro: [
@@ -755,6 +866,24 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
       api: "high",
     },
   },
+  "cursor-cli": {
+    modelsByAccess: {
+      default: [
+        modelOption("gpt-5", "Cursor Agent's GPT-5 preset alias.", ["default"], "GPT-5"),
+        modelOption("sonnet-4", "Cursor Agent's Sonnet preset alias.", ["default"], "Sonnet 4"),
+        modelOption("opus", "Cursor Agent's Opus preset alias.", ["default"], "Opus"),
+      ],
+    },
+    defaultModelByAccess: {
+      default: "gpt-5",
+    },
+  },
+  droid: {
+    modelsByAccess: {
+      default: [],
+    },
+    defaultModelByAccess: {},
+  },
   gemini: {
     modelsByAccess: {
       oauth: [
@@ -771,6 +900,18 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
       api: "gemini-3.1-pro-preview",
     },
   },
+  "github-copilot": {
+    modelsByAccess: {
+      default: [],
+    },
+    defaultModelByAccess: {},
+  },
+  opencode: {
+    modelsByAccess: {
+      default: [],
+    },
+    defaultModelByAccess: {},
+  },
   "qwen-code": {
     modelsByAccess: {
       oauth: [
@@ -783,6 +924,39 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
     defaultModelByAccess: {
       oauth: "coder-model",
       api: "coder-model",
+    },
+  },
+  ccr: {
+    modelsByAccess: {
+      default: [
+        modelOption(
+          "claude-sonnet-4-6",
+          "Balanced Claude model exposed through Claude Code Router.",
+          ["default"],
+          "Claude Sonnet 4.6",
+        ),
+        modelOption(
+          "claude-opus-4-6",
+          "Highest-capability Claude model exposed through Claude Code Router.",
+          ["default"],
+          "Claude Opus 4.6",
+        ),
+        modelOption(
+          "claude-haiku-4-5",
+          "Fast Claude model exposed through Claude Code Router.",
+          ["default"],
+          "Claude Haiku 4.5",
+        ),
+      ],
+    },
+    defaultModelByAccess: {
+      default: "claude-sonnet-4-6",
+    },
+    reasoningOptionsByAccess: {
+      default: DEFAULT_REASONING_OPTIONS,
+    },
+    defaultReasoningByAccess: {
+      default: "medium",
     },
   },
 };
@@ -898,12 +1072,10 @@ export interface UserPreferences {
   codingAgent?: string;
   /** Preferred IDE used when opening attempts/files. */
   ide?: string;
-  /** Optional SSH host/alias used for remote editor deep links. */
-  remoteSshHost?: string;
-  /** Optional SSH username used for remote editor deep links. */
-  remoteSshUser?: string;
   /** Preferred markdown editor for second-brain/context workflows. */
   markdownEditor?: string;
+  /** Local root path for the markdown editor's notes workspace or vault. */
+  markdownEditorPath?: string;
   /** Preferred account/access mode used to filter agent model choices in the UI. */
   modelAccess?: ModelAccessPreferences;
   notifications: NotificationPreferences;
@@ -933,6 +1105,8 @@ export interface TrustedHeaderAccessConfig {
 export interface DashboardAccessConfig {
   /** Require authenticated identity even for local access. */
   requireAuth?: boolean;
+  /** Allow the built-in signed share-link fallback for remote control. This is not enterprise SSO. */
+  allowSignedShareLinks?: boolean;
   /** Default role granted to authenticated users when no explicit binding matches. */
   defaultRole?: DashboardRole;
   /** Trust identity headers injected by an upstream edge access layer such as Cloudflare Access. */
@@ -985,8 +1159,13 @@ export interface AgentProfile {
 }
 
 export interface DevServerConfig {
-  command: string;
+  command?: string;
   cwd?: string;
+  url?: string;
+  port?: number;
+  host?: string;
+  path?: string;
+  https?: boolean;
 }
 
 export interface ColumnAliasesConfig {
@@ -1006,6 +1185,16 @@ export interface BoardConfigObject {
 
 export type BoardConfigEntry = string | BoardConfigObject;
 
+export interface GitHubProjectConfig {
+  id?: string;
+  ownerLogin?: string;
+  number?: number;
+  title?: string;
+  url?: string;
+  statusFieldId?: string;
+  statusFieldName?: string;
+}
+
 export interface ProjectConfig {
   name: string;
   repo: string;
@@ -1016,6 +1205,7 @@ export interface ProjectConfig {
   defaultWorkingDirectory?: string;
   /** Maps this project to an Obsidian board directory name (when dir name != config key). */
   boardDir?: string;
+  githubProject?: GitHubProjectConfig;
   runtime?: string;
   agent?: string;
   workspace?: string;
@@ -1147,6 +1337,10 @@ export interface SessionMetadata {
   prompt?: string;
   /** Dev server log file associated with this session, if configured. */
   devServerLog?: string;
+  /** Explicit preview URL resolved for this session. */
+  devServerUrl?: string;
+  /** Explicit preview port resolved for this session. */
+  devServerPort?: string;
 }
 
 // === SERVICE INTERFACES ===

@@ -22,11 +22,14 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     let state = AppState::new(config_path, config.clone(), db).await;
     state.discover_executors().await;
     state.restore_runtime_sessions().await;
+    state.start_tmux_activity_watchdog();
     let _runtime = runtime::initialize_runtime(config, state.clone(), _event_bus.clone()).await?;
     state.kick_spawn_supervisor();
+    state.start_app_update_watchdog();
     state.publish_snapshot().await;
 
     let app = Router::new()
+        .merge(routes::app_update::router())
         .merge(routes::config::router())
         .merge(routes::events::router())
         .merge(routes::health::router())
@@ -50,14 +53,18 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .with_state(state)
         .layer({
             let mut origins: Vec<HeaderValue> = vec![
-                "http://localhost:3000".parse::<HeaderValue>().unwrap(),
-                "http://127.0.0.1:3000".parse::<HeaderValue>().unwrap(),
+                "http://localhost:3000"
+                    .parse::<HeaderValue>()
+                    .expect("valid hardcoded origin"),
+                "http://127.0.0.1:3000"
+                    .parse::<HeaderValue>()
+                    .expect("valid hardcoded origin"),
                 format!("http://localhost:{}", config.effective_port())
                     .parse::<HeaderValue>()
-                    .unwrap(),
+                    .expect("valid hardcoded origin"),
                 format!("http://127.0.0.1:{}", config.effective_port())
                     .parse::<HeaderValue>()
-                    .unwrap(),
+                    .expect("valid hardcoded origin"),
             ];
             for extra in &config.server.cors_origins {
                 if let Ok(value) = extra.parse::<HeaderValue>() {

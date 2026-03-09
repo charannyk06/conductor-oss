@@ -9,6 +9,7 @@ type AppRouteHandlerRoutes =
   | "/api/boards"
   | "/api/config"
   | "/api/context-files"
+  | "/api/context-files/open"
   | "/api/events"
   | "/api/executor/health"
   | "/api/filesystem/directory"
@@ -29,10 +30,14 @@ type AppRouteHandlerRoutes =
   | "/api/sessions/[id]/feedback"
   | "/api/sessions/[id]/files"
   | "/api/sessions/[id]/feed"
+  | "/api/sessions/[id]/interrupt"
   | "/api/sessions/[id]/keys"
   | "/api/sessions/[id]/kill"
   | "/api/sessions/[id]/output"
   | "/api/sessions/[id]/output/stream"
+  | "/api/sessions/[id]/preview"
+  | "/api/sessions/[id]/preview/dom"
+  | "/api/sessions/[id]/preview/screenshot"
   | "/api/sessions/[id]/restore"
   | "/api/sessions/[id]/send"
   | "/api/spawn"
@@ -54,6 +59,7 @@ interface ParamMap {
   "/api/boards": {}
   "/api/config": {}
   "/api/context-files": {}
+  "/api/context-files/open": {}
   "/api/events": {}
   "/api/executor/health": {}
   "/api/filesystem/directory": {}
@@ -74,10 +80,14 @@ interface ParamMap {
   "/api/sessions/[id]/feedback": { "id": string; }
   "/api/sessions/[id]/files": { "id": string; }
   "/api/sessions/[id]/feed": { "id": string; }
+  "/api/sessions/[id]/interrupt": { "id": string; }
   "/api/sessions/[id]/keys": { "id": string; }
   "/api/sessions/[id]/kill": { "id": string; }
   "/api/sessions/[id]/output": { "id": string; }
   "/api/sessions/[id]/output/stream": { "id": string; }
+  "/api/sessions/[id]/preview": { "id": string; }
+  "/api/sessions/[id]/preview/dom": { "id": string; }
+  "/api/sessions/[id]/preview/screenshot": { "id": string; }
   "/api/sessions/[id]/restore": { "id": string; }
   "/api/sessions/[id]/send": { "id": string; }
   "/api/spawn": {}

@@ -71,6 +71,47 @@ pub struct AgentConfig {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Maximum session duration in seconds. None means no timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DevServerCompatConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub https: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubProjectConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_login: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_field_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_field_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +142,8 @@ pub struct ProjectConfig {
     pub icon_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_project: Option<GitHubProjectConfig>,
     #[serde(default)]
     pub agent_config: AgentConfig,
     #[serde(default)]
@@ -109,6 +152,20 @@ pub struct ProjectConfig {
     pub run_setup_in_parallel: bool,
     #[serde(default)]
     pub dev_server_script: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_server_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_server_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_server_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_server_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev_server_path: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dev_server_https: bool,
+    #[serde(default, skip_serializing)]
+    pub dev_server: Option<DevServerCompatConfig>,
     #[serde(default)]
     pub cleanup_script: Vec<String>,
     #[serde(default)]
@@ -133,14 +190,138 @@ impl Default for ProjectConfig {
             scm: None,
             icon_url: None,
             description: None,
+            github_project: None,
             agent_config: AgentConfig::default(),
             setup_script: Vec::new(),
             run_setup_in_parallel: false,
             dev_server_script: Vec::new(),
+            dev_server_cwd: None,
+            dev_server_url: None,
+            dev_server_port: None,
+            dev_server_host: None,
+            dev_server_path: None,
+            dev_server_https: false,
+            dev_server: None,
             cleanup_script: Vec::new(),
             archive_script: Vec::new(),
             copy_files: Vec::new(),
         }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn trim_to_option(value: &mut Option<String>) {
+    *value = value
+        .take()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty());
+}
+
+fn normalized_host(value: Option<&str>) -> String {
+    let host = value
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("127.0.0.1");
+    if host == "0.0.0.0" {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+fn normalized_path(value: Option<&str>) -> String {
+    let path = value
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or("");
+    if path.is_empty() {
+        String::new()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
+impl ProjectConfig {
+    pub fn normalize_dev_server(&mut self) {
+        self.dev_server_script = self
+            .dev_server_script
+            .iter()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        trim_to_option(&mut self.dev_server_cwd);
+        trim_to_option(&mut self.dev_server_url);
+        trim_to_option(&mut self.dev_server_host);
+        trim_to_option(&mut self.dev_server_path);
+
+        if let Some(dev_server) = self.dev_server.take() {
+            if self.dev_server_script.is_empty() {
+                if let Some(command) = dev_server.command {
+                    let command = command.trim();
+                    if !command.is_empty() {
+                        self.dev_server_script.push(command.to_string());
+                    }
+                }
+            }
+            if self.dev_server_cwd.is_none() {
+                self.dev_server_cwd = dev_server.cwd.and_then(|value| {
+                    let trimmed = value.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                });
+            }
+            if self.dev_server_url.is_none() {
+                self.dev_server_url = dev_server.url.and_then(|value| {
+                    let trimmed = value.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                });
+            }
+            if self.dev_server_port.is_none() {
+                self.dev_server_port = dev_server.port.filter(|port| *port > 0);
+            }
+            if self.dev_server_host.is_none() {
+                self.dev_server_host = dev_server.host.and_then(|value| {
+                    let trimmed = value.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                });
+            }
+            if self.dev_server_path.is_none() {
+                self.dev_server_path = dev_server.path.and_then(|value| {
+                    let trimmed = value.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                });
+            }
+            if !self.dev_server_https {
+                self.dev_server_https = dev_server.https.unwrap_or(false);
+            }
+        }
+    }
+
+    pub fn resolved_dev_server_url(&self) -> Option<String> {
+        if let Some(url) = self
+            .dev_server_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(url.to_string());
+        }
+
+        let port = self.dev_server_port?;
+        let scheme = if self.dev_server_https {
+            "https"
+        } else {
+            "http"
+        };
+        Some(format!(
+            "{scheme}://{}:{port}{}",
+            normalized_host(self.dev_server_host.as_deref()),
+            normalized_path(self.dev_server_path.as_deref())
+        ))
     }
 }
 
@@ -195,12 +376,10 @@ pub struct PreferencesConfig {
     pub coding_agent: String,
     #[serde(default = "default_ide")]
     pub ide: String,
-    #[serde(default)]
-    pub remote_ssh_host: String,
-    #[serde(default)]
-    pub remote_ssh_user: String,
     #[serde(default = "default_markdown_editor")]
     pub markdown_editor: String,
+    #[serde(default)]
+    pub markdown_editor_path: String,
     #[serde(default)]
     pub model_access: ModelAccessPreferences,
     #[serde(default)]
@@ -213,9 +392,8 @@ impl Default for PreferencesConfig {
             onboarding_acknowledged: false,
             coding_agent: default_agent_name(),
             ide: default_ide(),
-            remote_ssh_host: String::new(),
-            remote_ssh_user: String::new(),
             markdown_editor: default_markdown_editor(),
+            markdown_editor_path: String::new(),
             model_access: ModelAccessPreferences::default(),
             notifications: NotificationPreferences::default(),
         }
@@ -274,6 +452,8 @@ pub struct DashboardRoleBindings {
 pub struct DashboardAccessConfig {
     #[serde(default)]
     pub require_auth: bool,
+    #[serde(default)]
+    pub allow_signed_share_links: bool,
     #[serde(default = "default_role")]
     pub default_role: String,
     #[serde(default)]
@@ -286,6 +466,7 @@ impl Default for DashboardAccessConfig {
     fn default() -> Self {
         Self {
             require_auth: false,
+            allow_signed_share_links: false,
             default_role: default_role(),
             trusted_headers: TrustedHeaderAccessConfig::default(),
             roles: DashboardRoleBindings::default(),
@@ -397,6 +578,9 @@ impl ConductorConfig {
         if config.server.host.trim().is_empty() {
             config.server.host = default_host();
         }
+        for project in config.projects.values_mut() {
+            project.normalize_dev_server();
+        }
         config.config_path = Some(path.to_path_buf());
         Ok(config)
     }
@@ -475,5 +659,39 @@ mod tests {
     fn test_project_config_default_branch_defaults_to_main() {
         let project = ProjectConfig::default();
         assert_eq!(project.default_branch, "main");
+    }
+
+    #[test]
+    fn test_project_config_normalizes_nested_dev_server_compat() {
+        let yaml = r#"
+projects:
+  demo:
+    path: /tmp/demo
+    devServer:
+      command: pnpm dev
+      cwd: apps/web
+      port: 4321
+      host: 0.0.0.0
+      path: preview
+      https: true
+"#;
+        let mut config: ConductorConfig = serde_yaml::from_str(yaml).unwrap();
+        config
+            .projects
+            .get_mut("demo")
+            .expect("demo project missing")
+            .normalize_dev_server();
+        let project = config.projects.get("demo").unwrap();
+
+        assert_eq!(project.dev_server_script, vec!["pnpm dev".to_string()]);
+        assert_eq!(project.dev_server_cwd.as_deref(), Some("apps/web"));
+        assert_eq!(project.dev_server_port, Some(4321));
+        assert_eq!(project.dev_server_host.as_deref(), Some("0.0.0.0"));
+        assert_eq!(project.dev_server_path.as_deref(), Some("preview"));
+        assert!(project.dev_server_https);
+        assert_eq!(
+            project.resolved_dev_server_url().as_deref(),
+            Some("https://127.0.0.1:4321/preview")
+        );
     }
 }

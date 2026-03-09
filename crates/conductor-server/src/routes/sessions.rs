@@ -1,32 +1,78 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
 use crate::state::{
-    build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState,
-    SessionRecord, SpawnRequest,
+    build_normalized_chat_feed, build_session_runtime_status, session_to_dashboard_value,
+    trim_lines_tail, AppState, SessionRecord, SpawnRequest,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
 
+/// Simple token-bucket rate limiter for the spawn endpoint.
+/// Allows `SPAWN_RATE_LIMIT` requests per `SPAWN_RATE_WINDOW_SECS` window.
+const SPAWN_RATE_LIMIT: u64 = 10;
+const SPAWN_RATE_WINDOW_SECS: u64 = 60;
+
+static SPAWN_RATE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SPAWN_RATE_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+
+fn spawn_rate_check() -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let window_start = SPAWN_RATE_WINDOW_START.load(Ordering::Relaxed);
+    if now.saturating_sub(window_start) >= SPAWN_RATE_WINDOW_SECS {
+        SPAWN_RATE_WINDOW_START.store(now, Ordering::Relaxed);
+        SPAWN_RATE_COUNT.store(1, Ordering::Relaxed);
+        return true;
+    }
+    let count = SPAWN_RATE_COUNT.fetch_add(1, Ordering::Relaxed);
+    count < SPAWN_RATE_LIMIT
+}
+
+async fn spawn_rate_limit_middleware(
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> impl IntoResponse {
+    if !spawn_rate_check() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "Rate limit exceeded. Try again later." })),
+        )
+            .into_response();
+    }
+    next.run(request).await.into_response()
+}
+
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
+    let spawn_route = Router::new()
         .route("/api/spawn", post(spawn_session))
+        .layer(middleware::from_fn(spawn_rate_limit_middleware));
+
+    Router::new()
+        .merge(spawn_route)
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/conversation", get(get_conversation))
         .route("/api/sessions/{id}/feed", get(get_feed))
+        .route("/api/sessions/{id}/feed/stream", get(feed_stream))
         .route("/api/sessions/{id}/output", get(get_output))
         .route("/api/sessions/{id}/output/stream", get(output_stream))
         .route("/api/sessions/{id}/send", post(send_to_session))
+        .route("/api/sessions/{id}/interrupt", post(interrupt_session))
         .route("/api/sessions/{id}/kill", post(kill_session))
         .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/restore", post(restore_session))
@@ -163,12 +209,51 @@ async fn get_conversation(
 
 async fn get_feed(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
     match state.get_session(&id).await {
-        Some(session) => ok(session_feed_payload(&session)),
+        Some(session) => ok(session_feed_payload(&session).await),
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
 }
 
-fn session_feed_payload(session: &SessionRecord) -> Value {
+async fn feed_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let initial_payload = match state.get_session(&id).await {
+        Some(session) => session_feed_payload(&session).await,
+        None => {
+            json!({
+                "entries": [],
+                "sessionStatus": Value::Null,
+                "parserState": Value::Null,
+                "runtimeStatus": Value::Null,
+                "error": format!("Session {id} not found"),
+            })
+        }
+    };
+    let initial_stream = stream::iter(vec![Ok(
+        SseEvent::default().data(initial_payload.to_string())
+    )]);
+
+    let updates =
+        BroadcastStream::new(state.event_snapshots.subscribe()).filter_map(move |result| {
+            match result {
+                Ok(_) => Some(Ok(SseEvent::default()
+                    .event("refresh")
+                    .data(json!({ "type": "refresh", "sessionId": id }).to_string()))),
+                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(count)) => {
+                    tracing::warn!("Feed SSE stream lagged by {count} messages");
+                    Some(Ok(SseEvent::default().event("refresh").data(
+                        json!({ "type": "refresh", "reason": "lagged", "missed": count })
+                            .to_string(),
+                    )))
+                }
+            }
+        });
+
+    Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default())
+}
+
+async fn session_feed_payload(session: &SessionRecord) -> Value {
     let parser_state = session
         .metadata
         .get("parserState")
@@ -182,11 +267,13 @@ fn session_feed_payload(session: &SessionRecord) -> Value {
                 "command": session.metadata.get("parserStateCommand").cloned(),
             })
         });
+    let runtime_status = build_session_runtime_status(session).await;
 
     json!({
         "entries": build_normalized_chat_feed(session),
         "sessionStatus": session.status,
         "parserState": parser_state,
+        "runtimeStatus": runtime_status,
         "source": if session.output.is_empty() { "conversation-only" } else { "runtime-output" },
     })
 }
@@ -263,7 +350,10 @@ async fn send_to_session(
         );
     }
 
-    let is_live = state.live_sessions.read().await.contains_key(&id);
+    let is_live = match state.ensure_session_live(&id).await {
+        Ok(value) => value,
+        Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+    };
 
     if !is_live {
         let should_resume = state
@@ -326,6 +416,16 @@ async fn kill_session(State(state): State<Arc<AppState>>, Path(id): Path<String>
     }
 }
 
+async fn interrupt_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResponse {
+    match state.interrupt_session(&id).await {
+        Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
 async fn archive_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -380,6 +480,10 @@ async fn apply_action(
     Json(body): Json<ActionBody>,
 ) -> ApiResponse {
     match body.action.as_str() {
+        "interrupt" => match state.interrupt_session(&id).await {
+            Ok(()) => ok(json!({ "ok": true, "action": "interrupt", "sessionId": id })),
+            Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+        },
         "retry" | "restore" => match state.restore_session(&id).await {
             Ok(session) => ok(
                 json!({ "ok": true, "action": "restore", "session": session_to_dashboard_value(&session) }),

@@ -12,9 +12,8 @@ export type ScaffoldPreferencesConfig = {
   onboardingAcknowledged?: boolean;
   codingAgent?: string;
   ide?: string;
-  remoteSshHost?: string | null;
-  remoteSshUser?: string | null;
   markdownEditor?: string;
+  markdownEditorPath?: string;
   modelAccess?: ModelAccessPreferences;
   notifications?: ScaffoldNotificationPreferences;
 };
@@ -32,6 +31,24 @@ export type ScaffoldProjectConfig = {
   runtime?: string | null;
   scm?: string | null;
   boardDir?: string | null;
+  githubProject?: {
+    id?: string | null;
+    ownerLogin?: string | null;
+    number?: number | null;
+    title?: string | null;
+    url?: string | null;
+    statusFieldId?: string | null;
+    statusFieldName?: string | null;
+  } | null;
+  devServer?: {
+    command?: string | null;
+    cwd?: string | null;
+    url?: string | null;
+    port?: number | null;
+    host?: string | null;
+    path?: string | null;
+    https?: boolean | null;
+  } | null;
   agentModel?: string | null;
   agentReasoningEffort?: string | null;
   agentPermissions?: "skip" | "default";
@@ -42,6 +59,7 @@ export type ConductorYamlScaffoldConfig = {
   dashboardUrl?: string | null;
   access?: {
     requireAuth?: boolean;
+    allowSignedShareLinks?: boolean;
     defaultRole?: "viewer" | "operator" | "admin";
     trustedHeaders?: {
       enabled?: boolean;
@@ -113,8 +131,46 @@ export function buildProjectConfigRecord(project: ScaffoldProjectConfig): Record
     nextProject["boardDir"] = project.boardDir.trim();
   }
 
+  if (project.githubProject?.id?.trim()) {
+    nextProject["githubProject"] = {
+      id: project.githubProject.id.trim(),
+      ...(project.githubProject.ownerLogin?.trim() ? { ownerLogin: project.githubProject.ownerLogin.trim() } : {}),
+      ...(typeof project.githubProject.number === "number" ? { number: project.githubProject.number } : {}),
+      ...(project.githubProject.title?.trim() ? { title: project.githubProject.title.trim() } : {}),
+      ...(project.githubProject.url?.trim() ? { url: project.githubProject.url.trim() } : {}),
+      ...(project.githubProject.statusFieldId?.trim() ? { statusFieldId: project.githubProject.statusFieldId.trim() } : {}),
+      ...(project.githubProject.statusFieldName?.trim() ? { statusFieldName: project.githubProject.statusFieldName.trim() } : {}),
+    };
+  }
+
   if (project.defaultWorkingDirectory?.trim()) {
     nextProject["defaultWorkingDirectory"] = project.defaultWorkingDirectory.trim();
+  }
+
+  const devServer: Record<string, unknown> = {};
+  if (project.devServer?.command?.trim()) {
+    devServer["command"] = project.devServer.command.trim();
+  }
+  if (project.devServer?.cwd?.trim()) {
+    devServer["cwd"] = project.devServer.cwd.trim();
+  }
+  if (project.devServer?.url?.trim()) {
+    devServer["url"] = project.devServer.url.trim();
+  }
+  if (typeof project.devServer?.port === "number") {
+    devServer["port"] = project.devServer.port;
+  }
+  if (project.devServer?.host?.trim()) {
+    devServer["host"] = project.devServer.host.trim();
+  }
+  if (project.devServer?.path?.trim()) {
+    devServer["path"] = project.devServer.path.trim();
+  }
+  if (typeof project.devServer?.https === "boolean") {
+    devServer["https"] = project.devServer.https;
+  }
+  if (Object.keys(devServer).length > 0) {
+    nextProject["devServer"] = devServer;
   }
 
   if (project.agentModel?.trim()) {
@@ -153,6 +209,7 @@ export function buildConductorYaml(config: ConductorYamlScaffoldConfig = {}): st
     dashboardUrl,
     access: {
       requireAuth: config.access?.requireAuth === true,
+      allowSignedShareLinks: config.access?.allowSignedShareLinks === true,
       defaultRole: config.access?.defaultRole ?? "operator",
       trustedHeaders: {
         enabled: config.access?.trustedHeaders?.enabled === true,
@@ -177,12 +234,10 @@ export function buildConductorYaml(config: ConductorYamlScaffoldConfig = {}): st
     projects: {},
   };
 
-  if (preferences.remoteSshHost?.trim()) {
-    (root["preferences"] as Record<string, unknown>)["remoteSshHost"] = preferences.remoteSshHost.trim();
+  if (preferences.markdownEditorPath?.trim()) {
+    (root["preferences"] as Record<string, unknown>)["markdownEditorPath"] = preferences.markdownEditorPath.trim();
   }
-  if (preferences.remoteSshUser?.trim()) {
-    (root["preferences"] as Record<string, unknown>)["remoteSshUser"] = preferences.remoteSshUser.trim();
-  }
+
   const projects = config.projects ?? [];
   const projectMap = root["projects"] as Record<string, unknown>;
   const trustedHeaders = ((root["access"] as Record<string, unknown>)["trustedHeaders"] ?? {}) as Record<string, unknown>;

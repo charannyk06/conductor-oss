@@ -211,11 +211,34 @@ Defaults:
 
 This uses the standalone web build so it can run alongside `bun run dev:full` from the same checkout.
 
+Production notes:
+
+- Root package scripts automatically source `./.env.local` when present.
+- To enable signed GitHub webhook ingestion, set `CONDUCTOR_GITHUB_WEBHOOK_SECRET` in `.env.local` or your process environment.
+- GitHub Projects V2 sync requires `gh` auth with project scopes. Refresh once with:
+
+```bash
+gh auth refresh --scopes read:project,project
+```
+
+- The public GitHub webhook target is `/api/github/webhook` on whatever dashboard origin you expose in production.
+
 ### Run frontend only
 
 ```bash
 bun run dev
 ```
+
+### Local preview mapping
+
+If you want the session Preview tab to auto-connect to a local app, set the repository dev server config in `conductor.yaml` or in Settings -> Repositories:
+
+- `devServer.command`: optional command Conductor should launch
+- `devServer.cwd`: optional subdirectory for monorepos
+- `devServer.port` / `devServer.host` / `devServer.path` / `devServer.https`: explicit local preview mapping
+- `devServer.url`: explicit preview URL override for a known external preview URL
+
+If you leave `devServer.command` blank, Conductor will still auto-connect the preview as soon as your local app comes up on the mapped URL.
 
 ### Run backend only
 

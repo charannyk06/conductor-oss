@@ -47,9 +47,8 @@ function normalizePreferences(value: unknown) {
     onboardingAcknowledged: root["onboardingAcknowledged"] === true,
     codingAgent: asNonEmptyString(root["codingAgent"]) ?? "claude-code",
     ide: asNonEmptyString(root["ide"]) ?? "vscode",
-    remoteSshHost: asNonEmptyString(root["remoteSshHost"]),
-    remoteSshUser: asNonEmptyString(root["remoteSshUser"]),
     markdownEditor: asNonEmptyString(root["markdownEditor"]) ?? "obsidian",
+    markdownEditorPath: asNonEmptyString(root["markdownEditorPath"]) ?? "",
     modelAccess: normalizeModelAccessPreferences(root["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
@@ -66,6 +65,7 @@ function buildProjectScaffold(
   projectPath: string,
 ): ScaffoldProjectConfig {
   const agentConfig = toObject(project["agentConfig"]);
+  const githubProject = toObject(project["githubProject"]);
 
   return {
     projectId,
@@ -80,6 +80,17 @@ function buildProjectScaffold(
     runtime: asNonEmptyString(project["runtime"]),
     scm: asNonEmptyString(project["scm"]),
     boardDir: asNonEmptyString(project["boardDir"]),
+    githubProject: asNonEmptyString(githubProject["id"])
+      ? {
+          id: asNonEmptyString(githubProject["id"]),
+          ownerLogin: asNonEmptyString(githubProject["ownerLogin"]),
+          number: typeof githubProject["number"] === "number" ? githubProject["number"] as number : null,
+          title: asNonEmptyString(githubProject["title"]),
+          url: asNonEmptyString(githubProject["url"]),
+          statusFieldId: asNonEmptyString(githubProject["statusFieldId"]),
+          statusFieldName: asNonEmptyString(githubProject["statusFieldName"]),
+        }
+      : null,
     agentModel: asNonEmptyString(agentConfig["model"]),
     agentReasoningEffort: asNonEmptyString(agentConfig["reasoningEffort"]),
     agentPermissions: agentConfig["permissions"] === "default" ? "default" : "skip",

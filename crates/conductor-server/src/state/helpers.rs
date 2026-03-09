@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::iter::Peekable;
 use std::path::Path;
 
 use super::types::{SessionRecord, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT};
@@ -67,6 +68,64 @@ pub fn trim_lines_tail(output: &str, lines: usize) -> String {
     let mut collected = output.lines().rev().take(lines).collect::<Vec<_>>();
     collected.reverse();
     collected.join("\n")
+}
+
+fn is_filtered_control(ch: char) -> bool {
+    ch.is_control() && ch != '\n' && ch != '\t'
+}
+
+fn consume_csi<I>(chars: &mut Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(next) = chars.next() {
+        let code = next as u32;
+        if (0x40..=0x7e).contains(&code) {
+            break;
+        }
+    }
+}
+
+fn consume_osc<I>(chars: &mut Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    let mut previous_was_escape = false;
+    while let Some(next) = chars.next() {
+        if next == '\u{0007}' {
+            break;
+        }
+        if previous_was_escape && next == '\\' {
+            break;
+        }
+        previous_was_escape = next == '\u{001b}';
+    }
+}
+
+pub(super) fn sanitize_terminal_text(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\u{001b}' => match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    consume_csi(&mut chars);
+                }
+                Some(']') => {
+                    chars.next();
+                    consume_osc(&mut chars);
+                }
+                _ => {}
+            },
+            '\r' => {}
+            other if is_filtered_control(other) => {}
+            other => result.push(other),
+        }
+    }
+
+    result
 }
 
 fn is_command_like_line(line: &str) -> bool {
@@ -357,6 +416,115 @@ fn is_runtime_transport_dump(text: &str) -> bool {
     saw_event
 }
 
+fn is_runtime_internal_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let Some(timestamp) = parts.next() else {
+        return false;
+    };
+    let Some(level) = parts.next() else {
+        return false;
+    };
+    if !looks_like_iso8601_timestamp(timestamp) {
+        return false;
+    }
+    if !matches!(level, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR") {
+        return false;
+    }
+
+    let Some(target) = parts.next() else {
+        return false;
+    };
+    if target.ends_with(':') && target.contains("::") {
+        return true;
+    }
+
+    let remainder = std::iter::once(target)
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    remainder.contains("failed to list resources for mcp server")
+        || remainder.contains("failed to list resource templates for mcp server")
+        || remainder.contains("mcp error: -32601: method not found")
+}
+
+fn is_runtime_internal_noise_text(text: &str) -> bool {
+    let mut saw_noise = false;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if !is_runtime_internal_noise_line(line) {
+            return false;
+        }
+        saw_noise = true;
+    }
+    saw_noise
+}
+
+fn is_opencode_terminal_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == "Commands:"
+        || trimmed.starts_with("opencode ")
+        || trimmed.contains("start opencode tui")
+        || trimmed.contains("manage MCP (Model Context Protocol) servers")
+        || trimmed.chars().all(|ch| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '█' | '▀'
+                        | '▄'
+                        | '▌'
+                        | '▐'
+                        | '▖'
+                        | '▗'
+                        | '▘'
+                        | '▝'
+                        | '▙'
+                        | '▛'
+                        | '▜'
+                        | '▟'
+                )
+        })
+}
+
+fn is_amp_terminal_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("no api key found")
+        || lower.contains("starting login flow")
+        || lower.contains("ampcode.com/auth/cli-login")
+        || lower.contains("paste your code here")
+}
+
+fn is_cursor_terminal_noise_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("press any key to sign in") || lower.contains("cursor agent")
+}
+
+fn should_filter_runtime_line(session: &SessionRecord, line: &str) -> bool {
+    if is_runtime_transport_event_line(line) || is_runtime_internal_noise_line(line) {
+        return true;
+    }
+
+    (session.agent.trim().eq_ignore_ascii_case("opencode") && is_opencode_terminal_noise_line(line))
+        || (session.agent.trim().eq_ignore_ascii_case("amp") && is_amp_terminal_noise_line(line))
+        || (session.agent.trim().eq_ignore_ascii_case("cursor-cli")
+            && is_cursor_terminal_noise_line(line))
+}
+
+fn looks_like_iso8601_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && value.ends_with('Z')
+}
+
 fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
     let mut entries = Vec::new();
     let mut assistant_text = String::new();
@@ -398,7 +566,7 @@ fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
             continue;
         }
 
-        if is_runtime_transport_event_line(line) {
+        if should_filter_runtime_line(session, line) {
             continue;
         }
 
@@ -448,6 +616,7 @@ fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
 
 fn push_runtime_assistant_segments(
     feed: &mut Vec<Value>,
+    session: &SessionRecord,
     entry: &super::types::ConversationEntry,
     streaming: bool,
 ) {
@@ -485,6 +654,10 @@ fn push_runtime_assistant_segments(
             if !assistant_text.is_empty() && !assistant_text.ends_with("\n\n") {
                 assistant_text.push_str("\n\n");
             }
+            continue;
+        }
+
+        if should_filter_runtime_line(session, normalized) {
             continue;
         }
 
@@ -547,6 +720,7 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|value| !is_runtime_internal_noise_text(value))
         .filter(|value| Some(*value) != last_assistant_text);
     let summary = if matches!(normalized_status.as_str(), "needs_input" | "done")
         && summary
@@ -599,6 +773,7 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
                 entry.kind == "assistant_message"
                     && entry.source == "runtime"
                     && !is_runtime_transport_dump(&entry.text)
+                    && !is_runtime_internal_noise_text(&entry.text)
             })
             .map(|entry| entry.id.clone())
     } else {
@@ -608,6 +783,7 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
         matches!(entry.kind.as_str(), "assistant_message" | "status_message")
             && entry.source == "runtime"
             && !is_runtime_transport_dump(&entry.text)
+            && !is_runtime_internal_noise_text(&entry.text)
     });
     let runtime_entries = if has_structured_runtime_entries {
         Vec::new()
@@ -619,13 +795,17 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     }
 
     for entry in &session.conversation {
-        if entry.source == "runtime" && is_runtime_transport_dump(&entry.text) {
+        if entry.source == "runtime"
+            && (is_runtime_transport_dump(&entry.text)
+                || is_runtime_internal_noise_text(&entry.text))
+        {
             continue;
         }
 
         if entry.kind == "assistant_message" && entry.source == "runtime" {
             push_runtime_assistant_segments(
                 &mut feed,
+                session,
                 entry,
                 last_runtime_assistant_id.as_deref() == Some(entry.id.as_str()),
             );
@@ -933,6 +1113,15 @@ fn record_restart_recovery(session: &mut SessionRecord, recovered_at: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ConversationEntry;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    #[test]
+    fn sanitize_terminal_text_strips_ansi_and_control_sequences() {
+        let input = "\u{001b}[90m{\"type\":\"assistant\"}\u{001b}[0m\u{0008}";
+        assert_eq!(sanitize_terminal_text(input), "{\"type\":\"assistant\"}");
+    }
 
     #[test]
     fn finalize_tool_statuses_marks_completed_tool_calls_success() {
@@ -995,6 +1184,149 @@ mod tests {
                 .and_then(Value::as_str),
             Some("running")
         );
+    }
+
+    #[test]
+    fn build_normalized_chat_feed_drops_runtime_internal_log_noise() {
+        let mut session = SessionRecord::new(
+            "session-logs".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = "working".to_string();
+        session.conversation.push(ConversationEntry {
+            id: "runtime-log".to_string(),
+            kind: "assistant_message".to_string(),
+            text: "2026-03-09T01:31:02.130169Z WARN codex_core::mcp_connection_manager: Failed to list resources for MCP server 'filesystem': resources/list failed: Mcp error: -32601: Method not found".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        session.conversation.push(ConversationEntry {
+            id: "runtime-assistant".to_string(),
+            kind: "assistant_message".to_string(),
+            text: "I'm switching to shell inspection now.".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        let feed = build_normalized_chat_feed(&session);
+        let texts = feed
+            .iter()
+            .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(texts
+            .iter()
+            .any(|text| text.contains("shell inspection now")));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("codex_core::mcp_connection_manager")));
+    }
+
+    #[test]
+    fn build_normalized_chat_feed_drops_sqlx_runtime_log_noise() {
+        let mut session = SessionRecord::new(
+            "session-sqlx-logs".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = "working".to_string();
+        session.conversation.push(ConversationEntry {
+            id: "runtime-log".to_string(),
+            kind: "assistant_message".to_string(),
+            text: "2026-03-09T01:40:13.738303Z WARN sqlx::query: slow statement: execution time exceeded alert threshold summary=\"INSERT INTO threads ( ...\"".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        session.conversation.push(ConversationEntry {
+            id: "runtime-assistant".to_string(),
+            kind: "assistant_message".to_string(),
+            text: "I have the project layout and I'm reading the main components now.".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        let feed = build_normalized_chat_feed(&session);
+        let texts = feed
+            .iter()
+            .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(texts.iter().any(|text| text.contains("project layout")));
+        assert!(texts.iter().all(|text| !text.contains("sqlx::query")));
+    }
+
+    #[test]
+    fn build_normalized_chat_feed_drops_opencode_help_dump_noise() {
+        let mut session = SessionRecord::new(
+            "session-opencode-help".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "opencode".to_string(),
+            None,
+            None,
+            "Review repo".to_string(),
+            None,
+        );
+        session.status = "working".to_string();
+        session.conversation.push(ConversationEntry {
+            id: "runtime-help".to_string(),
+            kind: "assistant_message".to_string(),
+            text: "Commands:\nopencode completion          generate shell completion script\nopencode mcp                 manage MCP (Model Context Protocol) servers".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+        session.conversation.push(ConversationEntry {
+            id: "runtime-assistant".to_string(),
+            kind: "assistant_message".to_string(),
+            text: "I’m reviewing the repository layout now.".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "runtime".to_string(),
+            attachments: Vec::new(),
+            metadata: HashMap::new(),
+        });
+
+        let feed = build_normalized_chat_feed(&session);
+        let texts = feed
+            .iter()
+            .filter_map(|entry| entry.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(texts
+            .iter()
+            .any(|text| text.contains("reviewing the repository layout")));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("generate shell completion script")));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("manage MCP (Model Context Protocol) servers")));
     }
 
     #[test]
@@ -1103,13 +1435,15 @@ mod tests {
 }
 
 pub fn append_output(session: &mut SessionRecord, line: &str) {
-    if line.trim().is_empty() {
+    let sanitized = sanitize_terminal_text(line);
+    let normalized = sanitized.trim_end();
+    if normalized.trim().is_empty() {
         return;
     }
     if !session.output.is_empty() {
         session.output.push('\n');
     }
-    session.output.push_str(line.trim_end());
+    session.output.push_str(normalized);
     if session.output.len() > DEFAULT_OUTPUT_LIMIT_BYTES {
         let start = session
             .output

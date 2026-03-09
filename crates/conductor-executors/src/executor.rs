@@ -3,7 +3,9 @@ use async_trait::async_trait;
 use conductor_core::types::AgentKind;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Flags that must never be injected via extra_args because they bypass
@@ -43,6 +45,15 @@ pub struct SpawnOptions {
 
     /// Branch to work on.
     pub branch: Option<String>,
+
+    /// Maximum session duration. None means no timeout.
+    pub timeout: Option<Duration>,
+
+    /// Whether the runtime expects a long-lived interactive session.
+    pub interactive: bool,
+
+    /// Native CLI session target to resume instead of launching a fresh session.
+    pub resume_target: Option<String>,
 }
 
 impl SpawnOptions {
@@ -169,6 +180,104 @@ impl ExecutorHandle {
     }
 }
 
+pub fn wrap_parsed_output<E>(
+    executor: E,
+    mut output_rx: mpsc::Receiver<ExecutorOutput>,
+) -> mpsc::Receiver<ExecutorOutput>
+where
+    E: Executor + Send + Sync + 'static,
+{
+    let (parsed_output_tx, parsed_output_rx) = mpsc::channel::<ExecutorOutput>(1024);
+
+    tokio::spawn(async move {
+        while let Some(event) = output_rx.recv().await {
+            let parsed = match event {
+                ExecutorOutput::Stdout(line) => {
+                    let sanitized = sanitize_terminal_text(&line);
+                    executor.parse_output(&sanitized)
+                }
+                other => other,
+            };
+
+            for parsed_event in flatten_parsed_output(parsed) {
+                if parsed_output_tx.send(parsed_event).await.is_err() {
+                    return;
+                }
+            }
+        }
+    });
+
+    parsed_output_rx
+}
+
+fn is_filtered_control(ch: char) -> bool {
+    ch.is_control() && ch != '\n' && ch != '\t'
+}
+
+fn consume_csi<I>(chars: &mut Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(next) = chars.next() {
+        let code = next as u32;
+        if (0x40..=0x7e).contains(&code) {
+            break;
+        }
+    }
+}
+
+fn consume_osc<I>(chars: &mut Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    let mut previous_was_escape = false;
+    while let Some(next) = chars.next() {
+        if next == '\u{0007}' {
+            break;
+        }
+        if previous_was_escape && next == '\\' {
+            break;
+        }
+        previous_was_escape = next == '\u{001b}';
+    }
+}
+
+fn sanitize_terminal_text(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\u{001b}' => match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    consume_csi(&mut chars);
+                }
+                Some(']') => {
+                    chars.next();
+                    consume_osc(&mut chars);
+                }
+                _ => {}
+            },
+            '\r' => continue,
+            _ if is_filtered_control(ch) => continue,
+            _ => result.push(ch),
+        }
+    }
+
+    result
+}
+
+fn flatten_parsed_output(event: ExecutorOutput) -> Vec<ExecutorOutput> {
+    match event {
+        ExecutorOutput::Composite(events) => {
+            events.into_iter().flat_map(flatten_parsed_output).collect()
+        }
+        ExecutorOutput::Stdout(text) if text.trim().is_empty() => Vec::new(),
+        other => vec![other],
+    }
+}
+
 /// Trait for implementing an agent executor.
 ///
 /// Each supported agent CLI implements this trait to handle:
@@ -200,4 +309,110 @@ pub trait Executor: Send + Sync {
 
     /// Parse a line of output and classify it.
     fn parse_output(&self, line: &str) -> ExecutorOutput;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct DummyExecutor;
+
+    #[async_trait]
+    impl Executor for DummyExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "Dummy"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/tmp/dummy")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
+            unreachable!("not used in tests")
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            match line {
+                "structured" => ExecutorOutput::StructuredStatus {
+                    text: "Thinking".to_string(),
+                    metadata: HashMap::new(),
+                },
+                "composite" => ExecutorOutput::Composite(vec![
+                    ExecutorOutput::Stdout("first".to_string()),
+                    ExecutorOutput::Stdout(String::new()),
+                    ExecutorOutput::Stdout("second".to_string()),
+                ]),
+                _ => ExecutorOutput::Stdout(line.to_string()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wrap_parsed_output_applies_parser_and_flattens_composites() {
+        let (raw_tx, raw_rx) = mpsc::channel::<ExecutorOutput>(8);
+        let mut parsed_rx = wrap_parsed_output(DummyExecutor, raw_rx);
+
+        raw_tx
+            .send(ExecutorOutput::Stdout("structured".to_string()))
+            .await
+            .unwrap();
+        raw_tx
+            .send(ExecutorOutput::Stdout("composite".to_string()))
+            .await
+            .unwrap();
+        raw_tx
+            .send(ExecutorOutput::Stderr("stderr".to_string()))
+            .await
+            .unwrap();
+        drop(raw_tx);
+
+        let first = parsed_rx.recv().await.unwrap();
+        assert!(matches!(first, ExecutorOutput::StructuredStatus { .. }));
+
+        let second = parsed_rx.recv().await.unwrap();
+        assert!(matches!(second, ExecutorOutput::Stdout(ref text) if text == "first"));
+
+        let third = parsed_rx.recv().await.unwrap();
+        assert!(matches!(third, ExecutorOutput::Stdout(ref text) if text == "second"));
+
+        let fourth = parsed_rx.recv().await.unwrap();
+        assert!(matches!(fourth, ExecutorOutput::Stderr(ref text) if text == "stderr"));
+
+        assert!(parsed_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn wrap_parsed_output_sanitizes_terminal_sequences_before_parsing() {
+        let (raw_tx, raw_rx) = mpsc::channel::<ExecutorOutput>(8);
+        let mut parsed_rx = wrap_parsed_output(DummyExecutor, raw_rx);
+
+        raw_tx
+            .send(ExecutorOutput::Stdout(
+                "\u{001b}[90mhello\u{001b}[0m".to_string(),
+            ))
+            .await
+            .unwrap();
+        drop(raw_tx);
+
+        let output = parsed_rx.recv().await.unwrap();
+        assert!(matches!(output, ExecutorOutput::Stdout(ref text) if text == "hello"));
+        assert!(parsed_rx.recv().await.is_none());
+    }
 }

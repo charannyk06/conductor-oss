@@ -4,9 +4,11 @@ use conductor_core::types::AgentKind;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
+use super::discover_binary;
+use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::spawn_process;
 
+#[derive(Clone)]
 pub struct QwenCodeExecutor {
     binary: PathBuf,
 }
@@ -17,10 +19,7 @@ impl QwenCodeExecutor {
     }
 
     pub fn discover() -> Option<Self> {
-        which::which("qwen")
-            .ok()
-            .or_else(|| which::which("qwen-code").ok())
-            .map(Self::new)
+        discover_binary(&["qwen", "qwen-code"]).map(Self::new)
     }
 }
 
@@ -47,16 +46,29 @@ impl Executor for QwenCodeExecutor {
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
+        let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
         Ok(ExecutorHandle::new(
             handle.pid,
             self.kind(),
-            handle.output_rx,
+            output_rx,
             handle.input_tx,
             handle.kill_tx,
         ))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
+        if options.interactive {
+            let mut args = vec![];
+            if let Some(model) = &options.model {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+            if !options.prompt.trim().is_empty() {
+                args.push(options.prompt.clone());
+            }
+            return args;
+        }
+
         let mut args = vec![];
         if options.skip_permissions {
             args.push("--yolo".to_string());

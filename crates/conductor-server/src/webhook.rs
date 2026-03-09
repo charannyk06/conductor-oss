@@ -11,7 +11,10 @@ pub async fn emit_webhook(configs: &[WebhookConfig], event: &Event) -> Result<()
     let payload = serde_json::to_string(event)?;
 
     for config in configs {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
         let mut request = client.post(&config.url).header("Content-Type", "application/json");
 
         // Add HMAC signature if secret is configured.
@@ -25,7 +28,11 @@ pub async fn emit_webhook(configs: &[WebhookConfig], event: &Event) -> Result<()
         let req = request.body(payload.clone());
         tokio::spawn(async move {
             for attempt in 0..3 {
-                match req.try_clone().unwrap().send().await {
+                let Some(cloned) = req.try_clone() else {
+                    tracing::error!("Failed to clone webhook request for {url}");
+                    return;
+                };
+                match cloned.send().await {
                     Ok(resp) if resp.status().is_success() => {
                         tracing::debug!("Webhook delivered to {url}");
                         return;

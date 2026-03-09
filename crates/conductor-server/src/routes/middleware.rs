@@ -5,7 +5,9 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
 
-use super::config::{access_control_enabled, resolve_access_identity, AccessRole};
+use super::config::{
+    access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole,
+};
 use crate::state::AppState;
 
 pub async fn require_auth_when_remote(
@@ -25,7 +27,7 @@ pub async fn require_auth_when_remote(
 
     let headers = request.headers().clone();
     let identity = resolve_access_identity(&headers, &access).await;
-    if !identity.authenticated {
+    if !proxy_request_authorized(&headers) && !identity.authenticated {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -42,12 +44,20 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return None;
     }
 
-    if path == "/api/auth/session" || path == "/api/health" {
+    if path == "/api/auth/session" || path == "/api/health" || path == "/api/github/webhook" {
         return None;
     }
 
     if path.starts_with("/api/access") {
         return Some(AccessRole::Admin);
+    }
+
+    if path.starts_with("/api/app-update") {
+        return Some(if *method == Method::GET {
+            AccessRole::Viewer
+        } else {
+            AccessRole::Admin
+        });
     }
 
     if path.starts_with("/api/preferences")
@@ -101,8 +111,20 @@ mod tests {
     fn route_policy_protects_live_events_and_session_output() {
         assert_eq!(required_access_role(&Method::GET, "/api/health"), None);
         assert_eq!(
+            required_access_role(&Method::POST, "/api/github/webhook"),
+            None
+        );
+        assert_eq!(
             required_access_role(&Method::GET, "/api/events"),
             Some(AccessRole::Viewer)
+        );
+        assert_eq!(
+            required_access_role(&Method::GET, "/api/app-update"),
+            Some(AccessRole::Viewer)
+        );
+        assert_eq!(
+            required_access_role(&Method::POST, "/api/app-update"),
+            Some(AccessRole::Admin)
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/health/sessions"),
@@ -158,7 +180,11 @@ mod tests {
             std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
         }
 
-        let state = build_state(DashboardAccessConfig::default()).await;
+        let state = build_state(DashboardAccessConfig {
+            allow_signed_share_links: true,
+            ..DashboardAccessConfig::default()
+        })
+        .await;
         let app = Router::new()
             .route(
                 "/api/events",
@@ -188,12 +214,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn middleware_blocks_viewer_role_from_operator_routes() {
+    async fn middleware_allows_local_views_when_share_links_are_disabled_even_if_runtime_tokens_exist(
+    ) {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
-            std::env::set_var("CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS", "true");
+            std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
+            std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
         }
 
+        let state = build_state(DashboardAccessConfig::default()).await;
+
+        let app = Router::new()
+            .route(
+                "/api/events",
+                get(|| async { StatusCode::OK.into_response() }),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_auth_when_remote,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        unsafe {
+            std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
+            std::env::remove_var("CONDUCTOR_REMOTE_SESSION_SECRET");
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_allows_proxy_authorized_requests_even_when_runtime_auth_is_required() {
+        let state = build_state(DashboardAccessConfig {
+            require_auth: true,
+            ..DashboardAccessConfig::default()
+        })
+        .await;
+
+        let app = Router::new()
+            .route(
+                "/api/preferences",
+                get(|| async { StatusCode::OK.into_response() }),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_auth_when_remote,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/preferences")
+                    .header("x-conductor-proxy-authorized", "true")
+                    .header("x-conductor-access-authenticated", "false")
+                    .header("x-conductor-access-role", "viewer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_rejects_legacy_generic_trusted_headers() {
         let state = build_state(DashboardAccessConfig {
             require_auth: true,
             default_role: "viewer".to_string(),
@@ -232,9 +327,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        unsafe {
-            std::env::remove_var("CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS");
-        }
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

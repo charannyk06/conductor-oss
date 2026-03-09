@@ -309,11 +309,26 @@ async fn process_board_change(
 }
 
 async fn active_session_counts(state: &Arc<AppState>, project_id: &str) -> (usize, usize) {
+    let live_session_ids = state
+        .live_sessions
+        .read()
+        .await
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
     let sessions = state.sessions.read().await;
     let mut global = 0usize;
     let mut project = 0usize;
     for session in sessions.values() {
-        if SessionStatus::from(session.status.as_str()).is_terminal() {
+        let status = SessionStatus::from(session.status.as_str());
+        if status.is_terminal()
+            || status == SessionStatus::Queued
+            || matches!(session.status.as_str(), "needs_input" | "stuck" | "errored")
+        {
+            continue;
+        }
+        let is_live = live_session_ids.contains(&session.id);
+        if session.status != "spawning" && !is_live {
             continue;
         }
         global += 1;

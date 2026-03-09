@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { type FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { GitBranchIcon, LockIcon, MarkGithubIcon, RepoIcon } from "@primer/octicons-react";
@@ -16,7 +17,6 @@ import {
   type AgentReasoningOption,
   type DashboardRole,
   type ModelAccessPreferences,
-  type TrustedHeaderAccessProvider,
 } from "@conductor-oss/core/types";
 import type { IconType } from "react-icons";
 import { SiNotion, SiObsidian } from "react-icons/si";
@@ -48,9 +48,15 @@ import {
 } from "lucide-react";
 import type { DashboardSession } from "@/lib/types";
 import { normalizeAgentName } from "@/lib/agentUtils";
+import {
+  getKnownAgent,
+  KNOWN_AGENTS,
+  KNOWN_AGENT_ORDER,
+} from "@/lib/knownAgents";
 import { useSessions } from "@/hooks/useSessions";
 import { useConfig, type ConfigProject } from "@/hooks/useConfig";
 import { useAgents } from "@/hooks/useAgents";
+import { useResponsiveSidebarState } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
@@ -65,42 +71,17 @@ import {
 } from "@/lib/runtimeAgentModelsShared";
 import { WorkspaceOverview } from "@/features/dashboard/components/WorkspaceOverview";
 
-const EXECUTOR_ORDER = [
-  "codex",
-  "gemini",
-  "qwen-code",
-  "droid",
-  "claude-code",
-  "amp",
-  "opencode",
-  "github-copilot",
-  "cursor-cli",
-  "ccr",
-];
-
 const DEFAULT_AGENT = "claude-code";
+type DashboardWorkspaceView = "chat" | "board";
 
-const EXECUTOR_LABELS: Record<string, string> = {
-  codex: "Codex",
-  gemini: "Gemini",
-  "qwen-code": "Qwen Code",
-  droid: "Droid",
-  "claude-code": "Claude Code",
-  amp: "Amp",
-  opencode: "Opencode",
-  "github-copilot": "Copilot",
-  "cursor-cli": "Cursor Agent",
-  ccr: "CCR",
-};
+function normalizeDashboardQueryValue(value: string | null): string | null {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
+}
 
-const AGENT_SETUP_URLS: Record<string, string> = {
-  "claude-code": "https://claude.ai/",
-  codex: "https://chatgpt.com/codex",
-  gemini: "https://aistudio.google.com/",
-  "qwen-code": "https://chat.qwen.ai/",
-  opencode: "https://opencode.ai/",
-  "github-copilot": "https://github.com/settings/copilot",
-};
+function resolveDashboardWorkspaceView(value: string | null): DashboardWorkspaceView {
+  return value === "board" ? "board" : "chat";
+}
 
 const SessionDetail = dynamic(
   () => import("@/components/sessions/SessionDetail").then((mod) => mod.SessionDetail),
@@ -125,8 +106,8 @@ const WorkspaceKanban = dynamic(
 );
 
 function getAgentLabel(value: string): string {
-  const normalized = normalizeAgentName(value);
-  if (EXECUTOR_LABELS[normalized]) return EXECUTOR_LABELS[normalized];
+  const known = getKnownAgent(value);
+  if (known?.label) return known.label;
   return value
     .split(/[-_\s]+/g)
     .filter(Boolean)
@@ -259,6 +240,7 @@ type CreateSessionOptions = {
 type LinkedBoardTask = {
   id: string;
   text: string;
+  issueId: string | null;
   taskRef: string | null;
   type: string | null;
   priority: string | null;
@@ -294,9 +276,8 @@ type PreferencesPayload = {
   onboardingAcknowledged: boolean;
   codingAgent: string;
   ide: string;
-  remoteSshHost: string;
-  remoteSshUser: string;
   markdownEditor: string;
+  markdownEditorPath: string;
   modelAccess: ModelAccessPreferences;
   notifications: {
     soundEnabled: boolean;
@@ -312,7 +293,7 @@ type AccessIdentitySummary = {
 };
 
 function getLinkedTaskValue(task: LinkedBoardTask): string {
-  return task.taskRef?.trim() || task.id;
+  return task.issueId?.trim() || task.taskRef?.trim() || task.id;
 }
 
 function getLinkedTaskTitle(text: string): string {
@@ -325,7 +306,7 @@ type AccessSettingsPayload = {
   defaultRole: DashboardRole;
   trustedHeaders: {
     enabled: boolean;
-    provider: TrustedHeaderAccessProvider;
+    provider: "cloudflare-access";
     emailHeader: string;
     jwtHeader: string;
     teamDomain: string;
@@ -342,6 +323,31 @@ type AccessSettingsPayload = {
   current: AccessIdentitySummary;
 };
 
+type RemoteAccessPayload = {
+  publicUrl: string | null;
+  connectUrl: string | null;
+  shareable: boolean;
+  status: "disabled" | "starting" | "ready" | "error";
+  provider: "tailscale" | null;
+  recommendedProvider: "tailscale" | null;
+  localUrl: string | null;
+  managed: boolean;
+  installed: boolean;
+  connected: boolean;
+  canAutoInstall: boolean;
+  autoInstallMethod: "brew" | null;
+  lastError: string | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+  mode: "cloudflare-access" | "private-network" | "enterprise-only" | "generic-header" | "clerk" | "local-only" | "misconfigured" | "unsafe-public";
+  title: string;
+  description: string;
+  warnings: string[];
+  nextSteps: string[];
+};
+
+type RemoteAccessAction = "enable" | "rotate" | "disable";
+
 type RepositoryPathHealth = {
   exists: boolean;
   isGitRepository: boolean;
@@ -354,6 +360,7 @@ type RepositorySettingsPayload = {
   repo: string;
   path: string;
   agent: string;
+  agentPermissions: string;
   agentModel: string;
   agentReasoningEffort: string;
   workspaceMode: string;
@@ -362,6 +369,12 @@ type RepositorySettingsPayload = {
   defaultWorkingDirectory: string;
   defaultBranch: string;
   devServerScript: string;
+  devServerCwd: string;
+  devServerUrl: string;
+  devServerPort: string;
+  devServerHost: string;
+  devServerPath: string;
+  devServerHttps: boolean;
   setupScript: string;
   runSetupInParallel: boolean;
   cleanupScript: string;
@@ -383,6 +396,9 @@ type AgentSetupState = {
   configured: boolean;
   homepage: string | null;
   description: string | null;
+  installHint: string | null;
+  installUrl: string | null;
+  setupUrl: string | null;
 };
 
 type PreferencesDialogMode = "onboarding" | "settings";
@@ -465,23 +481,19 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
   const ide = typeof payload["ide"] === "string" && payload["ide"].trim().length > 0
     ? payload["ide"].trim()
     : "vscode";
-  const remoteSshHost = typeof payload["remoteSshHost"] === "string" && payload["remoteSshHost"].trim().length > 0
-    ? payload["remoteSshHost"].trim()
-    : "";
-  const remoteSshUser = typeof payload["remoteSshUser"] === "string" && payload["remoteSshUser"].trim().length > 0
-    ? payload["remoteSshUser"].trim()
-    : "";
   const markdownEditor = typeof payload["markdownEditor"] === "string" && payload["markdownEditor"].trim().length > 0
     ? payload["markdownEditor"].trim()
     : "obsidian";
+  const markdownEditorPath = typeof payload["markdownEditorPath"] === "string"
+    ? payload["markdownEditorPath"].trim()
+    : "";
 
   return {
     onboardingAcknowledged: payload["onboardingAcknowledged"] === true,
     codingAgent,
     ide,
-    remoteSshHost,
-    remoteSshUser,
     markdownEditor,
+    markdownEditorPath,
     modelAccess: normalizeModelAccessPreferences(payload["modelAccess"]),
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
@@ -510,6 +522,14 @@ function normalizeMultilineList(value: unknown): string {
     .join("\n");
 }
 
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSettingsPayload {
   const payload = toObject(value);
   const trustedHeaders = toObject(payload["trustedHeaders"]);
@@ -523,11 +543,11 @@ function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSetti
   const currentRoleRaw = current["role"];
 
   return {
-    requireAuth: payload["requireAuth"] === true,
+    requireAuth: payload["requireAuth"] === true || trustedHeaders["enabled"] === true,
     defaultRole,
     trustedHeaders: {
       enabled: trustedHeaders["enabled"] === true,
-      provider: trustedHeaders["provider"] === "generic" ? "generic" : "cloudflare-access",
+      provider: "cloudflare-access",
       emailHeader: typeof trustedHeaders["emailHeader"] === "string" && trustedHeaders["emailHeader"].trim().length > 0
         ? trustedHeaders["emailHeader"].trim()
         : "Cf-Access-Authenticated-User-Email",
@@ -562,6 +582,108 @@ function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSetti
         : null,
     },
   };
+}
+
+function normalizeRemoteAccess(value: unknown): RemoteAccessPayload {
+  const payload = toObject(value);
+  const mode = payload["mode"];
+  const status = payload["status"];
+  const provider = payload["provider"];
+  const autoInstallMethod = payload["autoInstallMethod"];
+
+  return {
+    publicUrl: typeof payload["publicUrl"] === "string" && payload["publicUrl"].trim().length > 0
+      ? payload["publicUrl"].trim()
+      : null,
+    connectUrl: typeof payload["connectUrl"] === "string" && payload["connectUrl"].trim().length > 0
+      ? payload["connectUrl"].trim()
+      : null,
+    shareable: payload["shareable"] === true,
+    status:
+      status === "starting"
+      || status === "ready"
+      || status === "error"
+      || status === "disabled"
+        ? status
+        : "disabled",
+    provider: provider === "tailscale" ? provider : null,
+    recommendedProvider:
+      payload["recommendedProvider"] === "tailscale"
+        ? payload["recommendedProvider"]
+        : null,
+    localUrl: typeof payload["localUrl"] === "string" && payload["localUrl"].trim().length > 0
+      ? payload["localUrl"].trim()
+      : null,
+    managed: payload["managed"] === true,
+    installed: payload["installed"] === true,
+    connected: payload["connected"] === true,
+    canAutoInstall: payload["canAutoInstall"] === true,
+    autoInstallMethod: autoInstallMethod === "brew" ? "brew" : null,
+    lastError: typeof payload["lastError"] === "string" && payload["lastError"].trim().length > 0
+      ? payload["lastError"].trim()
+      : null,
+    startedAt: typeof payload["startedAt"] === "string" && payload["startedAt"].trim().length > 0
+      ? payload["startedAt"].trim()
+      : null,
+    updatedAt: typeof payload["updatedAt"] === "string" && payload["updatedAt"].trim().length > 0
+      ? payload["updatedAt"].trim()
+      : null,
+    mode:
+      mode === "cloudflare-access"
+      || mode === "private-network"
+      || mode === "enterprise-only"
+      || mode === "generic-header"
+      || mode === "clerk"
+      || mode === "local-only"
+      || mode === "misconfigured"
+      || mode === "unsafe-public"
+        ? mode
+        : "local-only",
+    title: typeof payload["title"] === "string" && payload["title"].trim().length > 0
+      ? payload["title"].trim()
+      : "Remote access",
+    description: typeof payload["description"] === "string" && payload["description"].trim().length > 0
+      ? payload["description"].trim()
+      : "",
+    warnings: normalizeStringArray(payload["warnings"]),
+    nextSteps: normalizeStringArray(payload["nextSteps"]),
+  };
+}
+
+function getRemoteAccessModeLabel(mode: RemoteAccessPayload["mode"]): string {
+  switch (mode) {
+    case "cloudflare-access":
+      return "Cloudflare Access";
+    case "private-network":
+      return "Private network";
+    case "enterprise-only":
+      return "Enterprise only";
+    case "generic-header":
+      return "Legacy mode blocked";
+    case "clerk":
+      return "Clerk";
+    case "misconfigured":
+      return "Auth required";
+    case "unsafe-public":
+      return "Blocked until protected";
+    case "local-only":
+    default:
+      return "Local only";
+  }
+}
+
+function getRemoteAccessStatusLabel(status: RemoteAccessPayload["status"]): string {
+  switch (status) {
+    case "starting":
+      return "Starting";
+    case "ready":
+      return "Ready";
+    case "error":
+      return "Error";
+    case "disabled":
+    default:
+      return "Disabled";
+  }
 }
 
 function emptyModelSelection(): ModelSelectionState {
@@ -734,8 +856,9 @@ function resolveReasoningSelectionValue(selection: ModelSelectionState): string 
 
 function getAgentModelAccessLabel(agent: string, modelAccess: ModelAccessPreferences): string | null {
   const catalog = getAgentModelCatalog(agent);
+  if (!catalog || catalog.accessOptions.length <= 1) return null;
   const access = resolveAgentModelAccess(agent, modelAccess);
-  if (!catalog || !access) return null;
+  if (!access) return null;
 
   return catalog.accessOptions.find((option) => option.id === access)?.label ?? null;
 }
@@ -972,13 +1095,31 @@ function AgentModelSelector({
 }
 
 export default function DashboardClient() {
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const { sessions, error: sessionsError, refresh: refreshSessions } = useSessions(selectedProjectId);
-  const { projects, error: configError, refresh: refreshConfig } = useConfig();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const selectedProjectId = useMemo(
+    () => normalizeDashboardQueryValue(searchParams.get("project")),
+    [searchParams],
+  );
+  const selectedSessionId = useMemo(
+    () => normalizeDashboardQueryValue(searchParams.get("session")),
+    [searchParams],
+  );
+  const workspaceView = useMemo(
+    () => resolveDashboardWorkspaceView(searchParams.get("view")),
+    [searchParams],
+  );
+  const { sessions, loading: sessionsLoading, error: sessionsError, refresh: refreshSessions } = useSessions(selectedProjectId);
+  const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig();
   const { agents } = useAgents();
-
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const {
+    mobileSidebarOpen,
+    desktopSidebarOpen,
+    toggleSidebar,
+    closeSidebarOnMobile,
+    syncSidebarForViewport,
+  } = useResponsiveSidebarState();
 
   const [prompt, setPrompt] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("");
@@ -988,7 +1129,6 @@ export default function DashboardClient() {
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [newWorkspaceError, setNewWorkspaceError] = useState<string | null>(null);
-  const [workspaceView, setWorkspaceView] = useState<"chat" | "board">("chat");
   const [preferences, setPreferences] = useState<PreferencesPayload | null>(null);
   const [preferencesLoading, setPreferencesLoading] = useState(true);
   const [preferencesSaving, setPreferencesSaving] = useState(false);
@@ -999,30 +1139,91 @@ export default function DashboardClient() {
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const workspaceError = createError ?? configError ?? sessionsError ?? preferencesError;
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.innerWidth < 1024) {
-      setSidebarOpen(false);
+  const navigateDashboard = useCallback((
+    updates: {
+      projectId?: string | null;
+      sessionId?: string | null;
+      workspaceView?: DashboardWorkspaceView | null;
+      tab?: "overview" | "chat" | "diff" | "preview" | null;
+    },
+    mode: "push" | "replace" = "push",
+  ) => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    const updateParam = (key: string, value: string | null | undefined) => {
+      const trimmed = typeof value === "string" ? value.trim() : "";
+      if (trimmed.length > 0) {
+        params.set(key, trimmed);
+        return;
+      }
+      params.delete(key);
+    };
+
+    if ("projectId" in updates) {
+      updateParam("project", updates.projectId);
     }
-  }, []);
+    if ("sessionId" in updates) {
+      updateParam("session", updates.sessionId);
+    }
+    if ("workspaceView" in updates) {
+      if (updates.workspaceView === "board") {
+        params.set("view", "board");
+      } else {
+        params.delete("view");
+      }
+    }
+    if ("tab" in updates) {
+      if (updates.tab && updates.tab !== "chat") {
+        params.set("tab", updates.tab);
+      } else {
+        params.delete("tab");
+      }
+    }
+
+    if (!params.has("project")) {
+      params.delete("view");
+    }
+    if (!params.has("session")) {
+      params.delete("tab");
+    }
+
+    const nextQuery = params.toString();
+    const nextUrl = nextQuery.length > 0 ? `${pathname}?${nextQuery}` : pathname;
+    if (mode === "replace") {
+      router.replace(nextUrl, { scroll: false });
+      return;
+    }
+    router.push(nextUrl, { scroll: false });
+  }, [pathname, router, searchParams]);
 
   useEffect(() => {
+    if (configLoading || configError) return;
+
     if (projects.length === 0) {
-      if (selectedProjectId !== null) setSelectedProjectId(null);
+      if (selectedProjectId !== null) {
+        navigateDashboard({ projectId: null, workspaceView: null }, "replace");
+      }
       return;
     }
 
     if (selectedProjectId !== null && !projects.some((project) => project.id === selectedProjectId)) {
-      setSelectedProjectId(projects[0]?.id ?? null);
+      navigateDashboard(
+        {
+          projectId: selectedSessionId ? null : projects[0]?.id ?? null,
+          workspaceView: selectedSessionId ? null : workspaceView,
+        },
+        "replace",
+      );
     }
-  }, [projects, selectedProjectId]);
+  }, [configError, configLoading, navigateDashboard, projects, selectedProjectId, selectedSessionId, workspaceView]);
 
   useEffect(() => {
+    if (sessionsLoading || sessionsError || !selectedSessionId) return;
     if (!selectedSessionId) return;
     if (!dashboardSessions.some((session) => session.id === selectedSessionId)) {
-      setSelectedSessionId(null);
+      navigateDashboard({ sessionId: null, tab: null }, "replace");
     }
-  }, [dashboardSessions, selectedSessionId]);
+  }, [dashboardSessions, navigateDashboard, selectedSessionId, sessionsError, sessionsLoading]);
 
   const selectedSession = useMemo(
     () => dashboardSessions.find((s) => s.id === selectedSessionId) ?? null,
@@ -1050,6 +1251,9 @@ export default function DashboardClient() {
       : [];
     const opts = new Set<string>();
 
+    for (const known of KNOWN_AGENTS) {
+      opts.add(known.name);
+    }
     for (const agent of safeAgents) {
       if (agent.name) {
         opts.add(agent.name);
@@ -1072,6 +1276,19 @@ export default function DashboardClient() {
 
   const agentStatesByName = useMemo(() => {
     const states: Record<string, AgentSetupState> = {};
+    for (const known of KNOWN_AGENTS) {
+      states[normalizeAgentName(known.name)] = {
+        name: known.name,
+        ready: false,
+        installed: false,
+        configured: false,
+        homepage: known.homepage,
+        description: known.description,
+        installHint: known.installHint ?? null,
+        installUrl: known.installUrl ?? known.homepage ?? null,
+        setupUrl: known.setupUrl ?? known.homepage ?? null,
+      };
+    }
     const safeAgents = Array.isArray(agents)
       ? agents as Array<{
         name?: string;
@@ -1080,18 +1297,36 @@ export default function DashboardClient() {
         configured?: boolean;
         homepage?: string | null;
         description?: string | null;
+        installHint?: string | null;
+        installUrl?: string | null;
+        setupUrl?: string | null;
       }>
       : [];
 
     for (const agent of safeAgents) {
       if (!agent.name) continue;
+      const normalizedName = normalizeAgentName(agent.name);
+      const known = getKnownAgent(agent.name);
       states[normalizeAgentName(agent.name)] = {
-        name: agent.name,
+        name: known?.name ?? agent.name,
         ready: agent.ready === true,
         installed: agent.installed !== false,
-        configured: agent.configured !== false,
-        homepage: typeof agent.homepage === "string" ? agent.homepage : null,
-        description: typeof agent.description === "string" ? agent.description : null,
+        configured: agent.configured === true,
+        homepage: typeof agent.homepage === "string"
+          ? agent.homepage
+          : known?.homepage ?? states[normalizedName]?.homepage ?? null,
+        description: typeof agent.description === "string"
+          ? agent.description
+          : known?.description ?? states[normalizedName]?.description ?? null,
+        installHint: typeof agent.installHint === "string"
+          ? agent.installHint
+          : known?.installHint ?? states[normalizedName]?.installHint ?? null,
+        installUrl: typeof agent.installUrl === "string"
+          ? agent.installUrl
+          : known?.installUrl ?? states[normalizedName]?.installUrl ?? null,
+        setupUrl: typeof agent.setupUrl === "string"
+          ? agent.setupUrl
+          : known?.setupUrl ?? states[normalizedName]?.setupUrl ?? null,
       };
     }
 
@@ -1114,7 +1349,16 @@ export default function DashboardClient() {
 
   const openAgentSetup = useCallback((agentName: string) => {
     const normalized = normalizeAgentName(agentName);
-    const target = agentStatesByName[normalized]?.homepage || AGENT_SETUP_URLS[normalized];
+    const agentState = agentStatesByName[normalized];
+    const known = getKnownAgent(agentName);
+    const target = agentState?.installed
+      ? agentState?.setupUrl ?? known?.setupUrl ?? agentState?.homepage ?? known?.homepage
+      : agentState?.installUrl
+        ?? known?.installUrl
+        ?? agentState?.setupUrl
+        ?? known?.setupUrl
+        ?? agentState?.homepage
+        ?? known?.homepage;
     if (!target || typeof window === "undefined") return;
     window.open(target, "_blank", "noopener,noreferrer");
   }, [agentStatesByName]);
@@ -1232,22 +1476,6 @@ export default function DashboardClient() {
     }
   }
 
-  const toggleSidebar = useCallback(() => setSidebarOpen((prev) => !prev), []);
-
-  const closeSidebarOnMobile = useCallback(() => {
-    if (typeof window !== "undefined" && window.innerWidth < 1024) {
-      setSidebarOpen(false);
-    }
-  }, []);
-
-  const syncSidebarForViewport = useCallback(() => {
-    if (typeof window !== "undefined" && window.innerWidth < 1024) {
-      setSidebarOpen(false);
-      return;
-    }
-    setSidebarOpen(true);
-  }, []);
-
   const openWorkspaceDialog = useCallback(() => {
     setNewWorkspaceError(null);
     setNewWorkspaceOpen(true);
@@ -1318,10 +1546,17 @@ export default function DashboardClient() {
       }
 
       setPrompt("");
-      setWorkspaceView("chat");
       syncSidebarForViewport();
       await refreshSessions();
-      setSelectedSessionId(data.session.id);
+      navigateDashboard(
+        {
+          projectId,
+          sessionId: data.session.id,
+          workspaceView: "chat",
+          tab: "chat",
+        },
+        "push",
+      );
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Failed to create workspace");
     } finally {
@@ -1330,6 +1565,7 @@ export default function DashboardClient() {
   }, [
     agentStatesByName,
     launchModelSelection,
+    navigateDashboard,
     openAgentSetup,
     projects,
     prompt,
@@ -1363,11 +1599,11 @@ export default function DashboardClient() {
     }
 
     if (selectedSessionId === sessionId) {
-      setSelectedSessionId(null);
+      navigateDashboard({ sessionId: null, tab: null }, "replace");
     }
 
     await refreshSessions();
-  }, [refreshSessions, selectedSessionId]);
+  }, [navigateDashboard, refreshSessions, selectedSessionId]);
 
   const handleCreateWorkspace = useCallback(async (payload: NewWorkspacePayload) => {
     setCreatingWorkspace(true);
@@ -1394,33 +1630,55 @@ export default function DashboardClient() {
       }
 
       await refreshConfig();
-      setSelectedProjectId(createdProjectId);
-      setSelectedSessionId(null);
       setPrompt("");
       syncSidebarForViewport();
       setNewWorkspaceOpen(false);
+      navigateDashboard(
+        {
+          projectId: createdProjectId,
+          sessionId: null,
+          workspaceView: "chat",
+          tab: null,
+        },
+        "push",
+      );
     } catch (err) {
       setNewWorkspaceError(err instanceof Error ? err.message : "Failed to add workspace");
     } finally {
       setCreatingWorkspace(false);
     }
-  }, [refreshConfig, syncSidebarForViewport]);
+  }, [navigateDashboard, refreshConfig, syncSidebarForViewport]);
 
   const onboardingRequired = !preferencesLoading && !!preferences && !preferences.onboardingAcknowledged;
   const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || DEFAULT_AGENT);
   const resolvedCodingAgent = selectedAgent || resolvedPreferences.codingAgent || DEFAULT_AGENT;
 
   const handleSelectProject = useCallback((projectId: string | null) => {
-    setSelectedProjectId(projectId);
-    setSelectedSessionId(null);
+    navigateDashboard(
+      {
+        projectId,
+        sessionId: null,
+        workspaceView: projectId ? workspaceView : null,
+        tab: null,
+      },
+      "push",
+    );
     setSelectedAgent(preferences?.codingAgent || DEFAULT_AGENT);
     closeSidebarOnMobile();
-  }, [closeSidebarOnMobile, preferences?.codingAgent]);
+  }, [closeSidebarOnMobile, navigateDashboard, preferences?.codingAgent, workspaceView]);
 
   const handleSelectSession = useCallback((id: string) => {
-    setSelectedSessionId(id);
+    const matchedSession = dashboardSessions.find((session) => session.id === id) ?? null;
+    navigateDashboard(
+      {
+        projectId: matchedSession?.projectId ?? selectedProjectId ?? null,
+        sessionId: id,
+        tab: "chat",
+      },
+      "push",
+    );
     closeSidebarOnMobile();
-  }, [closeSidebarOnMobile]);
+  }, [closeSidebarOnMobile, dashboardSessions, navigateDashboard, selectedProjectId]);
 
   const handleOpenPreferences = useCallback(() => {
     setPreferencesDialogOpen(true);
@@ -1502,7 +1760,7 @@ export default function DashboardClient() {
         agentOptions={agentOptions}
         projects={projects}
         selectedProjectId={selectedProjectId}
-        onSelectProject={setSelectedProjectId}
+        onSelectProject={handleSelectProject}
         projectLabel={selectedProjectId ?? "All projects"}
         hasProject={projects.length > 0}
         creating={creating}
@@ -1550,7 +1808,7 @@ export default function DashboardClient() {
             <div className="inline-flex w-fit rounded-[6px] border border-[var(--vk-border)] p-1">
               <button
                 type="button"
-                onClick={() => setWorkspaceView("chat")}
+                onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "chat" }, "replace")}
                 className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
                   workspaceView === "chat"
                     ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
@@ -1561,7 +1819,7 @@ export default function DashboardClient() {
               </button>
               <button
                 type="button"
-                onClick={() => setWorkspaceView("board")}
+                onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
                 className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
                   workspaceView === "board"
                     ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
@@ -1579,7 +1837,7 @@ export default function DashboardClient() {
         </div>
       </div>
     );
-  }, [selectedProject, workspaceMainPanel, workspaceView]);
+  }, [navigateDashboard, selectedProject, workspaceMainPanel, workspaceView]);
 
   const workspaceContent = useMemo(() => {
     if (selectedSessionId) {
@@ -1622,7 +1880,8 @@ export default function DashboardClient() {
   return (
     <>
       <AppShell
-        sidebarOpen={sidebarOpen}
+        mobileSidebarOpen={mobileSidebarOpen}
+        desktopSidebarOpen={desktopSidebarOpen}
         onToggleSidebar={toggleSidebar}
         sidebar={sidebarContent}
       >
@@ -1657,6 +1916,7 @@ export default function DashboardClient() {
           current={resolvedPreferences}
           projectCount={projects.length}
           agentOptions={agentOptions}
+          agentStates={agentStatesByName}
           runtimeModelCatalogs={runtimeModelCatalogs}
           onRepositoriesChanged={refreshConfig}
           onOnboardingComplete={({ needsProject }) => {
@@ -1664,6 +1924,7 @@ export default function DashboardClient() {
               setPendingWorkspaceSetup(true);
             }
           }}
+          onOpenAgentSetup={openAgentSetup}
           onClose={handleClosePreferencesDialog}
           onSave={handleSavePreferences}
         />
@@ -1784,7 +2045,7 @@ function NewWorkspaceDialog({
       opts.push(defaultAgent || DEFAULT_AGENT);
     }
 
-    const rankMap = new Map(EXECUTOR_ORDER.map((name, index) => [name, index]));
+    const rankMap = new Map(KNOWN_AGENT_ORDER.map((name, index) => [name, index]));
     return opts.sort((left, right) => {
       const leftRank = rankMap.get(normalizeAgentName(left)) ?? Number.MAX_SAFE_INTEGER;
       const rightRank = rankMap.get(normalizeAgentName(right)) ?? Number.MAX_SAFE_INTEGER;
@@ -2745,7 +3006,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   onCreate: (options?: CreateSessionOptions) => void;
 }) {
   const orderedAgentOptions = useMemo(() => {
-    const rankMap = new Map(EXECUTOR_ORDER.map((name, index) => [name, index]));
+    const rankMap = new Map(KNOWN_AGENT_ORDER.map((name, index) => [name, index]));
     return [...agentOptions].sort((left, right) => {
       const leftRank = rankMap.get(normalizeAgentName(left)) ?? Number.MAX_SAFE_INTEGER;
       const rightRank = rankMap.get(normalizeAgentName(right)) ?? Number.MAX_SAFE_INTEGER;
@@ -3399,9 +3660,11 @@ function SettingsDialog({
   current,
   projectCount,
   agentOptions,
+  agentStates,
   runtimeModelCatalogs,
   onRepositoriesChanged,
   onOnboardingComplete,
+  onOpenAgentSetup,
   onClose,
   onSave,
 }: {
@@ -3412,18 +3675,19 @@ function SettingsDialog({
   current: PreferencesPayload;
   projectCount: number;
   agentOptions: string[];
+  agentStates: Record<string, AgentSetupState>;
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   onRepositoriesChanged?: () => Promise<void>;
   onOnboardingComplete?: (result: { needsProject: boolean }) => void;
+  onOpenAgentSetup: (agent: string) => void;
   onClose: () => void;
   onSave: (next: PreferencesPayload, options?: { closeDialog?: boolean }) => Promise<boolean>;
 }) {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("preferences");
   const [codingAgent, setCodingAgent] = useState(current.codingAgent);
   const [ide, setIde] = useState(current.ide);
-  const [remoteSshHost, setRemoteSshHost] = useState(current.remoteSshHost);
-  const [remoteSshUser, setRemoteSshUser] = useState(current.remoteSshUser);
   const [markdownEditor, setMarkdownEditor] = useState(current.markdownEditor);
+  const [markdownEditorPath, setMarkdownEditorPath] = useState<string>(current.markdownEditorPath ?? "");
   const [modelAccess, setModelAccess] = useState<ModelAccessPreferences>(current.modelAccess);
   const [soundEnabled, setSoundEnabled] = useState(current.notifications.soundEnabled);
   const [soundFile, setSoundFile] = useState<string | null>(current.notifications.soundFile);
@@ -3438,23 +3702,36 @@ function SettingsDialog({
   const [repositoryBranchesLoading, setRepositoryBranchesLoading] = useState(false);
   const [repositoryBranchesError, setRepositoryBranchesError] = useState<string | null>(null);
   const [repositoryFolderPickerOpen, setRepositoryFolderPickerOpen] = useState(false);
+  const [notesFolderPickerOpen, setNotesFolderPickerOpen] = useState(false);
   const [accessSettings, setAccessSettings] = useState<AccessSettingsPayload>(() => normalizeAccessSettings(null));
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessSaving, setAccessSaving] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
+  const [remoteAccessSettings, setRemoteAccessSettings] = useState<RemoteAccessPayload>(() => normalizeRemoteAccess(null));
+  const [remoteAccessLoading, setRemoteAccessLoading] = useState(false);
+  const [remoteAccessMutating, setRemoteAccessMutating] = useState<RemoteAccessAction | null>(null);
+  const [remoteAccessError, setRemoteAccessError] = useState<string | null>(null);
 
-  const isBusy = creating || repositoriesSaving || accessSaving;
+  const isBusy = creating || repositoriesSaving || accessSaving || remoteAccessMutating !== null;
 
-  function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySettingsPayload {
-    return {
-      ...value,
-      pathHealth: {
-        exists: value.pathHealth.exists,
-        isGitRepository: value.pathHealth.isGitRepository,
-        suggestedPath: value.pathHealth.suggestedPath,
-      },
-    };
-  }
+function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySettingsPayload {
+  return {
+    ...value,
+    agentPermissions: value.agentPermissions === "default" ? "default" : "skip",
+    devServerScript: value.devServerScript ?? "",
+    devServerCwd: value.devServerCwd ?? "",
+    devServerUrl: value.devServerUrl ?? "",
+    devServerPort: value.devServerPort ?? "",
+    devServerHost: value.devServerHost ?? "",
+    devServerPath: value.devServerPath ?? "",
+    devServerHttps: value.devServerHttps === true,
+    pathHealth: {
+      exists: value.pathHealth.exists,
+      isGitRepository: value.pathHealth.isGitRepository,
+      suggestedPath: value.pathHealth.suggestedPath,
+    },
+  };
+}
 
   function parseMultilineRoleList(value: string): string[] {
     return value
@@ -3559,11 +3836,18 @@ function SettingsDialog({
           repo: repositoryDraft.repo,
           path: repositoryDraft.path,
           agent: repositoryDraft.agent,
+          agentPermissions: repositoryDraft.agentPermissions,
           agentModel: resolveModelSelectionValue(repositoryModelSelection) ?? "",
           agentReasoningEffort: resolveReasoningSelectionValue(repositoryModelSelection) ?? "",
           defaultWorkingDirectory: repositoryDraft.defaultWorkingDirectory,
           defaultBranch: repositoryDraft.defaultBranch,
           devServerScript: repositoryDraft.devServerScript,
+          devServerCwd: repositoryDraft.devServerCwd,
+          devServerUrl: repositoryDraft.devServerUrl,
+          devServerPort: repositoryDraft.devServerPort,
+          devServerHost: repositoryDraft.devServerHost,
+          devServerPath: repositoryDraft.devServerPath,
+          devServerHttps: repositoryDraft.devServerHttps,
           setupScript: repositoryDraft.setupScript,
           runSetupInParallel: repositoryDraft.runSetupInParallel,
           cleanupScript: repositoryDraft.cleanupScript,
@@ -3633,11 +3917,11 @@ function SettingsDialog({
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          requireAuth: accessSettings.requireAuth,
+          requireAuth: accessSettings.requireAuth || accessSettings.trustedHeaders.enabled,
           defaultRole: accessSettings.defaultRole,
           trustedHeaders: {
             enabled: accessSettings.trustedHeaders.enabled,
-            provider: accessSettings.trustedHeaders.provider,
+            provider: "cloudflare-access",
             emailHeader: accessSettings.trustedHeaders.emailHeader,
             jwtHeader: accessSettings.trustedHeaders.jwtHeader,
             teamDomain: accessSettings.trustedHeaders.teamDomain,
@@ -3661,6 +3945,9 @@ function SettingsDialog({
       }
 
       setAccessSettings(normalizeAccessSettings(data?.access, data?.current));
+      if (activeTab === "remote_access") {
+        await loadRemoteAccess();
+      }
       return true;
     } catch (err) {
       setAccessError(err instanceof Error ? err.message : "Failed to save organization settings");
@@ -3670,14 +3957,78 @@ function SettingsDialog({
     }
   }
 
+  async function loadRemoteAccess(): Promise<void> {
+    setRemoteAccessLoading(true);
+    setRemoteAccessError(null);
+    try {
+      const res = await fetch("/api/remote-access");
+      const data = (await res.json().catch(() => null)) as
+        | { error?: string; reason?: string }
+        | RemoteAccessPayload
+        | null;
+      if (!res.ok) {
+        const reason = data && typeof data === "object" && "reason" in data && typeof data.reason === "string"
+          ? data.reason
+          : null;
+        const errorMessage = data && typeof data === "object" && "error" in data && typeof data.error === "string"
+          ? data.error
+          : null;
+        throw new Error(reason ?? errorMessage ?? `Failed to load remote access (${res.status})`);
+      }
+
+      setRemoteAccessSettings(normalizeRemoteAccess(data));
+    } catch (err) {
+      setRemoteAccessSettings(normalizeRemoteAccess(null));
+      setRemoteAccessError(err instanceof Error ? err.message : "Failed to load remote access");
+    } finally {
+      setRemoteAccessLoading(false);
+    }
+  }
+
+  async function mutateRemoteAccess(action: RemoteAccessAction): Promise<void> {
+    setRemoteAccessMutating(action);
+    setRemoteAccessError(null);
+    try {
+      const res = await fetch("/api/remote-access", {
+        method: action === "disable" ? "DELETE" : "POST",
+        headers: action === "disable"
+          ? undefined
+          : {
+              "Content-Type": "application/json",
+            },
+        body: action === "disable"
+          ? undefined
+          : JSON.stringify({ action }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | { error?: string; reason?: string }
+        | RemoteAccessPayload
+        | null;
+      if (!res.ok) {
+        const reason = data && typeof data === "object" && "reason" in data && typeof data.reason === "string"
+          ? data.reason
+          : null;
+        const errorMessage = data && typeof data === "object" && "error" in data && typeof data.error === "string"
+          ? data.error
+          : null;
+        throw new Error(reason ?? errorMessage ?? `Failed to ${action} remote access (${res.status})`);
+      }
+
+      setRemoteAccessSettings(normalizeRemoteAccess(data));
+    } catch (err) {
+      setRemoteAccessError(err instanceof Error ? err.message : `Failed to ${action} remote access`);
+    } finally {
+      setRemoteAccessMutating(null);
+    }
+  }
+
   useEffect(() => {
     if (!open) return;
     setActiveTab(mode === "onboarding" ? "preferences" : "general");
     setCodingAgent(current.codingAgent);
     setIde(current.ide);
-    setRemoteSshHost(current.remoteSshHost);
-    setRemoteSshUser(current.remoteSshUser);
     setMarkdownEditor(current.markdownEditor);
+    setMarkdownEditorPath(current.markdownEditorPath ?? "");
     setModelAccess(current.modelAccess);
     setSoundEnabled(current.notifications.soundEnabled);
     setSoundFile(current.notifications.soundFile);
@@ -3686,6 +4037,8 @@ function SettingsDialog({
     setRepositoriesError(null);
     setRepositoryModelSelection(emptyModelSelection());
     setAccessError(null);
+    setRemoteAccessSettings(normalizeRemoteAccess(null));
+    setRemoteAccessError(null);
   }, [mode, open]);
 
   useEffect(() => {
@@ -3701,6 +4054,12 @@ function SettingsDialog({
     void loadAccessSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, open]);
+
+  useEffect(() => {
+    if (!open || mode === "onboarding" || activeTab !== "remote_access") return;
+    void loadRemoteAccess();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, mode, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -3746,12 +4105,30 @@ function SettingsDialog({
   const isGeneralTab = activeTabItem.id === "general";
   const isRemoteAccessTab = activeTabItem.id === "remote_access";
   const isAgentsTab = activeTabItem.id === "agents";
-  const isPreferenceFormTab = isPreferencesTab || isGeneralTab || isRemoteAccessTab || isAgentsTab;
+  const isPreferenceFormTab = isPreferencesTab || isGeneralTab || isAgentsTab;
+  const isPrimarySettingsTab = isPreferenceFormTab || isRemoteAccessTab;
   const isRepositoriesTab = activeTabItem.id === "repositories";
   const isOrganizationTab = activeTabItem.id === "organization";
   const onboardingStepIndex = visibleTabs.findIndex((tab) => tab.id === activeTabItem.id) + 1;
   const onboardingHasRepositoryStep = visibleTabs.some((tab) => tab.id === "repositories");
   const accessCanEdit = accessSettings.current.role === "admin";
+  const remoteAccessModeLabel = getRemoteAccessModeLabel(remoteAccessSettings.mode);
+  const remoteAccessStatusLabel = getRemoteAccessStatusLabel(remoteAccessSettings.status);
+  const remoteAccessMutationPending = remoteAccessMutating !== null;
+  const managedRemoteProvider = remoteAccessSettings.provider ?? remoteAccessSettings.recommendedProvider;
+  const usingPrivateNetworkFlow = managedRemoteProvider === "tailscale";
+  const showManagedTunnelControls = managedRemoteProvider !== null || remoteAccessSettings.managed;
+  const remoteAccessEnableLabel = !remoteAccessSettings.installed && remoteAccessSettings.canAutoInstall
+    ? "Install + Enable"
+    : "Enable Private Link";
+  const remoteAccessCanEnable = !remoteAccessLoading
+    && !remoteAccessMutationPending
+    && usingPrivateNetworkFlow
+    && !(remoteAccessSettings.status === "ready" && remoteAccessSettings.managed);
+  const remoteAccessCanRotate = false;
+  const remoteAccessCanDisable = !remoteAccessLoading
+    && !remoteAccessMutationPending
+    && (remoteAccessSettings.status === "starting" || remoteAccessSettings.status === "ready" || remoteAccessSettings.status === "error");
 
   const orderedAgentOptions = useMemo(() => {
     const opts = new Set(agentOptions);
@@ -3761,7 +4138,7 @@ function SettingsDialog({
     if (opts.size === 0) {
       opts.add(DEFAULT_AGENT);
     }
-    const rankMap = new Map(EXECUTOR_ORDER.map((name, index) => [name, index]));
+    const rankMap = new Map(KNOWN_AGENT_ORDER.map((name, index) => [name, index]));
     return [...opts].sort((left, right) => {
       const leftRank = rankMap.get(normalizeAgentName(left)) ?? Number.MAX_SAFE_INTEGER;
       const rightRank = rankMap.get(normalizeAgentName(right)) ?? Number.MAX_SAFE_INTEGER;
@@ -3769,6 +4146,7 @@ function SettingsDialog({
       return getAgentLabel(left).localeCompare(getAgentLabel(right));
     });
   }, [agentOptions, codingAgent]);
+  const selectedCodingAgentState = agentStates[normalizeAgentName(codingAgent)] ?? null;
 
   function handleModelAccessChange(agent: string, nextAccess: string) {
     const catalog = getAgentModelCatalog(agent);
@@ -3792,7 +4170,6 @@ function SettingsDialog({
     && repositoryDraft.defaultBranch.trim().length > 0;
   const canSaveAccess = accessCanEdit && !accessLoading && (
     !accessSettings.trustedHeaders.enabled
-    || accessSettings.trustedHeaders.provider === "generic"
     || (
       accessSettings.trustedHeaders.teamDomain.trim().length > 0
       && accessSettings.trustedHeaders.audience.trim().length > 0
@@ -3835,9 +4212,8 @@ function SettingsDialog({
       onboardingAcknowledged: acknowledgeOnboarding ? true : current.onboardingAcknowledged,
       codingAgent: codingAgent.trim(),
       ide: ide.trim(),
-      remoteSshHost: remoteSshHost.trim(),
-      remoteSshUser: remoteSshUser.trim(),
       markdownEditor: markdownEditor.trim(),
+      markdownEditorPath: (markdownEditorPath ?? "").trim(),
       modelAccess,
       notifications: {
         soundEnabled,
@@ -3851,7 +4227,11 @@ function SettingsDialog({
     options?: { closeDialog?: boolean },
   ): Promise<boolean> {
     if (!canSubmitPreferences || creating) return false;
-    return onSave(buildNextPreferences(acknowledgeOnboarding), options);
+    const saved = await onSave(buildNextPreferences(acknowledgeOnboarding), options);
+    if (saved && selectedCodingAgentState && !selectedCodingAgentState.ready) {
+      onOpenAgentSetup(codingAgent);
+    }
+    return saved;
   }
 
   async function handleOnboardingContinue() {
@@ -3884,7 +4264,7 @@ function SettingsDialog({
       <div
         className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/70 px-3 py-3 sm:items-center"
         onClick={() => {
-          if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen) return;
+          if (isBusy || mode === "onboarding" || repositoryFolderPickerOpen || notesFolderPickerOpen) return;
           onClose();
         }}
         role="presentation"
@@ -3951,7 +4331,7 @@ function SettingsDialog({
             </header>
 
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-6 sm:py-4">
-              {isPreferenceFormTab ? (
+              {isPrimarySettingsTab ? (
                 <div className="space-y-5">
                   {isOnboarding && (
                     <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.08)] px-4 py-3">
@@ -3966,25 +4346,102 @@ function SettingsDialog({
                     <>
                   <section className="space-y-2">
                     <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Choose Your Coding Agent</h4>
-                    <p className="text-[12px] text-[var(--vk-text-muted)]">Select the default coding agent configuration.</p>
-                    <div className="grid gap-2">
+                    <p className="text-[12px] text-[var(--vk-text-muted)]">
+                      Select the default coding agent, review its setup state, and confirm which models Conductor can offer for it.
+                    </p>
+                    <div className="grid gap-3">
                       {orderedAgentOptions.map((agent) => {
                         const selected = codingAgent === agent;
+                        const agentState = agentStates[normalizeAgentName(agent)] ?? null;
+                        const accessLabel = getAgentModelAccessLabel(agent, modelAccess);
+                        const availableModels = getSelectableAgentModels(agent, modelAccess, runtimeModelCatalogs);
+                        const previewModels = availableModels.slice(0, 3);
+                        const additionalModels = availableModels.length - previewModels.length;
+                        const statusLabel = !agentState?.installed
+                          ? "Not installed"
+                          : !agentState.ready
+                            ? "Setup required"
+                            : "Ready";
                         return (
-                          <button
+                          <div
                             key={agent}
-                            type="button"
-                            onClick={() => setCodingAgent(agent)}
-                            className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
+                            className={`flex flex-col gap-3 rounded-[4px] border px-3 py-3 text-left sm:flex-row sm:items-start ${
                               selected
                                 ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
                                 : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
                             }`}
                           >
-                            <AgentTileIcon seed={{ label: agent }} className="h-5 w-5 border-none bg-transparent" />
-                            <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{getAgentLabel(agent)}</span>
-                            {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
-                          </button>
+                            <div className="flex min-w-0 flex-1 items-start gap-3">
+                              <AgentTileIcon seed={{ label: agent }} className="mt-0.5 h-5 w-5 border-none bg-transparent" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-[13px] font-medium text-[var(--vk-text-normal)]">{getAgentLabel(agent)}</span>
+                                  <span className="inline-flex rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                                    {statusLabel}
+                                  </span>
+                                  {accessLabel ? (
+                                    <span className="inline-flex rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                                      {accessLabel}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                                  {agentState?.description ?? getKnownAgent(agent)?.description ?? "Agent metadata not available."}
+                                </p>
+                                <div className="mt-2 flex flex-wrap gap-1.5">
+                                  {previewModels.map((model) => (
+                                    <span
+                                      key={`${agent}-${model.id}`}
+                                      className="inline-flex rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[11px] text-[var(--vk-text-normal)]"
+                                    >
+                                      {model.label}
+                                    </span>
+                                  ))}
+                                  {additionalModels > 0 ? (
+                                    <span className="inline-flex rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                                      +{additionalModels} more
+                                    </span>
+                                  ) : null}
+                                  {previewModels.length === 0 ? (
+                                    <span className="inline-flex rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                                      {supportsAgentModelSelection(agent) ? "Models appear after setup" : "Uses the agent default model"}
+                                    </span>
+                                  ) : null}
+                                </div>
+                                {!agentState?.installed && agentState?.installHint ? (
+                                  <p className="mt-2 text-[11px] text-[var(--vk-text-muted)]">
+                                    Install hint: <code className="rounded bg-[var(--vk-bg-main)] px-1.5 py-0.5 text-[11px] text-[var(--vk-text-normal)]">{agentState.installHint}</code>
+                                  </p>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-2 self-start sm:ml-auto">
+                              {!agentState?.ready ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCodingAgent(agent);
+                                    onOpenAgentSetup(agent);
+                                  }}
+                                  className="inline-flex h-8 items-center rounded-[4px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-orange)] hover:bg-[var(--vk-bg-panel)]"
+                                >
+                                  {agentState?.installed ? "Authenticate" : "Install"}
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => setCodingAgent(agent)}
+                                className={`inline-flex h-8 items-center rounded-[4px] border px-3 text-[12px] ${
+                                  selected
+                                    ? "border-[var(--vk-orange)] bg-[var(--vk-orange)]/12 text-[var(--vk-orange)]"
+                                    : "border-[var(--vk-border)] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-panel)]"
+                                }`}
+                              >
+                                {selected ? "Selected" : "Use this agent"}
+                              </button>
+                              {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
+                            </div>
+                          </div>
                         );
                       })}
                     </div>
@@ -3999,7 +4456,10 @@ function SettingsDialog({
                       </p>
                     </div>
                     <div className="grid gap-3">
-                      {orderedAgentOptions.filter((agent) => supportsAgentModelSelection(agent)).map((agent) => {
+                      {orderedAgentOptions.filter((agent) => {
+                        const catalog = getAgentModelCatalog(agent);
+                        return supportsAgentModelSelection(agent) && (catalog?.accessOptions.length ?? 0) > 1;
+                      }).map((agent) => {
                         const catalog = getAgentModelCatalog(agent);
                         if (!catalog) return null;
                         const selectedAccess = resolveAgentModelAccess(agent, modelAccess) ?? catalog.defaultAccess;
@@ -4032,181 +4492,349 @@ function SettingsDialog({
 
                   {(isPreferencesTab || isGeneralTab) && (
                     <>
+                      <section className="space-y-2">
+                        <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Choose Your Code Editor</h4>
+                        <p className="text-[12px] text-[var(--vk-text-muted)]">This editor will be used when opening attempts and files.</p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {IDE_OPTIONS.map((option) => {
+                            const selected = ide === option.id;
+                            return (
+                              <button
+                                key={option.id}
+                                type="button"
+                                onClick={() => setIde(option.id)}
+                                className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
+                                  selected
+                                    ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
+                                    : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
+                                }`}
+                              >
+                                <CodeEditorIcon editorId={option.id} label={option.label} />
+                                <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{option.label}</span>
+                                {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </section>
 
-                  <section className="space-y-2">
-                    <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Choose Your Code Editor</h4>
-                    <p className="text-[12px] text-[var(--vk-text-muted)]">This editor will be used when opening attempts and files.</p>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {IDE_OPTIONS.map((option) => {
-                        const selected = ide === option.id;
-                        return (
+                      <section className="space-y-2">
+                        <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Markdown Editor</h4>
+                        <p className="text-[12px] text-[var(--vk-text-muted)]">
+                          Used as your second-brain markdown source when feeding context into tasks.
+                        </p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {MARKDOWN_EDITOR_OPTIONS.map((option) => {
+                            const selected = markdownEditor === option.id;
+                            return (
+                              <button
+                                key={option.id}
+                                type="button"
+                                onClick={() => setMarkdownEditor(option.id)}
+                                className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
+                                  selected
+                                    ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
+                                    : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
+                                }`}
+                              >
+                                <MarkdownEditorIcon editorId={option.id} />
+                                <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{option.label}</span>
+                                {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {markdownEditor !== "notion" && (
+                          <div className="rounded-[4px] border border-[var(--vk-border)] px-3 py-3">
+                            <label className="block">
+                              <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                                Notes Root
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  value={markdownEditorPath ?? ""}
+                                  readOnly
+                                  onClick={() => setNotesFolderPickerOpen(true)}
+                                  placeholder="Select your Obsidian vault, Logseq graph, or notes folder"
+                                  className="h-9 w-full cursor-pointer rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setNotesFolderPickerOpen(true)}
+                                  disabled={isBusy}
+                                  className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+                                  title="Browse folders"
+                                >
+                                  <FolderOpen className="h-4 w-4" />
+                                </button>
+                                {(markdownEditorPath ?? "").trim().length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setMarkdownEditorPath("")}
+                                    disabled={isBusy}
+                                    className="inline-flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+                                  >
+                                    Clear
+                                  </button>
+                                )}
+                              </div>
+                              <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                                Context attachments are discovered from this folder first. Leave it blank to fall back to the current workspace.
+                              </p>
+                            </label>
+                          </div>
+                        )}
+                      </section>
+
+                      <section className="space-y-2">
+                        <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Notification Sound</h4>
+                        <p className="text-[12px] text-[var(--vk-text-muted)]">Pick a sound for notifications, or disable sound.</p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {NOTIFICATION_SOUND_OPTIONS.map((option) => {
+                            const selected = soundEnabled && soundFile === option.id;
+                            return (
+                              <button
+                                key={option.id}
+                                type="button"
+                                onClick={() => {
+                                  setSoundEnabled(true);
+                                  setSoundFile(option.id);
+                                }}
+                                className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
+                                  selected
+                                    ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
+                                    : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
+                                }`}
+                              >
+                                <Volume2 className="h-4 w-4 text-[var(--vk-text-muted)]" />
+                                <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{option.label}</span>
+                                {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
+                              </button>
+                            );
+                          })}
                           <button
-                            key={option.id}
                             type="button"
-                            onClick={() => setIde(option.id)}
+                            onClick={() => setSoundEnabled(false)}
                             className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
-                              selected
+                              !soundEnabled
                                 ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
                                 : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
                             }`}
                           >
-                            <CodeEditorIcon editorId={option.id} label={option.label} />
-                            <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{option.label}</span>
-                            {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
+                            <VolumeX className="h-4 w-4 text-[var(--vk-text-muted)]" />
+                            <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">No sound</span>
+                            {!soundEnabled && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
                           </button>
-                        );
-                      })}
-                    </div>
-                  </section>
-
-                  {isPreferencesTab && (
-                  <section className="space-y-3">
-                    <div className="space-y-1">
-                      <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Access</h4>
-                      <p className="text-[12px] text-[var(--vk-text-muted)]">
-                        Use your local Remote-SSH editor to jump straight into a remote worktree. This complements
-                        ngrok or Cloudflare Tunnel for dashboard access; it does not replace the tunnel.
-                      </p>
-                    </div>
-
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <label className="block">
-                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH Host or Alias</span>
-                        <input
-                          value={remoteSshHost}
-                          onChange={(event) => setRemoteSshHost(event.target.value)}
-                          placeholder="e.g., conductor-dev or 203.0.113.10"
-                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                        />
-                      </label>
-
-                      <label className="block">
-                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH User (optional)</span>
-                        <input
-                          value={remoteSshUser}
-                          onChange={(event) => setRemoteSshUser(event.target.value)}
-                          placeholder="e.g., ubuntu"
-                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                        />
-                      </label>
-                    </div>
-
-                    <p className="text-[12px] text-[var(--vk-text-muted)]">
-                      One-click remote open currently supports VS Code and VS Code Insiders. Other editors will still
-                      save as your preference, but they will not get a remote launch button yet.
-                    </p>
-                  </section>
-                  )}
-
-                  <section className="space-y-2">
-                    <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Markdown Editor</h4>
-                    <p className="text-[12px] text-[var(--vk-text-muted)]">
-                      Used as your second-brain markdown source when feeding context into tasks.
-                    </p>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {MARKDOWN_EDITOR_OPTIONS.map((option) => {
-                        const selected = markdownEditor === option.id;
-                        return (
-                          <button
-                            key={option.id}
-                            type="button"
-                            onClick={() => setMarkdownEditor(option.id)}
-                            className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
-                              selected
-                                ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
-                                : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
-                            }`}
-                          >
-                            <MarkdownEditorIcon editorId={option.id} />
-                            <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{option.label}</span>
-                            {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </section>
-
-                  <section className="space-y-2">
-                    <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Notification Sound</h4>
-                    <p className="text-[12px] text-[var(--vk-text-muted)]">Pick a sound for notifications, or disable sound.</p>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {NOTIFICATION_SOUND_OPTIONS.map((option) => {
-                        const selected = soundEnabled && soundFile === option.id;
-                        return (
-                          <button
-                            key={option.id}
-                            type="button"
-                            onClick={() => {
-                              setSoundEnabled(true);
-                              setSoundFile(option.id);
-                            }}
-                            className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
-                              selected
-                                ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
-                                : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
-                            }`}
-                          >
-                            <Volume2 className="h-4 w-4 text-[var(--vk-text-muted)]" />
-                            <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">{option.label}</span>
-                            {selected && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
-                          </button>
-                        );
-                      })}
-                      <button
-                        type="button"
-                        onClick={() => setSoundEnabled(false)}
-                        className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
-                          !soundEnabled
-                            ? "border-[var(--vk-orange)] bg-[var(--vk-bg-hover)]"
-                            : "border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)]"
-                        }`}
-                      >
-                        <VolumeX className="h-4 w-4 text-[var(--vk-text-muted)]" />
-                        <span className="flex-1 text-[13px] text-[var(--vk-text-normal)]">No sound</span>
-                        {!soundEnabled && <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />}
-                      </button>
-                    </div>
-                  </section>
+                        </div>
+                      </section>
                     </>
                   )}
 
                   {isRemoteAccessTab && (
-                  <section className="space-y-3">
-                    <div className="space-y-1">
-                      <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Access</h4>
-                      <p className="text-[12px] text-[var(--vk-text-muted)]">
-                        Use your local Remote-SSH editor to jump straight into a remote worktree. This complements
-                        ngrok or Cloudflare Tunnel for dashboard access; it does not replace the tunnel.
-                      </p>
+                    <div className="space-y-4">
+                      <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.06)] px-4 py-3">
+                        <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Access</h4>
+                        <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                          Use one complete URL to open this Conductor instance from your phone or any other machine.
+                          The URL below is only shown to admin sessions because it can grant real control of the dashboard.
+                        </p>
+                      </section>
+
+                    <section className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <h5 className="text-[18px] leading-[20px] text-[var(--vk-text-strong)]">{remoteAccessSettings.title}</h5>
+                          <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                            {remoteAccessSettings.description}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void loadRemoteAccess()}
+                          disabled={remoteAccessLoading}
+                          className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <RefreshCcw className={`h-3.5 w-3.5${remoteAccessLoading ? " animate-spin" : ""}`} />
+                          <span>Refresh</span>
+                        </button>
+                      </div>
+
+                      {remoteAccessLoading ? (
+                        <div className="flex items-center gap-2 rounded-[6px] border border-[var(--vk-border)] px-3 py-3 text-[13px] text-[var(--vk-text-muted)]">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Loading remote access details...
+                        </div>
+                      ) : remoteAccessError ? (
+                        <div className="rounded-[6px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-3 py-3 text-[12px] leading-5 text-[var(--vk-red)]">
+                          {remoteAccessError}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="grid gap-3 lg:grid-cols-3">
+                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                                Remote Status
+                              </span>
+                              <p className="mt-2 text-[14px] text-[var(--vk-text-normal)]">{remoteAccessStatusLabel}</p>
+                            </div>
+                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                                Security Mode
+                              </span>
+                              <p className="mt-2 text-[14px] text-[var(--vk-text-normal)]">{remoteAccessModeLabel}</p>
+                            </div>
+                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                                Local Target
+                              </span>
+                              <p className="mt-2 break-all text-[14px] text-[var(--vk-text-normal)]">
+                                {remoteAccessSettings.localUrl ?? "Not resolved"}
+                              </p>
+                            </div>
+                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                                Remote URL
+                              </span>
+                              <p className="mt-2 break-all text-[14px] text-[var(--vk-text-normal)]">
+                                {remoteAccessSettings.publicUrl ?? "Not resolved"}
+                              </p>
+                            </div>
+                          </div>
+
+                          {showManagedTunnelControls ? (
+                            <div className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="space-y-1">
+                                  <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                                    {usingPrivateNetworkFlow ? "Private Network Link" : "Managed Remote Access"}
+                                  </span>
+                                  <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
+                                    {usingPrivateNetworkFlow
+                                      ? "Start a private Tailscale link inside Conductor. Only authenticated devices on your tailnet can reach this URL."
+                                      : "Conductor no longer starts public share tunnels. Use a private Tailscale link here, or configure a protected Cloudflare Access URL separately."}
+                                  </p>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => void mutateRemoteAccess("enable")}
+                                    disabled={!remoteAccessCanEnable}
+                                    className="inline-flex h-8 items-center rounded-[4px] border border-[var(--vk-orange)] px-3 text-[12px] text-[var(--vk-orange)] hover:bg-[var(--vk-orange)]/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    {remoteAccessMutating === "enable" ? "Enabling..." : remoteAccessEnableLabel}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void mutateRemoteAccess("disable")}
+                                    disabled={!remoteAccessCanDisable}
+                                    className="inline-flex h-8 items-center rounded-[4px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                  >
+                                    {remoteAccessMutating === "disable" ? "Disabling..." : "Disable"}
+                                  </button>
+                                </div>
+                              </div>
+
+                              <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                                {usingPrivateNetworkFlow
+                                  ? remoteAccessSettings.installed
+                                    ? "Tailscale is available on this machine. Conductor will publish a private HTTPS link inside your tailnet."
+                                    : remoteAccessSettings.canAutoInstall && remoteAccessSettings.autoInstallMethod === "brew"
+                                      ? "Tailscale is not installed yet. Conductor can install it automatically with Homebrew, but the machine still needs a Tailscale sign-in."
+                                      : "Tailscale is not installed on this machine yet. Install and sign in once to enable the private remote link."
+                                  : "Managed remote access now uses only a private Tailscale link. For an enterprise public URL, configure Cloudflare Access separately and point Conductor at that protected address."}
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                                Enterprise Policy
+                              </span>
+                              <p className="mt-2 text-[13px] leading-5 text-[var(--vk-text-normal)]">
+                                {remoteAccessSettings.recommendedProvider === "tailscale"
+                                  ? "Conductor is set up for a private VPN-style link. Install and sign in to Tailscale, then enable the private link from this screen."
+                                  : "Conductor no longer publishes bearer-style unlock URLs. Configure verified Cloudflare Access and point `CONDUCTOR_PUBLIC_DASHBOARD_URL` at the protected external URL instead."}
+                              </p>
+                            </div>
+                          )}
+
+                          {remoteAccessSettings.lastError && (
+                            <div className="rounded-[6px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-4 py-3">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-red)]">
+                                {usingPrivateNetworkFlow ? "Private Link Error" : "Tunnel Error"}
+                              </span>
+                              <p className="mt-2 text-[12px] leading-5 text-[var(--vk-red)]">
+                                {remoteAccessSettings.lastError}
+                              </p>
+                            </div>
+                          )}
+
+                          {remoteAccessSettings.connectUrl ? (
+                            <div className="space-y-2 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="space-y-1">
+                                  <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+                                    {remoteAccessSettings.mode === "private-network"
+                                      ? "Private Remote URL"
+                                      : "Protected Remote URL"}
+                                  </span>
+                                  <p className="text-[12px] text-[var(--vk-text-muted)]">
+                                    {remoteAccessSettings.mode === "private-network"
+                                      ? "Share this URL only with operators who are already authenticated to your private network."
+                                      : "Share this protected URL. Recipients still need to pass the enterprise identity check before they reach Conductor."}
+                                  </p>
+                                </div>
+                                <CopySnippetButton value={remoteAccessSettings.connectUrl} idleLabel="Copy URL" />
+                              </div>
+                              <code className="block break-all rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-3 text-[12px] leading-5 text-[var(--vk-text-normal)]">
+                                {remoteAccessSettings.connectUrl}
+                              </code>
+                            </div>
+                          ) : (
+                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                              <p className="text-[13px] text-[var(--vk-text-normal)]">
+                                {remoteAccessSettings.mode === "enterprise-only"
+                                  ? remoteAccessSettings.recommendedProvider === "tailscale"
+                                    ? remoteAccessSettings.connected
+                                      ? "A private VPN URL will appear here after you enable the private link."
+                                      : "A private VPN URL will appear here after Tailscale is installed and signed in."
+                                    : "A protected enterprise remote URL will appear here after verified Cloudflare Access is configured."
+                                  : "A protected remote URL is not available yet."}
+                              </p>
+                            </div>
+                          )}
+
+                          {remoteAccessSettings.warnings.length > 0 && (
+                            <div className="space-y-2 rounded-[6px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-4 py-3">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-red)]">
+                                Security Warnings
+                              </span>
+                              <div className="space-y-1.5">
+                                {remoteAccessSettings.warnings.map((warning) => (
+                                  <p key={warning} className="text-[12px] leading-5 text-[var(--vk-red)]">
+                                    {warning}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {remoteAccessSettings.nextSteps.length > 0 && (
+                            <div className="space-y-2 rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
+                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">Next Steps</span>
+                              <div className="space-y-1.5">
+                                {remoteAccessSettings.nextSteps.map((step) => (
+                                  <p key={step} className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                                    {step}
+                                  </p>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </section>
+
                     </div>
-
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <label className="block">
-                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH Host or Alias</span>
-                        <input
-                          value={remoteSshHost}
-                          onChange={(event) => setRemoteSshHost(event.target.value)}
-                          placeholder="e.g., conductor-dev or 203.0.113.10"
-                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                        />
-                      </label>
-
-                      <label className="block">
-                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">SSH User (optional)</span>
-                        <input
-                          value={remoteSshUser}
-                          onChange={(event) => setRemoteSshUser(event.target.value)}
-                          placeholder="e.g., ubuntu"
-                          className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                        />
-                      </label>
-                    </div>
-
-                    <p className="text-[12px] text-[var(--vk-text-muted)]">
-                      One-click remote open currently supports VS Code and VS Code Insiders. Other editors will still
-                      save as your preference, but they will not get a remote launch button yet.
-                    </p>
-                  </section>
                   )}
                 </div>
               ) : isRepositoriesTab ? (
@@ -4358,6 +4986,24 @@ function SettingsDialog({
                         )}
 
                         <label className="block">
+                          <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Agent Permission Default</span>
+                          <select
+                            value={repositoryDraft.agentPermissions}
+                            onChange={(event) => setRepositoryDraft((prev) => prev ? {
+                              ...prev,
+                              agentPermissions: event.target.value === "default" ? "default" : "skip",
+                            } : prev)}
+                            className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                          >
+                            <option value="skip">Auto approve and allow local dev servers</option>
+                            <option value="default">Sandboxed default mode</option>
+                          </select>
+                          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                            Applies to new sessions for this repository across all agents unless you override the launch mode.
+                          </p>
+                        </label>
+
+                        <label className="block">
                           <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Repository Path</span>
                           <div className="flex items-center gap-2">
                             <input
@@ -4482,8 +5128,77 @@ function SettingsDialog({
                             placeholder="npm run dev"
                             className="w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                           />
-                          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">Starts a development server for this repository.</p>
+                          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                            Optional. Leave this blank if you run the local app yourself and only want Conductor to auto-connect the preview.
+                          </p>
                         </label>
+
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Dev Server CWD</span>
+                            <input
+                              value={repositoryDraft.devServerCwd}
+                              onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, devServerCwd: event.target.value } : prev)}
+                              placeholder="e.g., apps/web"
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                            />
+                            <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">Runs the dev server from this subdirectory when set.</p>
+                          </label>
+
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Preview URL Override</span>
+                            <input
+                              value={repositoryDraft.devServerUrl}
+                              onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, devServerUrl: event.target.value } : prev)}
+                              placeholder="e.g., https://preview.example.com"
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                            />
+                            <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">If set, preview connects here first instead of inferring from logs.</p>
+                          </label>
+                        </div>
+
+                        <div className="grid gap-3 sm:grid-cols-4">
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Preview Port</span>
+                            <input
+                              value={repositoryDraft.devServerPort}
+                              onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, devServerPort: event.target.value } : prev)}
+                              inputMode="numeric"
+                              placeholder="3000"
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                            />
+                          </label>
+
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Preview Host</span>
+                            <input
+                              value={repositoryDraft.devServerHost}
+                              onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, devServerHost: event.target.value } : prev)}
+                              placeholder="127.0.0.1"
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                            />
+                          </label>
+
+                          <label className="block">
+                            <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Preview Path</span>
+                            <input
+                              value={repositoryDraft.devServerPath}
+                              onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, devServerPath: event.target.value } : prev)}
+                              placeholder="/"
+                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                            />
+                          </label>
+
+                          <label className="flex items-center gap-2 rounded-[4px] border border-[var(--vk-border)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)]">
+                            <input
+                              type="checkbox"
+                              checked={repositoryDraft.devServerHttps}
+                              onChange={(event) => setRepositoryDraft((prev) => prev ? { ...prev, devServerHttps: event.target.checked } : prev)}
+                              className="h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
+                            />
+                            <span>Use HTTPS</span>
+                          </label>
+                        </div>
 
                         <label className="block">
                           <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Setup Script</span>
@@ -4597,8 +5312,7 @@ function SettingsDialog({
                         <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(80,80,80,0.18)] px-4 py-3">
                           <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
                             You can review organization security here, but only an admin session can save changes.
-                            Use the built-in unlock link, a local admin session, or an admin identity from your edge
-                            auth provider to modify access rules.
+                            Use a local admin session or an admin identity from your edge auth provider to modify access rules.
                           </p>
                         </section>
                       )}
@@ -4607,8 +5321,9 @@ function SettingsDialog({
                         <div className="space-y-1">
                           <h5 className="text-[18px] leading-[20px] text-[var(--vk-text-strong)]">Baseline Access Rules</h5>
                           <p className="text-[12px] text-[var(--vk-text-muted)]">
-                            Require authentication for every dashboard request and decide what authenticated users get
-                            by default before explicit role bindings are applied.
+                            Require authentication for remote dashboard requests and decide what authenticated users get
+                            by default before explicit role bindings are applied. Localhost on this machine stays in a
+                            local admin recovery mode so setup and break-glass access keep working.
                           </p>
                         </div>
 
@@ -4620,11 +5335,16 @@ function SettingsDialog({
                               ...prev,
                               requireAuth: event.target.checked,
                             }))}
-                            disabled={!accessCanEdit || accessSaving}
+                            disabled={!accessCanEdit || accessSaving || accessSettings.trustedHeaders.enabled}
                             className="mt-0.5 h-4 w-4 rounded border border-[var(--vk-border)] bg-transparent accent-[var(--vk-orange)]"
                           />
-                          <span>Require authentication even on localhost</span>
+                          <span>Require authentication for remote dashboard requests</span>
                         </label>
+
+                        <p className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                          Public share-link remote control has been removed. Remote access now requires either the private
+                          Tailscale link or an identity-bound provider such as Cloudflare Access or Clerk.
+                        </p>
 
                         <label className="block">
                           <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Default Role</span>
@@ -4643,6 +5363,7 @@ function SettingsDialog({
                           </select>
                           <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
                             This applies after identity verification when no explicit email or domain binding matches.
+                            Cloudflare Access enterprise mode forces full authentication automatically.
                           </p>
                         </label>
                       </section>
@@ -4662,6 +5383,7 @@ function SettingsDialog({
                             checked={accessSettings.trustedHeaders.enabled}
                             onChange={(event) => setAccessSettings((prev) => ({
                               ...prev,
+                              requireAuth: event.target.checked ? true : prev.requireAuth,
                               trustedHeaders: {
                                 ...prev.trustedHeaders,
                                 enabled: event.target.checked,
@@ -4676,21 +5398,9 @@ function SettingsDialog({
                         <div className="grid gap-3 lg:grid-cols-2">
                           <label className="block">
                             <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">Provider</span>
-                            <select
-                              value={accessSettings.trustedHeaders.provider}
-                              onChange={(event) => setAccessSettings((prev) => ({
-                                ...prev,
-                                trustedHeaders: {
-                                  ...prev.trustedHeaders,
-                                  provider: event.target.value as TrustedHeaderAccessProvider,
-                                },
-                              }))}
-                              disabled={!accessCanEdit || accessSaving}
-                              className="h-9 w-full rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] disabled:opacity-60"
-                            >
-                              <option value="cloudflare-access">Cloudflare Access (verified JWT)</option>
-                              <option value="generic">Generic header passthrough (advanced)</option>
-                            </select>
+                            <div className="flex h-9 items-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[13px] text-[var(--vk-text-normal)]">
+                              Cloudflare Access (verified JWT)
+                            </div>
                           </label>
 
                           <label className="block">
@@ -4760,13 +5470,11 @@ function SettingsDialog({
                           </label>
                         </div>
 
-                        {accessSettings.trustedHeaders.provider === "generic" && (
-                          <p className="rounded-[4px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-3 py-2 text-[12px] leading-5 text-[var(--vk-red)]">
-                            Generic header passthrough is only safe when your reverse proxy strips user-supplied headers
-                            and injects identity itself. Conductor blocks this mode by default unless
-                            `CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS=true` is also set.
-                          </p>
-                        )}
+                        <p className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                          Enterprise remote access requires a Cloudflare Access application that injects a verified JWT
+                          and email header. Conductor will not publish a shareable admin URL when that verification layer
+                          is missing.
+                        </p>
                       </section>
 
                       <section className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
@@ -4974,6 +5682,18 @@ function SettingsDialog({
               }
             : prev);
           void detectRepositoryBranches(selectedPath);
+        }}
+      />
+      <FolderPickerDialog
+        open={notesFolderPickerOpen}
+        initialPath={markdownEditorPath ?? ""}
+        title="Select Notes Root"
+        description="Choose the local Obsidian vault, Logseq graph, or markdown notes folder used for context attachments."
+        onClose={() => setNotesFolderPickerOpen(false)}
+        onSelect={(selectedPath) => {
+          setNotesFolderPickerOpen(false);
+          if (selectedPath === null) return;
+          setMarkdownEditorPath(selectedPath);
         }}
       />
     </>

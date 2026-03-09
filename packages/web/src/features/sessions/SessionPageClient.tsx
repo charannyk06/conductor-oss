@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { useResponsiveSidebarState } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
@@ -16,15 +17,13 @@ export default function SessionPageClient() {
   const { projects } = useConfig();
   const { sessions, refresh } = useSessions();
   const dashboardSessions = sessions as unknown as DashboardSession[];
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const {
+    mobileSidebarOpen,
+    desktopSidebarOpen,
+    toggleSidebar,
+    closeSidebarOnMobile,
+  } = useResponsiveSidebarState();
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.innerWidth < 1024) {
-      setSidebarOpen(false);
-    }
-  }, []);
 
   const selectedSession = useMemo(
     () => dashboardSessions.find((session) => session.id === params.id) ?? null,
@@ -51,14 +50,6 @@ export default function SessionPageClient() {
       setSelectedProjectId(projects[0]?.id ?? null);
     }
   }, [projects, selectedProjectId, selectedSession?.projectId]);
-
-  const toggleSidebar = () => setSidebarOpen((prev) => !prev);
-
-  const closeSidebarOnMobile = () => {
-    if (typeof window !== "undefined" && window.innerWidth < 1024) {
-      setSidebarOpen(false);
-    }
-  };
 
   async function handleArchiveSession(sessionId: string) {
     let res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
@@ -101,7 +92,8 @@ export default function SessionPageClient() {
 
   return (
     <AppShell
-      sidebarOpen={sidebarOpen}
+      mobileSidebarOpen={mobileSidebarOpen}
+      desktopSidebarOpen={desktopSidebarOpen}
       onToggleSidebar={toggleSidebar}
       sidebar={
         <WorkspaceSidebarPanel

@@ -488,27 +488,102 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return { profileName, agentName, model, reasoningEffort, permissions };
   }
 
+  function trimToNull(value: string | undefined): string | null {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : null;
+  }
+
+  function normalizeDevServerHost(value: string | undefined): string {
+    const trimmed = trimToNull(value);
+    if (!trimmed || trimmed === "0.0.0.0") {
+      return "127.0.0.1";
+    }
+    return trimmed;
+  }
+
+  function normalizeDevServerPath(value: string | undefined): string {
+    const trimmed = trimToNull(value);
+    if (!trimmed) return "";
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  }
+
+  function resolveDevServerUrl(project: ProjectConfig): string | null {
+    const dev = project.devServer;
+    if (!dev) return null;
+
+    const explicit = trimToNull(dev.url);
+    if (explicit) {
+      try {
+        const parsed = new URL(explicit);
+        if (parsed.hostname === "0.0.0.0") {
+          parsed.hostname = "127.0.0.1";
+        }
+        return parsed.toString();
+      } catch {
+        return explicit;
+      }
+    }
+
+    if (!dev.port) return null;
+    const scheme = dev.https ? "https" : "http";
+    return `${scheme}://${normalizeDevServerHost(dev.host)}:${dev.port}${normalizeDevServerPath(dev.path)}`;
+  }
+
+  function resolveDevServerCwd(project: ProjectConfig): string {
+    const cwd = trimToNull(project.devServer?.cwd);
+    if (!cwd) return project.path;
+    if (cwd.startsWith("~/")) {
+      return join(homedir(), cwd.slice(2));
+    }
+    if (cwd.startsWith("/")) {
+      return cwd;
+    }
+    return join(project.path, cwd);
+  }
+
   const devServerByProject = new Map<string, { process: ChildProcess; logPath: string }>();
 
-  function ensureDevServer(projectId: string, project: ProjectConfig): string | null {
+  function ensureDevServer(projectId: string, project: ProjectConfig): {
+    logPath: string | null;
+    previewUrl: string | null;
+    previewPort: string | null;
+  } {
     const dev = project.devServer;
-    if (!dev?.command) return null;
+    const previewUrl = resolveDevServerUrl(project);
+    const previewPort = typeof dev?.port === "number" ? String(dev.port) : null;
+    const command = trimToNull(dev?.command);
+    if (!command) {
+      return { logPath: null, previewUrl, previewPort };
+    }
 
     const existing = devServerByProject.get(projectId);
     if (existing && !existing.process.killed) {
-      return existing.logPath;
+      return { logPath: existing.logPath, previewUrl, previewPort };
     }
 
     const logDir = join(homedir(), ".conductor", "dev-servers");
     mkdirSync(logDir, { recursive: true });
     const logPath = join(logDir, `${projectId}.log`);
     const stream = createWriteStream(logPath, { flags: "a" });
+    const env = { ...process.env } as Record<string, string | undefined>;
 
-    const child = spawnProcess("sh", ["-lc", dev.command], {
-      cwd: dev.cwd ?? project.path,
+    if (previewUrl) {
+      env.CONDUCTOR_PREVIEW_URL = previewUrl;
+    }
+    if (previewPort) {
+      env.PORT = previewPort;
+      env.CONDUCTOR_PREVIEW_PORT = previewPort;
+    }
+    if (dev?.host) {
+      env.HOST = dev.host;
+      env.CONDUCTOR_PREVIEW_HOST = normalizeDevServerHost(dev.host);
+    }
+
+    const child = spawnProcess("sh", ["-lc", command], {
+      cwd: resolveDevServerCwd(project),
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env,
     });
 
     child.stdout?.pipe(stream);
@@ -516,7 +591,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     child.unref();
 
     devServerByProject.set(projectId, { process: child, logPath });
-    return logPath;
+    return { logPath, previewUrl, previewPort };
   }
 
   /** Count active (non-terminal) sessions for a project. */
@@ -971,7 +1046,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       lastActivityAt: new Date(),
       metadata: {},
     };
-    const devServerLog = ensureDevServer(spawnConfig.projectId, project);
+    const devServer = ensureDevServer(spawnConfig.projectId, project);
 
     try {
       writeMetadata(sessionsDir, sessionId, {
@@ -995,9 +1070,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         prompt: spawnConfig.prompt ?? composedPrompt ?? undefined,
         createdAt: new Date().toISOString(),
         runtimeHandle: JSON.stringify(handle),
+        devServerUrl: devServer.previewUrl ?? undefined,
+        devServerPort: devServer.previewPort ?? undefined,
       });
       updateMetadata(sessionsDir, sessionId, {
-        devServerLog: devServerLog ?? "",
+        devServerLog: devServer.logPath ?? "",
+        devServerUrl: devServer.previewUrl ?? "",
+        devServerPort: devServer.previewPort ?? "",
       });
       const initialPrompt = spawnConfig.prompt?.trim()
         || (spawnConfig.issueId ? `Start work on issue ${spawnConfig.issueId}.` : "");
@@ -1646,6 +1725,8 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         baseBranch: raw["baseBranch"],
         prompt: raw["prompt"],
         devServerLog: raw["devServerLog"],
+        devServerUrl: raw["devServerUrl"],
+        devServerPort: raw["devServerPort"],
       });
     }
 
