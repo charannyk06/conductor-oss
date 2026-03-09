@@ -18,6 +18,8 @@ pub struct ConductorConfig {
     pub port: u16,
     #[serde(default)]
     pub dashboard_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookConfig>,
     #[serde(default)]
     pub projects: BTreeMap<String, ProjectConfig>,
     #[serde(default)]
@@ -34,6 +36,7 @@ impl Default for ConductorConfig {
             server: ServerConfig::default(),
             port: default_port(),
             dashboard_url: None,
+            webhook: None,
             projects: BTreeMap::new(),
             preferences: PreferencesConfig::default(),
             access: DashboardAccessConfig::default(),
@@ -58,6 +61,40 @@ impl Default for ServerConfig {
             host: default_host(),
             port: default_port(),
             cors_origins: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_webhook_port")]
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_webhook_port(),
+            secret: None,
+            url: None,
+        }
+    }
+}
+
+impl WebhookConfig {
+    fn normalize(&mut self) {
+        trim_to_option(&mut self.secret);
+        trim_to_option(&mut self.url);
+        if self.port == 0 {
+            self.port = default_webhook_port();
         }
     }
 }
@@ -482,6 +519,10 @@ fn default_port() -> u16 {
     4747
 }
 
+fn default_webhook_port() -> u16 {
+    4748
+}
+
 fn default_true() -> bool {
     true
 }
@@ -546,6 +587,7 @@ impl ConductorConfig {
             server: ServerConfig::default(),
             port: default_port(),
             dashboard_url: None,
+            webhook: None,
             projects: BTreeMap::new(),
             preferences: PreferencesConfig::default(),
             access: DashboardAccessConfig::default(),
@@ -578,10 +620,14 @@ impl ConductorConfig {
         if config.server.host.trim().is_empty() {
             config.server.host = default_host();
         }
+        if let Some(webhook) = config.webhook.as_mut() {
+            webhook.normalize();
+        }
         for project in config.projects.values_mut() {
             project.normalize_dev_server();
         }
         config.config_path = Some(path.to_path_buf());
+        config.validate()?;
         Ok(config)
     }
 
@@ -606,6 +652,22 @@ impl ConductorConfig {
         clone.port = clone.server.port;
         let content = serde_yaml::to_string(&clone)?;
         std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if let Some(webhook) = self.webhook.as_ref().filter(|webhook| webhook.enabled) {
+            if webhook
+                .secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                anyhow::bail!("webhook.secret is required when webhook.enabled is true");
+            }
+        }
+
         Ok(())
     }
 }
@@ -644,6 +706,47 @@ mod tests {
         let config = ConductorConfig::default_for_workspace(workspace);
         assert_eq!(config.workspace, workspace);
         assert!(config.projects.is_empty());
+    }
+
+    #[test]
+    fn test_validate_rejects_enabled_webhook_without_secret() {
+        let config: ConductorConfig = serde_yaml::from_str(
+            r#"
+webhook:
+  enabled: true
+  port: 4748
+"#,
+        )
+        .unwrap();
+
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("webhook.secret is required"));
+    }
+
+    #[test]
+    fn test_load_normalizes_and_accepts_webhook_secret() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-config-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("conductor.yaml");
+        std::fs::write(
+            &path,
+            r#"
+webhook:
+  enabled: true
+  secret: "  test-secret  "
+"#,
+        )
+        .unwrap();
+
+        let config = ConductorConfig::load(&path).unwrap();
+        let webhook = config.webhook.expect("webhook config");
+        assert_eq!(webhook.port, 4748);
+        assert_eq!(webhook.secret.as_deref(), Some("test-secret"));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

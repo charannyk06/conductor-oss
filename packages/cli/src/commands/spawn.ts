@@ -8,8 +8,13 @@
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
-import type { SessionSpawnConfig } from "@conductor-oss/core";
-import { createServices, loadConfig } from "../services.js";
+import {
+  apiCall,
+  fetchConfiguredProjects,
+  sessionTmuxTarget,
+  sessionWorktree,
+  type SessionResponse,
+} from "../backend.js";
 
 interface SpawnOptions {
   agent?: string;
@@ -34,12 +39,12 @@ export function registerSpawn(program: Command): void {
     .option("--branch <name>", "Override branch name")
     .option("--prompt <text>", "Explicit prompt (if issueOrPrompt is an issue)")
     .action(async (project: string, issueOrPrompt: string | undefined, opts: SpawnOptions) => {
-      const config = await loadConfig();
+      const projects = await fetchConfiguredProjects();
 
-      if (!config.projects[project]) {
+      if (!projects.has(project)) {
         console.error(
           chalk.red(
-            `Unknown project: ${project}\nAvailable: ${Object.keys(config.projects).join(", ")}`,
+            `Unknown project: ${project}\nAvailable: ${[...projects.keys()].join(", ")}`,
           ),
         );
         process.exit(1);
@@ -51,26 +56,24 @@ export function registerSpawn(program: Command): void {
         ? /^#?\d+$/.test(issueOrPrompt) || /^[A-Z]+-\d+$/.test(issueOrPrompt)
         : false;
 
-      const spawnConfig: SessionSpawnConfig = {
-        projectId: project,
-        issueId: isIssue ? issueOrPrompt : undefined,
-        prompt: opts.prompt ?? (!isIssue ? issueOrPrompt : undefined),
-        branch: opts.branch,
-        agent: opts.agent,
-        model: opts.model,
-        reasoningEffort: opts.reasoningEffort?.trim().toLowerCase() || undefined,
-      };
-
       const spinner = ora("Creating session").start();
 
       try {
-        const { sessionManager } = await createServices(config);
         spinner.text = "Spawning agent session";
 
-        const session = await sessionManager.spawn(spawnConfig);
+        const { session } = await apiCall<SessionResponse>("POST", "/api/sessions/spawn", {
+          projectId: project,
+          issueId: isIssue ? issueOrPrompt : undefined,
+          prompt: opts.prompt ?? (!isIssue ? issueOrPrompt : undefined),
+          branch: opts.branch,
+          agent: opts.agent,
+          model: opts.model,
+          reasoningEffort: opts.reasoningEffort?.trim().toLowerCase() || undefined,
+          useWorktree: true,
+        });
         spinner.succeed(`Session ${chalk.green(session.id)} created`);
 
-        console.log(`  Worktree: ${chalk.dim(session.workspacePath ?? "-")}`);
+        console.log(`  Worktree: ${chalk.dim(sessionWorktree(session) ?? "-")}`);
         if (session.branch) {
           console.log(`  Branch:   ${chalk.dim(session.branch)}`);
         }
@@ -78,7 +81,7 @@ export function registerSpawn(program: Command): void {
           console.log(`  Issue:    ${chalk.dim(session.issueId)}`);
         }
 
-        const tmuxTarget = session.runtimeHandle?.id ?? session.id;
+        const tmuxTarget = sessionTmuxTarget(session);
         console.log(`  Attach:   ${chalk.dim(`tmux attach -t ${tmuxTarget}`)}`);
         console.log();
         console.log(`SESSION=${session.id}`);

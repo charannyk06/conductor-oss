@@ -12,6 +12,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}", get(get_task))
+        .route("/api/tasks/{id}/graph", get(get_task_graph))
         .route("/api/tasks/{id}/state", post(update_task_state))
 }
 
@@ -81,6 +82,73 @@ async fn get_task(
         Ok(None) => Json(serde_json::json!({ "error": "not found" })),
         Err(e) => Json(serde_json::json!({ "error": e.to_string() })),
     }
+}
+
+fn task_id_for_session(session: &conductor_core::types::SessionRecord) -> String {
+    session
+        .metadata
+        .get("taskId")
+        .cloned()
+        .unwrap_or_else(|| format!("t-{}", session.id))
+}
+
+fn attempt_id_for_session(session: &conductor_core::types::SessionRecord) -> String {
+    session
+        .metadata
+        .get("attemptId")
+        .cloned()
+        .unwrap_or_else(|| format!("a-{}", session.id))
+}
+
+async fn get_task_graph(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let sessions = state.all_sessions().await;
+    let attempts = sessions
+        .iter()
+        .filter(|session| task_id_for_session(session) == id)
+        .collect::<Vec<_>>();
+
+    if attempts.is_empty() {
+        return Json(serde_json::Value::Null);
+    }
+
+    let mut children = sessions
+        .iter()
+        .filter(|&session| session.metadata.get("parentTaskId").map(String::as_str) == Some(id.as_str()) ).map(task_id_for_session)
+        .collect::<Vec<_>>();
+    children.sort();
+    children.dedup();
+
+    let mut attempts_payload = attempts
+        .into_iter()
+        .map(|session| {
+            serde_json::json!({
+                "attemptId": attempt_id_for_session(session),
+                "sessionId": session.id,
+                "status": session.status,
+                "agent": session.agent,
+                "model": session.model,
+                "branch": session.branch,
+                "createdAt": session.created_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    attempts_payload.sort_by(|left, right| left["createdAt"].as_str().cmp(&right["createdAt"].as_str()));
+
+    Json(serde_json::json!({
+        "taskId": id,
+        "parentTaskId": attempts_payload
+            .first()
+            .and_then(|attempt| attempt.get("sessionId"))
+            .and_then(|session_id| session_id.as_str())
+            .and_then(|session_id| sessions.iter().find(|session| session.id == session_id))
+            .and_then(|session| session.metadata.get("parentTaskId"))
+            .cloned(),
+        "childrenTaskIds": children,
+        "attempts": attempts_payload,
+    }))
 }
 
 #[derive(Deserialize)]

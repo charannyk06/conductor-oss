@@ -8,15 +8,19 @@
 
 import chalk from "chalk";
 import type { Command } from "commander";
-import type { Session, SessionStatus } from "@conductor-oss/core";
-import { createServices, loadConfig } from "../services.js";
+import {
+  apiCall,
+  fetchConfiguredProjects,
+  type BackendSession,
+  type SessionsResponse,
+} from "../backend.js";
 
 // ---- Attention buckets ----
 
 interface AttentionBucket {
   label: string;
   color: (s: string) => string;
-  statuses: ReadonlySet<SessionStatus>;
+  statuses: ReadonlySet<string>;
 }
 
 const BUCKETS: AttentionBucket[] = [
@@ -55,7 +59,7 @@ function formatAge(date: Date): string {
   return `${Math.floor(diff / 86400)}d`;
 }
 
-function printSessionLine(session: Session): void {
+function printSessionLine(session: BackendSession): void {
   const parts: string[] = [
     chalk.green(session.id),
   ];
@@ -67,13 +71,13 @@ function printSessionLine(session: Session): void {
     parts.push(chalk.blue(session.issueId));
   }
 
-  const summary = session.agentInfo?.summary ?? session.metadata["summary"];
+  const summary = session.summary ?? session.metadata["summary"];
   if (summary) {
     const truncated = summary.length > 50 ? summary.slice(0, 49) + "\u2026" : summary;
     parts.push(chalk.dim(truncated));
   }
 
-  parts.push(chalk.dim(`(${formatAge(session.lastActivityAt)})`));
+  parts.push(chalk.dim(`(${formatAge(new Date(session.lastActivityAt))})`));
 
   console.log(`    ${parts.join("  ")}`);
 }
@@ -87,15 +91,15 @@ export function registerStatus(program: Command): void {
     .option("-p, --project <id>", "Filter by project ID")
     .action(async (opts: { project?: string }) => {
       try {
-        const config = await loadConfig();
+        const configuredProjects = await fetchConfiguredProjects();
 
-        if (opts.project && !config.projects[opts.project]) {
+        if (opts.project && !configuredProjects.has(opts.project)) {
           console.error(chalk.red(`Unknown project: ${opts.project}`));
           process.exit(1);
         }
 
-        const { sessionManager } = await createServices(config);
-        const sessions = await sessionManager.list(opts.project);
+        const query = opts.project ? `?project=${encodeURIComponent(opts.project)}` : "";
+        const sessions = (await apiCall<SessionsResponse>("GET", `/api/sessions${query}`)).sessions;
 
         // Exclude terminal sessions
         const TERMINAL: ReadonlySet<string> = new Set([

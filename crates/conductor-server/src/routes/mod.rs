@@ -1,3 +1,5 @@
+pub mod agents;
+pub mod api_error;
 pub mod app_update;
 pub mod attachments;
 pub mod auth;

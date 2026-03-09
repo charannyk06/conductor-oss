@@ -26,6 +26,7 @@ hex = { workspace = true }
 reqwest = { workspace = true }
 notify-rust = { path = "../notify-rust" }
 jsonwebtoken = "9"
+regex = "1"
 libc = "0.2"
 glob = { workspace = true }
 async-trait = { workspace = true }

@@ -52,15 +52,12 @@ async fn read_directory(
         return error(StatusCode::NOT_FOUND, "Directory not found");
     }
 
-    let current_path = canonicalize_for_access(&current_path);
-
-    // Restrict browsing to allowed root directories to prevent path traversal.
-    if !is_within_allowed_roots(&current_path, &state.workspace_path) {
+    let Ok(current_path) = resolve_browse_path(&current_path, &state.workspace_path) else {
         return error(
             StatusCode::FORBIDDEN,
             "Access to this directory is not allowed",
         );
-    }
+    };
     if !current_path.is_dir() {
         return error(StatusCode::BAD_REQUEST, "Path is not a directory");
     }
@@ -70,19 +67,28 @@ async fn read_directory(
         .map(|entries| {
             let mut items = entries
                 .flatten()
-                .map(|entry| {
+                .filter_map(|entry| {
                     let path = entry.path();
                     let file_type = entry.file_type().ok();
-                    let is_directory = file_type
-                        .as_ref()
-                        .map(|value| value.is_dir())
+                    let resolved_path = resolved_entry_path(&path, file_type.as_ref());
+
+                    if let Some(resolved_path) = resolved_path.as_deref() {
+                        if !is_within_allowed_roots(resolved_path, &state.workspace_path) {
+                            return None;
+                        }
+                    }
+
+                    let is_directory = resolved_path
+                        .as_deref()
+                        .map(Path::is_dir)
+                        .or_else(|| file_type.as_ref().map(|value| value.is_dir()))
                         .unwrap_or(false);
-                    json!({
+                    Some(json!({
                         "name": entry.file_name().to_string_lossy().to_string(),
                         "path": path.to_string_lossy().to_string(),
                         "isDirectory": is_directory,
                         "isGitRepo": is_directory && path.join(".git").exists(),
-                    })
+                    }))
                 })
                 .collect::<Vec<_>>();
             items.sort_by(|left, right| {
@@ -127,6 +133,19 @@ fn allowed_browse_roots() -> Vec<PathBuf> {
 
 fn canonicalize_for_access(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn resolve_browse_path(path: &Path, workspace_path: &Path) -> Result<PathBuf, ()> {
+    let resolved = std::fs::canonicalize(path).map_err(|_| ())?;
+    is_within_allowed_roots(&resolved, workspace_path)
+        .then_some(resolved)
+        .ok_or(())
+}
+
+fn resolved_entry_path(path: &Path, file_type: Option<&std::fs::FileType>) -> Option<PathBuf> {
+    file_type
+        .filter(|value| value.is_symlink())
+        .and_then(|_| std::fs::canonicalize(path).ok())
 }
 
 fn is_within_allowed_roots(path: &Path, workspace_path: &Path) -> bool {
@@ -212,7 +231,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_within_allowed_roots;
+    use super::{is_within_allowed_roots, resolve_browse_path};
     use std::fs;
 
     #[test]
@@ -228,6 +247,26 @@ mod tests {
 
         assert!(is_within_allowed_roots(&workspace_path, &workspace_path));
         assert!(!is_within_allowed_roots(&traversal_path, &workspace_path));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_browse_path_rejects_symlink_escape_from_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("conductor-filesystem-{}", uuid::Uuid::new_v4()));
+        let workspace_path = root.join("workspace");
+        let outside_path = root.join("outside");
+        let symlink_path = workspace_path.join("escape");
+        fs::create_dir_all(&workspace_path).unwrap();
+        fs::create_dir_all(&outside_path).unwrap();
+        symlink(&outside_path, &symlink_path).unwrap();
+
+        assert!(resolve_browse_path(&workspace_path, &workspace_path).is_ok());
+        assert!(resolve_browse_path(&symlink_path, &workspace_path).is_err());
 
         fs::remove_dir_all(&root).unwrap();
     }

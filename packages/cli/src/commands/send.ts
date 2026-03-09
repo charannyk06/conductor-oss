@@ -7,7 +7,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
-import { createServices, loadConfig } from "../services.js";
+import { apiCall, type BackendSession } from "../backend.js";
 
 export function registerSend(program: Command): void {
   program
@@ -26,17 +26,12 @@ export function registerSend(program: Command): void {
       const spinner = ora(`Sending message to ${sessionId}`).start();
 
       try {
-        const config = await loadConfig();
-        const { sessionManager } = await createServices(config);
-
         // Verify session exists
-        const session = await sessionManager.get(sessionId);
-        if (!session) {
-          spinner.fail(`Session ${chalk.red(sessionId)} not found`);
-          process.exit(1);
-        }
+        await apiCall<BackendSession>("GET", `/api/sessions/${encodeURIComponent(sessionId)}`);
 
-        await sessionManager.send(sessionId, message);
+        await apiCall("POST", `/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+          message,
+        });
         spinner.succeed(`Message sent to ${chalk.green(sessionId)}`);
         console.log(chalk.dim(`  > ${message.length > 80 ? message.slice(0, 79) + "\u2026" : message}`));
       } catch (err) {

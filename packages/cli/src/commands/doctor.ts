@@ -1,7 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
 import chalk from "chalk";
 import type { Command } from "commander";
-import { loadConfig } from "../services.js";
+import {
+  apiCall,
+  type HealthResponse,
+  type SessionHealthMetric,
+  type SessionHealthResponse,
+} from "../backend.js";
 
 interface DoctorOptions {
   workspace?: string;
@@ -9,111 +13,80 @@ interface DoctorOptions {
   fixConfig?: boolean;
 }
 
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
+function formatMs(milliseconds: number): string {
+  if (milliseconds < 60_000) return `${Math.floor(milliseconds / 1_000)}s`;
+  if (milliseconds < 3_600_000) return `${Math.floor(milliseconds / 60_000)}m`;
+  if (milliseconds < 86_400_000) return `${Math.floor(milliseconds / 3_600_000)}h`;
+  return `${Math.floor(milliseconds / 86_400_000)}d`;
+}
+
+function healthColor(value: string): string {
+  switch (value) {
+    case "healthy":
+      return chalk.green(value);
+    case "pending":
+      return chalk.blue(value);
+    case "warning":
+      return chalk.yellow(value);
+    case "critical":
+      return chalk.red(value);
+    default:
+      return chalk.dim(value);
+  }
+}
+
+function printMetric(metric: SessionHealthMetric): void {
+  console.log(
+    `  ${healthColor(metric.health)} ${chalk.green(metric.id)} ${chalk.dim(metric.projectId)} ` +
+    `${chalk.yellow(metric.status)} idle=${chalk.dim(formatMs(metric.idleMs))} age=${chalk.dim(formatMs(metric.ageMs))}`,
+  );
+}
+
 export function registerDoctor(program: Command): void {
   program
     .command("doctor")
-    .description("Diagnose board watcher parsing/dispatch issues")
-    .option("-w, --workspace <path>", "Workspace path (defaults to CONDUCTOR_WORKSPACE)")
+    .description("Diagnose Rust backend health and session runtime issues")
+    .option("-w, --workspace <path>", "Workspace path (reported for context only)")
     .option("--json", "Output JSON report")
-    .option("--fix-config", "Regenerate drifted project-local conductor.yaml files")
+    .option("--fix-config", "Deprecated. Config sync now happens through the Rust backend")
     .action(async (opts: DoctorOptions) => {
       try {
-        const config = await loadConfig(opts.workspace);
-        const coreModule = await import("@conductor-oss/core");
-        const core = coreModule as Record<string, unknown>;
-        const discoverBoards = core["discoverBoards"] as
-          | ((workspacePath: string, boardPathsOrConfig?: unknown) => string[])
-          | undefined;
-        const resolveBoardAliasesForPath = core["resolveBoardAliasesForPath"] as
-          | ((cfg: unknown, workspacePath: string, boardPath: string) => Record<string, string[]>)
-          | undefined;
-        const parseBoardStatus = core["parseBoardStatus"] as
-          | ((boardPath: string, content: string, aliases: Record<string, string[]>, projectIds: Set<string>) => {
-              unresolvedProjects: string[];
-              errors: string[];
-              readyCount: number;
-              parseOk: boolean;
-            } & Record<string, unknown>)
-          | undefined;
-        const readRecentWatcherActions = core["readRecentWatcherActions"] as
-          | ((workspacePath: string, limit?: number) => Array<{ ts: string; level: string; action: string; boardPath?: string }>)
-          | undefined;
-        const defaultAliasMapping = core["defaultAliasMapping"] as (() => Record<string, string[]>) | undefined;
-        if (!discoverBoards || !parseBoardStatus || !readRecentWatcherActions) {
-          throw new Error("Core diagnostics helpers are unavailable. Run pnpm build.");
-        }
-        const workspace = opts.workspace
-          ?? process.env["CONDUCTOR_WORKSPACE"]
-          ?? `${process.env["HOME"]}/.conductor/workspace`;
+        const [health, sessionHealth] = await Promise.all([
+          apiCall<HealthResponse>("GET", "/api/health"),
+          apiCall<SessionHealthResponse>("GET", "/api/health/sessions"),
+        ]);
 
-        const boardPatternsOrConfig = config.boards?.length ? config.boards : config;
-        const boards = discoverBoards(workspace, boardPatternsOrConfig);
-        const projectIds = new Set(Object.keys(config.projects));
-
-        const aliasMapping: Record<string, Record<string, string[]>> = {};
-        const boardStatus: Array<Record<string, unknown> & { unresolvedProjects: string[]; errors: string[]; readyCount: number; parseOk: boolean; boardPath: string }> = [];
-        const unresolvedProjectTags: Array<{ boardPath: string; tag: string }> = [];
-
-        for (const boardPath of boards) {
-          const aliases = resolveBoardAliasesForPath
-            ? resolveBoardAliasesForPath(config, workspace, boardPath)
-            : (defaultAliasMapping ? defaultAliasMapping() : {});
-          aliasMapping[boardPath] = aliases;
-
-          if (!existsSync(boardPath)) {
-            boardStatus.push({
-              boardPath,
-              exists: false,
-              parseOk: false,
-              headingCount: 0,
-              headings: [],
-              columns: {},
-              readyCount: 0,
-              unresolvedProjects: [],
-              errors: ["Board file does not exist"],
-            });
-            continue;
-          }
-
-          const content = readFileSync(boardPath, "utf-8");
-          const status = parseBoardStatus(boardPath, content, aliases, projectIds) as {
-            boardPath: string;
-            unresolvedProjects: string[];
-            errors: string[];
-            readyCount: number;
-            parseOk: boolean;
-          } & Record<string, unknown>;
-          boardStatus.push(status);
-          for (const tag of status.unresolvedProjects) {
-            unresolvedProjectTags.push({ boardPath, tag });
-          }
-        }
-
-        const recentActions = readRecentWatcherActions(workspace, 20);
-
+        const unhealthyMetrics = sessionHealth.metrics.filter((metric) => metric.health !== "healthy");
         const hints: string[] = [];
-        if (boards.length === 0) {
-          hints.push("No boards discovered. Add explicit boards: entries or verify workspace path.");
+
+        if (health.queue_depth > 0) {
+          hints.push(`${health.queue_depth} session${health.queue_depth !== 1 ? "s are" : " is"} queued waiting for launch capacity.`);
         }
-        if (unresolvedProjectTags.length > 0) {
-          hints.push("Some #project/<id> tags do not exist in conductor.yaml projects.");
+        if (health.recovering_sessions > 0) {
+          hints.push(`${health.recovering_sessions} session${health.recovering_sessions !== 1 ? "s are" : " is"} currently in recovery.`);
         }
-        for (const status of boardStatus) {
-          for (const error of status.errors) {
-            hints.push(`${status.boardPath}: ${error}`);
-          }
+        if (sessionHealth.summary.critical > 0) {
+          hints.push(`${sessionHealth.summary.critical} session${sessionHealth.summary.critical !== 1 ? "s are" : " is"} in a critical state. Review \`co status\` and session output.`);
         }
-        if (recentActions.length === 0) {
-          hints.push("No watcher actions logged yet. Start `co watch` or `co start` and retry.");
+        if (opts.fixConfig) {
+          hints.push("`--fix-config` moved out of the JS CLI path. Restart the Rust backend to rerun config/support-file sync.");
+        }
+        if (hints.length === 0) {
+          hints.push("No backend health issues detected.");
         }
 
         const report = {
-          watchedBoards: boards,
-          aliasMapping,
-          boardStatus,
-          unresolvedProjectTags,
-          recentActions,
+          backend: health,
+          sessions: sessionHealth,
           hints,
+          workspace: opts.workspace ?? process.env["CONDUCTOR_WORKSPACE"] ?? null,
         };
 
         if (opts.json) {
@@ -122,106 +95,46 @@ export function registerDoctor(program: Command): void {
         }
 
         console.log(chalk.bold("Conductor Doctor"));
-        console.log(chalk.dim(`Workspace: ${workspace}`));
+        if (report.workspace) {
+          console.log(chalk.dim(`Workspace: ${report.workspace}`));
+        }
         console.log();
 
-        console.log(chalk.bold("Watched Boards"));
-        if (boards.length === 0) {
-          console.log(chalk.yellow("  none"));
+        console.log(chalk.bold("Backend Health"));
+        console.log(`  Status:      ${health.status === "ok" ? chalk.green(health.status) : chalk.red(health.status)}`);
+        console.log(`  Version:     ${chalk.cyan(health.version)}`);
+        console.log(`  Uptime:      ${chalk.dim(formatDuration(health.uptime_secs))}`);
+        console.log(`  Executors:   ${chalk.dim(String(health.executors))}`);
+        console.log(`  Subscribers: ${chalk.dim(String(health.event_subscribers))}`);
+        console.log(`  Queue depth: ${chalk.dim(String(health.queue_depth))}`);
+        console.log(`  Launching:   ${chalk.dim(String(health.launching_sessions))}`);
+        console.log(`  Recovering:  ${chalk.dim(String(health.recovering_sessions))}`);
+        console.log(`  Detached:    ${chalk.dim(String(health.detached_sessions))}`);
+
+        console.log();
+        console.log(chalk.bold("Session Health"));
+        console.log(
+          `  total=${chalk.dim(String(sessionHealth.summary.total))} ` +
+          `healthy=${chalk.green(String(sessionHealth.summary.healthy))} ` +
+          `pending=${chalk.blue(String(sessionHealth.summary.pending))} ` +
+          `warning=${chalk.yellow(String(sessionHealth.summary.warning))} ` +
+          `critical=${chalk.red(String(sessionHealth.summary.critical))}`,
+        );
+
+        console.log();
+        console.log(chalk.bold("Sessions Needing Attention"));
+        if (unhealthyMetrics.length === 0) {
+          console.log(chalk.green("  None"));
         } else {
-          for (const board of boards) {
-            console.log(`  ${chalk.cyan(board)}`);
-          }
-        }
-
-        console.log();
-        console.log(chalk.bold("Board Parse Status"));
-        for (const status of boardStatus) {
-          const label = status.parseOk ? chalk.green("ok") : chalk.red("error");
-          console.log(`  ${label} ${chalk.cyan(status.boardPath)} ready=${status.readyCount}`);
-          if (status.errors.length > 0) {
-            for (const error of status.errors) {
-              console.log(`    ${chalk.red("- "+error)}`);
-            }
-          }
-          if (status.unresolvedProjects.length > 0) {
-            console.log(`    ${chalk.yellow("unresolved projects:")} ${status.unresolvedProjects.join(", ")}`);
-          }
-        }
-
-        console.log();
-        console.log(chalk.bold("Recent Watcher Actions"));
-        if (recentActions.length === 0) {
-          console.log(chalk.yellow("  none"));
-        } else {
-          for (const action of recentActions) {
-            const lvl = action.level === "error" ? chalk.red(action.level) : action.level === "debug" ? chalk.dim(action.level) : chalk.green(action.level);
-            const board = action.boardPath ? ` ${chalk.cyan(action.boardPath)}` : "";
-            console.log(`  ${chalk.dim(action.ts)} ${lvl}${board} ${action.action}`);
-          }
-        }
-
-        // Config drift detection
-        const detectConfigDrift = core["detectConfigDrift"] as
-          | ((cfg: unknown) => Array<{ projectId: string; projectPath: string; localConfigPath: string; status: string; reason?: string; driftedFields?: string[] }>)
-          | undefined;
-        const syncAllProjectConfigs = core["syncAllProjectConfigs"] as
-          | ((cfg: unknown) => { reports: Array<{ projectId: string; status: string; reason?: string }>; fixed: number })
-          | undefined;
-
-        let configDriftReports: Array<{ projectId: string; projectPath: string; localConfigPath: string; status: string; reason?: string; driftedFields?: string[] }> = [];
-
-        if (detectConfigDrift) {
-          configDriftReports = detectConfigDrift(config);
-
-          if (opts.fixConfig && syncAllProjectConfigs) {
-            const syncResult = syncAllProjectConfigs(config);
-            console.log();
-            console.log(chalk.bold("Config Sync"));
-            if (syncResult.fixed > 0) {
-              console.log(chalk.green(`  Fixed ${syncResult.fixed} project-local config(s)`));
-            } else {
-              console.log(chalk.green("  All project-local configs are in sync"));
-            }
-            // Re-detect after fix
-            configDriftReports = detectConfigDrift(config);
-          }
-        }
-
-        console.log();
-        console.log(chalk.bold("Project Config Drift"));
-        if (configDriftReports.length === 0) {
-          console.log(chalk.yellow("  Config drift detection unavailable. Run pnpm build."));
-        } else {
-          for (const drift of configDriftReports) {
-            const statusLabel =
-              drift.status === "ok" ? chalk.green("ok") :
-              drift.status === "missing" ? chalk.yellow("missing") :
-              drift.status === "unmanaged" ? chalk.blue("unmanaged") :
-              chalk.red("drifted");
-            console.log(`  ${statusLabel} ${chalk.cyan(drift.projectId)}`);
-            if (drift.reason) {
-              console.log(`    ${chalk.dim(drift.reason)}`);
-            }
-            if (drift.driftedFields && drift.driftedFields.length > 0) {
-              console.log(`    ${chalk.yellow("changed:")} ${drift.driftedFields.join(", ")}`);
-            }
-          }
-
-          const driftCount = configDriftReports.filter((r) => r.status === "drifted" || r.status === "missing").length;
-          if (driftCount > 0 && !opts.fixConfig) {
-            hints.push(`${driftCount} project config(s) are drifted or missing. Run \`co doctor --fix-config\` to repair.`);
+          for (const metric of unhealthyMetrics) {
+            printMetric(metric);
           }
         }
 
         console.log();
         console.log(chalk.bold("Fix Hints"));
-        if (hints.length === 0) {
-          console.log(chalk.green("  No issues detected."));
-        } else {
-          for (const hint of hints) {
-            console.log(`  ${chalk.yellow("-")} ${hint}`);
-          }
+        for (const hint of hints) {
+          console.log(`  ${chalk.yellow("-")} ${hint}`);
         }
       } catch (err) {
         console.error(chalk.red(String(err)));

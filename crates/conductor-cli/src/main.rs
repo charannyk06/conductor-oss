@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use conductor_core::scaffold::{
+    resolve_scaffold_project, scaffold_workspace, ScaffoldWorkspaceOptions,
+};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
@@ -36,7 +40,35 @@ enum Commands {
     Init {
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[arg(long, short)]
+        force: bool,
+        #[arg(long)]
+        project_id: Option<String>,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        reasoning_effort: Option<String>,
+        #[arg(long)]
+        ide: Option<String>,
+        #[arg(long)]
+        markdown_editor: Option<String>,
+        #[arg(long)]
+        default_branch: Option<String>,
+        #[arg(long)]
+        default_working_directory: Option<String>,
+        #[arg(long)]
+        dashboard_url: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
+    /// Start Conductor as an MCP server over stdio.
+    McpServer,
     /// List configured projects.
     Projects,
     /// Show backend status.
@@ -111,16 +143,124 @@ async fn main() -> Result<()> {
             );
             conductor_server::serve(&config, db, event_bus).await?;
         }
-        Commands::Init { path } => {
-            let config_path = path.join("conductor.yaml");
-            if config_path.exists() {
-                tracing::warn!("conductor.yaml already exists");
-                return Ok(());
+        Commands::Init {
+            path,
+            force,
+            project_id,
+            display_name,
+            repo,
+            agent,
+            model,
+            reasoning_effort,
+            ide,
+            markdown_editor,
+            default_branch,
+            default_working_directory,
+            dashboard_url,
+            json,
+        } => {
+            let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
+            let options = ScaffoldWorkspaceOptions {
+                force,
+                project_id,
+                display_name,
+                repo,
+                path: Some(path.clone()),
+                agent,
+                model,
+                reasoning_effort,
+                ide,
+                markdown_editor,
+                default_branch,
+                default_working_directory,
+                dashboard_url,
+            };
+            let resolved = resolve_scaffold_project(&cwd, &options)?;
+            let board_exists = resolved.path.join("CONDUCTOR.md").exists();
+            let config_exists = resolved.path.join("conductor.yaml").exists();
+            let result = scaffold_workspace(
+                &cwd,
+                &options,
+            )?;
+
+            if json {
+                let project = &result.project;
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "created": result.created,
+                        "boardPath": result.board_path,
+                        "configPath": result.config_path,
+                        "project": {
+                            "projectId": &project.project_id,
+                            "displayName": &project.display_name,
+                            "repo": &project.repo,
+                            "path": &project.path,
+                            "agent": &project.agent,
+                            "agentModel": &project.agent_model,
+                            "agentReasoningEffort": &project.agent_reasoning_effort,
+                            "ide": &project.ide,
+                            "markdownEditor": &project.markdown_editor,
+                            "defaultBranch": &project.default_branch,
+                            "defaultWorkingDirectory": &project.default_working_directory,
+                            "dashboardUrl": &project.dashboard_url,
+                        }
+                    }))?
+                );
+            } else {
+                if !board_exists || options.force {
+                    println!("✔  Created CONDUCTOR.md");
+                } else {
+                    println!("  CONDUCTOR.md already exists (use --force to overwrite)");
+                }
+
+                if !config_exists || options.force {
+                    println!("✔  Created conductor.yaml");
+                } else {
+                    println!("  conductor.yaml already exists (use --force to overwrite)");
+                }
+
+                if result.created > 0 {
+                    println!();
+                    println!("Detected project defaults:");
+                    println!("  project id: {}", result.project.project_id);
+                    println!("  repo: {}", result.project.repo);
+                    println!("  path: {}", result.project.path.display());
+                    println!("  default branch: {}", result.project.default_branch);
+                    println!("  agent: {}", result.project.agent);
+                    println!();
+                    println!("Next steps:");
+                    println!("  1. co start");
+                    println!("  2. Open dashboard");
+                    println!("  3. Open CONDUCTOR.md");
+                    println!();
+                    println!(
+                        "  Tip: Running `npx conductor-oss@latest init` from a repo root now auto-detects origin + branch."
+                    );
+                    println!();
+                }
             }
-            let config = ConductorConfig::default_for_workspace(&path);
-            config.save(&config_path)?;
-            std::fs::create_dir_all(path.join(".conductor"))?;
-            tracing::info!("Initialized workspace at {}", path.display());
+        }
+        Commands::McpServer => {
+            let config_path = cli
+                .config
+                .unwrap_or_else(|| cli.workspace.join("conductor.yaml"));
+            let mut config = if config_path.exists() {
+                ConductorConfig::load(&config_path)?
+            } else {
+                ConductorConfig::default_for_workspace(&cli.workspace)
+            };
+            config.workspace = cli.workspace.clone();
+            config.config_path = Some(config_path.clone());
+
+            let db_path = cli.workspace.join(".conductor").join("conductor.db");
+            let db = Database::connect(&db_path)
+                .await
+                .context("Failed to connect to database")?;
+            let state = conductor_server::state::AppState::new(config_path, config, db).await;
+            state.discover_executors().await;
+            let backend = Arc::new(conductor_server::mcp::AppStateMcpBackend::new(state));
+            conductor_server::mcp::serve_stdio(backend).await?;
         }
         Commands::Projects => {
             let config_path = cli

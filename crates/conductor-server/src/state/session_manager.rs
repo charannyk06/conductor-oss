@@ -579,6 +579,33 @@ impl AppState {
                 "running".to_string()
             },
         );
+        record.metadata.insert(
+            "taskId".to_string(),
+            request
+                .task_id
+                .clone()
+                .unwrap_or_else(|| format!("t-{session_id}")),
+        );
+        record.metadata.insert(
+            "attemptId".to_string(),
+            request
+                .attempt_id
+                .clone()
+                .unwrap_or_else(|| format!("a-{session_id}")),
+        );
+        if let Some(parent_task_id) = request.parent_task_id.clone() {
+            record
+                .metadata
+                .insert("parentTaskId".to_string(), parent_task_id);
+        }
+        if let Some(retry_of_session_id) = request.retry_of_session_id.clone() {
+            record
+                .metadata
+                .insert("retryOfSessionId".to_string(), retry_of_session_id);
+        }
+        if let Some(profile) = request.profile.clone() {
+            record.metadata.insert("profile".to_string(), profile);
+        }
 
         if let Some(existing_record) = existing_record {
             record.created_at = existing_record.created_at;
@@ -1473,6 +1500,11 @@ impl AppState {
             reasoning_effort: session.reasoning_effort.clone(),
             branch: session.branch.clone(),
             base_branch: None,
+            task_id: session.metadata.get("taskId").cloned(),
+            attempt_id: None,
+            parent_task_id: session.metadata.get("parentTaskId").cloned(),
+            retry_of_session_id: None,
+            profile: session.metadata.get("profile").cloned(),
             attachments: Vec::new(),
             source: "restore".to_string(),
         })
@@ -1767,6 +1799,11 @@ mod tests {
                     reasoning_effort: Some("high".to_string()),
                     branch: None,
                     base_branch: None,
+                    task_id: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },
@@ -1831,6 +1868,11 @@ mod tests {
                     reasoning_effort: Some("medium".to_string()),
                     branch: None,
                     base_branch: None,
+                    task_id: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },
@@ -1934,6 +1976,11 @@ mod tests {
                     reasoning_effort: None,
                     branch: None,
                     base_branch: None,
+                    task_id: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },
@@ -1981,6 +2028,11 @@ mod tests {
                 reasoning_effort: None,
                 branch: None,
                 base_branch: None,
+                task_id: None,
+                attempt_id: None,
+                parent_task_id: None,
+                retry_of_session_id: None,
+                profile: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
             })
@@ -2056,6 +2108,11 @@ mod tests {
                 reasoning_effort: None,
                 branch: None,
                 base_branch: None,
+                task_id: None,
+                attempt_id: None,
+                parent_task_id: None,
+                retry_of_session_id: None,
+                profile: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
             })
@@ -2109,6 +2166,11 @@ mod tests {
                     reasoning_effort: None,
                     branch: None,
                     base_branch: None,
+                    task_id: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },

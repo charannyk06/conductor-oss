@@ -24,6 +24,10 @@ pub fn session_to_dashboard_value(session: &SessionRecord) -> Value {
         "summary": session.summary,
         "createdAt": session.created_at,
         "lastActivityAt": session.last_activity_at,
+        "workspacePath": session.workspace_path,
+        "agent": session.agent,
+        "model": session.model,
+        "reasoningEffort": session.reasoning_effort,
         "pr": session.pr,
         "metadata": session.metadata,
     })
