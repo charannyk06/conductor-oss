@@ -30,6 +30,7 @@ regex = "1"
 libc = "0.2"
 glob = { workspace = true }
 async-trait = { workspace = true }
+portable-pty = { workspace = true }
 
 [dev-dependencies]
 tower = "0.5"

@@ -2,7 +2,9 @@ use serde_json::{json, Value};
 use std::iter::Peekable;
 use std::path::Path;
 
-use super::types::{SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT};
+use super::types::{
+    SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT,
+};
 
 const SPAWN_REQUEST_METADATA_KEY: &str = "spawnRequest";
 const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
@@ -355,7 +357,10 @@ pub(super) fn merge_assistant_fragment(current: &mut String, fragment: &str) {
         return;
     }
     // Cap contains check to last 512 bytes to avoid O(n*m) on large buffers.
-    let tail_start = current.len().saturating_sub(512);
+    let mut tail_start = current.len().saturating_sub(512);
+    while tail_start < current.len() && !current.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
     let check_region = &current[tail_start..];
     if check_region.contains(trimmed) {
         return;
@@ -722,10 +727,12 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
         .filter(|value| !value.is_empty())
         .filter(|value| !is_runtime_internal_noise_text(value))
         .filter(|value| Some(*value) != last_assistant_text);
-    let summary = if matches!(session.status, SessionStatus::NeedsInput | SessionStatus::Done)
-        && summary
-            .map(|value| value.contains('\n') || value.len() > 280)
-            .unwrap_or(false)
+    let summary = if matches!(
+        session.status,
+        SessionStatus::NeedsInput | SessionStatus::Done
+    ) && summary
+        .map(|value| value.contains('\n') || value.len() > 280)
+        .unwrap_or(false)
     {
         None
     } else {
@@ -740,7 +747,9 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
     if let Some(summary_text) = summary {
         parts.push(summary_text.to_string());
     }
-    if (session.status != SessionStatus::Done || parts.is_empty()) && !matches!(session.status, SessionStatus::Other(ref s) if s.is_empty()) {
+    if (session.status != SessionStatus::Done || parts.is_empty())
+        && !matches!(session.status, SessionStatus::Other(ref s) if s.is_empty())
+    {
         parts.push(format!("Session status: {}", session.status));
     }
 

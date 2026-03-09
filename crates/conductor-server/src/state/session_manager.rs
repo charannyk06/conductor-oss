@@ -10,8 +10,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::helpers::{
-    append_output, is_runtime_status_line, merge_assistant_fragment,
-    runtime_tool_metadata, sanitize_terminal_text,
+    append_output, is_runtime_status_line, merge_assistant_fragment, runtime_tool_metadata,
+    sanitize_terminal_text,
 };
 use super::runtime_status::resolve_native_resume_target;
 use super::tmux_runtime::{
@@ -638,7 +638,9 @@ impl AppState {
             }
         }
 
-        if record.conversation.is_empty() {
+        if record.conversation.is_empty()
+            && (!request.prompt.trim().is_empty() || !request.attachments.is_empty())
+        {
             record.conversation.push(ConversationEntry {
                 id: Uuid::new_v4().to_string(),
                 kind: "user_message".to_string(),
@@ -670,7 +672,7 @@ impl AppState {
             session_id.clone(),
             executor,
             output_rx,
-            runtime_mode(&project) != TMUX_RUNTIME_MODE,
+            true,
             project
                 .agent_config
                 .session_timeout_secs
@@ -1272,7 +1274,7 @@ impl AppState {
             session_id.to_string(),
             handle,
             output_rx,
-            runtime_mode(&project) != TMUX_RUNTIME_MODE,
+            true,
             project
                 .agent_config
                 .session_timeout_secs
@@ -2046,7 +2048,9 @@ mod tests {
         let launched = timeout(Duration::from_secs(3), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
-                if current.status != SessionStatus::Queued && current.metadata.contains_key("worktree") {
+                if current.status != SessionStatus::Queued
+                    && current.metadata.contains_key("worktree")
+                {
                     return current;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -2055,7 +2059,10 @@ mod tests {
         .await
         .expect("queued session should be promoted");
 
-        assert!(matches!(launched.status, SessionStatus::Spawning | SessionStatus::Working));
+        assert!(matches!(
+            launched.status,
+            SessionStatus::Spawning | SessionStatus::Working
+        ));
         assert!(launched.metadata.contains_key("worktree"));
 
         let _ = fs::remove_dir_all(&root);
@@ -2124,7 +2131,9 @@ mod tests {
         let launched = timeout(Duration::from_secs(3), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
-                if current.status != SessionStatus::Queued && current.metadata.contains_key("worktree") {
+                if current.status != SessionStatus::Queued
+                    && current.metadata.contains_key("worktree")
+                {
                     return current;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -2133,7 +2142,10 @@ mod tests {
         .await
         .expect("queued session should not be blocked by paused sessions");
 
-        assert!(matches!(launched.status, SessionStatus::Spawning | SessionStatus::Working));
+        assert!(matches!(
+            launched.status,
+            SessionStatus::Spawning | SessionStatus::Working
+        ));
         let _ = fs::remove_dir_all(&root);
     }
 
