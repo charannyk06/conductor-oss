@@ -48,6 +48,10 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return None;
     }
 
+    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/ws") {
+        return None;
+    }
+
     if path.starts_with("/api/access") {
         return Some(AccessRole::Admin);
     }

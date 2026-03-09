@@ -1684,10 +1684,6 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       setLaunchMessage("Select a project to launch a session.");
       return;
     }
-    if (!launchPrompt.trim()) {
-      setLaunchMessage("Session prompt is required.");
-      return;
-    }
     const normalizedAgent = normalizeLaunchAgent(launchAgent).trim();
     const loweredLaunchAgent = launchAgent.trim().toLowerCase();
     const resolvedAgent = loweredLaunchAgent === "auto" || loweredLaunchAgent === "custom" || !normalizedAgent
@@ -2304,7 +2300,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                 value={launchPrompt}
                 onChange={(event) => setLaunchPrompt(event.target.value)}
                 rows={2}
-                placeholder="Prompt for this task"
+                placeholder="Optional launch prompt. Leave empty to open the native CLI home screen."
                 className="min-h-[74px] w-full rounded-md border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] outline-none focus:border-[var(--color-accent)]"
               />
               <div className="flex items-center gap-2">

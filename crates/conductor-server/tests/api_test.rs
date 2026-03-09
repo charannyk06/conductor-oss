@@ -26,12 +26,10 @@ async fn smoke_all_route_modules() {
         let state = harness.state.clone();
         let session_id = queued.id.clone();
         async move {
-            state.get_session(&session_id).await.and_then(|session| {
-                session
-                    .metadata
-                    .contains_key("worktree")
-                    .then_some(session)
-            })
+            state
+                .get_session(&session_id)
+                .await
+                .and_then(|session| session.metadata.contains_key("worktree").then_some(session))
         }
     })
     .await;

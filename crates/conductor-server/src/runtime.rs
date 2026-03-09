@@ -327,7 +327,10 @@ async fn active_session_counts(state: &Arc<AppState>, project_id: &str) -> (usiz
     for session in sessions.values() {
         if session.status.is_terminal()
             || session.status == SessionStatus::Queued
-            || matches!(session.status, SessionStatus::NeedsInput | SessionStatus::Stuck | SessionStatus::Errored)
+            || matches!(
+                session.status,
+                SessionStatus::NeedsInput | SessionStatus::Stuck | SessionStatus::Errored
+            )
         {
             continue;
         }
@@ -523,7 +526,10 @@ mod tests {
                 .values()
                 .filter(|session| {
                     session.project_id == "demo"
-                        && matches!(session.status, SessionStatus::Spawning | SessionStatus::Working)
+                        && matches!(
+                            session.status,
+                            SessionStatus::Spawning | SessionStatus::Working
+                        )
                 })
                 .map(|session| session.id.clone())
                 .collect::<Vec<_>>();

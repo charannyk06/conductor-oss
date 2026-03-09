@@ -37,7 +37,9 @@ async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<V
         .count();
     let launching = sessions
         .values()
-        .filter(|session| session.status == SessionStatus::Spawning || live_session_ids.contains(&session.id))
+        .filter(|session| {
+            session.status == SessionStatus::Spawning || live_session_ids.contains(&session.id)
+        })
         .count();
     (
         StatusCode::OK,
@@ -76,7 +78,10 @@ async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json
                 .unwrap_or(now);
             let age_ms = (now - created).num_milliseconds();
             let idle_ms = (now - last_activity).num_milliseconds();
-            let health = if matches!(session.status, SessionStatus::Stuck | SessionStatus::Errored) {
+            let health = if matches!(
+                session.status,
+                SessionStatus::Stuck | SessionStatus::Errored
+            ) {
                 "critical"
             } else if session.status == SessionStatus::Queued {
                 "pending"

@@ -1,6 +1,6 @@
 use conductor_executors::agents::{
-    AmpExecutor, CcrExecutor, ClaudeCodeExecutor, CodexExecutor, CopilotExecutor,
-    CursorExecutor, DroidExecutor, GeminiExecutor, OpenCodeExecutor, QwenCodeExecutor,
+    AmpExecutor, CcrExecutor, ClaudeCodeExecutor, CodexExecutor, CopilotExecutor, CursorExecutor,
+    DroidExecutor, GeminiExecutor, OpenCodeExecutor, QwenCodeExecutor,
 };
 use conductor_executors::executor::{Executor, ExecutorOutput, SpawnOptions};
 use serde_json::Value;
@@ -40,9 +40,9 @@ fn assert_contains(args: &[String], expected: &[&str]) {
 fn assert_filters_blocked_flags(args: &[String]) {
     assert!(args.iter().any(|arg| arg == "--safe-extra"));
     assert!(!args.iter().any(|arg| arg.eq_ignore_ascii_case("--yolo")));
-    assert!(!args.iter().any(|arg| {
-        arg.eq_ignore_ascii_case("--dangerously-skip-permissions")
-    }));
+    assert!(!args
+        .iter()
+        .any(|arg| { arg.eq_ignore_ascii_case("--dangerously-skip-permissions") }));
 }
 
 #[test]
@@ -176,8 +176,8 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
 
     let mut opencode_options = options("opencode");
     opencode_options.reasoning_effort = Some("xhigh".to_string());
-    let opencode = OpenCodeExecutor::new(PathBuf::from("/usr/bin/opencode"))
-        .build_args(&opencode_options);
+    let opencode =
+        OpenCodeExecutor::new(PathBuf::from("/usr/bin/opencode")).build_args(&opencode_options);
     assert_contains(
         &opencode,
         &[
@@ -196,12 +196,8 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
 
     let mut qwen_options = options("qwen");
     qwen_options.model = Some("qwen-max".to_string());
-    let qwen =
-        QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).build_args(&qwen_options);
-    assert_contains(
-        &qwen,
-        &["--model", "qwen-max", "--prompt", "qwen"],
-    );
+    let qwen = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).build_args(&qwen_options);
+    assert_contains(&qwen, &["--model", "qwen-max", "--prompt", "qwen"]);
     assert_filters_blocked_flags(&qwen);
 }
 
@@ -236,9 +232,8 @@ fn parse_output_handles_representative_agent_formats() {
         Some(ExecutorOutput::Stdout(text)) if text == "Claude says hi"
     ));
 
-    let codex = CodexExecutor::new(PathBuf::from("/usr/bin/codex")).parse_output(
-        r#"{"type":"agent_message","message":{"content":["Codex delta"]}}"#,
-    );
+    let codex = CodexExecutor::new(PathBuf::from("/usr/bin/codex"))
+        .parse_output(r#"{"type":"agent_message","message":{"content":["Codex delta"]}}"#);
     assert!(matches!(codex, ExecutorOutput::Stdout(ref text) if text == "Codex delta"));
 
     let copilot = CopilotExecutor::new(PathBuf::from("/usr/bin/copilot"))
@@ -267,9 +262,8 @@ fn parse_output_handles_representative_agent_formats() {
         Some("completed")
     );
 
-    let gemini = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini")).parse_output(
-        r#"{"type":"result","status":"error","error":"quota exceeded"}"#,
-    );
+    let gemini = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini"))
+        .parse_output(r#"{"type":"result","status":"error","error":"quota exceeded"}"#);
     assert!(matches!(
         gemini,
         ExecutorOutput::Failed { ref error, exit_code: Some(1) } if error == "quota exceeded"

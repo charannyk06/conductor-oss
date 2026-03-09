@@ -22,10 +22,14 @@ pub(crate) const TMUX_SOCKET_METADATA_KEY: &str = "tmuxSocket";
 pub(crate) const TMUX_LOG_PATH_METADATA_KEY: &str = "tmuxLogPath";
 pub(crate) const TMUX_EXIT_PATH_METADATA_KEY: &str = "tmuxExitPath";
 pub(crate) const TMUX_LOG_OFFSET_METADATA_KEY: &str = "tmuxLogOffset";
+pub(crate) const TMUX_LAUNCH_COMMAND_METADATA_KEY: &str = "tmuxLaunchCommand";
 
 const TMUX_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TMUX_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
-const TMUX_ACTIVITY_WATCH_INTERVAL: Duration = Duration::from_secs(2);
+const TMUX_ACTIVITY_WATCH_INTERVAL: Duration = Duration::from_millis(750);
+const TMUX_DEFAULT_COLUMNS: &str = "120";
+const TMUX_DEFAULT_ROWS: &str = "32";
+const TMUX_SHELL_BOOT_DELAY: Duration = Duration::from_millis(120);
 
 pub(crate) struct RuntimeLaunch {
     pub handle: ExecutorHandle,
@@ -75,6 +79,15 @@ fn last_non_empty_line(pane: &str) -> &str {
         .unwrap_or("")
 }
 
+fn shell_prompt_visible(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    matches!(trimmed, ">" | "$" | "#" | "%")
+        || trimmed.ends_with(" >")
+        || trimmed.ends_with(" $")
+        || trimmed.ends_with(" #")
+        || trimmed.ends_with(" %")
+}
+
 fn prompt_visible(agent: &str, line: &str) -> bool {
     if line.is_empty() {
         return false;
@@ -83,7 +96,7 @@ fn prompt_visible(agent: &str, line: &str) -> bool {
     match conductor_core::types::AgentKind::parse(agent) {
         conductor_core::types::AgentKind::Codex => {
             line.starts_with('›')
-                || matches!(line, ">" | "$" | "#")
+                || shell_prompt_visible(line)
                 || line
                     .split_whitespace()
                     .next()
@@ -92,9 +105,9 @@ fn prompt_visible(agent: &str, line: &str) -> bool {
                     && (line.contains(" left") || line.contains(" remaining"))
         }
         conductor_core::types::AgentKind::Gemini => {
-            line.starts_with('❯') || matches!(line, ">" | "$" | "#")
+            line.starts_with('❯') || shell_prompt_visible(line)
         }
-        _ => matches!(line, "❯" | ">" | "$" | "#"),
+        _ => matches!(line, "❯") || shell_prompt_visible(line),
     }
 }
 
@@ -205,7 +218,7 @@ impl AppState {
         match runtime_mode(project) {
             TMUX_RUNTIME_MODE => {
                 options.interactive = true;
-                options.structured_output = true;
+                options.structured_output = false;
                 self.spawn_tmux_runtime(executor, session_id, options).await
             }
             _ => {
@@ -289,7 +302,10 @@ impl AppState {
             return Ok(false);
         };
 
-        if matches!(session.status, SessionStatus::Archived | SessionStatus::Killed) {
+        if matches!(
+            session.status,
+            SessionStatus::Archived | SessionStatus::Killed
+        ) {
             return Ok(false);
         }
 
@@ -394,31 +410,23 @@ impl AppState {
         let _ = tokio::fs::remove_file(&exit_path).await;
         let _ = tokio::fs::remove_file(&ready_path).await;
 
-        let command = build_shell_command(
+        let launch_command = build_shell_command(
             executor.binary_path(),
             &executor.build_args(&options),
             &options.env,
         );
-        let wrapper = format!(
-            "while [ ! -f {ready} ]; do sleep 0.05; done; {command}; status=$?; printf '%s' \"$status\" > {exit_path}; exit $status",
-            ready = shell_escape(&ready_path.to_string_lossy()),
-            command = command,
-            exit_path = shell_escape(&exit_path.to_string_lossy()),
-        );
+        let login_shell = resolve_login_shell();
+        let wrapper = build_login_shell_wrapper(&login_shell, &ready_path, &exit_path);
 
-        // Use a very wide terminal (32000 columns) so that stream-json output
-        // from agents like Claude Code is never wrapped by the PTY. Without
-        // this, pipe-pane captures line-wrapped fragments that break JSON
-        // parsing in the output consumer.
         run_tmux_command(
             &socket_path,
             [
                 "new-session",
                 "-d",
                 "-x",
-                "32000",
+                TMUX_DEFAULT_COLUMNS,
                 "-y",
-                "24",
+                TMUX_DEFAULT_ROWS,
                 "-s",
                 session_name.as_str(),
                 "-c",
@@ -439,6 +447,15 @@ impl AppState {
         .with_context(|| format!("Failed to pipe tmux pane output for {session_name}"))?;
 
         tokio::fs::write(&ready_path, b"ready").await?;
+        tokio::time::sleep(TMUX_SHELL_BOOT_DELAY).await;
+
+        if !launch_command.trim().is_empty() {
+            send_tmux_text(&socket_path, &session_name, &launch_command)
+                .await
+                .with_context(|| {
+                    format!("Failed to launch CLI inside tmux session {session_name}")
+                })?;
+        }
 
         let pane_pid = tmux_pane_pid(&socket_path, &session_name)
             .await
@@ -475,6 +492,9 @@ impl AppState {
             exit_path.to_string_lossy().to_string(),
         );
         metadata.insert(TMUX_LOG_OFFSET_METADATA_KEY.to_string(), "0".to_string());
+        if !launch_command.trim().is_empty() {
+            metadata.insert(TMUX_LAUNCH_COMMAND_METADATA_KEY.to_string(), launch_command);
+        }
 
         Ok(RuntimeLaunch { handle, metadata })
     }
@@ -540,7 +560,7 @@ impl AppState {
                 }),
             );
 
-            self.start_output_consumer(session_id.to_string(), executor, output_rx, false, None);
+            self.start_output_consumer(session_id.to_string(), executor, output_rx, true, None);
 
             let mut sessions = self.sessions.write().await;
             if let Some(current) = sessions.get_mut(session_id) {
@@ -559,6 +579,14 @@ impl AppState {
                 let updated = current.clone();
                 drop(sessions);
                 self.replace_session(updated).await?;
+            }
+
+            if let Err(err) = self.reconcile_tmux_session_activity(session_id).await {
+                tracing::debug!(
+                    session_id,
+                    error = %err,
+                    "Failed to reconcile tmux activity immediately after restore"
+                );
             }
 
             return Ok(());
@@ -696,7 +724,6 @@ impl AppState {
             mut offset,
         } = forwarder;
         let mut partial = Vec::new();
-        let mut json_buffer = String::new();
         let mut exit_deadline = None;
 
         loop {
@@ -704,23 +731,6 @@ impl AppState {
                 read_tmux_log_delta(&log_path, offset, &mut partial).await?
             {
                 for line in lines {
-                    // JSON line reassembly for structured output
-                    if !json_buffer.is_empty() || line.starts_with('{') {
-                        json_buffer.push_str(&line);
-                        // Check if braces are balanced
-                        let open = json_buffer.chars().filter(|c| *c == '{').count();
-                        let close = json_buffer.chars().filter(|c| *c == '}').count();
-                        if open > 0 && open == close {
-                            // Complete JSON line
-                            let complete = std::mem::take(&mut json_buffer);
-                            if output_tx.send(ExecutorOutput::Stdout(complete)).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                        // else: incomplete, keep buffering
-                        continue;
-                    }
-                    // Non-JSON line, send as-is
                     if output_tx.send(ExecutorOutput::Stdout(line)).await.is_err() {
                         return Ok(());
                     }
@@ -1067,6 +1077,36 @@ fn build_shell_command(binary: &Path, args: &[String], env: &HashMap<String, Str
     parts.join(" ")
 }
 
+fn build_login_shell_wrapper(shell: &Path, ready_path: &Path, exit_path: &Path) -> String {
+    format!(
+        concat!(
+            "while [ ! -f {ready} ]; do sleep 0.05; done; ",
+            "export TERM=xterm-256color; ",
+            "{shell} -il; ",
+            "status=$?; ",
+            "printf '%s' \"$status\" > {exit_path}; ",
+            "exit $status"
+        ),
+        ready = shell_escape(&ready_path.to_string_lossy()),
+        shell = shell_escape(&shell.to_string_lossy()),
+        exit_path = shell_escape(&exit_path.to_string_lossy()),
+    )
+}
+
+fn resolve_login_shell() -> PathBuf {
+    std::env::var("SHELL")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| {
+            ["/bin/zsh", "/bin/bash", "/bin/sh"]
+                .into_iter()
+                .map(PathBuf::from)
+                .find(|path| path.exists())
+        })
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1251,6 +1291,7 @@ mod tests {
             .write()
             .await
             .insert(AgentKind::Codex, Arc::new(TmuxHarnessExecutor));
+        state.start_tmux_activity_watchdog();
         state
     }
 
@@ -1327,17 +1368,24 @@ mod tests {
         .await
         .expect("tmux session should reattach");
 
-        let final_session = timeout(Duration::from_secs(5), async {
+        let output_restored = timeout(Duration::from_secs(10), async {
             loop {
                 let session = restored.get_session(session_id).await.unwrap();
-                if session.status == SessionStatus::NeedsInput && session.output.contains("phase-two") {
+                if session.output.contains("phase-two") {
                     return session;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("tmux session should finish after reattach");
+        .expect("tmux session output should continue after reattach");
+
+        restored
+            .reconcile_tmux_session_activity(session_id)
+            .await
+            .expect("tmux session should reconcile after reattach");
+
+        let final_session = restored.get_session(session_id).await.unwrap();
 
         assert_eq!(
             final_session
@@ -1346,7 +1394,12 @@ mod tests {
                 .map(String::as_str),
             Some(TMUX_RUNTIME_MODE)
         );
+        assert!(output_restored.output.contains("phase-two"));
         assert!(final_session.output.contains("phase-two"));
+        assert!(matches!(
+            final_session.status,
+            SessionStatus::Working | SessionStatus::NeedsInput
+        ));
         assert!(!final_session.metadata.contains_key("recoveryState"));
 
         if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {

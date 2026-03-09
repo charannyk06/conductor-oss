@@ -1,9 +1,7 @@
 mod common;
-use conductor_core::types::SessionStatus;
-use common::{
-    spawn_request, wait_for_condition, TestExecutor, TestHarness, TmuxResumeExecutor,
-};
+use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness, TmuxResumeExecutor};
 use conductor_core::types::AgentKind;
+use conductor_core::types::SessionStatus;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -27,8 +25,9 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::Working && session.metadata.contains_key("worktree"))
-                    .then_some(session)
+                (session.status == SessionStatus::Working
+                    && session.metadata.contains_key("worktree"))
+                .then_some(session)
             })
         }
     })
@@ -70,9 +69,10 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let state = harness.state.clone();
         let session_id = session.id.clone();
         async move {
-            state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::Killed).then_some(session)
-            })
+            state
+                .get_session(&session_id)
+                .await
+                .and_then(|session| (session.status == SessionStatus::Killed).then_some(session))
         }
     })
     .await;
@@ -88,8 +88,9 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::Working && session.metadata.contains_key("worktree"))
-                    .then_some(session)
+                (session.status == SessionStatus::Working
+                    && session.metadata.contains_key("worktree"))
+                .then_some(session)
             })
         }
     })
@@ -101,9 +102,10 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let state = harness.state.clone();
         let session_id = archivable.id.clone();
         async move {
-            state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::Archived).then_some(session)
-            })
+            state
+                .get_session(&session_id)
+                .await
+                .and_then(|session| (session.status == SessionStatus::Archived).then_some(session))
         }
     })
     .await;
@@ -116,7 +118,8 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         let session_id = restored.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::Working || session.status == SessionStatus::NeedsInput)
+                (session.status == SessionStatus::Working
+                    || session.status == SessionStatus::NeedsInput)
                     .then_some(session)
             })
         }
@@ -137,7 +140,10 @@ async fn resume_session_restores_tmux_runtime_when_live_handle_is_missing() {
     {
         return;
     }
-    let probe_socket = std::env::temp_dir().join(format!("conductor-tmux-probe-{}.sock", uuid::Uuid::new_v4()));
+    let probe_socket = std::env::temp_dir().join(format!(
+        "conductor-tmux-probe-{}.sock",
+        uuid::Uuid::new_v4()
+    ));
     let probe_output = tokio::process::Command::new("tmux")
         .args(["-S", &probe_socket.to_string_lossy(), "start-server"])
         .output()
@@ -185,7 +191,12 @@ async fn resume_session_restores_tmux_runtime_when_live_handle_is_missing() {
     })
     .await;
 
-    harness.state.live_sessions.write().await.remove(&session.id);
+    harness
+        .state
+        .live_sessions
+        .write()
+        .await
+        .remove(&session.id);
 
     harness
         .state

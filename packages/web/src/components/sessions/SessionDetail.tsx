@@ -6,32 +6,28 @@ import {
   FileCode,
   Globe,
   LayoutDashboard,
-  MessageSquare,
+  SquareTerminal,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { useSession } from "@/hooks/useSession";
-import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { SessionOverview } from "./SessionOverview";
 import { SessionDiff } from "./SessionDiff";
-import { ChatPanel } from "./ChatPanel";
 import { SessionPreview } from "./SessionPreview";
+import { SessionTerminal } from "./SessionTerminal";
 
 interface SessionDetailProps {
   sessionId: string;
 }
 
-type SessionTab = "overview" | "chat" | "diff" | "preview";
+type SessionTab = "overview" | "terminal" | "diff" | "preview";
 
 function resolveSessionTab(value: string | null): SessionTab {
-  if (value === "overview" || value === "chat" || value === "diff" || value === "preview") {
+  if (value === "overview" || value === "terminal" || value === "diff" || value === "preview") {
     return value;
   }
-  if (value === "terminal") {
-    return "chat";
-  }
-  return "chat";
+  return "terminal";
 }
 
 export function SessionDetail({ sessionId }: SessionDetailProps) {
@@ -46,7 +42,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
   const handleTabChange = useCallback((value: string) => {
     const nextTab = resolveSessionTab(value);
     const params = new URLSearchParams(searchParams.toString());
-    if (nextTab === "chat") {
+    if (nextTab === "terminal") {
       params.delete("tab");
     } else {
       params.set("tab", nextTab);
@@ -106,11 +102,9 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
               <LayoutDashboard className="h-3.5 w-3.5" />
               Overview
             </TabsTrigger>
-            <TabsTrigger value="chat">
-              {agentName
-                ? <AgentTileIcon seed={{ label: agentName }} className="h-6 w-6" />
-                : <MessageSquare className="h-3.5 w-3.5" />}
-              Chat
+            <TabsTrigger value="terminal">
+              <SquareTerminal className="h-3.5 w-3.5" />
+              Terminal
             </TabsTrigger>
             <TabsTrigger value="preview">
               <Globe className="h-3.5 w-3.5" />
@@ -133,13 +127,19 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
           <SessionOverview session={session} />
         </TabsContent>
 
-        <TabsContent value="chat" className="min-h-0 flex-1 overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[#212121]">
-          <ChatPanel
+        <TabsContent
+          value="terminal"
+          forceMount
+          className="min-h-0 flex-1 overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[#212121] data-[state=inactive]:hidden"
+        >
+          <SessionTerminal
             sessionId={sessionId}
             agentName={agentName}
             projectId={session.projectId}
             sessionModel={sessionModel}
             sessionReasoningEffort={sessionReasoningEffort}
+            sessionState={status}
+            active={activeTab === "terminal"}
           />
         </TabsContent>
 

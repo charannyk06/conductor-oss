@@ -1865,7 +1865,7 @@ export function WorkspaceKanban({
                                     router.push(
                                       `/sessions/${encodeURIComponent(
                                         primaryLinkedSession.id
-                                      )}?tab=chat`
+                                      )}`
                                     )
                                   }
                                   className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
@@ -1921,7 +1921,7 @@ export function WorkspaceKanban({
                                       router.push(
                                         `/sessions/${encodeURIComponent(
                                           session.id
-                                        )}?tab=chat`
+                                        )}`
                                       )
                                     }
                                     className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
@@ -1962,7 +1962,7 @@ export function WorkspaceKanban({
                                     router.push(
                                       `/sessions/${encodeURIComponent(
                                         unresolvedPrimaryLink
-                                      )}?tab=chat`
+                                      )}`
                                     )
                                   }
                                   className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"

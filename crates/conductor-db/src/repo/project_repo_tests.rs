@@ -48,7 +48,10 @@ async fn upsert_get_list_and_delete_projects() {
 
     let projects = ProjectRepo::list(pool).await.unwrap();
     assert_eq!(
-        projects.iter().map(|project| project.id.as_str()).collect::<Vec<_>>(),
+        projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["alpha", "beta"]
     );
 
@@ -62,19 +65,14 @@ async fn project_repo_handles_unicode_and_empty_optionals() {
     let pool = db.pool();
     let long_name = "Projekt 🦀 ".repeat(24);
 
-    ProjectRepo::upsert(
-        pool,
-        "unicode-proj",
-        &long_name,
-        "",
-        Some(""),
-        Some(""),
-        0,
-    )
-    .await
-    .unwrap();
+    ProjectRepo::upsert(pool, "unicode-proj", &long_name, "", Some(""), Some(""), 0)
+        .await
+        .unwrap();
 
-    let project = ProjectRepo::get(pool, "unicode-proj").await.unwrap().unwrap();
+    let project = ProjectRepo::get(pool, "unicode-proj")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(project.name, long_name);
     assert_eq!(project.path, "");
     assert_eq!(project.board_path.as_deref(), Some(""));

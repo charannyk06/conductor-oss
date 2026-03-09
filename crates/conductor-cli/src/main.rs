@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use conductor_core::scaffold::{
-    build_conductor_board, build_conductor_yaml, resolve_scaffold_project,
-    scaffold_workspace, ConductorYamlScaffoldConfig, ScaffoldPreferencesConfig,
-    ScaffoldWorkspaceOptions,
+    build_conductor_board, build_conductor_yaml, resolve_scaffold_project, scaffold_workspace,
+    ConductorYamlScaffoldConfig, ScaffoldPreferencesConfig, ScaffoldWorkspaceOptions,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -186,10 +185,7 @@ async fn main() -> Result<()> {
             let resolved = resolve_scaffold_project(&cwd, &options)?;
             let board_exists = resolved.path.join("CONDUCTOR.md").exists();
             let config_exists = resolved.path.join("conductor.yaml").exists();
-            let result = scaffold_workspace(
-                &cwd,
-                &options,
-            )?;
+            let result = scaffold_workspace(&cwd, &options)?;
 
             if json {
                 let project = &result.project;

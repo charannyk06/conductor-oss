@@ -15,6 +15,7 @@ pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
+pub(crate) use tmux_runtime::{tmux_runtime_metadata, tmux_session_exists};
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus, SpawnRequest,
 };

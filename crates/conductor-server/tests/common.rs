@@ -69,7 +69,9 @@ impl Executor for TestExecutor {
             }
 
             if auto_complete {
-                let _ = output_tx.send(ExecutorOutput::Completed { exit_code: 0 }).await;
+                let _ = output_tx
+                    .send(ExecutorOutput::Completed { exit_code: 0 })
+                    .await;
                 return;
             }
 

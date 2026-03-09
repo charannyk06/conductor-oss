@@ -109,7 +109,7 @@ export default function SessionPageClient() {
           sessions={dashboardSessions}
           selectedSessionId={params.id}
           onSelectSession={(sessionId) => {
-            router.push(`/sessions/${encodeURIComponent(sessionId)}?tab=chat`);
+            router.push(`/sessions/${encodeURIComponent(sessionId)}`);
             closeSidebarOnMobile();
           }}
           onArchiveSession={handleArchiveSession}

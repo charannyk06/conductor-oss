@@ -174,20 +174,6 @@ async fn spawn_session(
     Json(body): Json<SpawnBody>,
 ) -> ApiResponse {
     let prompt = body.prompt.unwrap_or_default();
-    if prompt.trim().is_empty()
-        && body
-            .issue_id
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .is_empty()
-    {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "Either prompt or issueId is required to create a session",
-        );
-    }
-
     match state
         .spawn_session(SpawnRequest {
             project_id: body.project_id,
@@ -502,10 +488,9 @@ async fn retry_session(
     source_update
         .metadata
         .insert("attemptStatus".to_string(), "archived".to_string());
-    source_update.metadata.insert(
-        "supersededByAttemptId".to_string(),
-        next_attempt_id.clone(),
-    );
+    source_update
+        .metadata
+        .insert("supersededByAttemptId".to_string(), next_attempt_id.clone());
 
     if let Err(err) = state.replace_session(source_update).await {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
@@ -529,7 +514,9 @@ async fn retry_session(
             attempt_id: Some(next_attempt_id),
             parent_task_id: source.metadata.get("parentTaskId").cloned(),
             retry_of_session_id: Some(source.id.clone()),
-            profile: body.profile.or_else(|| source.metadata.get("profile").cloned()),
+            profile: body
+                .profile
+                .or_else(|| source.metadata.get("profile").cloned()),
             attachments: Vec::new(),
             source: "retry".to_string(),
         })

@@ -296,36 +296,35 @@ export function Sidebar({
   }, [filtered]);
 
   useEffect(() => {
-    const controller = new AbortController();
+    let cancelled = false;
     const sessionsToFetch = orderedSessions.filter((session) => {
       const cacheKey = getSessionDiffCacheKey(session);
       return diffStatsBySessionId[session.id]?.key !== cacheKey;
     });
 
     if (sessionsToFetch.length === 0) {
-      return () => controller.abort();
+      return () => {
+        cancelled = true;
+      };
     }
 
     void Promise.all(
       sessionsToFetch.map(async (session) => {
         const cacheKey = getSessionDiffCacheKey(session);
         try {
-          const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/diff`, {
-            signal: controller.signal,
-          });
+          const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/diff`);
           if (!response.ok) {
             return [session.id, { key: cacheKey, stats: null }] as const;
           }
           const payload = await response.json();
           return [session.id, { key: cacheKey, stats: parseSessionDiffPayload(payload) }] as const;
         } catch (error) {
-          if ((error as Error).name === "AbortError") {
-            return null;
-          }
+          console.error("Failed to load session diff stats", error);
           return [session.id, { key: cacheKey, stats: null }] as const;
         }
       }),
     ).then((entries) => {
+      if (cancelled) return;
       const resolvedEntries = entries.filter((entry): entry is readonly [string, SessionDiffStatsCacheEntry] => entry !== null);
       if (resolvedEntries.length === 0) return;
       setDiffStatsBySessionId((current) => {
@@ -337,7 +336,9 @@ export function Sidebar({
       });
     });
 
-    return () => controller.abort();
+    return () => {
+      cancelled = true;
+    };
   }, [diffStatsBySessionId, orderedSessions]);
 
   return (
