@@ -1477,10 +1477,8 @@ mod tests {
     use rsa::traits::PublicKeyParts;
     use rsa::RsaPrivateKey;
     use serde::Serialize;
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::LazyLock;
     use std::time::Instant;
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     const TEST_TEAM_DOMAIN: &str = "acme.cloudflareaccess.com";
     const TEST_AUDIENCE: &str = "cf-access-audience";
@@ -1583,7 +1581,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_accepts_verified_cloudflare_access_jwt() {
-        let _guard = ENV_LOCK
+        let _guard = crate::routes::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_cloudflare_test_cache();
@@ -1609,7 +1607,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_rejects_cloudflare_email_header_mismatch() {
-        let _guard = ENV_LOCK
+        let _guard = crate::routes::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_cloudflare_test_cache();
@@ -1637,7 +1635,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_rejects_misconfigured_cloudflare_access() {
-        let _guard = ENV_LOCK
+        let _guard = crate::routes::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_cloudflare_test_cache();
@@ -1660,7 +1658,7 @@ mod tests {
 
     #[test]
     fn access_control_ignores_builtin_remote_auth_until_share_links_are_enabled() {
-        let _guard = ENV_LOCK
+        let _guard = crate::routes::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
@@ -1682,7 +1680,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_rejects_legacy_generic_trusted_headers() {
-        let _guard = ENV_LOCK
+        let _guard = crate::routes::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let access = DashboardAccessConfig {

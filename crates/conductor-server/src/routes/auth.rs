@@ -182,10 +182,7 @@ mod tests {
     use axum::http::Request;
     use conductor_core::config::{ConductorConfig, DashboardAccessConfig};
     use conductor_db::Database;
-    use std::sync::{LazyLock, Mutex};
     use tower::util::ServiceExt;
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     async fn build_state(access: DashboardAccessConfig) -> Arc<AppState> {
         let mut config = ConductorConfig::default();
@@ -203,7 +200,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_rejects_requests_when_share_links_are_disabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::routes::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::set_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV, "test-token");
             std::env::set_var(BUILTIN_REMOTE_SESSION_SECRET_ENV, "test-secret");
@@ -234,7 +233,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_sets_cookie_when_share_links_are_enabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::routes::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::set_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV, "test-token");
             std::env::set_var(BUILTIN_REMOTE_SESSION_SECRET_ENV, "test-secret");

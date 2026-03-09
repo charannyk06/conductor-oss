@@ -88,10 +88,7 @@ mod tests {
         ConductorConfig, DashboardAccessConfig, TrustedHeaderAccessConfig,
     };
     use conductor_db::Database;
-    use std::sync::{LazyLock, Mutex};
     use tower::util::ServiceExt;
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     async fn build_state(access: DashboardAccessConfig) -> Arc<AppState> {
         let mut config = ConductorConfig::default();
@@ -174,7 +171,9 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_rejects_unauthenticated_views_when_builtin_remote_auth_is_enabled() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::routes::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
             std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
@@ -216,7 +215,9 @@ mod tests {
     #[tokio::test]
     async fn middleware_allows_local_views_when_share_links_are_disabled_even_if_runtime_tokens_exist(
     ) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::routes::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
             std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
