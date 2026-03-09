@@ -82,6 +82,29 @@ fn detached_runtime_pid(session: &SessionRecord) -> Option<u32> {
         .filter(|pid| *pid > 0)
 }
 
+/// Shared Stdout event handler used by both `append_and_apply` and `apply_runtime_event`.
+fn apply_stdout_event(session: &mut SessionRecord, line: &str, is_live: bool) {
+    if is_live && !is_terminal_status(&session.status) {
+        session.status = "working".to_string();
+        session.activity = Some("active".to_string());
+    }
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        append_runtime_assistant_break(session);
+    } else {
+        if detect_parser_state(session, trimmed) || is_runtime_status_line(trimmed) {
+            append_runtime_status_entry(session, trimmed);
+        } else {
+            clear_parser_state(session);
+            append_runtime_assistant_entry(session, line.trim_end());
+        }
+        session.summary = Some(trimmed.to_string());
+        session
+            .metadata
+            .insert("summary".to_string(), trimmed.to_string());
+    }
+}
+
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
     let sanitized = sanitize_terminal_text(text);
     let normalized = sanitized.trim_end();
@@ -704,25 +727,7 @@ impl AppState {
         // Apply event (inline from apply_runtime_event logic)
         match event {
             ExecutorOutput::Stdout(ref stdout_line) => {
-                if is_live && !is_terminal_status(&session.status) {
-                    session.status = "working".to_string();
-                    session.activity = Some("active".to_string());
-                }
-                let trimmed = stdout_line.trim();
-                if trimmed.is_empty() {
-                    append_runtime_assistant_break(session);
-                } else {
-                    if detect_parser_state(session, trimmed) || is_runtime_status_line(trimmed) {
-                        append_runtime_status_entry(session, trimmed);
-                    } else {
-                        clear_parser_state(session);
-                        append_runtime_assistant_entry(session, stdout_line.trim_end());
-                    }
-                    session.summary = Some(trimmed.to_string());
-                    session
-                        .metadata
-                        .insert("summary".to_string(), trimmed.to_string());
-                }
+                apply_stdout_event(session, stdout_line, is_live);
             }
             ExecutorOutput::Stderr(ref stderr_line) => {
                 if detect_parser_state(session, stderr_line) {
@@ -802,25 +807,7 @@ impl AppState {
 
         match event {
             ExecutorOutput::Stdout(line) => {
-                if is_live && !is_terminal_status(&session.status) {
-                    session.status = "working".to_string();
-                    session.activity = Some("active".to_string());
-                }
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    append_runtime_assistant_break(session);
-                } else {
-                    if detect_parser_state(session, trimmed) || is_runtime_status_line(trimmed) {
-                        append_runtime_status_entry(session, trimmed);
-                    } else {
-                        clear_parser_state(session);
-                        append_runtime_assistant_entry(session, line.trim_end());
-                    }
-                    session.summary = Some(trimmed.to_string());
-                    session
-                        .metadata
-                        .insert("summary".to_string(), trimmed.to_string());
-                }
+                apply_stdout_event(session, &line, is_live);
             }
             ExecutorOutput::Stderr(line) => {
                 if detect_parser_state(session, &line) {
