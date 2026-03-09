@@ -35,6 +35,16 @@ const TYPE_LABEL_TO_CATEGORY = new Map([
   ["refactor / chore", "Maintenance"],
 ]);
 
+function normalizeTypeLabel(value) {
+  const normalized = cleanupInlineMarkdown(value).toLowerCase();
+  for (const label of TYPE_LABEL_TO_CATEGORY.keys()) {
+    if (normalized === label || normalized.startsWith(`${label} (`)) {
+      return label;
+    }
+  }
+  return normalized;
+}
+
 function normalizeNewlines(value) {
   return String(value ?? "").replace(/\r\n?/g, "\n");
 }
@@ -279,7 +289,7 @@ export function extractCheckedCategories(body) {
     const match = line.trim().match(/^[-*+]\s+\[([ xX])\]\s+(.*)$/);
     if (!match || match[1].toLowerCase() !== "x") continue;
 
-    const normalized = cleanupInlineMarkdown(match[2]).toLowerCase();
+    const normalized = normalizeTypeLabel(match[2]);
     const category = TYPE_LABEL_TO_CATEGORY.get(normalized);
     if (category) {
       categories.push(category);
