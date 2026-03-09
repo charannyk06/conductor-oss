@@ -725,10 +725,7 @@ webhook:
 
     #[test]
     fn test_load_normalizes_and_accepts_webhook_secret() {
-        let root = std::env::temp_dir().join(format!(
-            "conductor-config-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root = std::env::temp_dir().join(format!("conductor-config-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("conductor.yaml");
         std::fs::write(

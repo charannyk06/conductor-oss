@@ -132,9 +132,7 @@ static KNOWN_AGENTS: &[KnownAgentInfo] = &[
 ];
 
 fn normalize_agent_name(name: &str) -> String {
-    name.trim()
-        .to_lowercase()
-        .replace(['_', ' '], "-")
+    name.trim().to_lowercase().replace(['_', ' '], "-")
 }
 
 #[allow(dead_code)]
@@ -191,25 +189,21 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
         let normalized = normalize_agent_name(known.name);
         seen.insert(normalized.clone());
 
-        let (installed, configured, ready, catalog, binary) =
-            if let Some((_kind, binary_path)) = installed_map.get(&normalized) {
-                let catalog = build_runtime_model_catalog_for_name(
-                    known.name,
-                    Some(binary_path),
-                )
-                .await;
-                (
-                    true,
-                    true,
-                    true,
-                    catalog,
-                    json!(binary_path.display().to_string()),
-                )
-            } else {
-                let catalog =
-                    build_runtime_model_catalog_for_name(known.name, None).await;
-                (false, false, false, catalog, Value::Null)
-            };
+        let (installed, configured, ready, catalog, binary) = if let Some((_kind, binary_path)) =
+            installed_map.get(&normalized)
+        {
+            let catalog = build_runtime_model_catalog_for_name(known.name, Some(binary_path)).await;
+            (
+                true,
+                true,
+                true,
+                catalog,
+                json!(binary_path.display().to_string()),
+            )
+        } else {
+            let catalog = build_runtime_model_catalog_for_name(known.name, None).await;
+            (false, false, false, catalog, Value::Null)
+        };
 
         agents.push(json!({
             "name": known.name,
@@ -236,11 +230,8 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Value> {
             continue;
         }
         let (description, homepage, icon_url) = agent_metadata(kind);
-        let catalog = build_runtime_model_catalog_for_name(
-            &kind.to_string(),
-            Some(binary_path),
-        )
-        .await;
+        let catalog =
+            build_runtime_model_catalog_for_name(&kind.to_string(), Some(binary_path)).await;
 
         agents.push(json!({
             "name": kind.to_string(),
@@ -323,10 +314,7 @@ fn agent_metadata(kind: &AgentKind) -> (&'static str, &'static str, &'static str
 // Runtime model catalog dispatch
 // ---------------------------------------------------------------------------
 
-async fn build_runtime_model_catalog_for_name(
-    name: &str,
-    binary_path: Option<&Path>,
-) -> Value {
+async fn build_runtime_model_catalog_for_name(name: &str, binary_path: Option<&Path>) -> Value {
     let normalized = normalize_agent_name(name);
     match normalized.as_str() {
         "claude-code" | "claude" => {
@@ -338,32 +326,50 @@ async fn build_runtime_model_catalog_for_name(
                 Value::Null
             }
         }
-        "codex" => build_codex_runtime_model_catalog().await.unwrap_or(Value::Null),
-        "gemini" => build_gemini_runtime_model_catalog().await.unwrap_or(Value::Null),
+        "codex" => build_codex_runtime_model_catalog()
+            .await
+            .unwrap_or(Value::Null),
+        "gemini" => build_gemini_runtime_model_catalog()
+            .await
+            .unwrap_or(Value::Null),
         "amp" => {
             let bp = binary_path.map(Path::to_path_buf);
-            build_amp_runtime_model_catalog(bp.as_deref()).await.unwrap_or(Value::Null)
+            build_amp_runtime_model_catalog(bp.as_deref())
+                .await
+                .unwrap_or(Value::Null)
         }
         "cursor-cli" => {
             let bp = binary_path.map(Path::to_path_buf);
-            build_cursor_runtime_model_catalog(bp.as_deref()).await.unwrap_or(Value::Null)
+            build_cursor_runtime_model_catalog(bp.as_deref())
+                .await
+                .unwrap_or(Value::Null)
         }
         "droid" => {
             let bp = binary_path.map(Path::to_path_buf);
-            build_droid_runtime_model_catalog(bp.as_deref()).await.unwrap_or(Value::Null)
+            build_droid_runtime_model_catalog(bp.as_deref())
+                .await
+                .unwrap_or(Value::Null)
         }
         "opencode" => {
             let bp = binary_path.map(Path::to_path_buf);
-            build_opencode_runtime_model_catalog(bp.as_deref()).await.unwrap_or(Value::Null)
+            build_opencode_runtime_model_catalog(bp.as_deref())
+                .await
+                .unwrap_or(Value::Null)
         }
         "github-copilot" => {
             let bp = binary_path.map(Path::to_path_buf);
-            build_copilot_runtime_model_catalog(bp.as_deref()).await.unwrap_or(Value::Null)
+            build_copilot_runtime_model_catalog(bp.as_deref())
+                .await
+                .unwrap_or(Value::Null)
         }
-        "qwen-code" => build_qwen_runtime_model_catalog().await.unwrap_or(Value::Null),
+        "qwen-code" => build_qwen_runtime_model_catalog()
+            .await
+            .unwrap_or(Value::Null),
         "ccr" => {
             let bp = binary_path.map(Path::to_path_buf);
-            build_ccr_runtime_model_catalog(bp.as_deref()).await.unwrap_or(Value::Null)
+            build_ccr_runtime_model_catalog(bp.as_deref())
+                .await
+                .unwrap_or(Value::Null)
         }
         _ => Value::Null,
     }
@@ -556,8 +562,6 @@ fn default_access_catalog(
     reasoning_options: Vec<Value>,
     default_reasoning: Option<&str>,
 ) -> Option<Value> {
-    
-
     let resolved_default = default_model
         .or_else(|| models.first().and_then(|m| m["id"].as_str()))
         .map(String::from);
@@ -766,8 +770,6 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
         .and_then(Value::as_str)
         .map(|v| v.trim().to_lowercase());
 
-    
-
     let all_models = if discovered_models.is_empty() {
         vec![configured_model
             .clone()
@@ -902,9 +904,17 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
         .filter(|(_, m)| m.get("visibility").and_then(Value::as_str) == Some("list"))
         .collect();
     listed.sort_by(|a, b| {
-        let ap = a.1.get("priority").and_then(Value::as_f64).unwrap_or(f64::MAX);
-        let bp = b.1.get("priority").and_then(Value::as_f64).unwrap_or(f64::MAX);
-        ap.partial_cmp(&bp).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+        let ap =
+            a.1.get("priority")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::MAX);
+        let bp =
+            b.1.get("priority")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::MAX);
+        ap.partial_cmp(&bp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
     });
 
     listed.is_empty();
@@ -915,7 +925,11 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
     let mut default_reasoning_by_model: HashMap<String, String> = HashMap::new();
 
     for (_, entry) in &listed {
-        let slug = entry.get("slug").and_then(Value::as_str).unwrap_or("").trim();
+        let slug = entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
         if slug.is_empty() {
             continue;
         }
@@ -932,7 +946,10 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
             .map(String::from)
             .unwrap_or_else(|| format!("Model exposed by the local Codex installation ({slug})."));
 
-        let api_supported = entry.get("supported_in_api").and_then(Value::as_bool).unwrap_or(true);
+        let api_supported = entry
+            .get("supported_in_api")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         let chatgpt_opt = model_option(slug, &label, &desc, &["chatgpt"]);
         let api_opt = model_option(slug, &label, &desc, &["chatgpt", "api"]);
 
@@ -942,11 +959,18 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
         }
 
         // Reasoning options per model
-        if let Some(levels) = entry.get("supported_reasoning_levels").and_then(Value::as_array) {
+        if let Some(levels) = entry
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+        {
             let options: Vec<Value> = levels
                 .iter()
                 .filter_map(|l| {
-                    let effort = l.get("effort").and_then(Value::as_str)?.trim().to_lowercase();
+                    let effort = l
+                        .get("effort")
+                        .and_then(Value::as_str)?
+                        .trim()
+                        .to_lowercase();
                     let _ = effort.is_empty();
                     let desc = l.get("description").and_then(Value::as_str);
                     Some(json!({
@@ -1036,7 +1060,6 @@ fn format_gemini_model_label(model: &str) -> String {
         .trim()
         .split(['-', '_'])
         .filter(|p| !p.is_empty())
-        
         .map(|part| {
             if part.chars().all(|c| c.is_ascii_digit() || c == '.') {
                 return part.to_string();
@@ -1134,7 +1157,12 @@ async fn build_amp_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
         .iter()
         .map(|mode| {
             let label = format!("Amp {}{}", mode[..1].to_uppercase(), &mode[1..]);
-            model_option(mode, &label, &format!("Amp mode exposed by the local CLI ({mode})."), &["default"])
+            model_option(
+                mode,
+                &label,
+                &format!("Amp mode exposed by the local CLI ({mode})."),
+                &["default"],
+            )
         })
         .collect();
 
@@ -1168,12 +1196,34 @@ async fn build_cursor_runtime_model_catalog(binary_path: Option<&Path>) -> Optio
     help.as_ref()?;
 
     let models = vec![
-        model_option("auto", "Auto", "Automatically choose the best model for the task.", &["default"]),
-        model_option("claude-sonnet", "Claude Sonnet", "Anthropic Claude Sonnet via Cursor.", &["default"]),
-        model_option("gpt-4o", "GPT-4o", "OpenAI GPT-4o via Cursor.", &["default"]),
+        model_option(
+            "auto",
+            "Auto",
+            "Automatically choose the best model for the task.",
+            &["default"],
+        ),
+        model_option(
+            "claude-sonnet",
+            "Claude Sonnet",
+            "Anthropic Claude Sonnet via Cursor.",
+            &["default"],
+        ),
+        model_option(
+            "gpt-4o",
+            "GPT-4o",
+            "OpenAI GPT-4o via Cursor.",
+            &["default"],
+        ),
     ];
 
-    default_access_catalog("cursor-cli", models, Some("auto"), Some("auto"), vec![], None)
+    default_access_catalog(
+        "cursor-cli",
+        models,
+        Some("auto"),
+        Some("auto"),
+        vec![],
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1218,9 +1268,12 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
 
     models.is_empty();
 
-    let resolved_default = default_model
-        .clone()
-        .or_else(|| models.first().and_then(|m| m["id"].as_str()).map(str::to_string));
+    let resolved_default = default_model.clone().or_else(|| {
+        models
+            .first()
+            .and_then(|m| m["id"].as_str())
+            .map(str::to_string)
+    });
 
     default_access_catalog(
         "droid",
@@ -1257,7 +1310,9 @@ async fn build_opencode_runtime_model_catalog(binary_path: Option<&Path>) -> Opt
         .captures_iter(&output)
         .filter_map(|cap| {
             let id = cap.get(1)?.as_str().trim().to_string();
-            if !id.is_empty() { seen.insert(id.clone()); }
+            if !id.is_empty() {
+                seen.insert(id.clone());
+            }
             let label = format_generic_model_label(&id);
             Some(model_option(
                 &id,
@@ -1272,18 +1327,21 @@ async fn build_opencode_runtime_model_catalog(binary_path: Option<&Path>) -> Opt
         // Fallback: just check CLI exists via help
         let help = read_command_help(&cmd_refs).await;
         help.as_ref()?;
-        return default_access_catalog(
-            "opencode",
-            vec![],
-            None,
-            Some(""),
-            vec![],
-            None,
-        );
+        return default_access_catalog("opencode", vec![], None, Some(""), vec![], None);
     }
 
-    let default_model = models.first().and_then(|m| m["id"].as_str()).map(str::to_string);
-    default_access_catalog("opencode", models, default_model.as_deref(), default_model.as_deref(), vec![], None)
+    let default_model = models
+        .first()
+        .and_then(|m| m["id"].as_str())
+        .map(str::to_string);
+    default_access_catalog(
+        "opencode",
+        models,
+        default_model.as_deref(),
+        default_model.as_deref(),
+        vec![],
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,7 +1371,9 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
             .captures_iter(caps.get(1)?.as_str())
             .filter_map(|c| {
                 let id = c.get(1)?.as_str().trim().to_string();
-                if !id.is_empty() { seen.insert(id.clone()); }
+                if !id.is_empty() {
+                    seen.insert(id.clone());
+                }
                 Some(id)
             })
             .collect()
@@ -1336,8 +1396,18 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
         })
         .collect();
 
-    let default_model = models.first().and_then(|m| m["id"].as_str()).map(str::to_string);
-    default_access_catalog("github-copilot", models, default_model.as_deref(), default_model.as_deref(), vec![], None)
+    let default_model = models
+        .first()
+        .and_then(|m| m["id"].as_str())
+        .map(str::to_string);
+    default_access_catalog(
+        "github-copilot",
+        models,
+        default_model.as_deref(),
+        default_model.as_deref(),
+        vec![],
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1366,8 +1436,18 @@ async fn build_qwen_runtime_model_catalog() -> Option<Value> {
         })
         .collect();
 
-    let default_model = models.first().and_then(|m| m["id"].as_str()).map(str::to_string);
-    default_access_catalog("qwen-code", models, default_model.as_deref(), default_model.as_deref(), vec![], None)
+    let default_model = models
+        .first()
+        .and_then(|m| m["id"].as_str())
+        .map(str::to_string);
+    default_access_catalog(
+        "qwen-code",
+        models,
+        default_model.as_deref(),
+        default_model.as_deref(),
+        vec![],
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1401,7 +1481,11 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
     let mut seen = HashSet::new();
 
     for tier in &["pro", "max", "api"] {
-        if let Some(models) = claude.get("modelsByAccess").and_then(|m| m.get(tier)).and_then(Value::as_array) {
+        if let Some(models) = claude
+            .get("modelsByAccess")
+            .and_then(|m| m.get(tier))
+            .and_then(Value::as_array)
+        {
             for model in models {
                 if let Some(id) = model.get("id").and_then(Value::as_str) {
                     if seen.insert(id.to_string()) {
@@ -1440,9 +1524,7 @@ async fn build_ccr_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
     }
     if let Some(opts) = reasoning {
         // Remap reasoning options access to "default"
-        let remapped: Vec<Value> = opts
-            .as_array().cloned()
-            .unwrap_or_default();
+        let remapped: Vec<Value> = opts.as_array().cloned().unwrap_or_default();
         if !remapped.is_empty() {
             catalog["reasoningOptionsByAccess"] = json!({ "default": remapped });
         }
@@ -1514,14 +1596,26 @@ mod tests {
 
     #[test]
     fn format_gemini_model_label_capitalizes_parts() {
-        assert_eq!(format_gemini_model_label("gemini-3.1-pro-preview"), "Gemini 3.1 Pro Preview");
+        assert_eq!(
+            format_gemini_model_label("gemini-3.1-pro-preview"),
+            "Gemini 3.1 Pro Preview"
+        );
     }
 
     #[test]
     fn claude_access_for_model_categorizes_correctly() {
-        assert_eq!(claude_access_for_model("claude-opus-4-6"), vec!["max", "api"]);
+        assert_eq!(
+            claude_access_for_model("claude-opus-4-6"),
+            vec!["max", "api"]
+        );
         assert_eq!(claude_access_for_model("opus"), vec!["max", "api"]);
-        assert_eq!(claude_access_for_model("claude-haiku-4-5"), vec!["pro", "max", "api"]);
-        assert_eq!(claude_access_for_model("claude-sonnet-4-6"), vec!["pro", "max", "api"]);
+        assert_eq!(
+            claude_access_for_model("claude-haiku-4-5"),
+            vec!["pro", "max", "api"]
+        );
+        assert_eq!(
+            claude_access_for_model("claude-sonnet-4-6"),
+            vec!["pro", "max", "api"]
+        );
     }
 }

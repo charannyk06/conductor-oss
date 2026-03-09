@@ -22,7 +22,10 @@ fn session_occupies_launch_capacity(session: &SessionRecord, is_live: bool) -> b
         return false;
     }
 
-    if matches!(session.status, SessionStatus::NeedsInput | SessionStatus::Stuck | SessionStatus::Errored) {
+    if matches!(
+        session.status,
+        SessionStatus::NeedsInput | SessionStatus::Stuck | SessionStatus::Errored
+    ) {
         return false;
     }
 

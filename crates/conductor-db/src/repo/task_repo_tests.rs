@@ -40,7 +40,10 @@ async fn task_repo_supports_create_get_list_and_counts() {
     blocked.parent_id = Some(ready.id);
     TaskRepo::create(pool, &blocked).await.unwrap();
 
-    let fetched = TaskRepo::get(pool, &ready.id.to_string()).await.unwrap().unwrap();
+    let fetched = TaskRepo::get(pool, &ready.id.to_string())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.title, "Ship API");
     assert_eq!(fetched.description.as_deref(), Some("Add smoke coverage"));
     assert_eq!(fetched.state, TaskState::Ready);
@@ -73,7 +76,9 @@ async fn task_repo_updates_terminal_state_and_preserves_completion_timestamp() {
     let task_id = task.id.to_string();
     TaskRepo::create(pool, &task).await.unwrap();
 
-    TaskRepo::update_state(pool, &task_id, "done").await.unwrap();
+    TaskRepo::update_state(pool, &task_id, "done")
+        .await
+        .unwrap();
 
     let state: String = sqlx::query_scalar("SELECT state FROM tasks WHERE id = ?")
         .bind(&task_id)
@@ -89,7 +94,9 @@ async fn task_repo_updates_terminal_state_and_preserves_completion_timestamp() {
     assert_eq!(state, "done");
     assert!(completed_at.is_some());
 
-    TaskRepo::update_state(pool, &task_id, "review").await.unwrap();
+    TaskRepo::update_state(pool, &task_id, "review")
+        .await
+        .unwrap();
     let preserved_completed_at: Option<String> =
         sqlx::query_scalar("SELECT completed_at FROM tasks WHERE id = ?")
             .bind(&task_id)

@@ -67,14 +67,9 @@ async fn concurrent_reads_and_writes_keep_session_logs_consistent() {
         let pool = pool.clone();
         let session_id = session_id.clone();
         jobs.spawn(async move {
-            SessionRepo::append_log(
-                &pool,
-                &session_id,
-                "stdout",
-                &format!("line-{index:02}"),
-            )
-            .await
-            .unwrap();
+            SessionRepo::append_log(&pool, &session_id, "stdout", &format!("line-{index:02}"))
+                .await
+                .unwrap();
         });
     }
     for _ in 0..12 {

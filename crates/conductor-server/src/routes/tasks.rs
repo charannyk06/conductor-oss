@@ -116,7 +116,10 @@ async fn get_task_graph(
 
     let mut children = sessions
         .iter()
-        .filter(|&session| session.metadata.get("parentTaskId").map(String::as_str) == Some(id.as_str()) ).map(task_id_for_session)
+        .filter(|&session| {
+            session.metadata.get("parentTaskId").map(String::as_str) == Some(id.as_str())
+        })
+        .map(task_id_for_session)
         .collect::<Vec<_>>();
     children.sort();
     children.dedup();
@@ -135,7 +138,8 @@ async fn get_task_graph(
             })
         })
         .collect::<Vec<_>>();
-    attempts_payload.sort_by(|left, right| left["createdAt"].as_str().cmp(&right["createdAt"].as_str()));
+    attempts_payload
+        .sort_by(|left, right| left["createdAt"].as_str().cmp(&right["createdAt"].as_str()));
 
     Json(serde_json::json!({
         "taskId": id,

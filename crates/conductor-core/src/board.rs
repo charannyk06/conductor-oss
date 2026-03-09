@@ -391,22 +391,34 @@ mod tests {
         let board = Board::parse(content);
         assert_eq!(board.columns[0].cards[0].title, "Build feature");
         assert_eq!(
-            board.columns[0].cards[0].metadata.get("model").map(|s| s.as_str()),
+            board.columns[0].cards[0]
+                .metadata
+                .get("model")
+                .map(|s| s.as_str()),
             Some("gpt-5")
         );
         assert_eq!(
-            board.columns[0].cards[0].metadata.get("reasoningEffort").map(|s| s.as_str()),
+            board.columns[0].cards[0]
+                .metadata
+                .get("reasoningEffort")
+                .map(|s| s.as_str()),
             Some("high")
         );
 
         let output = board.to_markdown();
         let reparsed = Board::parse(&output);
         assert_eq!(
-            reparsed.columns[0].cards[0].metadata.get("model").map(|s| s.as_str()),
+            reparsed.columns[0].cards[0]
+                .metadata
+                .get("model")
+                .map(|s| s.as_str()),
             Some("gpt-5")
         );
         assert_eq!(
-            reparsed.columns[0].cards[0].metadata.get("reasoningEffort").map(|s| s.as_str()),
+            reparsed.columns[0].cards[0]
+                .metadata
+                .get("reasoningEffort")
+                .map(|s| s.as_str()),
             Some("high")
         );
     }

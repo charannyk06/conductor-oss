@@ -1,16 +1,16 @@
 mod common;
-use conductor_core::types::SessionStatus;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{build_app, spawn_request, wait_for_condition, TestExecutor, TestHarness};
 use conductor_core::board::Board;
-use conductor_core::EventBus;
 use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
+use conductor_core::types::SessionStatus;
+use conductor_core::EventBus;
+use serde_json::Value;
 use std::fs;
 use std::sync::Arc;
 use tower::util::ServiceExt;
-use serde_json::Value;
 
 #[tokio::test]
 async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
@@ -96,10 +96,7 @@ async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
     assert_eq!(task["issueId"], "42");
     assert_eq!(task["githubItemId"], "gh-99");
     assert_eq!(task["notes"], "Initial notes");
-    assert_eq!(
-        task["attachments"].as_array().unwrap().len(),
-        2
-    );
+    assert_eq!(task["attachments"].as_array().unwrap().len(), 2);
 
     let board_contents = fs::read_to_string(&harness.board_path).unwrap();
     assert!(board_contents.contains("taskRef:DEM-123"));
@@ -180,19 +177,20 @@ async fn board_change_events_drive_session_spawns_with_board_metadata() {
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::Working && session.metadata.contains_key("worktree"))
-                    .then_some(session)
+                (session.status == SessionStatus::Working
+                    && session.metadata.contains_key("worktree"))
+                .then_some(session)
             })
         }
     })
     .await;
     assert_eq!(session.project_id, "demo");
-    assert_eq!(session.metadata.get("model").map(String::as_str), Some("gpt-5-mini"));
     assert_eq!(
-        session
-            .metadata
-            .get("reasoningEffort")
-            .map(String::as_str),
+        session.metadata.get("model").map(String::as_str),
+        Some("gpt-5-mini")
+    );
+    assert_eq!(
+        session.metadata.get("reasoningEffort").map(String::as_str),
         Some("medium")
     );
 }

@@ -2,7 +2,8 @@ mod common;
 
 use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
-use conductor_core::types::SessionStatus;use std::sync::Arc;
+use conductor_core::types::SessionStatus;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn spawn_session_runs_from_queue_to_follow_up_ready_state() {
@@ -47,5 +48,6 @@ async fn spawn_session_runs_from_queue_to_follow_up_ready_state() {
     assert!(session
         .conversation
         .iter()
-        .any(|entry| entry.kind == "assistant_message" && entry.text.contains("prompt:Ship the test harness")));
+        .any(|entry| entry.kind == "assistant_message"
+            && entry.text.contains("prompt:Ship the test harness")));
 }

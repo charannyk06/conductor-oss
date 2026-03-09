@@ -80,7 +80,10 @@ async fn session_repo_supports_crud_listing_and_log_cleanup() {
     let terminated = SessionRepo::list(pool, Some("terminated")).await.unwrap();
     assert_eq!(terminated.len(), 1);
     assert_eq!(terminated[0].exit_code, Some(137));
-    assert!(SessionRepo::list_active(pool, "demo").await.unwrap().is_empty());
+    assert!(SessionRepo::list_active(pool, "demo")
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -105,10 +108,12 @@ async fn session_repo_handles_unicode_and_stale_log_cleanup() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE session_logs SET created_at = datetime('now', '-10 days') WHERE content = ''")
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE session_logs SET created_at = datetime('now', '-10 days') WHERE content = ''",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 
     let removed = SessionRepo::cleanup_stale_logs(pool, 5).await.unwrap();
     assert_eq!(removed, 1);

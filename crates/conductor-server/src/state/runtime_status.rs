@@ -231,9 +231,8 @@ fn read_codex_runtime_status_from_home(home: &Path, cwd: &str) -> Option<Session
                         if let Some(max_tokens) = json_u64(info.get("model_context_window")) {
                             context_window.max_tokens = Some(max_tokens);
                             context_window.source = "cli".to_string();
-                            context_window.note = Some(
-                                "Reported directly by the active Codex session.".to_string(),
-                            );
+                            context_window.note =
+                                Some("Reported directly by the active Codex session.".to_string());
                         }
                     }
                 }
@@ -303,8 +302,7 @@ fn read_claude_runtime_status(cwd: &str) -> Option<SessionRuntimeStatus> {
             usage.input_tokens = input_tokens;
             usage.output_tokens = output_tokens;
             usage.cached_input_tokens = Some(cache_read.unwrap_or(0) + cache_creation.unwrap_or(0));
-            usage.total_tokens =
-                Some(input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0));
+            usage.total_tokens = Some(input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0));
             break;
         }
     }
