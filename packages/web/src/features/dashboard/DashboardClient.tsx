@@ -1955,7 +1955,7 @@ function NewWorkspaceDialog({
   const [path, setPath] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
   const [agent, setAgent] = useState(defaultAgent);
-  const [useWorktree, setUseWorktree] = useState(true);
+  const [useWorktree, setUseWorktree] = useState(false);
   const [initializeGit, setInitializeGit] = useState(true);
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
   const [githubReposLoading, setGithubReposLoading] = useState(false);
@@ -1978,7 +1978,7 @@ function NewWorkspaceDialog({
     setPath("");
     setDefaultBranch("main");
     setInitializeGit(true);
-    setUseWorktree(true);
+    setUseWorktree(false);
     setAgent(defaultAgent);
     setGithubRepos([]);
     setGithubReposLoaded(false);
@@ -3030,7 +3030,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   const [issueId, setIssueId] = useState("");
   const [availableTasks, setAvailableTasks] = useState<LinkedBoardTask[]>([]);
   const [taskLoading, setTaskLoading] = useState(false);
-  const [useWorktree, setUseWorktree] = useState(true);
+  const [useWorktree, setUseWorktree] = useState(false);
   const [permissionMode, setPermissionMode] = useState<CreatePermissionMode>("default");
 
   useEffect(() => {

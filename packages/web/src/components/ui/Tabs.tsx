@@ -13,7 +13,7 @@ export const TabsList = forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      "inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-0.5 whitespace-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+      "inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-0.5 whitespace-nowrap touch-pan-x [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
       className,
     )}
     {...props}
@@ -28,7 +28,7 @@ export const TabsTrigger = forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex shrink-0 items-center gap-1.5 rounded-[3px] px-2.5 py-1.5 text-[12px] text-[var(--vk-text-muted)]",
+      "inline-flex min-h-[34px] shrink-0 items-center gap-1.5 rounded-[3px] px-2.5 py-1.5 text-[12px] text-[var(--vk-text-muted)]",
       "data-[state=active]:bg-[var(--vk-bg-active)] data-[state=active]:text-[var(--vk-text-normal)]",
       "hover:text-[var(--vk-text-normal)]",
       "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vk-orange)]",

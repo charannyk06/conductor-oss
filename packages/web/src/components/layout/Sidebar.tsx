@@ -382,7 +382,11 @@ export function Sidebar({
               const statusBadge = getStatusBadge(session, level);
               const sessionAgent = getSessionAgent(session);
               const isSelected = session.id === selectedId;
-              const isRunning = level === "working";
+              const isRunning = session.activity === "active"
+                || (
+                  session.activity == null
+                  && (session.status === "queued" || session.status === "spawning" || session.status === "running" || session.status === "working")
+                );
               const isArchiving = archivingId === session.id;
               const hasArchiveError = archiveError === session.id;
 
@@ -419,11 +423,18 @@ export function Sidebar({
                         </span>
                       </span>
                       {diffStats ? (
-                        <SessionDiffBadge
-                          additions={diffStats.additions}
-                          deletions={diffStats.deletions}
-                          isSelected={isSelected}
-                        />
+                        <>
+                          <span className="hidden sm:block">
+                            <SessionDiffBadge
+                              additions={diffStats.additions}
+                              deletions={diffStats.deletions}
+                              isSelected={isSelected}
+                            />
+                          </span>
+                          <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium sm:hidden">
+                            <span className={statusBadge.className}>{statusBadge.label}</span>
+                          </span>
+                        </>
                       ) : (
                         <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium">
                           <span className={statusBadge.className}>{statusBadge.label}</span>
