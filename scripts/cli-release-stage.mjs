@@ -76,20 +76,38 @@ function copyDistDirectory(sourcePath, destinationPath) {
   });
 }
 
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
-}
+function copyDirectoryResolvingSymlinks(sourcePath, destinationPath, parents = new Set()) {
+  const sourceStat = lstatSync(sourcePath);
+  const resolvedSourcePath = sourceStat.isSymbolicLink() ? realpathSync(sourcePath) : sourcePath;
+  const resolvedStat = sourceStat.isSymbolicLink() ? lstatSync(resolvedSourcePath) : sourceStat;
 
-function copyDirectoryResolvingSymlinks(sourcePath, destinationPath) {
+  if (!resolvedStat.isDirectory()) {
+    mkdirSync(dirname(destinationPath), { recursive: true });
+    cpSync(resolvedSourcePath, destinationPath, { force: true });
+    return;
+  }
+
+  const cycleKey = realpathSync(resolvedSourcePath);
+  if (parents.has(cycleKey)) {
+    throw new Error(`Refusing to follow cyclic directory link while staging ${sourcePath}`);
+  }
+
+  const nextParents = new Set(parents);
+  nextParents.add(cycleKey);
+
   mkdirSync(destinationPath, { recursive: true });
-  execFileSync(
-    "sh",
-    [
-      "-lc",
-      `tar -chf - -C ${shellQuote(sourcePath)} . | tar -xf - -C ${shellQuote(destinationPath)}`,
-    ],
-    { stdio: "inherit" },
-  );
+  for (const entry of readdirSync(resolvedSourcePath, { withFileTypes: true })) {
+    const childSourcePath = join(resolvedSourcePath, entry.name);
+    const childDestinationPath = join(destinationPath, entry.name);
+
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      copyDirectoryResolvingSymlinks(childSourcePath, childDestinationPath, nextParents);
+      continue;
+    }
+
+    mkdirSync(dirname(childDestinationPath), { recursive: true });
+    cpSync(childSourcePath, childDestinationPath, { force: true });
+  }
 }
 
 function hydrateStandaloneNodeModules(standaloneRoot) {
