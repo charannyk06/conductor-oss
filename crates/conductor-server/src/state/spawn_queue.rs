@@ -143,15 +143,37 @@ impl AppState {
     }
 
     async fn next_queueable_spawn(&self) -> Option<(String, SpawnRequest)> {
-        let queued_ids = {
+        let (queued_ids, active_prompts) = {
             let sessions = self.sessions.read().await;
+            let live_ids = self
+                .live_sessions
+                .read()
+                .await
+                .keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>();
+
             let mut queued = sessions
                 .values()
                 .filter(|session| session.status == SessionStatus::Queued.to_string())
                 .map(|session| (session.created_at.clone(), session.id.clone()))
                 .collect::<Vec<_>>();
             queued.sort_by(|left, right| left.0.cmp(&right.0));
-            queued.into_iter().map(|(_, id)| id).collect::<Vec<_>>()
+            let queued_ids: Vec<_> = queued.into_iter().map(|(_, id)| id).collect();
+
+            // Collect (project_id, prompt) pairs for all active (non-terminal, non-queued) sessions.
+            let active_prompts: std::collections::HashSet<(String, String)> = sessions
+                .values()
+                .filter(|s| {
+                    let status = SessionStatus::from(s.status.as_str());
+                    !status.is_terminal()
+                        && status != SessionStatus::Queued
+                        && (s.status == "spawning" || live_ids.contains(&s.id))
+                })
+                .map(|s| (s.project_id.clone(), s.prompt.clone()))
+                .collect();
+
+            (queued_ids, active_prompts)
         };
 
         if queued_ids.is_empty() {
@@ -167,6 +189,17 @@ impl AppState {
             let Some(session) = self.get_session(&session_id).await else {
                 continue;
             };
+
+            // Dedup: skip if an active session already exists for the same project + prompt.
+            if active_prompts.contains(&(session.project_id.clone(), session.prompt.clone())) {
+                tracing::debug!(
+                    session_id,
+                    project_id = session.project_id,
+                    "Skipping duplicate spawn: active session exists with same prompt"
+                );
+                continue;
+            }
+
             let project_active = per_project_active
                 .get(&session.project_id)
                 .copied()
