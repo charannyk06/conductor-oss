@@ -299,12 +299,8 @@ fn read_claude_runtime_status(cwd: &str) -> Option<SessionRuntimeStatus> {
             usage.input_tokens = input_tokens;
             usage.output_tokens = output_tokens;
             usage.cached_input_tokens = Some(cache_read.unwrap_or(0) + cache_creation.unwrap_or(0));
-            usage.total_tokens = Some(
-                input_tokens.unwrap_or(0)
-                    + output_tokens.unwrap_or(0)
-                    + cache_read.unwrap_or(0)
-                    + cache_creation.unwrap_or(0),
-            );
+            usage.total_tokens =
+                Some(input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0));
             break;
         }
     }
