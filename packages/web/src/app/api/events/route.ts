@@ -42,7 +42,6 @@ export async function GET(request: Request): Promise<Response> {
     method: "GET",
     headers,
     cache: "no-store",
-    // @ts-expect-error -- Node.js fetch supports signal for abort
     signal: request.signal,
   });
 
