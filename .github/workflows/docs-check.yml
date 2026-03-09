@@ -1,0 +1,19 @@
+# Verify docs/manifest.json stays in sync with actual source files on every PR.
+
+name: Docs Check
+
+on:
+  pull_request:
+
+jobs:
+  validate-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Validate docs/manifest.json
+        run: bash scripts/validate-docs.sh
