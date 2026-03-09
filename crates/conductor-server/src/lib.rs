@@ -1,6 +1,9 @@
+pub mod mcp;
+pub mod notifier;
 pub mod routes;
 mod runtime;
 pub mod state;
+pub mod tracker;
 
 use anyhow::Result;
 use axum::http::{HeaderValue, Method};
@@ -45,6 +48,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .merge(routes::notifications::router())
         .merge(routes::projects::router())
         .merge(routes::tasks::router())
+        .merge(routes::terminal::router())
         .merge(routes::auth::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
