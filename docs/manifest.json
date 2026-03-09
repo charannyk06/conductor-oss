@@ -1,0 +1,19 @@
+{
+  "version": "0.3.0",
+  "agents": [
+    {"id": "claude-code", "binary": "claude-code", "aliases": ["claude", "claude-code"], "installCommand": "npm install -g @anthropic-ai/claude-code", "website": "https://claude.ai", "brandColor": "#E39A73"},
+    {"id": "codex", "binary": "codex", "aliases": ["codex"], "installCommand": "npm install -g @openai/codex-cli", "website": "https://openai.com/codex/", "brandColor": "#7EE0C3"},
+    {"id": "gemini", "binary": "gemini", "aliases": ["gemini"], "installCommand": "npm install -g @google/gemini-cli", "website": "https://gemini.google.com/", "brandColor": "#8FA7FF"},
+    {"id": "amp", "binary": "amp", "aliases": ["amp"], "installCommand": "npm install -g @anthropic-ai/amp", "website": "https://ampcode.com/", "brandColor": "#FF8A62"},
+    {"id": "cursor-cli", "binary": "cursor", "aliases": ["cursor", "cursor-cli", "cursor-agent"], "installCommand": "npm install -g cursor-cli", "website": "https://www.cursor.com/", "brandColor": "#83C8FF"},
+    {"id": "opencode", "binary": "opencode", "aliases": ["opencode", "open-code", "open_code"], "installCommand": "npm install -g opencode", "website": "https://opencode.ai/", "brandColor": "#C7D2D8"},
+    {"id": "droid", "binary": "droid", "aliases": ["droid"], "installCommand": "npm install -g @anthropic-ai/droid", "website": "https://github.com/Factory-AI/factory", "brandColor": "#F6E58D"},
+    {"id": "qwen-code", "binary": "qwen", "aliases": ["qwen", "qwen-code"], "installCommand": "npm install -g qwen-code", "website": "https://github.com/QwenLM/qwen-code", "brandColor": "#9D8CFF"},
+    {"id": "github-copilot", "binary": "github-copilot", "aliases": ["github-copilot", "copilot", "gh-copilot"], "installCommand": "npm install -g github-copilot", "website": "https://github.com/features/copilot", "brandColor": "#87AEFF"},
+    {"id": "ccr", "binary": "ccr", "aliases": ["ccr"], "installCommand": "npm install -g ccr", "website": "https://github.com/anthropics/ccr", "brandColor": "#FFB86C"}
+  ],
+  "cliCommands": ["attach", "cleanup", "dashboard", "doctor", "feedback", "init", "kill", "list", "mcp-server", "restore", "retry", "send", "setup", "spawn", "start", "status", "task"],
+  "mcpTools": ["conductor_dispatch", "conductor_list_sessions", "conductor_session_status", "conductor_list_projects", "conductor_kill_session"],
+  "features": ["board-watcher", "mcp-server", "worktrees", "tmux-runtime", "github-integration", "webhook", "desktop-notifications", "discord-notifications", "session-preview", "session-diff", "remote-access", "access-control"],
+  "apiRoutes": ["agents", "app-update", "attachments", "auth", "boards", "config", "context-files", "events", "filesystem", "github", "health", "notifications", "projects", "repositories", "session-workspace", "sessions", "tasks", "terminal", "workspaces"]
+}

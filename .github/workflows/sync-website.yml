@@ -1,0 +1,35 @@
+# Sync website when product source or docs manifest change.
+# The conductor-website repo is private, so this workflow needs a PAT secret
+# called WEBSITE_SYNC_TOKEN with repo scope on the website repository.
+# Create the PAT, then add it as a repository secret in conductor-oss settings.
+
+name: Sync Website
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "packages/cli/**"
+      - "docs/manifest.json"
+
+jobs:
+  validate-and-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout conductor-oss
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Validate docs/manifest.json
+        run: bash scripts/validate-docs.sh
+
+      - name: Notify conductor-website
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          repository: charannyk06/conductor-website
+          event-type: conductor-oss-updated
+          client-payload: '{"ref": "${{ github.sha }}", "version": "0.3.0"}'
