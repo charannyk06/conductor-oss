@@ -8,7 +8,7 @@ type GuardOptions = {
 };
 
 type RouteParams = Record<string, string | undefined>;
-type RouteContext = { params: Promise<RouteParams> | RouteParams };
+type RouteContext = { params: Promise<RouteParams> };
 
 export function guardedProxyRoute(pathname: string, options: GuardOptions = {}) {
   return async function proxyRoute(request: Request): Promise<Response> {

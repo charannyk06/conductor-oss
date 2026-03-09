@@ -1,0 +1,17 @@
+name: PR metadata
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+
+jobs:
+  validate-description:
+    name: Validate PR description
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate PR description
+        run: node scripts/validate-pr-description.mjs

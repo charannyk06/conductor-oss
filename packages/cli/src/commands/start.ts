@@ -7,11 +7,14 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createServer, type Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
@@ -24,6 +27,167 @@ function commandExists(command: string): boolean {
   return result.status === 0;
 }
 
+type CliInstallMode =
+  | "source"
+  | "npx"
+  | "global-npm"
+  | "global-pnpm"
+  | "global-bun"
+  | "unknown";
+
+type CliUpdateContext = {
+  packageName: string;
+  version: string;
+  installMode: CliInstallMode;
+};
+
+export function quoteWindowsCliArg(value: string): string {
+  let escaped = "";
+  let backslashCount = 0;
+
+  for (const char of value) {
+    if (char === "\\") {
+      backslashCount += 1;
+      continue;
+    }
+
+    if (char === "\"") {
+      escaped += "\\".repeat(backslashCount * 2 + 1);
+      escaped += "\"";
+      backslashCount = 0;
+      continue;
+    }
+
+    if (backslashCount > 0) {
+      escaped += "\\".repeat(backslashCount);
+      backslashCount = 0;
+    }
+
+    escaped += char;
+  }
+
+  if (backslashCount > 0) {
+    escaped += "\\".repeat(backslashCount * 2);
+  }
+
+  return `"${escaped}"`;
+}
+
+export function quoteCliArg(value: string): string {
+  if (value.length === 0) {
+    return process.platform === "win32" ? "\"\"" : "''";
+  }
+
+  if (/^[A-Za-z0-9_./:=@+-]+$/.test(value)) {
+    return value;
+  }
+
+  if (process.platform === "win32") {
+    return quoteWindowsCliArg(value);
+  }
+
+  return "'" + value.replace(/'/g, "'\"'\"'") + "'";
+}
+
+function normalizeFsPath(value: string): string {
+  return value.replace(/\\/g, "/").toLowerCase();
+}
+
+function isPathInside(candidate: string, parent: string): boolean {
+  const relativePath = relative(resolve(parent), resolve(candidate));
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+function readCommandStdout(command: string, args: string[]): string | null {
+  if (!commandExists(command)) return null;
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.status !== 0) return null;
+  const stdout = result.stdout?.trim();
+  return stdout && stdout.length > 0 ? stdout : null;
+}
+
+function resolveBunGlobalNodeModulesDir(): string {
+  const bunInstallRoot = process.env["BUN_INSTALL"]?.trim() || join(homedir(), ".bun");
+  return join(bunInstallRoot, "install", "global", "node_modules");
+}
+
+function resolveCliUpdateContext(): CliUpdateContext {
+  const packageJsonUrl = new URL("../../package.json", import.meta.url);
+  const packageRoot = dirname(fileURLToPath(packageJsonUrl));
+  let packageName = "conductor-oss";
+  let version = "0.0.0";
+
+  try {
+    const payload = JSON.parse(readFileSync(packageJsonUrl, "utf8")) as {
+      name?: string;
+      version?: string;
+    };
+    if (typeof payload.name === "string" && payload.name.trim().length > 0) {
+      packageName = payload.name.trim();
+    }
+    if (typeof payload.version === "string" && payload.version.trim().length > 0) {
+      version = payload.version.trim();
+    }
+  } catch {
+    // Ignore package metadata lookup failures and fall back to defaults.
+  }
+
+  const normalizedRoot = normalizeFsPath(packageRoot);
+  const parentWorkspaceLockfile = join(packageRoot, "..", "..", "pnpm-lock.yaml");
+  if (normalizedRoot.endsWith("/packages/cli") && existsSync(parentWorkspaceLockfile)) {
+    return { packageName, version, installMode: "source" };
+  }
+
+  if (
+    normalizedRoot.includes("/_npx/")
+    || normalizedRoot.includes("/npm-cache/_npx/")
+    || normalizedRoot.includes("/pnpm/dlx/")
+    || normalizedRoot.includes("/bunx/")
+  ) {
+    return { packageName, version, installMode: "npx" };
+  }
+
+  const pnpmGlobalRoot = readCommandStdout("pnpm", ["root", "-g"]);
+  if (pnpmGlobalRoot && isPathInside(packageRoot, pnpmGlobalRoot)) {
+    return { packageName, version, installMode: "global-pnpm" };
+  }
+
+  const npmGlobalPrefix = readCommandStdout("npm", ["prefix", "-g"]);
+  if (npmGlobalPrefix) {
+    const npmGlobalDirs = [
+      join(npmGlobalPrefix, "lib", "node_modules"),
+      join(npmGlobalPrefix, "node_modules"),
+    ];
+    if (npmGlobalDirs.some((dir) => existsSync(dir) && isPathInside(packageRoot, dir))) {
+      return { packageName, version, installMode: "global-npm" };
+    }
+  }
+
+  const bunGlobalRoot = resolveBunGlobalNodeModulesDir();
+  if (existsSync(bunGlobalRoot) && isPathInside(packageRoot, bunGlobalRoot)) {
+    return { packageName, version, installMode: "global-bun" };
+  }
+
+  return { packageName, version, installMode: "unknown" };
+}
+
+const cliUpdateContext = resolveCliUpdateContext();
+
+function buildCliRerunCommand(context: CliUpdateContext): string | null {
+  if (context.installMode !== "npx") {
+    return null;
+  }
+
+  const forwardedArgs = process.argv.slice(2).filter((arg) => arg !== "--open");
+  const rerunArgs = [`${context.packageName}@latest`, ...forwardedArgs].map(quoteCliArg);
+  return `npx ${rerunArgs.join(" ")}`;
+}
+
+const cliRerunCommand = buildCliRerunCommand(cliUpdateContext);
+
 export function isLoopbackHost(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase();
   return normalized === "127.0.0.1"
@@ -31,17 +195,6 @@ export function isLoopbackHost(hostname: string): boolean {
     || normalized === "::1"
     || normalized === "[::1]";
 }
-
-export function buildRemoteUnlockUrl(baseUrl: string, accessToken: string): string {
-  const unlockUrl = new URL("/unlock", baseUrl);
-  unlockUrl.hash = new URLSearchParams({ token: accessToken }).toString();
-  return unlockUrl.toString();
-}
-
-type BuiltinRemoteAuth = {
-  accessToken: string;
-  sessionSecret: string;
-};
 
 type TrustedHeaderAuth = {
   enabled: boolean;
@@ -66,6 +219,20 @@ type LauncherSettings = {
   access: LauncherAccessConfig;
 };
 
+type RemoteAccessRuntimeState = {
+  status: "disabled" | "starting" | "ready" | "error";
+  provider: "tailscale" | null;
+  publicUrl: string | null;
+  localUrl: string | null;
+  accessToken: string | null;
+  sessionSecret: string | null;
+  tunnelPid: number | null;
+  logPath: string | null;
+  lastError: string | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+};
+
 type RustLaunchConfig = {
   cmd: string;
   args: string[];
@@ -78,18 +245,50 @@ type RustLaunchResolution = {
   reason?: string;
 };
 
-function resolveBuiltinRemoteAuth(enabled: boolean): BuiltinRemoteAuth | null {
-  if (!enabled) return null;
+function getRemoteAccessRuntimeStatePath(workspacePath: string): string {
+  const workspaceKey = createHash("sha256")
+    .update(workspacePath.trim())
+    .digest("hex");
+  return join(homedir(), ".conductor", "runtime", "remote-access", `${workspaceKey}.json`);
+}
 
-  const accessToken = process.env["CONDUCTOR_REMOTE_ACCESS_TOKEN"]?.trim()
-    || randomBytes(24).toString("base64url");
-  const sessionSecret = process.env["CONDUCTOR_REMOTE_SESSION_SECRET"]?.trim()
-    || randomBytes(32).toString("base64url");
-
-  return {
-    accessToken,
-    sessionSecret,
+function writeRemoteAccessRuntimeState(
+  workspacePath: string,
+  next: Partial<RemoteAccessRuntimeState> & Pick<RemoteAccessRuntimeState, "status">,
+): void {
+  const statePath = getRemoteAccessRuntimeStatePath(workspacePath);
+  mkdirSync(dirname(statePath), { recursive: true });
+  const current = (() => {
+    try {
+      return JSON.parse(readFileSync(statePath, "utf8")) as Partial<RemoteAccessRuntimeState>;
+    } catch {
+      return null;
+    }
+  })();
+  const pick = <Key extends keyof RemoteAccessRuntimeState>(key: Key): RemoteAccessRuntimeState[Key] => {
+    if (Object.prototype.hasOwnProperty.call(next, key)) {
+      return (next[key] ?? null) as RemoteAccessRuntimeState[Key];
+    }
+    return ((current?.[key] as RemoteAccessRuntimeState[Key] | undefined) ?? null) as RemoteAccessRuntimeState[Key];
   };
+  const payload: RemoteAccessRuntimeState = {
+    status: next.status,
+    provider: pick("provider"),
+    publicUrl: pick("publicUrl"),
+    localUrl: pick("localUrl"),
+    accessToken: pick("accessToken"),
+    sessionSecret: pick("sessionSecret"),
+    tunnelPid: pick("tunnelPid"),
+    logPath: pick("logPath"),
+    lastError: pick("lastError"),
+    startedAt: pick("startedAt"),
+    updatedAt: new Date().toISOString(),
+  };
+  writeFileSync(statePath, JSON.stringify(payload, null, 2), "utf8");
+}
+
+function clearRemoteAccessRuntimeState(workspacePath: string): void {
+  rmSync(getRemoteAccessRuntimeStatePath(workspacePath), { force: true });
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -132,68 +331,6 @@ function resolveTrustedHeaderAuth(config: Record<string, unknown>): TrustedHeade
     jwtHeader: asTrimmedString(trustedHeaders["jwtHeader"]) || "Cf-Access-Jwt-Assertion",
     teamDomain: asTrimmedString(trustedHeaders["teamDomain"]),
     audience: asTrimmedString(trustedHeaders["audience"]),
-  };
-}
-
-export function extractCloudflareTunnelUrl(output: string): string | null {
-  const match = output.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
-  return match?.[0] ?? null;
-}
-
-function startCloudflareQuickTunnel(localUrl: string): {
-  process: ChildProcess;
-  url: Promise<string>;
-} {
-  const tunnelProcess = spawn(
-    "cloudflared",
-    ["tunnel", "--no-autoupdate", "--url", localUrl],
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        NO_COLOR: "1",
-      },
-    },
-  );
-
-  const url = new Promise<string>((resolvePromise, rejectPromise) => {
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      rejectPromise(new Error("Timed out waiting for Cloudflare Quick Tunnel URL"));
-    }, 30_000);
-
-    const handleOutput = (chunk: Buffer | string) => {
-      if (settled) return;
-      const nextUrl = extractCloudflareTunnelUrl(chunk.toString());
-      if (!nextUrl) return;
-      settled = true;
-      clearTimeout(timeout);
-      resolvePromise(nextUrl);
-    };
-
-    tunnelProcess.stdout?.on("data", handleOutput);
-    tunnelProcess.stderr?.on("data", handleOutput);
-    tunnelProcess.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      rejectPromise(error);
-    });
-    tunnelProcess.on("exit", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      rejectPromise(
-        new Error(`cloudflared exited before announcing a tunnel URL (${signal ?? code ?? "unknown"})`),
-      );
-    });
-  });
-
-  return {
-    process: tunnelProcess,
-    url,
   };
 }
 
@@ -244,6 +381,59 @@ function openDashboardInBrowser(url: string): boolean {
     console.log(chalk.yellow(`Could not open browser automatically. Open ${url} manually.`));
   });
   return true;
+}
+
+type LauncherControlServer = {
+  server: HttpServer;
+  url: string;
+  token: string;
+};
+
+function closeLauncherControlServer(server: HttpServer): Promise<void> {
+  return new Promise((resolveClose) => {
+    server.close(() => resolveClose());
+  });
+}
+
+async function createLauncherControlServer(onRestart: () => void): Promise<LauncherControlServer> {
+  const token = randomBytes(24).toString("base64url");
+
+  return await new Promise<LauncherControlServer>((resolveServer, rejectServer) => {
+    const server = createServer((request, response) => {
+      if (request.method !== "POST" || request.url !== "/restart") {
+        response.statusCode = 404;
+        response.end();
+        return;
+      }
+
+      const authorization = request.headers["authorization"];
+      if (authorization !== `Bearer ${token}`) {
+        response.statusCode = 403;
+        response.end();
+        return;
+      }
+
+      response.statusCode = 202;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ ok: true }));
+      setTimeout(onRestart, 75);
+    });
+
+    server.once("error", rejectServer);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        rejectServer(new Error("Failed to allocate launcher control port"));
+        return;
+      }
+
+      resolveServer({
+        server,
+        url: `http://127.0.0.1:${(address as AddressInfo).port}`,
+        token,
+      });
+    });
+  });
 }
 
 async function waitForDashboard(url: string, timeoutMs = 15_000): Promise<boolean> {
@@ -479,7 +669,79 @@ function describeNativeBinaryHostMismatch(binaryPath: string): string {
   return `Bundled Rust backend is incompatible with ${process.platform}-${process.arch} (binary format: ${format}).`;
 }
 
-function resolveRustBackendLaunch(workspacePath: string, configPath: string, backendPort: number): RustLaunchResolution {
+function resolveNewestExistingBinary(candidates: string[]): string | null {
+  const existing = candidates
+    .filter((candidate) => existsSync(candidate))
+    .map((candidate) => {
+      try {
+        return { candidate, mtimeMs: statSync(candidate).mtimeMs };
+      } catch {
+        return { candidate, mtimeMs: 0 };
+      }
+    })
+    .sort((left, right) => right.mtimeMs - left.mtimeMs);
+
+  return existing[0]?.candidate ?? null;
+}
+
+export function resolveRustBackendLaunch(
+  workspacePath: string,
+  configPath: string,
+  backendPort: number,
+): RustLaunchResolution {
+  const repoCargoRoot = resolveRepoCargoRoot(workspacePath);
+  if (repoCargoRoot) {
+    const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
+    const prebuiltCandidate = resolveNewestExistingBinary([
+      join(repoCargoRoot, "target", "debug", binaryName),
+      join(repoCargoRoot, "target", "release", binaryName),
+    ]);
+
+    if (prebuiltCandidate) {
+      return {
+        launch: {
+          cmd: prebuiltCandidate,
+          args: [
+            "--workspace",
+            workspacePath,
+            "--config",
+            configPath,
+            "start",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            String(backendPort),
+          ],
+          cwd: repoCargoRoot,
+          label: "prebuilt Rust backend",
+        },
+      };
+    }
+
+    return {
+      launch: {
+        cmd: "cargo",
+        args: [
+          "run",
+          "-p",
+          "conductor-cli",
+          "--",
+          "--workspace",
+          workspacePath,
+          "--config",
+          configPath,
+          "start",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          String(backendPort),
+        ],
+        cwd: repoCargoRoot,
+        label: "cargo-run Rust backend",
+      },
+    };
+  }
+
   const bundledBinary = resolveBundledRustBinary();
   if (bundledBinary) {
     if (!isCompatibleNativeBinary(bundledBinary)) {
@@ -509,64 +771,9 @@ function resolveRustBackendLaunch(workspacePath: string, configPath: string, bac
     };
   }
 
-  const repoCargoRoot = resolveRepoCargoRoot(workspacePath);
-  if (!repoCargoRoot) {
-    return {
-      launch: null,
-      reason: "No compatible bundled Rust backend was found, and this install does not have a repo-local Cargo fallback.",
-    };
-  }
-
-  const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
-  const prebuiltCandidates = [
-    join(repoCargoRoot, "target", "release", binaryName),
-    join(repoCargoRoot, "target", "debug", binaryName),
-  ];
-
-  for (const candidate of prebuiltCandidates) {
-    if (existsSync(candidate)) {
-      return {
-        launch: {
-          cmd: candidate,
-          args: [
-            "--workspace",
-            workspacePath,
-            "--config",
-            configPath,
-            "start",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            String(backendPort),
-          ],
-          cwd: repoCargoRoot,
-          label: "prebuilt Rust backend",
-        },
-      };
-    }
-  }
-
   return {
-    launch: {
-      cmd: "cargo",
-      args: [
-        "run",
-        "-p",
-        "conductor-cli",
-        "--",
-        "--workspace",
-        workspacePath,
-        "--config",
-        configPath,
-        "start",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        String(backendPort),
-      ],
-      cwd: repoCargoRoot,
-      label: "cargo-run Rust backend",
-    },
+    launch: null,
+    reason: "No compatible bundled Rust backend was found, and this install does not have a repo-local Cargo fallback.",
   };
 }
 
@@ -630,7 +837,7 @@ export function registerStart(program: Command): void {
     .option("--no-dashboard", "Skip starting the web dashboard")
     .option("--no-watcher", "Deprecated. Rust backend startup no longer uses the JS watcher")
     .option("--open", "Open the dashboard in your default browser")
-    .option("--tunnel", "Expose the dashboard on a free public Cloudflare Quick Tunnel")
+    .option("--tunnel", "Deprecated. Public share-link remote access has been removed")
     .option("--host <host>", "Dashboard bind host. Defaults to 127.0.0.1 for local-only access")
     .option("-p, --port <port>", "Dashboard port override")
     .option("--no-backend", "Do not launch a separate local Rust backend")
@@ -659,28 +866,79 @@ export function registerStart(program: Command): void {
         const backendPort = resolveBackendPort(opts.backendPort, settings.backendPort);
         const explicitBackendUrl = process.env["CONDUCTOR_BACKEND_URL"]?.trim() || null;
         const bindHost = opts.host?.trim() || "127.0.0.1";
+        if (opts.tunnel) {
+          throw new Error(
+            "`--tunnel` was removed for security. Use Settings -> Remote Access to enable the private Tailscale link, or configure Cloudflare Access on a protected public URL.",
+          );
+        }
         const shutdownTasks: Array<() => void | Promise<void>> = [];
         let isShuttingDown = false;
+        let launcherControl: LauncherControlServer | null = null;
 
         process.env["CONDUCTOR_WORKSPACE"] = workspacePath;
         process.env["CO_CONFIG_PATH"] = configPath;
+        clearRemoteAccessRuntimeState(workspacePath);
+        shutdownTasks.push(() => clearRemoteAccessRuntimeState(workspacePath));
+
+        const runShutdown = async (): Promise<void> => {
+          if (isShuttingDown) return;
+          isShuttingDown = true;
+
+          if (launcherControl) {
+            try {
+              await closeLauncherControlServer(launcherControl.server);
+            } catch {
+              // Ignore control server shutdown errors.
+            }
+            launcherControl = null;
+          }
+
+          for (const task of shutdownTasks) {
+            try {
+              await task();
+            } catch (error) {
+              console.error(error);
+            }
+          }
+
+          process.exit(0);
+        };
 
         const requestShutdown = (): void => {
+          void runShutdown();
+        };
+
+        const requestRestart = (): void => {
           void (async () => {
             if (isShuttingDown) return;
-            isShuttingDown = true;
-
-            for (const task of shutdownTasks) {
-              try {
-                await task();
-              } catch (error) {
-                console.error(error);
-              }
+            const launcherEntry = process.argv[1];
+            if (!launcherEntry) {
+              console.error(chalk.red("Could not resolve the Conductor launcher entrypoint for restart."));
+              return;
             }
 
-            process.exit(0);
+            const restartArgs = process.argv.slice(2).filter((arg) => arg !== "--open");
+            const child = spawn(process.execPath, [launcherEntry, ...restartArgs], {
+              cwd: process.cwd(),
+              detached: true,
+              stdio: "ignore",
+              env: {
+                ...process.env,
+              },
+            });
+            child.unref();
+            await runShutdown();
           })();
         };
+
+        launcherControl = await createLauncherControlServer(requestRestart);
+        process.env["CONDUCTOR_LAUNCHER_CONTROL_URL"] = launcherControl.url;
+        process.env["CONDUCTOR_LAUNCHER_CONTROL_TOKEN"] = launcherControl.token;
+        shutdownTasks.push(async () => {
+          if (!launcherControl) return;
+          await closeLauncherControlServer(launcherControl.server);
+          launcherControl = null;
+        });
 
         process.on("SIGINT", requestShutdown);
         process.on("SIGTERM", requestShutdown);
@@ -717,6 +975,12 @@ export function registerStart(program: Command): void {
                 detached: false,
                 env: {
                   ...process.env,
+                  CONDUCTOR_CLI_PACKAGE_NAME: cliUpdateContext.packageName,
+                  CONDUCTOR_CLI_VERSION: cliUpdateContext.version,
+                  CONDUCTOR_CLI_INSTALL_MODE: cliUpdateContext.installMode,
+                  ...(cliRerunCommand
+                    ? { CONDUCTOR_CLI_RERUN_COMMAND: cliRerunCommand }
+                    : {}),
                 },
               });
 
@@ -754,15 +1018,7 @@ export function registerStart(program: Command): void {
         // ---- Start web dashboard ----
         let dashboardProcess: ChildProcess | null = null;
         let publicDashboardUrl: string | null = null;
-        let unlockDashboardUrl: string | null = null;
-        const externalAccessRequested = opts.tunnel === true || !isLoopbackHost(bindHost);
-        const clerkConfigured = Boolean(
-          process.env["NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"] && process.env["CLERK_SECRET_KEY"],
-        );
         const trustedHeaderAuth = settings.access.trustedHeaders;
-        const builtinRemoteAuth = resolveBuiltinRemoteAuth(
-          externalAccessRequested && !clerkConfigured,
-        );
 
         if (opts.dashboard !== false) {
           const dashSpinner = ora("Starting web dashboard").start();
@@ -868,16 +1124,16 @@ export function registerStart(program: Command): void {
                 HOSTNAME: bindHost,
                 CONDUCTOR_WORKSPACE: workspacePath,
                 CO_CONFIG_PATH: configPath,
+                CONDUCTOR_CLI_PACKAGE_NAME: cliUpdateContext.packageName,
+                CONDUCTOR_CLI_VERSION: cliUpdateContext.version,
+                CONDUCTOR_CLI_INSTALL_MODE: cliUpdateContext.installMode,
+                ...(cliRerunCommand
+                  ? { CONDUCTOR_CLI_RERUN_COMMAND: cliRerunCommand }
+                  : {}),
                 ...(backendUrl
                   ? {
                       CONDUCTOR_BACKEND_URL: backendUrl,
                       CONDUCTOR_BACKEND_PORT: String(backendPort),
-                    }
-                  : {}),
-                ...(builtinRemoteAuth
-                  ? {
-                      CONDUCTOR_REMOTE_ACCESS_TOKEN: builtinRemoteAuth.accessToken,
-                      CONDUCTOR_REMOTE_SESSION_SECRET: builtinRemoteAuth.sessionSecret,
                     }
                   : {}),
                 ...(trustedHeaderAuth.enabled
@@ -911,38 +1167,25 @@ export function registerStart(program: Command): void {
             const dashboardUrl = isLoopbackHost(bindHost)
               ? `http://localhost:${dashboardPort}`
               : `http://${bindHost}:${dashboardPort}`;
-            if (builtinRemoteAuth) {
-              unlockDashboardUrl = buildRemoteUnlockUrl(dashboardUrl, builtinRemoteAuth.accessToken);
-            }
+            writeRemoteAccessRuntimeState(
+              workspacePath,
+              {
+                status: isLoopbackHost(bindHost) ? "disabled" : "ready",
+                provider: null,
+                publicUrl: isLoopbackHost(bindHost) ? null : dashboardUrl,
+                localUrl: dashboardInternalUrl,
+                accessToken: null,
+                sessionSecret: null,
+                tunnelPid: null,
+                logPath: null,
+                lastError: null,
+                startedAt: new Date().toISOString(),
+              },
+            );
             dashSpinner.succeed(`Web dashboard starting on ${dashboardUrl}`);
 
-            if (opts.tunnel) {
-              const tunnelSpinner = ora("Starting Cloudflare Quick Tunnel").start();
-              if (!commandExists("cloudflared")) {
-                tunnelSpinner.warn("cloudflared is not installed. Re-run `co setup --yes --tunnel` to automate public URL setup.");
-              } else if (await waitForDashboard(dashboardInternalUrl)) {
-                try {
-                  const tunnel = startCloudflareQuickTunnel(dashboardInternalUrl);
-                  shutdownTasks.push(() => {
-                    if (tunnel.process.exitCode === null) {
-                      tunnel.process.kill("SIGTERM");
-                    }
-                  });
-                  publicDashboardUrl = await tunnel.url;
-                  if (builtinRemoteAuth) {
-                    unlockDashboardUrl = buildRemoteUnlockUrl(publicDashboardUrl, builtinRemoteAuth.accessToken);
-                  }
-                  tunnelSpinner.succeed(`Public dashboard available at ${publicDashboardUrl}`);
-                } catch (error) {
-                  tunnelSpinner.warn(`Cloudflare Quick Tunnel failed: ${error}`);
-                }
-              } else {
-                tunnelSpinner.warn("Dashboard was not ready in time for tunnel startup.");
-              }
-            }
-
             if (opts.open) {
-              const preferredUrl = unlockDashboardUrl ?? publicDashboardUrl ?? dashboardUrl;
+              const preferredUrl = publicDashboardUrl ?? dashboardUrl;
               void waitForDashboard(dashboardInternalUrl).then((ready) => {
                 if (ready) {
                   const targetUrl = preferredUrl || dashboardUrl;
@@ -975,10 +1218,6 @@ export function registerStart(program: Command): void {
           if (publicDashboardUrl) {
             console.log(chalk.dim(`  Public:    ${publicDashboardUrl}`));
           }
-          if (unlockDashboardUrl) {
-            console.log(chalk.dim(`  Unlock:    ${unlockDashboardUrl}`));
-            console.log(chalk.dim("  Security:  Share the unlock link only with devices that should control this session."));
-          }
           if (trustedHeaderAuth.enabled) {
             if (
               trustedHeaderAuth.provider === "cloudflare-access"
@@ -993,7 +1232,9 @@ export function registerStart(program: Command): void {
                 "  Edge Auth: Cloudflare Access is enabled but still needs team domain and audience configuration.",
               ));
             } else {
-              console.log(chalk.dim(`  Edge Auth: generic trusted header ${trustedHeaderAuth.emailHeader}`));
+              console.log(chalk.yellow(
+                "  Edge Auth: legacy generic trusted-header mode is no longer supported. Configure verified Cloudflare Access instead.",
+              ));
             }
           }
         }

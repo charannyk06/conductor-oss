@@ -1,10 +1,12 @@
 "use client";
 
-import type { SSESnapshotEvent } from "@/lib/types";
+import type { AppUpdateStatus, SSESnapshotEvent } from "@/lib/types";
 
 type SnapshotListener = (event: SSESnapshotEvent) => void;
+type AppUpdateListener = (update: AppUpdateStatus | null) => void;
 
 const listeners = new Set<SnapshotListener>();
+const appUpdateListeners = new Set<AppUpdateListener>();
 let eventSource: EventSource | null = null;
 let refreshInFlight: Promise<void> | null = null;
 
@@ -25,9 +27,30 @@ function normalizeSessionArray(value: unknown): SSESnapshotEvent | null {
   return Array.isArray(payload.sessions) ? payload : null;
 }
 
+function normalizeAppUpdate(value: unknown): AppUpdateStatus | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as AppUpdateStatus;
+  return typeof candidate.enabled === "boolean" ? candidate : null;
+}
+
 function dispatchSnapshots(payload: SSESnapshotEvent) {
   for (const listener of listeners) {
     listener(payload);
+  }
+
+  const normalizedAppUpdate = normalizeAppUpdate(payload.appUpdate);
+  if (!normalizedAppUpdate) return;
+  for (const listener of appUpdateListeners) {
+    listener(normalizedAppUpdate);
+  }
+}
+
+function dispatchAppUpdate(update: AppUpdateStatus | null) {
+  for (const listener of appUpdateListeners) {
+    listener(update);
   }
 }
 
@@ -46,6 +69,17 @@ async function refreshSessions() {
       const payload = normalizeSessionArray(body);
       if (!payload) return;
       dispatchSnapshots(payload);
+    } catch {
+      // Ignore transient refresh failures.
+    }
+
+    try {
+      const response = await fetch("/api/app-update");
+      if (!response.ok) {
+        return;
+      }
+      const body = await response.json().catch(() => null);
+      dispatchAppUpdate(normalizeAppUpdate(body));
     } catch {
       // Ignore transient refresh failures.
     }
@@ -85,7 +119,7 @@ function ensureEventSource() {
   });
 
   eventSource.onerror = () => {
-    if (listeners.size === 0) {
+    if (listeners.size === 0 && appUpdateListeners.size === 0) {
       eventSource?.close();
       eventSource = null;
     }
@@ -98,7 +132,20 @@ export function subscribeToSnapshotEvents(listener: SnapshotListener): () => voi
 
   return () => {
     listeners.delete(listener);
-    if (listeners.size === 0 && eventSource) {
+    if (listeners.size === 0 && appUpdateListeners.size === 0 && eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+  };
+}
+
+export function subscribeToAppUpdateEvents(listener: AppUpdateListener): () => void {
+  appUpdateListeners.add(listener);
+  ensureEventSource();
+
+  return () => {
+    appUpdateListeners.delete(listener);
+    if (listeners.size === 0 && appUpdateListeners.size === 0 && eventSource) {
       eventSource.close();
       eventSource = null;
     }

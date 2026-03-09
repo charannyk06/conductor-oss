@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
+use super::discover_binary;
+use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::spawn_process_no_stdin;
 
 /// Claude Code CLI executor.
+#[derive(Clone)]
 pub struct ClaudeCodeExecutor {
     binary: PathBuf,
 }
@@ -21,7 +23,7 @@ impl ClaudeCodeExecutor {
 
     /// Try to find claude in PATH.
     pub fn discover() -> Option<Self> {
-        which::which("claude").ok().map(Self::new)
+        discover_binary(&["claude", "claude-code"]).map(Self::new)
     }
 }
 
@@ -53,17 +55,64 @@ impl Executor for ClaudeCodeExecutor {
         let args = self.build_args(&options);
         let handle =
             spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
 
         Ok(ExecutorHandle::new(
             handle.pid,
             self.kind(),
-            handle.output_rx,
+            output_rx,
             handle.input_tx,
             handle.kill_tx,
         ))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
+        if options.interactive {
+            let mut args = Vec::new();
+
+            if let Some(resume_target) = &options.resume_target {
+                args.push("--resume".to_string());
+                args.push(resume_target.clone());
+
+                if options.skip_permissions {
+                    args.push("--dangerously-skip-permissions".to_string());
+                }
+
+                if let Some(model) = &options.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+
+                if let Some(reasoning_effort) = &options.reasoning_effort {
+                    args.push("--effort".to_string());
+                    args.push(reasoning_effort.clone());
+                }
+
+                args.extend(options.sanitized_extra_args());
+                return args;
+            }
+
+            if options.skip_permissions {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
+
+            if let Some(model) = &options.model {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+
+            if let Some(reasoning_effort) = &options.reasoning_effort {
+                args.push("--effort".to_string());
+                args.push(reasoning_effort.clone());
+            }
+
+            args.extend(options.sanitized_extra_args());
+            if !options.prompt.trim().is_empty() {
+                args.push(options.prompt.clone());
+            }
+            return args;
+        }
+
         let mut args = vec![
             "--print".to_string(),
             "--input-format".to_string(),
@@ -98,54 +147,56 @@ impl Executor for ClaudeCodeExecutor {
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
-        // Try to parse as JSON (stream-json format).
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
-            if let Some(msg_type) = value.get("type").and_then(|t| t.as_str()) {
-                match msg_type {
-                    "system" | "rate_limit_event" | "user" => {
-                        return ExecutorOutput::Composite(Vec::new());
-                    }
-                    "assistant" => {
-                        return ExecutorOutput::Composite(extract_assistant_events(&value));
-                    }
-                    "result" => {
-                        if value
-                            .get("is_error")
-                            .and_then(|flag| flag.as_bool())
-                            .unwrap_or(false)
-                        {
-                            let error = value
-                                .get("result")
-                                .and_then(|result| result.as_str())
-                                .map(str::trim)
-                                .filter(|result| !result.is_empty())
-                                .unwrap_or("Claude Code failed")
-                                .to_string();
-                            return ExecutorOutput::Failed {
-                                error,
-                                exit_code: Some(1),
-                            };
-                        }
-                        return ExecutorOutput::Completed { exit_code: 0 };
-                    }
-                    "input_request" => {
-                        let prompt = value
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("Input needed")
+        parse_claude_stream_json_output(line, "Claude Code failed")
+    }
+}
+
+pub(crate) fn parse_claude_stream_json_output(line: &str, default_error: &str) -> ExecutorOutput {
+    if let Ok(value) = serde_json::from_str::<Value>(line) {
+        if let Some(msg_type) = value.get("type").and_then(|t| t.as_str()) {
+            match msg_type {
+                "system" | "rate_limit_event" | "user" => {
+                    return ExecutorOutput::Composite(Vec::new());
+                }
+                "assistant" => {
+                    return ExecutorOutput::Composite(extract_assistant_events(&value));
+                }
+                "result" => {
+                    if value
+                        .get("is_error")
+                        .and_then(|flag| flag.as_bool())
+                        .unwrap_or(false)
+                    {
+                        let error = value
+                            .get("result")
+                            .and_then(|result| result.as_str())
+                            .map(str::trim)
+                            .filter(|result| !result.is_empty())
+                            .unwrap_or(default_error)
                             .to_string();
-                        return ExecutorOutput::NeedsInput(prompt);
+                        return ExecutorOutput::Failed {
+                            error,
+                            exit_code: Some(1),
+                        };
                     }
-                    _ => {
-                        return ExecutorOutput::Composite(Vec::new());
-                    }
+                    return ExecutorOutput::Completed { exit_code: 0 };
+                }
+                "input_request" => {
+                    let prompt = value
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Input needed")
+                        .to_string();
+                    return ExecutorOutput::NeedsInput(prompt);
+                }
+                _ => {
+                    return ExecutorOutput::Composite(Vec::new());
                 }
             }
         }
-
-        // Fallback: treat as plain stdout.
-        ExecutorOutput::Stdout(line.to_string())
     }
+
+    ExecutorOutput::Stdout(line.to_string())
 }
 
 fn extract_assistant_events(value: &Value) -> Vec<ExecutorOutput> {
@@ -334,11 +385,40 @@ mod tests {
             extra_args: Vec::new(),
             env: HashMap::new(),
             branch: None,
+            timeout: None,
+            interactive: false,
+            resume_target: None,
         });
 
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"sonnet".to_string()));
         assert!(args.contains(&"--effort".to_string()));
         assert!(args.contains(&"medium".to_string()));
+    }
+
+    #[test]
+    fn build_args_resumes_native_session_without_inline_prompt() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "continue".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            skip_permissions: true,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            resume_target: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
+        });
+
+        assert!(args.starts_with(&[
+            "--resume".to_string(),
+            "123e4567-e89b-12d3-a456-426614174000".to_string(),
+        ]));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--effort".to_string()));
+        assert!(!args.contains(&"continue".to_string()));
     }
 }

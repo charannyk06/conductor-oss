@@ -8,17 +8,12 @@ preferences:
   onboardingAcknowledged: false
   codingAgent: claude-code
   ide: vscode
-  # Optional: enable "Open in VS Code" from the dashboard for remote worktrees.
-  # Keep using ngrok / Cloudflare Tunnel / a reverse proxy for dashboard access;
-  # these fields only power editor deep links.
-  # remoteSshHost: conductor-dev
-  # remoteSshUser: ubuntu
   markdownEditor: obsidian
   notifications:
     soundEnabled: true
     soundFile: abstract-sound-4
 
-# URL shown in board card links (set this to your actual dashboard URL)
+# URL shown in board card links (set this to your actual protected dashboard URL)
 # dashboardUrl: http://localhost:4747
 
 # Optional: board paths to watch (explicit files + glob patterns)
@@ -75,8 +70,13 @@ projects:
         permissions: default
     # Optional project dev server for preview/test loop
     # devServer:
-    #   command: pnpm dev
-    #   cwd: ~/projects/my-app
+    #   command: pnpm dev          # optional; leave blank if you run the app yourself
+    #   cwd: apps/web             # optional; relative to the project root
+    #   port: 3000                # optional; used for auto-preview + PORT env injection
+    #   host: 127.0.0.1           # optional; defaults to 127.0.0.1
+    #   path: /                   # optional; append a path like /app or /dashboard
+    #   https: false              # optional; set true for local HTTPS dev servers
+    #   url: https://preview.example.com
     workspace: worktree            # git worktree isolation per task
     runtime: tmux                  # tmux session runner
     scm: github                    # GitHub PR/CI integration

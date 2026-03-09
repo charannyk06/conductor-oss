@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
+use super::discover_binary;
+use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::spawn_process;
 
 /// OpenAI Codex CLI executor.
+#[derive(Clone)]
 pub struct CodexExecutor {
     binary: PathBuf,
 }
@@ -20,7 +22,7 @@ impl CodexExecutor {
     }
 
     pub fn discover() -> Option<Self> {
-        which::which("codex").ok().map(Self::new)
+        discover_binary(&["codex"]).map(Self::new)
     }
 }
 
@@ -50,17 +52,68 @@ impl Executor for CodexExecutor {
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
+        let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
 
         Ok(ExecutorHandle::new(
             handle.pid,
             self.kind(),
-            handle.output_rx,
+            output_rx,
             handle.input_tx,
             handle.kill_tx,
         ))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
+        if options.interactive {
+            let mut args = vec!["--no-alt-screen".to_string()];
+
+            if let Some(resume_target) = &options.resume_target {
+                args.push("resume".to_string());
+
+                if let Some(model) = &options.model {
+                    args.push("--model".to_string());
+                    args.push(model.clone());
+                }
+
+                if let Some(reasoning_effort) = &options.reasoning_effort {
+                    args.push("-c".to_string());
+                    args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+                }
+
+                if options.skip_permissions {
+                    args.push("--yolo".to_string());
+                } else {
+                    args.push("--full-auto".to_string());
+                }
+
+                args.extend(options.sanitized_extra_args());
+                args.push(resume_target.clone());
+                return args;
+            }
+
+            if let Some(model) = &options.model {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+
+            if let Some(reasoning_effort) = &options.reasoning_effort {
+                args.push("-c".to_string());
+                args.push(format!("model_reasoning_effort=\"{reasoning_effort}\""));
+            }
+
+            if options.skip_permissions {
+                args.push("--yolo".to_string());
+            } else {
+                args.push("--full-auto".to_string());
+            }
+
+            args.extend(options.sanitized_extra_args());
+            if !options.prompt.trim().is_empty() {
+                args.push(options.prompt.clone());
+            }
+            return args;
+        }
+
         let mut args = vec![
             "exec".to_string(),
             "--color".to_string(),
@@ -91,7 +144,12 @@ impl Executor for CodexExecutor {
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return ExecutorOutput::Stdout(String::new());
+        }
+
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             if let Some(event_type) = value.get("type").and_then(|v| v.as_str()) {
                 match event_type {
                     "agent_message" => {
@@ -214,8 +272,53 @@ impl Executor for CodexExecutor {
             return ExecutorOutput::Stdout(String::new());
         }
 
-        ExecutorOutput::Stdout(line.trim().to_string())
+        if is_internal_codex_log_line(trimmed) {
+            return ExecutorOutput::Stdout(String::new());
+        }
+
+        ExecutorOutput::Stdout(trimmed.to_string())
     }
+}
+
+fn is_internal_codex_log_line(line: &str) -> bool {
+    let mut parts = line.split_whitespace();
+    let Some(timestamp) = parts.next() else {
+        return false;
+    };
+    let Some(level) = parts.next() else {
+        return false;
+    };
+    if !looks_like_iso8601_timestamp(timestamp) {
+        return false;
+    }
+    if !matches!(level, "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR") {
+        return false;
+    }
+
+    let Some(target) = parts.next() else {
+        return false;
+    };
+    if target.ends_with(':') && target.contains("::") {
+        return true;
+    }
+
+    let remainder = std::iter::once(target)
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    remainder.contains("failed to list resources for mcp server")
+        || remainder.contains("failed to list resource templates for mcp server")
+        || remainder.contains("mcp error: -32601: method not found")
+}
+
+fn looks_like_iso8601_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && value.ends_with('Z')
 }
 
 fn tool_title_from_item(item: &Value) -> String {
@@ -348,12 +451,63 @@ mod tests {
             extra_args: Vec::new(),
             env: HashMap::new(),
             branch: None,
+            timeout: None,
+            interactive: false,
+            resume_target: None,
         });
 
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"gpt-5".to_string()));
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"model_reasoning_effort=\"high\"".to_string()));
+    }
+
+    #[test]
+    fn build_args_resumes_native_session_without_inline_prompt() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "continue".to_string(),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: Some("medium".to_string()),
+            skip_permissions: true,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            resume_target: Some("session-123".to_string()),
+        });
+
+        assert_eq!(args.first().map(String::as_str), Some("--no-alt-screen"));
+        assert!(args.contains(&"resume".to_string()));
+        assert!(args.contains(&"--yolo".to_string()));
+        assert!(args.contains(&"session-123".to_string()));
+        assert!(!args.contains(&"continue".to_string()));
+    }
+
+    #[test]
+    fn parse_output_ignores_internal_codex_logs() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let line = "2026-03-09T01:31:02.130169Z WARN codex_core::mcp_connection_manager: Failed to list resources for MCP server 'filesystem': resources/list failed: Mcp error: -32601: Method not found";
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::Stdout(text) = output else {
+            panic!("expected stdout suppression");
+        };
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn parse_output_ignores_sqlx_tracing_logs() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let line = "2026-03-09T01:40:13.738303Z WARN sqlx::query: slow statement: execution time exceeded alert threshold";
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::Stdout(text) = output else {
+            panic!("expected stdout suppression");
+        };
+        assert!(text.is_empty());
     }
 }
 

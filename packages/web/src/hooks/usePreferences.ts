@@ -6,9 +6,8 @@ export interface UserPreferencesResponse {
   onboardingAcknowledged: boolean;
   codingAgent: string;
   ide: string;
-  remoteSshHost: string;
-  remoteSshUser: string;
   markdownEditor: string;
+  markdownEditorPath: string;
   notifications: {
     soundEnabled: boolean;
     soundFile: string | null;
@@ -33,15 +32,12 @@ function normalizePreferences(value: unknown): UserPreferencesResponse {
     ide: typeof payload["ide"] === "string" && payload["ide"].trim().length > 0
       ? payload["ide"].trim()
       : "vscode",
-    remoteSshHost: typeof payload["remoteSshHost"] === "string" && payload["remoteSshHost"].trim().length > 0
-      ? payload["remoteSshHost"].trim()
-      : "",
-    remoteSshUser: typeof payload["remoteSshUser"] === "string" && payload["remoteSshUser"].trim().length > 0
-      ? payload["remoteSshUser"].trim()
-      : "",
     markdownEditor: typeof payload["markdownEditor"] === "string" && payload["markdownEditor"].trim().length > 0
       ? payload["markdownEditor"].trim()
       : "obsidian",
+    markdownEditorPath: typeof payload["markdownEditorPath"] === "string"
+      ? payload["markdownEditorPath"].trim()
+      : "",
     notifications: {
       soundEnabled: notifications["soundEnabled"] !== false,
       soundFile: soundFileRaw === null

@@ -4,9 +4,12 @@ use conductor_core::types::AgentKind;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process;
+use super::claude_code::parse_claude_stream_json_output;
+use super::discover_binary;
+use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
+use crate::process::spawn_process_no_stdin;
 
+#[derive(Clone)]
 pub struct AmpExecutor {
     binary: PathBuf,
 }
@@ -17,7 +20,7 @@ impl AmpExecutor {
     }
 
     pub fn discover() -> Option<Self> {
-        which::which("amp").ok().map(Self::new)
+        discover_binary(&["amp"]).map(Self::new)
     }
 }
 
@@ -44,21 +47,38 @@ impl Executor for AmpExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle =
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
         Ok(ExecutorHandle::new(
             handle.pid,
             self.kind(),
-            handle.output_rx,
+            output_rx,
             handle.input_tx,
             handle.kill_tx,
         ))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
-        let mut args = vec!["--non-interactive".to_string()];
-        if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
+        if options.interactive {
+            let mut args = Vec::new();
+            if !options.prompt.trim().is_empty() {
+                args.push(options.prompt.clone());
+            }
+            return args;
+        }
+
+        let mut args = vec![
+            "-x".to_string(),
+            "--stream-json".to_string(),
+            "--stream-json-thinking".to_string(),
+        ];
+        if options.skip_permissions {
+            args.push("--dangerously-allow-all".to_string());
+        }
+        if let Some(mode) = normalize_amp_mode(options.model.as_deref()) {
+            args.push("--mode".to_string());
+            args.push(mode.to_string());
         }
         args.extend(options.sanitized_extra_args());
         args.push(options.prompt.clone());
@@ -66,6 +86,51 @@ impl Executor for AmpExecutor {
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
-        ExecutorOutput::Stdout(line.to_string())
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return ExecutorOutput::Stdout(String::new());
+        }
+
+        if is_amp_login_prompt(trimmed) {
+            return ExecutorOutput::NeedsInput(
+                "Amp login required. Run `amp login` or finish the browser sign-in flow."
+                    .to_string(),
+            );
+        }
+
+        parse_claude_stream_json_output(trimmed, "Amp failed")
+    }
+}
+
+fn normalize_amp_mode(model: Option<&str>) -> Option<&'static str> {
+    match model?.trim().to_ascii_lowercase().as_str() {
+        "deep" => Some("deep"),
+        "free" => Some("free"),
+        "rush" => Some("rush"),
+        "smart" => Some("smart"),
+        _ => None,
+    }
+}
+
+fn is_amp_login_prompt(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("no api key found")
+        || lower.contains("starting login flow")
+        || lower.contains("ampcode.com/auth/cli-login")
+        || lower.contains("paste your code here")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_login_prompt_requests_input() {
+        let executor = AmpExecutor::new(PathBuf::from("/usr/bin/amp"));
+        let output = executor.parse_output("No API key found. Starting login flow...");
+        let ExecutorOutput::NeedsInput(prompt) = output else {
+            panic!("expected needs-input output");
+        };
+        assert!(prompt.contains("amp login"));
     }
 }

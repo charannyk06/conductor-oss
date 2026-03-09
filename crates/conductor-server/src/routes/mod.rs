@@ -1,3 +1,4 @@
+pub mod app_update;
 pub mod attachments;
 pub mod auth;
 pub mod boards;
@@ -15,3 +16,9 @@ pub mod session_workspace;
 pub mod sessions;
 pub mod tasks;
 pub mod workspaces;
+
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
+
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

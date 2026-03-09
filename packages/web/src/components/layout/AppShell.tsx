@@ -3,11 +3,13 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { PanelLeftOpen, PanelRightClose } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { AppUpdateNotice } from "@/components/layout/AppUpdateNotice";
 
 interface AppShellProps {
   sidebar: ReactNode;
   children: ReactNode;
-  sidebarOpen: boolean;
+  mobileSidebarOpen: boolean;
+  desktopSidebarOpen: boolean;
   onToggleSidebar: () => void;
 }
 
@@ -19,7 +21,8 @@ const SIDEBAR_WIDTH_STORAGE_KEY = "conductor-workspace-sidebar-width";
 export function AppShell({
   sidebar,
   children,
-  sidebarOpen,
+  mobileSidebarOpen,
+  desktopSidebarOpen,
   onToggleSidebar,
 }: AppShellProps) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
@@ -74,7 +77,7 @@ export function AppShell({
       style={shellStyle}
       className="relative flex h-dvh min-h-[100dvh] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]"
     >
-      {sidebarOpen && (
+      {mobileSidebarOpen && (
         <button
           type="button"
           className="absolute inset-0 z-20 bg-black/45 lg:hidden"
@@ -85,17 +88,18 @@ export function AppShell({
 
       <aside
         className={cn(
-          "absolute inset-y-0 left-0 z-30 flex h-full w-[min(90vw,var(--workspace-sidebar-width))] flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)] transition-transform duration-200 lg:relative lg:w-[var(--workspace-sidebar-width)]",
-          sidebarOpen
-            ? "translate-x-0"
-            : "-translate-x-full lg:-translate-x-0 lg:w-0 lg:overflow-hidden lg:border-r-0",
-          "lg:left-auto",
+          "absolute inset-y-0 left-0 z-30 flex h-full w-[min(90vw,var(--workspace-sidebar-width))] flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)] transition-[transform,width] duration-200",
+          mobileSidebarOpen ? "translate-x-0" : "-translate-x-full",
+          desktopSidebarOpen
+            ? "lg:w-[var(--workspace-sidebar-width)]"
+            : "lg:w-0 lg:overflow-hidden lg:border-r-0",
+          "lg:relative lg:left-auto lg:translate-x-0",
         )}
       >
         {sidebar}
       </aside>
 
-      {sidebarOpen ? (
+      {desktopSidebarOpen ? (
         <div
           className="absolute bottom-0 left-[var(--workspace-sidebar-width)] top-0 z-30 hidden w-2 -translate-x-1/2 cursor-col-resize lg:block"
           onMouseDown={() => setResizing(true)}
@@ -105,30 +109,42 @@ export function AppShell({
         </div>
       ) : null}
 
-      {sidebarOpen && (
+      {desktopSidebarOpen && (
         <button
           type="button"
           onClick={onToggleSidebar}
           className="absolute left-[var(--workspace-sidebar-width)] top-2 z-40 hidden h-7 w-7 -translate-x-1/2 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_0_0_1px_rgba(0,0,0,0.25)] hover:bg-[var(--vk-bg-hover)] lg:inline-flex"
           aria-label="Hide workspace panel"
         >
-          <PanelRightClose className="h-4 w-4" />
+          <PanelRightClose className="h-5 w-5" />
         </button>
       )}
 
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
-        {!sidebarOpen && (
+        {!mobileSidebarOpen && (
           <button
             type="button"
             onClick={onToggleSidebar}
-            className="absolute left-2 top-2 z-40 inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+            className="absolute left-2 top-2 z-40 inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] lg:hidden"
             aria-label="Open workspace panel"
           >
-            <PanelLeftOpen className="h-4 w-4" />
+            <PanelLeftOpen className="h-5 w-5" />
+          </button>
+        )}
+        {!desktopSidebarOpen && (
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            className="absolute left-2 top-2 z-40 hidden h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] lg:inline-flex"
+            aria-label="Open workspace panel"
+          >
+            <PanelLeftOpen className="h-5 w-5" />
           </button>
         )}
         {children}
       </main>
+
+      <AppUpdateNotice />
     </div>
   );
 }

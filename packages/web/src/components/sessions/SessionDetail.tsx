@@ -1,9 +1,10 @@
 "use client";
 
-import { useMemo } from "react";
-import { useSearchParams } from "next/navigation";
+import { useCallback, useMemo } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   FileCode,
+  Globe,
   LayoutDashboard,
   MessageSquare,
 } from "lucide-react";
@@ -15,15 +16,16 @@ import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { SessionOverview } from "./SessionOverview";
 import { SessionDiff } from "./SessionDiff";
 import { ChatPanel } from "./ChatPanel";
+import { SessionPreview } from "./SessionPreview";
 
 interface SessionDetailProps {
   sessionId: string;
 }
 
-type SessionTab = "overview" | "chat" | "diff";
+type SessionTab = "overview" | "chat" | "diff" | "preview";
 
 function resolveSessionTab(value: string | null): SessionTab {
-  if (value === "overview" || value === "chat" || value === "diff") {
+  if (value === "overview" || value === "chat" || value === "diff" || value === "preview") {
     return value;
   }
   if (value === "terminal") {
@@ -33,12 +35,26 @@ function resolveSessionTab(value: string | null): SessionTab {
 }
 
 export function SessionDetail({ sessionId }: SessionDetailProps) {
+  const pathname = usePathname();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const { session, loading, error } = useSession(sessionId);
-  const initialTab = useMemo(
+  const activeTab = useMemo(
     () => resolveSessionTab(searchParams.get("tab")),
     [searchParams],
   );
+  const handleTabChange = useCallback((value: string) => {
+    const nextTab = resolveSessionTab(value);
+    const params = new URLSearchParams(searchParams.toString());
+    if (nextTab === "chat") {
+      params.delete("tab");
+    } else {
+      params.set("tab", nextTab);
+    }
+    const nextQuery = params.toString();
+    const nextUrl = nextQuery.length > 0 ? `${pathname}?${nextQuery}` : pathname;
+    router.replace(nextUrl, { scroll: false });
+  }, [pathname, router, searchParams]);
 
   if (loading) {
     return (
@@ -83,7 +99,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <Tabs key={`${sessionId}-${initialTab}`} defaultValue={initialTab} className="flex min-h-0 flex-1 flex-col gap-2 p-2 sm:p-3">
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="flex min-h-0 flex-1 flex-col gap-2 p-2 sm:p-3">
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
           <TabsList className="w-full sm:w-fit">
             <TabsTrigger value="overview">
@@ -95,6 +111,10 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
                 ? <AgentTileIcon seed={{ label: agentName }} className="h-6 w-6" />
                 : <MessageSquare className="h-3.5 w-3.5" />}
               Chat
+            </TabsTrigger>
+            <TabsTrigger value="preview">
+              <Globe className="h-3.5 w-3.5" />
+              Preview
             </TabsTrigger>
             <TabsTrigger value="diff">
               <FileCode className="h-3.5 w-3.5" />
@@ -120,6 +140,13 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
             projectId={session.projectId}
             sessionModel={sessionModel}
             sessionReasoningEffort={sessionReasoningEffort}
+          />
+        </TabsContent>
+
+        <TabsContent value="preview" className="min-h-0 flex-1 overflow-auto">
+          <SessionPreview
+            sessionId={sessionId}
+            projectId={session.projectId}
           />
         </TabsContent>
 

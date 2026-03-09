@@ -162,7 +162,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                         setUnlinkError(null);
                         setConfirmUnlinkProjectId(project.id);
                       }}
-                      className="mr-2 hidden shrink-0 items-center justify-center rounded-[4px] p-1 text-[var(--vk-text-muted)] hover:bg-[var(--vk-red)]/10 hover:text-[var(--vk-red)] group-hover:inline-flex disabled:opacity-50"
+                      className="mr-2 inline-flex shrink-0 items-center justify-center rounded-[4px] p-1 text-[var(--vk-text-muted)] hover:bg-[var(--vk-red)]/10 hover:text-[var(--vk-red)] disabled:opacity-50"
                       aria-label={`Unlink ${project.id}`}
                       title="Unlink project"
                     >

@@ -17,6 +17,19 @@ const LAUNCH_ATTEMPTS_METADATA_KEY: &str = "launchAttempts";
 const LAUNCH_STATE_METADATA_KEY: &str = "launchState";
 const LAUNCH_STARTED_AT_METADATA_KEY: &str = "launchStartedAt";
 
+fn session_occupies_launch_capacity(session: &SessionRecord, is_live: bool) -> bool {
+    let status = SessionStatus::from(session.status.as_str());
+    if status.is_terminal() || status == SessionStatus::Queued {
+        return false;
+    }
+
+    if matches!(session.status.as_str(), "needs_input" | "stuck" | "errored") {
+        return false;
+    }
+
+    session.status == "spawning" || is_live
+}
+
 impl AppState {
     pub async fn spawn_session(self: &Arc<Self>, request: SpawnRequest) -> Result<SessionRecord> {
         self.enqueue_session_spawn(request).await
@@ -202,11 +215,7 @@ impl AppState {
         let mut per_project = HashMap::new();
 
         for session in sessions.values() {
-            let status = SessionStatus::from(session.status.as_str());
-            let occupies_launch_capacity =
-                session.status == "spawning" || live_session_ids.contains(&session.id);
-            if status.is_terminal() || status == SessionStatus::Queued || !occupies_launch_capacity
-            {
+            if !session_occupies_launch_capacity(session, live_session_ids.contains(&session.id)) {
                 continue;
             }
             global += 1;

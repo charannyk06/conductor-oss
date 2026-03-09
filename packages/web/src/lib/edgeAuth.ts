@@ -13,7 +13,6 @@ export type TrustedEdgeAuthConfig = {
   jwtHeader: string;
   teamDomain: string | null;
   audience: string | null;
-  allowInsecureEmailHeader: boolean;
 };
 
 export type TrustedEdgeIdentity =
@@ -92,8 +91,6 @@ export function resolveTrustedEdgeAuthConfig(
       ?? DEFAULT_JWT_HEADER,
     teamDomain,
     audience,
-    allowInsecureEmailHeader:
-      (process.env.CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS ?? "").trim().toLowerCase() === "true",
   };
 }
 
@@ -136,70 +133,60 @@ export async function verifyTrustedEdgeIdentity(
   const config = resolveTrustedEdgeAuthConfig(access);
   if (!config.enabled) return null;
 
-  if (config.provider === CLOUDFLARE_PROVIDER) {
-    const assertion = headers.get(config.jwtHeader)?.trim() ?? "";
-    if (!assertion) return null;
-
-    if (!config.teamDomain || !config.audience) {
-      return {
-        ok: false,
-        reason: "Cloudflare Access is enabled but team domain or audience is missing.",
-        provider: "cloudflare-access",
-      };
-    }
-
-    try {
-      const { payload } = await jwtVerify(assertion, getCloudflareJwks(config.teamDomain), {
-        audience: config.audience,
-        issuer: `https://${config.teamDomain}`,
-      });
-      const email = extractEmailFromPayload(payload);
-      if (!email) {
-        return {
-          ok: false,
-          reason: "Cloudflare Access token is missing an email claim.",
-          provider: "cloudflare-access",
-        };
-      }
-
-      const assertedEmail = headers.get(config.emailHeader)?.trim().toLowerCase() ?? "";
-      if (assertedEmail && assertedEmail !== email) {
-        return {
-          ok: false,
-          reason: "Cloudflare Access email header does not match the verified token.",
-          provider: "cloudflare-access",
-        };
-      }
-
-      return {
-        ok: true,
-        email,
-        provider: "cloudflare-access",
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        reason: formatJwtError(error),
-        provider: "cloudflare-access",
-      };
-    }
-  }
-
-  const email = headers.get(config.emailHeader)?.trim().toLowerCase() ?? "";
-  if (!email) return null;
-
-  if (!config.allowInsecureEmailHeader) {
+  if (config.provider !== CLOUDFLARE_PROVIDER) {
+    const legacyEmail = headers.get(config.emailHeader)?.trim().toLowerCase() ?? "";
+    if (!legacyEmail) return null;
     return {
       ok: false,
-      reason:
-        "Generic trusted-header mode is disabled. Use verified Cloudflare Access, or explicitly set CONDUCTOR_ALLOW_INSECURE_TRUSTED_HEADERS=true.",
+      reason: "Generic trusted-header mode has been removed. Configure verified Cloudflare Access instead.",
       provider: "trusted-header",
     };
   }
 
-  return {
-    ok: true,
-    email,
-    provider: "trusted-header",
-  };
+  const assertion = headers.get(config.jwtHeader)?.trim() ?? "";
+  if (!assertion) return null;
+
+  if (!config.teamDomain || !config.audience) {
+    return {
+      ok: false,
+      reason: "Cloudflare Access is enabled but team domain or audience is missing.",
+      provider: "cloudflare-access",
+    };
+  }
+
+  try {
+    const { payload } = await jwtVerify(assertion, getCloudflareJwks(config.teamDomain), {
+      audience: config.audience,
+      issuer: `https://${config.teamDomain}`,
+    });
+    const email = extractEmailFromPayload(payload);
+    if (!email) {
+      return {
+        ok: false,
+        reason: "Cloudflare Access token is missing an email claim.",
+        provider: "cloudflare-access",
+      };
+    }
+
+    const assertedEmail = headers.get(config.emailHeader)?.trim().toLowerCase() ?? "";
+    if (assertedEmail && assertedEmail !== email) {
+      return {
+        ok: false,
+        reason: "Cloudflare Access email header does not match the verified token.",
+        provider: "cloudflare-access",
+      };
+    }
+
+    return {
+      ok: true,
+      email,
+      provider: "cloudflare-access",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: formatJwtError(error),
+      provider: "cloudflare-access",
+    };
+  }
 }

@@ -6,10 +6,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
+use super::discover_binary;
+use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::spawn_process;
 
 /// Gemini CLI executor.
+#[derive(Clone)]
 pub struct GeminiExecutor {
     binary: PathBuf,
 }
@@ -20,7 +22,7 @@ impl GeminiExecutor {
     }
 
     pub fn discover() -> Option<Self> {
-        which::which("gemini").ok().map(Self::new)
+        discover_binary(&["gemini"]).map(Self::new)
     }
 }
 
@@ -50,17 +52,39 @@ impl Executor for GeminiExecutor {
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
+        let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
 
         Ok(ExecutorHandle::new(
             handle.pid,
             self.kind(),
-            handle.output_rx,
+            output_rx,
             handle.input_tx,
             handle.kill_tx,
         ))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
+        if options.interactive {
+            let mut args = vec![];
+            if let Some(model) = &options.model {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+            if options.skip_permissions {
+                args.push("--yolo".to_string());
+            }
+            if let Some(resume_target) = &options.resume_target {
+                args.push("--resume".to_string());
+                args.push(resume_target.clone());
+                return args;
+            }
+            if !options.prompt.trim().is_empty() {
+                args.push("--prompt-interactive".to_string());
+                args.push(options.prompt.clone());
+            }
+            return args;
+        }
+
         let mut args = vec![];
 
         if options.skip_permissions {
@@ -254,10 +278,36 @@ mod tests {
             extra_args: Vec::new(),
             env: HashMap::new(),
             branch: None,
+            timeout: None,
+            interactive: false,
+            resume_target: None,
         });
 
         assert!(args.contains(&"--output-format".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
+    }
+
+    #[test]
+    fn build_args_resumes_native_session_without_inline_prompt() {
+        let executor = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "continue".to_string(),
+            model: Some("gemini-3.1-pro-preview".to_string()),
+            reasoning_effort: None,
+            skip_permissions: true,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            resume_target: Some("latest".to_string()),
+        });
+
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"latest".to_string()));
+        assert!(args.contains(&"--yolo".to_string()));
+        assert!(!args.contains(&"--prompt-interactive".to_string()));
     }
 
     #[test]

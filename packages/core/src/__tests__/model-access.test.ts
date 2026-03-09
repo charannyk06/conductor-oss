@@ -13,10 +13,16 @@ import {
 
 test("defaults expose model access preferences for supported agents", () => {
   assert.deepEqual(getDefaultModelAccessPreferences(), {
+    amp: "default",
     claudeCode: "pro",
     codex: "chatgpt",
+    cursorCli: "default",
+    droid: "default",
     gemini: "oauth",
+    githubCopilot: "default",
+    opencode: "default",
     qwenCode: "oauth",
+    ccr: "default",
   });
 });
 
@@ -34,6 +40,13 @@ test("agent catalogs only expose access metadata", () => {
   assert.deepEqual(
     claudeCatalog.accessOptions.map((option) => option.id),
     ["pro", "max", "api"],
+  );
+
+  const copilotCatalog = getAgentModelCatalog("github-copilot");
+  assert.ok(copilotCatalog);
+  assert.deepEqual(
+    copilotCatalog.accessOptions.map((option) => option.id),
+    ["default"],
   );
 });
 
@@ -68,10 +81,14 @@ test("core exposes stable fallback model and reasoning catalogs", () => {
 test("resolveAgentModelAccess uses the saved preference when valid", () => {
   assert.equal(resolveAgentModelAccess("codex", { codex: "api" }), "api");
   assert.equal(resolveAgentModelAccess("claude-code", { claudeCode: "max" }), "max");
+  assert.equal(resolveAgentModelAccess("github-copilot", { githubCopilot: "default" }), "default");
 });
 
 test("unsupported agents fall back cleanly", () => {
-  assert.equal(supportsAgentModelSelection("amp"), false);
-  assert.equal(resolveAgentModelAccess("amp", null), null);
-  assert.equal(getAgentModelCatalog("amp"), null);
+  assert.equal(supportsAgentModelSelection("amp"), true);
+  assert.equal(resolveAgentModelAccess("amp", null), "default");
+  assert.equal(getAgentModelCatalog("amp")?.label, "Amp");
+  assert.equal(supportsAgentModelSelection("custom-agent"), false);
+  assert.equal(resolveAgentModelAccess("custom-agent", null), null);
+  assert.equal(getAgentModelCatalog("custom-agent"), null);
 });

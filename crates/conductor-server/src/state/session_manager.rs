@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use conductor_core::types::AgentKind;
+use conductor_executors::agents::build_runtime_env;
 use conductor_executors::executor::{ExecutorInput, ExecutorOutput, SpawnOptions};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -10,8 +11,9 @@ use uuid::Uuid;
 
 use super::helpers::{
     append_output, is_runtime_status_line, is_terminal_status, merge_assistant_fragment,
-    runtime_tool_metadata,
+    runtime_tool_metadata, sanitize_terminal_text,
 };
+use super::runtime_status::resolve_native_resume_target;
 use super::tmux_runtime::{
     runtime_mode, tmux_runtime_metadata, tmux_session_exists, TMUX_RUNTIME_MODE,
 };
@@ -38,14 +40,33 @@ fn enforce_conversation_limit(session: &mut SessionRecord) {
     session.conversation.drain(..excess);
 }
 
-fn persisted_output_line(event: &ExecutorOutput) -> Option<&str> {
+fn project_defaults_to_skip_permissions(project: &conductor_core::config::ProjectConfig) -> bool {
+    !matches!(
+        project.agent_config.permissions.as_deref().map(str::trim),
+        Some("default")
+    )
+}
+
+fn resolve_skip_permissions(
+    request_permission_mode: Option<&str>,
+    project: &conductor_core::config::ProjectConfig,
+) -> bool {
+    match request_permission_mode.map(str::trim) {
+        Some("auto") => true,
+        Some("ask") | Some("plan") => false,
+        _ => project_defaults_to_skip_permissions(project),
+    }
+}
+
+fn persisted_output_line(event: &ExecutorOutput) -> Option<String> {
     match event {
         ExecutorOutput::Stdout(line) | ExecutorOutput::Stderr(line) => {
-            let trimmed = line.trim();
+            let sanitized = sanitize_terminal_text(line);
+            let trimmed = sanitized.trim();
             if trimmed.is_empty() {
                 None
             } else {
-                Some(trimmed)
+                Some(trimmed.to_string())
             }
         }
         ExecutorOutput::StructuredStatus { .. } | ExecutorOutput::Composite(_) => None,
@@ -62,7 +83,8 @@ fn detached_runtime_pid(session: &SessionRecord) -> Option<u32> {
 }
 
 fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
-    let normalized = text.trim_end();
+    let sanitized = sanitize_terminal_text(text);
+    let normalized = sanitized.trim_end();
     if normalized.trim().is_empty() {
         return;
     }
@@ -106,12 +128,48 @@ fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) {
     append_runtime_status_entry_with_metadata(session, text, None);
 }
 
+fn build_session_preferences_update_text(
+    previous_model: Option<&str>,
+    next_model: Option<&str>,
+    previous_reasoning_effort: Option<&str>,
+    next_reasoning_effort: Option<&str>,
+    model_changed: bool,
+    reasoning_changed: bool,
+) -> String {
+    let mut parts = Vec::new();
+
+    if model_changed {
+        let line = match (previous_model, next_model) {
+            (Some(previous), Some(next)) => format!("Model switched: {previous} -> {next}"),
+            (None, Some(next)) => format!("Model set: {next}"),
+            _ => "Model updated.".to_string(),
+        };
+        parts.push(line);
+    }
+
+    if reasoning_changed {
+        let line = match (previous_reasoning_effort, next_reasoning_effort) {
+            (Some(previous), Some(next)) => format!("Reasoning updated: {previous} -> {next}"),
+            (None, Some(next)) => format!("Reasoning set: {next}"),
+            _ => "Reasoning updated.".to_string(),
+        };
+        parts.push(line);
+    }
+
+    if parts.is_empty() {
+        "Session preferences updated.".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
 fn append_runtime_status_entry_with_metadata(
     session: &mut SessionRecord,
     text: &str,
     explicit_metadata: Option<HashMap<String, Value>>,
 ) {
-    let trimmed = text.trim();
+    let sanitized = sanitize_terminal_text(text);
+    let trimmed = sanitized.trim();
     if trimmed.is_empty() {
         return;
     }
@@ -156,9 +214,12 @@ fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     for candidate in [
         "gh auth login",
+        "copilot login",
         "claude login",
+        "cursor-agent login",
         "gemini auth login",
         "codex login",
+        "amp login",
         "opencode auth login",
         "qwen auth login",
     ] {
@@ -168,10 +229,13 @@ fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
     }
 
     match agent.trim().to_lowercase().as_str() {
-        "github-copilot" => Some("gh auth login".to_string()),
-        "claude-code" => Some("claude login".to_string()),
+        "github-copilot" => Some("copilot login".to_string()),
+        "claude-code" | "ccr" => Some("claude login".to_string()),
+        "cursor-cli" => Some("cursor-agent login".to_string()),
         "gemini" => Some("gemini auth login".to_string()),
         "codex" => Some("codex login".to_string()),
+        "amp" => Some("amp login".to_string()),
+        "droid" => Some("export FACTORY_API_KEY=...".to_string()),
         "opencode" => Some("opencode auth login".to_string()),
         "qwen-code" => Some("qwen auth login".to_string()),
         _ => None,
@@ -266,22 +330,39 @@ impl AppState {
         session_id: String,
         executor: Arc<dyn conductor_executors::executor::Executor>,
         mut output_rx: tokio::sync::mpsc::Receiver<ExecutorOutput>,
+        output_is_parsed: bool,
+        timeout: Option<std::time::Duration>,
     ) {
+        if let Some(timeout_duration) = timeout {
+            let state = Arc::clone(self);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(timeout_duration).await;
+                tracing::warn!(session_id = %session_id, "Session timed out after {}s", timeout_duration.as_secs());
+                let _ = state.kill_session(&session_id).await;
+            });
+        }
         let state = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = output_rx.recv().await {
                 match event {
                     ExecutorOutput::Stdout(line) => {
-                        let mapped = executor.parse_output(&line);
+                        let sanitized = sanitize_terminal_text(&line);
+                        let mapped = if output_is_parsed {
+                            ExecutorOutput::Stdout(sanitized)
+                        } else {
+                            executor.parse_output(&sanitized)
+                        };
                         let _ = state.apply_parsed_output(&session_id, mapped).await;
                     }
                     ExecutorOutput::Stderr(line) => {
-                        let prefixed = format!("[stderr] {line}");
+                        let sanitized = sanitize_terminal_text(&line);
+                        let prefixed = format!("[stderr] {sanitized}");
                         let _ = state
                             .append_and_apply(
                                 &session_id,
                                 Some(&prefixed),
-                                ExecutorOutput::Stderr(line),
+                                ExecutorOutput::Stderr(sanitized),
                             )
                             .await;
                     }
@@ -360,8 +441,8 @@ impl AppState {
             let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
             return Err(err);
         }
-        let dev_server_log = match self.ensure_dev_server(&request.project_id, &project).await {
-            Ok(log_path) => log_path,
+        let dev_server = match self.ensure_dev_server(&request.project_id, &project).await {
+            Ok(dev_server) => dev_server,
             Err(err) => {
                 let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
                 return Err(err);
@@ -383,11 +464,8 @@ impl AppState {
             )
         };
 
-        let skip_permissions = match request.permission_mode.as_deref().map(str::trim) {
-            Some("auto") => true,
-            Some("ask") | Some("plan") => false,
-            _ => matches!(project.agent_config.permissions.as_deref(), Some("skip")),
-        };
+        let skip_permissions =
+            resolve_skip_permissions(request.permission_mode.as_deref(), &project);
 
         let mut spawn_env = HashMap::new();
         if executor.kind() == AgentKind::ClaudeCode {
@@ -396,6 +474,7 @@ impl AppState {
             // is used instead of any inherited API key billing context.
             spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
+        let spawn_env = build_runtime_env(executor.binary_path(), &spawn_env);
 
         let runtime_launch = match self
             .spawn_with_runtime(
@@ -411,6 +490,12 @@ impl AppState {
                     extra_args: Vec::new(),
                     env: spawn_env,
                     branch: branch.clone(),
+                    timeout: project
+                        .agent_config
+                        .session_timeout_secs
+                        .map(std::time::Duration::from_secs),
+                    interactive: false,
+                    resume_target: None,
                 },
             )
             .await
@@ -448,8 +533,16 @@ impl AppState {
                 .to_string_lossy()
                 .to_string(),
         );
-        if let Some(log_path) = dev_server_log {
+        if let Some(log_path) = dev_server.log_path {
             record.metadata.insert("devServerLog".to_string(), log_path);
+        }
+        if let Some(url) = dev_server.preview_url {
+            record.metadata.insert("devServerUrl".to_string(), url);
+        }
+        if let Some(port) = dev_server.preview_port {
+            record
+                .metadata
+                .insert("devServerPort".to_string(), port.to_string());
         }
         record.metadata.extend(runtime_launch.metadata.clone());
         record
@@ -522,7 +615,16 @@ impl AppState {
                 kill_tx: Mutex::new(kill_tx.take()),
             }),
         );
-        self.start_output_consumer(session_id.clone(), executor, output_rx);
+        self.start_output_consumer(
+            session_id.clone(),
+            executor,
+            output_rx,
+            runtime_mode(&project) != TMUX_RUNTIME_MODE,
+            project
+                .agent_config
+                .session_timeout_secs
+                .map(std::time::Duration::from_secs),
+        );
 
         Ok(record)
     }
@@ -537,7 +639,7 @@ impl AppState {
                 }
                 ExecutorOutput::Stdout(line) => {
                     let output = ExecutorOutput::Stdout(line);
-                    let persisted = persisted_output_line(&output).map(str::to_string);
+                    let persisted = persisted_output_line(&output);
                     self.append_and_apply(session_id, persisted.as_deref(), output)
                         .await?;
                 }
@@ -853,7 +955,7 @@ impl AppState {
     }
 
     pub async fn send_to_session(
-        &self,
+        self: &Arc<Self>,
         session_id: &str,
         message: String,
         attachments: Vec<String>,
@@ -861,6 +963,7 @@ impl AppState {
         reasoning_effort: Option<String>,
         source: &str,
     ) -> Result<()> {
+        self.ensure_session_live(session_id).await?;
         let handle = self
             .live_sessions
             .read()
@@ -890,15 +993,65 @@ impl AppState {
         session.last_activity_at = Utc::now().to_rfc3339();
         session.status = "working".to_string();
         session.activity = Some("active".to_string());
-        if let Some(model_value) = model {
+        let previous_model = session.model.clone();
+        let previous_reasoning_effort = session.reasoning_effort.clone();
+        let model_changed = model
+            .as_ref()
+            .map(|value| previous_model.as_deref() != Some(value.as_str()))
+            .unwrap_or(false);
+        let reasoning_changed = reasoning_effort
+            .as_ref()
+            .map(|value| previous_reasoning_effort.as_deref() != Some(value.as_str()))
+            .unwrap_or(false);
+        if let Some(model_value) = model.clone() {
             session.model = Some(model_value.clone());
             session.metadata.insert("model".to_string(), model_value);
         }
-        if let Some(reasoning) = reasoning_effort {
+        if let Some(reasoning) = reasoning_effort.clone() {
             session.reasoning_effort = Some(reasoning.clone());
             session
                 .metadata
                 .insert("reasoningEffort".to_string(), reasoning);
+        }
+        if model_changed || reasoning_changed {
+            let mut metadata = HashMap::new();
+            metadata.insert(
+                "eventType".to_string(),
+                Value::String("session_preferences_updated".to_string()),
+            );
+            metadata.insert("modelChanged".to_string(), Value::Bool(model_changed));
+            metadata.insert(
+                "reasoningChanged".to_string(),
+                Value::Bool(reasoning_changed),
+            );
+            if let Some(value) = previous_model.clone() {
+                metadata.insert("previousModel".to_string(), Value::String(value));
+            }
+            if let Some(value) = model.clone() {
+                metadata.insert("model".to_string(), Value::String(value));
+            }
+            if let Some(value) = previous_reasoning_effort.clone() {
+                metadata.insert("previousReasoningEffort".to_string(), Value::String(value));
+            }
+            if let Some(value) = reasoning_effort.clone() {
+                metadata.insert("reasoningEffort".to_string(), Value::String(value));
+            }
+            session.conversation.push(ConversationEntry {
+                id: Uuid::new_v4().to_string(),
+                kind: "system_message".to_string(),
+                source: "session_preferences".to_string(),
+                text: build_session_preferences_update_text(
+                    previous_model.as_deref(),
+                    model.as_deref(),
+                    previous_reasoning_effort.as_deref(),
+                    reasoning_effort.as_deref(),
+                    model_changed,
+                    reasoning_changed,
+                ),
+                created_at: Utc::now().to_rfc3339(),
+                attachments: Vec::new(),
+                metadata,
+            });
         }
         session.conversation.push(ConversationEntry {
             id: Uuid::new_v4().to_string(),
@@ -909,6 +1062,7 @@ impl AppState {
             attachments,
             metadata: HashMap::new(),
         });
+        enforce_conversation_limit(session);
         let updated = session.clone();
         drop(sessions);
         self.persist_session(&updated).await?;
@@ -929,6 +1083,19 @@ impl AppState {
         reasoning_effort: Option<String>,
         source: &str,
     ) -> Result<()> {
+        if self.ensure_session_live(session_id).await? {
+            return self
+                .send_to_session(
+                    session_id,
+                    message,
+                    attachments,
+                    model,
+                    reasoning_effort,
+                    source,
+                )
+                .await;
+        }
+
         let session_snapshot = self
             .get_session(session_id)
             .await
@@ -978,10 +1145,15 @@ impl AppState {
             )
         };
 
-        let effective_model = model.or_else(|| session_snapshot.model.clone());
-        let effective_reasoning_effort =
-            reasoning_effort.or_else(|| session_snapshot.reasoning_effort.clone());
-        let skip_permissions = matches!(project.agent_config.permissions.as_deref(), Some("skip"));
+        let effective_model = model.clone().or_else(|| session_snapshot.model.clone());
+        let effective_reasoning_effort = reasoning_effort
+            .clone()
+            .or_else(|| session_snapshot.reasoning_effort.clone());
+        let skip_permissions = project_defaults_to_skip_permissions(&project);
+        let native_resume_target =
+            resolve_native_resume_target(agent_kind.clone(), workspace_path.clone()).await;
+        let terminal_follow_up = runtime_mode(&project) == TMUX_RUNTIME_MODE;
+        let send_follow_up_after_spawn = native_resume_target.is_some() || terminal_follow_up;
 
         // Apply the same environment overrides as initial spawn to avoid
         // leaking ANTHROPIC_API_KEY on resumed sessions.
@@ -990,6 +1162,7 @@ impl AppState {
             resume_env.insert("CLAUDECODE".to_string(), String::new());
             resume_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
+        let resume_env = build_runtime_env(executor.binary_path(), &resume_env);
 
         let handle = executor.clone();
         let runtime_launch = self
@@ -999,13 +1172,23 @@ impl AppState {
                 session_id,
                 SpawnOptions {
                     cwd: std::path::PathBuf::from(&workspace_path),
-                    prompt: effective_message.clone(),
+                    prompt: if send_follow_up_after_spawn {
+                        String::new()
+                    } else {
+                        effective_message.clone()
+                    },
                     model: effective_model.clone(),
                     reasoning_effort: effective_reasoning_effort.clone(),
                     skip_permissions,
                     extra_args: Vec::new(),
                     env: resume_env,
                     branch: session_snapshot.branch.clone(),
+                    timeout: project
+                        .agent_config
+                        .session_timeout_secs
+                        .map(std::time::Duration::from_secs),
+                    interactive: false,
+                    resume_target: native_resume_target.clone(),
                 },
             )
             .await?;
@@ -1036,15 +1219,27 @@ impl AppState {
             .metadata
             .insert("startedAt".to_string(), Utc::now().to_rfc3339());
         session.metadata.remove("finishedAt");
-        session.conversation.push(ConversationEntry {
-            id: Uuid::new_v4().to_string(),
-            kind: "user_message".to_string(),
-            source: source.to_string(),
-            text: message,
-            created_at: Utc::now().to_rfc3339(),
-            attachments: attachments.clone(),
-            metadata: HashMap::new(),
-        });
+        if native_resume_target.is_some() {
+            session.conversation.push(ConversationEntry {
+                id: Uuid::new_v4().to_string(),
+                kind: "system_message".to_string(),
+                source: "restore".to_string(),
+                text: "Session restored and reattached to native CLI state.".to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                attachments: Vec::new(),
+                metadata: HashMap::new(),
+            });
+        } else if !send_follow_up_after_spawn {
+            session.conversation.push(ConversationEntry {
+                id: Uuid::new_v4().to_string(),
+                kind: "user_message".to_string(),
+                source: source.to_string(),
+                text: message.clone(),
+                created_at: Utc::now().to_rfc3339(),
+                attachments: attachments.clone(),
+                metadata: HashMap::new(),
+            });
+        }
 
         let updated = session.clone();
         drop(sessions);
@@ -1057,12 +1252,39 @@ impl AppState {
                 kill_tx: Mutex::new(Some(kill_tx)),
             }),
         );
-        self.start_output_consumer(session_id.to_string(), handle, output_rx);
+        self.start_output_consumer(
+            session_id.to_string(),
+            handle,
+            output_rx,
+            runtime_mode(&project) != TMUX_RUNTIME_MODE,
+            project
+                .agent_config
+                .session_timeout_secs
+                .map(std::time::Duration::from_secs),
+        );
+
+        if send_follow_up_after_spawn {
+            return self
+                .send_to_session(
+                    session_id,
+                    message,
+                    attachments,
+                    model,
+                    reasoning_effort,
+                    source,
+                )
+                .await;
+        }
 
         Ok(())
     }
 
-    pub async fn send_raw_to_session(&self, session_id: &str, keys: String) -> Result<()> {
+    pub async fn send_raw_to_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        keys: String,
+    ) -> Result<()> {
+        self.ensure_session_live(session_id).await?;
         let handle = self
             .live_sessions
             .read()
@@ -1090,6 +1312,11 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    pub async fn interrupt_session(self: &Arc<Self>, session_id: &str) -> Result<()> {
+        self.send_raw_to_session(session_id, "\u{3}".to_string())
+            .await
     }
 
     pub async fn kill_session(&self, session_id: &str) -> Result<()> {
@@ -1274,6 +1501,7 @@ mod tests {
     use conductor_core::config::{ConductorConfig, ProjectConfig};
     use conductor_db::Database;
     use conductor_executors::executor::{Executor, ExecutorHandle};
+    use conductor_executors::process::spawn_process;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1312,7 +1540,8 @@ mod tests {
         async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
             let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
             drop(output_tx);
-            let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(8);
+            let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
+            tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
             let (kill_tx, _kill_rx) = oneshot::channel();
             Ok(ExecutorHandle::new(
                 1,
@@ -1325,6 +1554,93 @@ mod tests {
 
         fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
             Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
+
+    struct PrefixingExecutor;
+
+    #[async_trait]
+    impl Executor for PrefixingExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "Prefixing Executor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/bin/true")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
+            unreachable!("not used in tests")
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(format!("parsed::{line}"))
+        }
+    }
+
+    struct TmuxResumeExecutor;
+
+    #[async_trait]
+    impl Executor for TmuxResumeExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "Tmux Resume Executor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/bin/sh")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
+            let args = self.build_args(&options);
+            let handle =
+                spawn_process(self.binary_path(), &args, &options.cwd, &options.env).await?;
+            Ok(ExecutorHandle::new(
+                handle.pid,
+                self.kind(),
+                handle.output_rx,
+                handle.input_tx,
+                handle.kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            vec![
+                "-lc".to_string(),
+                "printf 'ready\\n'; IFS= read -r line; printf 'echo:%s\\n' \"$line\"; sleep 0.2"
+                    .to_string(),
+            ]
         }
 
         fn parse_output(&self, line: &str) -> ExecutorOutput {
@@ -1408,6 +1724,28 @@ mod tests {
         state
     }
 
+    #[test]
+    fn resolve_skip_permissions_defaults_to_unsandboxed_when_project_does_not_override() {
+        let project = ProjectConfig::default();
+
+        assert!(project_defaults_to_skip_permissions(&project));
+        assert!(resolve_skip_permissions(None, &project));
+        assert!(resolve_skip_permissions(Some("default"), &project));
+    }
+
+    #[test]
+    fn resolve_skip_permissions_respects_explicit_sandbox_modes() {
+        let mut project = ProjectConfig::default();
+        project.agent_config.permissions = Some("default".to_string());
+
+        assert!(!project_defaults_to_skip_permissions(&project));
+        assert!(!resolve_skip_permissions(None, &project));
+        assert!(!resolve_skip_permissions(Some("default"), &project));
+        assert!(!resolve_skip_permissions(Some("ask"), &project));
+        assert!(!resolve_skip_permissions(Some("plan"), &project));
+        assert!(resolve_skip_permissions(Some("auto"), &project));
+    }
+
     #[tokio::test]
     async fn spawn_session_applies_workspace_hooks_and_keeps_saved_agent_defaults() {
         let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
@@ -1474,6 +1812,106 @@ mod tests {
             "spawn-time agent overrides should not rewrite project defaults"
         );
         assert_eq!(config.preferences.coding_agent, "codex");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn send_to_session_records_structured_preference_updates() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-pref-event-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: Some("codex".to_string()),
+                    use_worktree: Some(true),
+                    permission_mode: None,
+                    model: Some("gpt-5.2-codex".to_string()),
+                    reasoning_effort: Some("medium".to_string()),
+                    branch: None,
+                    base_branch: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        state
+            .send_to_session(
+                &session.id,
+                "Continue with the next pass".to_string(),
+                Vec::new(),
+                Some("gpt-5.4".to_string()),
+                Some("high".to_string()),
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let updated = state.get_session(&session.id).await.unwrap();
+        let event = updated
+            .conversation
+            .iter()
+            .find(|entry| entry.kind == "system_message" && entry.source == "session_preferences")
+            .expect("preference update event should be stored");
+
+        assert_eq!(
+            event.text,
+            "Model switched: gpt-5.2-codex -> gpt-5.4\nReasoning updated: medium -> high"
+        );
+        assert_eq!(
+            event.metadata.get("eventType").and_then(Value::as_str),
+            Some("session_preferences_updated")
+        );
+        assert_eq!(
+            event.metadata.get("previousModel").and_then(Value::as_str),
+            Some("gpt-5.2-codex")
+        );
+        assert_eq!(
+            event.metadata.get("model").and_then(Value::as_str),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            event
+                .metadata
+                .get("previousReasoningEffort")
+                .and_then(Value::as_str),
+            Some("medium")
+        );
+        assert_eq!(
+            event
+                .metadata
+                .get("reasoningEffort")
+                .and_then(Value::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            event.metadata.get("modelChanged").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            event
+                .metadata
+                .get("reasoningChanged")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -1758,6 +2196,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_session_with_prompt_routes_tmux_follow_up_through_terminal_host() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-resume-tmux-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            runtime: Some(crate::state::tmux_runtime::TMUX_RUNTIME_MODE.to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TmuxResumeExecutor));
+
+        let mut session = SessionRecord::new(
+            "resume-tmux-session".to_string(),
+            "demo".to_string(),
+            Some("session/resume-tmux".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = "needs_input".to_string();
+        session.activity = Some("waiting_input".to_string());
+        session.summary = Some("Ready for follow-up".to_string());
+        session
+            .metadata
+            .insert("summary".to_string(), "Ready for follow-up".to_string());
+        session
+            .metadata
+            .insert("agentCwd".to_string(), repo.to_string_lossy().to_string());
+        state.replace_session(session).await.unwrap();
+
+        state
+            .resume_session_with_prompt(
+                "resume-tmux-session",
+                "Continue".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let updated = timeout(Duration::from_secs(5), async {
+            loop {
+                let current = state.get_session("resume-tmux-session").await.unwrap();
+                if current.output.contains("echo:Continue") {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("tmux resume should deliver follow-up through the live terminal host");
+
+        assert!(updated.output.contains("echo:Continue"));
+        assert_eq!(
+            updated
+                .conversation
+                .iter()
+                .filter(|entry| entry.kind == "user_message" && entry.text == "Continue")
+                .count(),
+            1
+        );
+        assert_eq!(
+            updated.metadata.get("runtimeMode").map(String::as_str),
+            Some(crate::state::tmux_runtime::TMUX_RUNTIME_MODE)
+        );
+
+        if let Some((socket_path, tmux_session)) =
+            crate::state::tmux_runtime::tmux_runtime_metadata(&updated)
+        {
+            let _ =
+                crate::state::tmux_runtime::kill_tmux_session(&socket_path, &tmux_session).await;
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn kill_session_terminates_detached_runtime() {
         let root = std::env::temp_dir().join(format!("conductor-kill-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -1808,6 +2337,148 @@ mod tests {
         let updated = state.get_session("detached-kill").await.unwrap();
         assert_eq!(updated.status, "killed");
         assert!(!updated.metadata.contains_key(DETACHED_PID_METADATA_KEY));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn start_output_consumer_skips_reparsing_for_direct_runtime_output() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-direct-output-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let mut session = SessionRecord::new(
+            "direct-output".to_string(),
+            "demo".to_string(),
+            Some("session/direct-output".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = "working".to_string();
+        state.replace_session(session).await.unwrap();
+
+        let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
+        state.start_output_consumer(
+            "direct-output".to_string(),
+            Arc::new(PrefixingExecutor),
+            output_rx,
+            true,
+            None,
+        );
+        output_tx
+            .send(ExecutorOutput::Stdout("parsed::hello".to_string()))
+            .await
+            .unwrap();
+        drop(output_tx);
+
+        let updated = timeout(Duration::from_secs(3), async {
+            loop {
+                let current = state.get_session("direct-output").await.unwrap();
+                if current
+                    .conversation
+                    .iter()
+                    .any(|entry| entry.kind == "assistant_message")
+                {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("consumer should append assistant output");
+
+        let assistant = updated
+            .conversation
+            .iter()
+            .find(|entry| entry.kind == "assistant_message")
+            .expect("assistant message");
+        assert_eq!(assistant.text, "parsed::hello");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn start_output_consumer_sanitizes_tmux_output_before_parsing() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-tmux-output-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let mut session = SessionRecord::new(
+            "tmux-output".to_string(),
+            "demo".to_string(),
+            Some("session/tmux-output".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = "working".to_string();
+        state.replace_session(session).await.unwrap();
+
+        let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
+        state.start_output_consumer(
+            "tmux-output".to_string(),
+            Arc::new(PrefixingExecutor),
+            output_rx,
+            false,
+            None,
+        );
+        output_tx
+            .send(ExecutorOutput::Stdout(
+                "\u{001b}[90mhello\u{001b}[0m".to_string(),
+            ))
+            .await
+            .unwrap();
+        drop(output_tx);
+
+        let updated = timeout(Duration::from_secs(3), async {
+            loop {
+                let current = state.get_session("tmux-output").await.unwrap();
+                if current
+                    .conversation
+                    .iter()
+                    .any(|entry| entry.kind == "assistant_message")
+                {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("consumer should append assistant output");
+
+        let assistant = updated
+            .conversation
+            .iter()
+            .find(|entry| entry.kind == "assistant_message")
+            .expect("assistant message");
+        assert_eq!(assistant.text, "parsed::hello");
 
         let _ = fs::remove_dir_all(&root);
     }

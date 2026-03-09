@@ -168,20 +168,43 @@ export function resolveAgentSetupConfig(agent: string): AgentSetupConfig {
     },
     "github-copilot": {
       commands: ["github-copilot", "copilot", "gh-copilot"],
-      installPackage: "@githubnext/github-copilot-cli",
+      installPackage: "@github/copilot",
       installLabel: "Install GitHub Copilot CLI",
+      postInstallAuthCommand: {
+        label: "Connect GitHub Copilot",
+        cmd: "copilot",
+        args: ["login"],
+      },
     },
     "cursor-cli": {
-      commands: ["cursor-cli", "cursor"],
+      commands: ["cursor-cli", "cursor", "cursor-agent"],
+      installPackage: "cursor-agent",
+      installLabel: "Install Cursor Agent CLI",
     },
     amp: {
       commands: ["amp"],
+      installPackage: "@sourcegraph/amp",
+      installLabel: "Install Amp CLI",
+      postInstallAuthCommand: {
+        label: "Connect Amp",
+        cmd: "amp",
+        args: ["login"],
+      },
     },
     opencode: {
-      commands: ["opencode"],
+      commands: ["opencode", "open-code", "open_code"],
+      installPackage: "opencode-ai",
+      installLabel: "Install OpenCode CLI",
+      postInstallAuthCommand: {
+        label: "Connect OpenCode",
+        cmd: "opencode",
+        args: ["auth", "login"],
+      },
     },
     droid: {
       commands: ["droid"],
+      installPackage: "@factory/cli",
+      installLabel: "Install Droid CLI",
     },
     "qwen-code": {
       commands: ["qwen", "qwen-code"],
@@ -196,6 +219,8 @@ export function resolveAgentSetupConfig(agent: string): AgentSetupConfig {
     },
     ccr: {
       commands: ["ccr"],
+      installPackage: "@musistudio/claude-code-router",
+      installLabel: "Install Claude Code Router",
     },
   };
 

@@ -5,6 +5,7 @@ import {
 
 const CLAUDE_ACCESS = ["pro", "max", "api"] as const;
 const CODEX_ACCESS = ["chatgpt", "api"] as const;
+const DEFAULT_ACCESS = ["default"] as const;
 const GEMINI_ACCESS = ["oauth", "api"] as const;
 const QWEN_ACCESS = ["oauth", "api"] as const;
 
@@ -32,9 +33,15 @@ export function normalizeModelAccessPreferences(
   const defaults = getDefaultModelAccessPreferences();
 
   return {
+    amp: selectValue(root["amp"], DEFAULT_ACCESS, defaults.amp),
     claudeCode: selectValue(root["claudeCode"], CLAUDE_ACCESS, defaults.claudeCode),
     codex: selectValue(root["codex"], CODEX_ACCESS, defaults.codex),
+    cursorCli: selectValue(root["cursorCli"], DEFAULT_ACCESS, defaults.cursorCli),
+    droid: selectValue(root["droid"], DEFAULT_ACCESS, defaults.droid),
     gemini: selectValue(root["gemini"], GEMINI_ACCESS, defaults.gemini),
+    githubCopilot: selectValue(root["githubCopilot"], DEFAULT_ACCESS, defaults.githubCopilot),
+    opencode: selectValue(root["opencode"], DEFAULT_ACCESS, defaults.opencode),
     qwenCode: selectValue(root["qwenCode"], QWEN_ACCESS, defaults.qwenCode),
+    ccr: selectValue(root["ccr"], DEFAULT_ACCESS, defaults.ccr),
   };
 }

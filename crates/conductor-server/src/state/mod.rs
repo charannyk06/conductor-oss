@@ -1,4 +1,7 @@
+mod app_update;
+mod board_collaboration;
 mod helpers;
+mod runtime_status;
 mod session_manager;
 mod session_store;
 mod spawn_queue;
@@ -6,15 +9,19 @@ mod tmux_runtime;
 pub mod types;
 mod workspace;
 
+pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
+pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
+pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus, SpawnRequest,
 };
 pub use workspace::{expand_path, resolve_workspace_path};
 
 use anyhow::Result;
+use board_collaboration::BoardCollaborationStore;
 use chrono::{DateTime, Utc};
 use conductor_core::config::{ConductorConfig, DashboardAccessConfig, PreferencesConfig};
 use conductor_core::support::{startup_config_sync, sync_workspace_support_files};
@@ -32,6 +39,12 @@ pub(crate) struct DevServerRecord {
     pub log_path: String,
 }
 
+pub(crate) struct DevServerLaunch {
+    pub log_path: Option<String>,
+    pub preview_url: Option<String>,
+    pub preview_port: Option<u16>,
+}
+
 /// Shared application state for the HTTP server.
 pub struct AppState {
     pub config_path: PathBuf,
@@ -44,7 +57,10 @@ pub struct AppState {
     pub event_snapshots: broadcast::Sender<String>,
     /// Sends (session_id, delta_line) for incremental output updates.
     pub output_updates: broadcast::Sender<(String, String)>,
+    pub app_update_config: AppUpdateConfig,
+    app_update: Mutex<app_update::AppUpdateRuntime>,
     pub started_at: DateTime<Utc>,
+    board_collaboration: RwLock<BoardCollaborationStore>,
     /// Serializes board-triggered spawns to prevent TOCTOU races in limit checks.
     pub spawn_guard: Mutex<()>,
     dev_servers: Mutex<HashMap<String, DevServerRecord>>,
@@ -55,6 +71,8 @@ impl AppState {
         let workspace_path = resolve_workspace_path(&config_path, &config.workspace);
         let (event_snapshots, _) = broadcast::channel(256);
         let (output_updates, _) = broadcast::channel(512);
+        let app_update_config = AppUpdateConfig::from_env();
+        let app_update_state = app_update::AppUpdateRuntime::new(&app_update_config);
         let state = Arc::new(Self {
             config_path,
             workspace_path,
@@ -65,12 +83,16 @@ impl AppState {
             live_sessions: RwLock::new(HashMap::new()),
             event_snapshots,
             output_updates,
+            app_update: Mutex::new(app_update_state),
+            app_update_config,
             started_at: Utc::now(),
+            board_collaboration: RwLock::new(BoardCollaborationStore::default()),
             spawn_guard: Mutex::new(()),
             dev_servers: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;
+        state.load_board_collaboration_from_disk().await;
         state
     }
 
@@ -161,6 +183,7 @@ impl AppState {
         serde_json::to_string(&json!({
             "type": "snapshot",
             "sessions": self.snapshot_sessions().await,
+            "appUpdate": self.app_update_snapshot().await,
         }))
         .unwrap_or_else(|_| "{\"type\":\"snapshot\",\"sessions\":[]}".to_string())
     }
@@ -196,6 +219,7 @@ impl AppState {
                     "boardDir": board_dir,
                     "boardFile": resolve_board_file(&workspace_path, &board_dir, Some(&project.path)),
                     "description": project.description,
+                    "githubProject": project.github_project.clone(),
                     "defaultBranch": project.default_branch.clone(),
                     "agent": project.agent.clone().unwrap_or_else(|| config.preferences.coding_agent.clone()),
                     "agentPermissions": project.agent_config.permissions,

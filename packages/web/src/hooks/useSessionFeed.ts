@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { NormalizedChatEntry } from "@/lib/chatFeed";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
+import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
 import { TERMINAL_STATUSES, type SSESnapshotEvent } from "@/lib/types";
 const ACTIVE_POLL_INTERVAL_MS = 4_000;
 const HIDDEN_POLL_INTERVAL_MS = 15_000;
@@ -11,11 +12,13 @@ const TERMINAL_POLL_INTERVAL_MS = 30_000;
 interface SessionFeedResponse {
   entries?: NormalizedChatEntry[];
   sessionStatus?: string | null;
+  error?: string | null;
   parserState?: {
     kind?: string | null;
     message?: string | null;
     command?: string | null;
   } | null;
+  runtimeStatus?: SessionRuntimeStatus | null;
 }
 
 export interface SessionParserState {
@@ -30,6 +33,7 @@ interface UseSessionFeedResult {
   error: string | null;
   sessionStatus: string | null;
   parserState: SessionParserState | null;
+  runtimeStatus: SessionRuntimeStatus | null;
   refresh: () => Promise<void>;
 }
 
@@ -90,6 +94,11 @@ function normalizeParserState(value: SessionFeedResponse["parserState"]): Sessio
   return { kind, message, command };
 }
 
+function normalizeRuntimeStatus(value: SessionFeedResponse["runtimeStatus"]): SessionRuntimeStatus | null {
+  if (!value || typeof value !== "object") return null;
+  return value;
+}
+
 async function fetchFeed(sessionId: string): Promise<SessionFeedResponse> {
   const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/feed`, {
     cache: "no-store",
@@ -108,6 +117,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
   const [error, setError] = useState<string | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [parserState, setParserState] = useState<SessionParserState | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<SessionRuntimeStatus | null>(null);
   const terminalRef = useRef(false);
   const mountedRef = useRef(true);
   const inFlightRef = useRef(false);
@@ -132,7 +142,17 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
       }
       return next;
     });
-    setError(null);
+    setRuntimeStatus((current) => {
+      const next = normalizeRuntimeStatus(payload.runtimeStatus);
+      if (JSON.stringify(current) === JSON.stringify(next)) {
+        return current;
+      }
+      return next;
+    });
+    const nextError = typeof payload.error === "string" && payload.error.trim().length > 0
+      ? payload.error.trim()
+      : null;
+    setError(nextError);
     setLoading(false);
   }, []);
 
@@ -143,6 +163,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
       setError(null);
       setSessionStatus(null);
       setParserState(null);
+      setRuntimeStatus(null);
       return;
     }
 
@@ -165,6 +186,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
           setEntries([]);
           setSessionStatus(null);
           setParserState(null);
+          setRuntimeStatus(null);
         }
         setError(message);
         setLoading(false);
@@ -185,6 +207,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
     setEntries([]);
     setSessionStatus(null);
     setParserState(null);
+    setRuntimeStatus(null);
     setError(null);
     setLoading(true);
     void refresh();
@@ -208,6 +231,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
     };
     window.addEventListener("focus", handleWindowFocus);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    let eventSource: EventSource | null = null;
 
     let pollTimeoutId: number | null = null;
 
@@ -233,6 +257,35 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
     };
 
     startPolling();
+    if (typeof EventSource !== "undefined") {
+      eventSource = new EventSource(
+        `/api/sessions/${encodeURIComponent(sessionId)}/feed/stream`,
+      );
+
+      eventSource.onmessage = (event) => {
+        if (!mountedRef.current) return;
+        try {
+          const payload = JSON.parse(event.data as string) as SessionFeedResponse;
+          applyPayload(payload);
+          startPolling();
+        } catch {
+          // Ignore malformed session feed events.
+        }
+      };
+
+      eventSource.addEventListener("refresh", () => {
+        if (!mountedRef.current) return;
+        void refresh();
+        startPolling();
+      });
+
+      eventSource.onerror = () => {
+        if (!mountedRef.current) return;
+        void refresh();
+        startPolling();
+      };
+    }
+
     const unsubscribe = subscribeToSnapshotEvents((payload: SSESnapshotEvent) => {
       if (!mountedRef.current) return;
       const matchingSession = payload.sessions.find((value) => value.id === sessionId);
@@ -256,6 +309,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
     return () => {
       mountedRef.current = false;
       stopPolling();
+      eventSource?.close();
       unsubscribe();
       window.removeEventListener("focus", handleWindowFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -263,7 +317,7 @@ export function useSessionFeed(sessionId: string | null | undefined): UseSession
   }, [refresh, sessionId]);
 
   return useMemo(
-    () => ({ entries, loading, error, sessionStatus, parserState, refresh }),
-    [entries, error, loading, parserState, refresh, sessionStatus],
+    () => ({ entries, loading, error, sessionStatus, parserState, runtimeStatus, refresh }),
+    [entries, error, loading, parserState, refresh, runtimeStatus, sessionStatus],
   );
 }

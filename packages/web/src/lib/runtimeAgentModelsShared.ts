@@ -5,11 +5,20 @@ import type {
   SupportedModelAgent,
 } from "@conductor-oss/core/types";
 
+export interface RuntimeAgentModelContext {
+  maxTokens?: number;
+  inputMaxTokens?: number;
+  outputMaxTokens?: number;
+  source?: string;
+  note?: string;
+}
+
 export interface RuntimeAgentModelCatalog {
   agent: SupportedModelAgent;
   customModelPlaceholder: string;
   defaultModelByAccess: Partial<Record<AgentModelAccess, string>>;
   modelsByAccess: Partial<Record<AgentModelAccess, AgentModelOption[]>>;
+  modelContextById?: Record<string, RuntimeAgentModelContext>;
   defaultReasoningByAccess?: Partial<Record<AgentModelAccess, string>>;
   reasoningOptionsByAccess?: Partial<Record<AgentModelAccess, AgentReasoningOption[]>>;
   defaultReasoningByModel?: Record<string, string>;

@@ -33,7 +33,7 @@ const ANSI_PATTERN = /\u001B\[[0-?]*[ -/]*[@-~]/g;
 const OSC_PATTERN = /\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g;
 const CONTROL_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
-function normalizeText(value: string): string {
+export function normalizeChatText(value: string): string {
   return value
     .replace(OSC_PATTERN, "")
     .replace(ANSI_PATTERN, "")
@@ -85,7 +85,7 @@ function stripLeadingPromptEcho(output: string, conversation: StoredConversation
 
   if (!lastUserText) return output;
 
-  const normalizedPrompt = normalizeText(lastUserText);
+  const normalizedPrompt = normalizeChatText(lastUserText);
   if (!normalizedPrompt) return output;
 
   if (output.startsWith(normalizedPrompt)) {
@@ -110,7 +110,7 @@ function createAssistantEntry(
   output: string,
   sessionStatus: string | null | undefined,
 ): NormalizedChatEntry | null {
-  const normalizedOutput = normalizeText(output);
+  const normalizedOutput = normalizeChatText(output);
   if (!normalizedOutput) return null;
 
   return {
@@ -161,7 +161,7 @@ export function buildNormalizedChatFeed({
   const feed: NormalizedChatEntry[] = conversation
     .filter((entry) => typeof entry?.text === "string" && entry.text.trim().length > 0)
     .map((entry) => {
-      const normalizedText = normalizeText(entry.text ?? "");
+      const normalizedText = normalizeChatText(entry.text ?? "");
       const stableKey = entry.id?.trim() || `${entry.kind ?? "entry"}:${entry.createdAt ?? normalizedText}`;
       return {
         id: makeStableId("entry", stableKey),

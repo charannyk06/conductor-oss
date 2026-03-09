@@ -39,11 +39,18 @@ struct SaveRepositoryBody {
     repo: String,
     path: String,
     agent: Option<String>,
+    agent_permissions: Option<String>,
     agent_model: Option<String>,
     agent_reasoning_effort: Option<String>,
     default_working_directory: Option<String>,
     default_branch: Option<String>,
     dev_server_script: Option<String>,
+    dev_server_cwd: Option<String>,
+    dev_server_url: Option<String>,
+    dev_server_port: Option<String>,
+    dev_server_host: Option<String>,
+    dev_server_path: Option<String>,
+    dev_server_https: Option<bool>,
     setup_script: Option<String>,
     run_setup_in_parallel: Option<bool>,
     cleanup_script: Option<String>,
@@ -96,6 +103,10 @@ async fn save_repository(
         .agent
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    project.agent_config.permissions = body
+        .agent_permissions
+        .map(|value| value.trim().to_string())
+        .filter(|value| matches!(value.as_str(), "skip" | "default"));
     project.default_branch = body
         .default_branch
         .unwrap_or_else(|| "main".to_string())
@@ -115,10 +126,20 @@ async fn save_repository(
         .filter(|value| !value.is_empty());
     project.run_setup_in_parallel = body.run_setup_in_parallel.unwrap_or(false);
     project.dev_server_script = split_lines(body.dev_server_script.as_deref());
+    project.dev_server_cwd = optional_trimmed(body.dev_server_cwd);
+    project.dev_server_url = optional_trimmed(body.dev_server_url);
+    project.dev_server_port = match parse_optional_port(body.dev_server_port) {
+        Ok(port) => port,
+        Err(err) => return error(StatusCode::BAD_REQUEST, err),
+    };
+    project.dev_server_host = optional_trimmed(body.dev_server_host);
+    project.dev_server_path = optional_trimmed(body.dev_server_path);
+    project.dev_server_https = body.dev_server_https.unwrap_or(false);
     project.setup_script = split_lines(body.setup_script.as_deref());
     project.cleanup_script = split_lines(body.cleanup_script.as_deref());
     project.archive_script = split_lines(body.archive_script.as_deref());
     project.copy_files = split_lines(body.copy_files.as_deref());
+    project.normalize_dev_server();
     let saved = project.clone();
     let default_agent = config.preferences.coding_agent.clone();
     drop(config);
@@ -171,6 +192,23 @@ fn split_lines(value: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+fn optional_trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn parse_optional_port(value: Option<String>) -> Result<Option<u16>, String> {
+    let Some(value) = optional_trimmed(value) else {
+        return Ok(None);
+    };
+
+    value
+        .parse::<u16>()
+        .map(Some)
+        .map_err(|_| format!("Invalid dev server port: {value}"))
+}
+
 fn repository_payload(
     id: &str,
     project: &ProjectConfig,
@@ -189,14 +227,22 @@ fn repository_payload(
         "repo": project.repo.clone().unwrap_or_else(|| id.to_string()),
         "path": resolved_path.to_string_lossy().to_string(),
         "agent": project.agent.clone().unwrap_or_else(|| default_agent.to_string()),
+        "agentPermissions": project.agent_config.permissions.clone().unwrap_or_else(|| "skip".to_string()),
         "agentModel": project.agent_config.model.clone(),
         "agentReasoningEffort": project.agent_config.reasoning_effort.clone(),
         "workspaceMode": project.workspace.clone().unwrap_or_else(|| "worktree".to_string()),
         "runtimeMode": project.runtime.clone().unwrap_or_else(|| "tmux".to_string()),
         "scmMode": "git",
+        "githubProject": project.github_project.clone(),
         "defaultWorkingDirectory": project.default_working_directory.clone().unwrap_or_default(),
         "defaultBranch": project.default_branch.clone(),
         "devServerScript": project.dev_server_script.join("\n"),
+        "devServerCwd": project.dev_server_cwd.clone().unwrap_or_default(),
+        "devServerUrl": project.dev_server_url.clone().unwrap_or_default(),
+        "devServerPort": project.dev_server_port.map(|value| value.to_string()).unwrap_or_default(),
+        "devServerHost": project.dev_server_host.clone().unwrap_or_default(),
+        "devServerPath": project.dev_server_path.clone().unwrap_or_default(),
+        "devServerHttps": project.dev_server_https,
         "setupScript": project.setup_script.join("\n"),
         "runSetupInParallel": project.run_setup_in_parallel,
         "cleanupScript": project.cleanup_script.join("\n"),

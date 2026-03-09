@@ -151,6 +151,8 @@ export function writeMetadata(
   if (metadata.baseBranch) data["baseBranch"] = metadata.baseBranch;
   if (metadata.prompt) data["prompt"] = metadata.prompt;
   if (metadata.devServerLog) data["devServerLog"] = metadata.devServerLog;
+  if (metadata.devServerUrl) data["devServerUrl"] = metadata.devServerUrl;
+  if (metadata.devServerPort) data["devServerPort"] = metadata.devServerPort;
 
   writeFileSync(path, serializeMetadata(data), "utf-8");
 }

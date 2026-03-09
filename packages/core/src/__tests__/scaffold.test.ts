@@ -47,6 +47,7 @@ test("buildConductorYaml includes organization-friendly access defaults", () => 
   })) as {
     access?: {
       requireAuth?: boolean;
+      allowSignedShareLinks?: boolean;
       defaultRole?: string;
       trustedHeaders?: {
         enabled?: boolean;
@@ -58,6 +59,7 @@ test("buildConductorYaml includes organization-friendly access defaults", () => 
   };
 
   assert.equal(parsed.access?.requireAuth, false);
+  assert.equal(parsed.access?.allowSignedShareLinks, false);
   assert.equal(parsed.access?.defaultRole, "operator");
   assert.equal(parsed.access?.trustedHeaders?.enabled, false);
   assert.equal(parsed.access?.trustedHeaders?.provider, "cloudflare-access");

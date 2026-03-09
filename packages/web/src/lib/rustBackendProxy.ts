@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 
 const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
+const INTERNAL_ACCESS_HEADERS = [
+  "x-conductor-proxy-authorized",
+  "x-conductor-access-authenticated",
+  "x-conductor-access-role",
+  "x-conductor-access-email",
+  "x-conductor-access-provider",
+] as const;
 
 const BLOCKED_REQUEST_HEADERS = new Set<string>([
   "connection",
@@ -14,6 +21,7 @@ const BLOCKED_REQUEST_HEADERS = new Set<string>([
   "trailers",
   "transfer-encoding",
   "accept-encoding",
+  ...INTERNAL_ACCESS_HEADERS,
 ]);
 
 const BLOCKED_RESPONSE_HEADERS = new Set([
@@ -27,6 +35,10 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
 export function hasRustBackend(): boolean {
   return backendUrl.length > 0;
 }
+
+type RustProxyOptions = {
+  headers?: HeadersInit;
+};
 
 function isEventStreamResponse(response: Response): boolean {
   return response.headers.get("content-type")?.toLowerCase().includes("text/event-stream") ?? false;
@@ -88,7 +100,11 @@ function wrapEventStreamBody(body: ReadableStream<Uint8Array> | null): ReadableS
   });
 }
 
-export async function proxyToRust(request: Request, pathname: string): Promise<Response> {
+export async function proxyToRust(
+  request: Request,
+  pathname: string,
+  options: RustProxyOptions = {},
+): Promise<Response> {
   if (!hasRustBackend()) {
     throw new Error("Rust backend URL is not configured");
   }
@@ -103,6 +119,12 @@ export async function proxyToRust(request: Request, pathname: string): Promise<R
       headers.set(key, value);
     }
   });
+  if (options.headers) {
+    const extraHeaders = new Headers(options.headers);
+    extraHeaders.forEach((value, key) => {
+      headers.set(key, value);
+    });
+  }
   headers.set("x-forwarded-proto", incomingUrl.protocol.replace(":", ""));
   headers.set("x-forwarded-host", incomingUrl.host);
 
@@ -135,7 +157,11 @@ export async function proxyToRust(request: Request, pathname: string): Promise<R
   });
 }
 
-export async function proxyToRustOrUnavailable(request: Request, pathname: string): Promise<Response> {
+export async function proxyToRustOrUnavailable(
+  request: Request,
+  pathname: string,
+  options: RustProxyOptions = {},
+): Promise<Response> {
   if (!hasRustBackend()) {
     return NextResponse.json(
       { error: "Rust backend URL is not configured" },
@@ -144,7 +170,7 @@ export async function proxyToRustOrUnavailable(request: Request, pathname: strin
   }
 
   try {
-    return await proxyToRust(request, pathname);
+    return await proxyToRust(request, pathname, options);
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to reach Rust backend" },

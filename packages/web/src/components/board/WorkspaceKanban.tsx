@@ -2,9 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ExternalLink, Loader2, Pencil, Plus, Search } from "lucide-react";
+import {
+  ExternalLink,
+  Loader2,
+  MessageSquare,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+} from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { usePreferences } from "@/hooks/usePreferences";
 import { cn } from "@/lib/cn";
+import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 
 type BoardRole =
   | "intake"
@@ -29,6 +39,12 @@ type BoardTask = {
   priority: string | null;
   taskRef: string | null;
   attemptRef: string | null;
+  issueId: string | null;
+  githubItemId: string | null;
+  attachments: string[];
+  notes: string | null;
+  commentCount: number;
+  comments: BoardComment[];
 };
 
 type BoardColumn = {
@@ -37,13 +53,63 @@ type BoardColumn = {
   tasks: BoardTask[];
 };
 
+type GitHubProjectLink = {
+  id?: string | null;
+  ownerLogin?: string | null;
+  number?: number | null;
+  title?: string | null;
+  url?: string | null;
+  statusFieldId?: string | null;
+  statusFieldName?: string | null;
+};
+
+type BoardActivity = {
+  id: string;
+  source: string;
+  action: string;
+  detail: string;
+  timestamp: string;
+};
+
+type BoardComment = {
+  id: string;
+  taskId: string;
+  author: string;
+  authorEmail?: string | null;
+  provider?: string | null;
+  body: string;
+  timestamp: string;
+};
+
+type WebhookDelivery = {
+  id: string;
+  event: string;
+  action: string;
+  status: string;
+  detail: string;
+  repository?: string | null;
+  timestamp: string;
+};
+
 type BoardResponse = {
   projectId: string;
+  repository?: string | null;
   boardPath: string;
   workspacePath: string;
   columns: BoardColumn[];
   primaryRoles: BoardRole[];
+  githubProject?: GitHubProjectLink | null;
+  recentActions?: BoardActivity[];
+  recentWebhookDeliveries?: WebhookDelivery[];
   watcherHint?: string;
+};
+
+type GitHubProjectsResponse = {
+  projectId: string;
+  repository?: string | null;
+  ownerLogin?: string | null;
+  linkedProject?: GitHubProjectLink | null;
+  projects: GitHubProjectLink[];
 };
 
 type ContextFile = {
@@ -74,6 +140,8 @@ interface WorkspaceKanbanProps {
   agentOptions: string[];
 }
 
+type BoardViewFilter = "active" | "all" | "backlog" | "cancelled";
+
 const ROLE_COLOR: Record<BoardRole, string> = {
   intake: "#3c83f6",
   ready: "#f59f0a",
@@ -103,9 +171,29 @@ const ROLE_LABEL: Record<BoardRole, string> = {
 };
 const ACTIVE_BOARD_REFRESH_MS = 10_000;
 const HIDDEN_BOARD_REFRESH_MS = 30_000;
+const MARKDOWN_EDITOR_LABELS: Record<string, string> = {
+  obsidian: "Obsidian",
+  vscode: "VS Code",
+  notion: "Notion",
+  typora: "Typora",
+  logseq: "Logseq",
+  custom: "your editor",
+};
 
 function toRole(value: string): BoardRole {
-  const roles: BoardRole[] = ["intake", "ready", "dispatching", "inProgress", "needsInput", "blocked", "errored", "review", "merge", "done", "cancelled"];
+  const roles: BoardRole[] = [
+    "intake",
+    "ready",
+    "dispatching",
+    "inProgress",
+    "needsInput",
+    "blocked",
+    "errored",
+    "review",
+    "merge",
+    "done",
+    "cancelled",
+  ];
   return roles.includes(value as BoardRole) ? (value as BoardRole) : "intake";
 }
 
@@ -132,10 +220,53 @@ function formatFileSize(value: number | null | undefined): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function boardsEqual(left: BoardResponse | null, right: BoardResponse): boolean {
+function getMarkdownEditorLabel(editorId: string): string {
+  return MARKDOWN_EDITOR_LABELS[editorId] ?? "your editor";
+}
+
+function getContextOpenLabel(editorId: string): string {
+  if (editorId === "obsidian" || editorId === "vscode" || editorId === "typora" || editorId === "logseq") {
+    return `Open in ${getMarkdownEditorLabel(editorId)}`;
+  }
+  return "Open file";
+}
+
+function ContextAttachmentChip({
+  attachment,
+  onOpen,
+  opening = false,
+}: {
+  attachment: string;
+  onOpen: () => void;
+  opening?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      disabled={opening}
+      className="inline-flex max-w-full items-center gap-1 rounded-[3px] bg-[color:#292929] px-2 py-1 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60"
+      title={attachment}
+      aria-label={`Open ${attachment}`}
+    >
+      {opening ? (
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+      ) : (
+        <ExternalLink className="h-3 w-3 shrink-0" />
+      )}
+      <span className="truncate">{attachment}</span>
+    </button>
+  );
+}
+
+function boardsEqual(
+  left: BoardResponse | null,
+  right: BoardResponse
+): boolean {
   if (!left) return false;
   if (
     left.projectId !== right.projectId ||
+    left.repository !== right.repository ||
     left.boardPath !== right.boardPath ||
     left.workspacePath !== right.workspacePath ||
     left.watcherHint !== right.watcherHint ||
@@ -151,7 +282,11 @@ function boardsEqual(left: BoardResponse | null, right: BoardResponse): boolean 
     }
   }
 
-  for (let columnIndex = 0; columnIndex < left.columns.length; columnIndex += 1) {
+  for (
+    let columnIndex = 0;
+    columnIndex < left.columns.length;
+    columnIndex += 1
+  ) {
     const leftColumn = left.columns[columnIndex];
     const rightColumn = right.columns[columnIndex];
     if (
@@ -162,7 +297,11 @@ function boardsEqual(left: BoardResponse | null, right: BoardResponse): boolean 
       return false;
     }
 
-    for (let taskIndex = 0; taskIndex < leftColumn.tasks.length; taskIndex += 1) {
+    for (
+      let taskIndex = 0;
+      taskIndex < leftColumn.tasks.length;
+      taskIndex += 1
+    ) {
       const leftTask = leftColumn.tasks[taskIndex];
       const rightTask = rightColumn.tasks[taskIndex];
       if (
@@ -174,27 +313,135 @@ function boardsEqual(left: BoardResponse | null, right: BoardResponse): boolean 
         leftTask.type !== rightTask.type ||
         leftTask.priority !== rightTask.priority ||
         leftTask.taskRef !== rightTask.taskRef ||
-        leftTask.attemptRef !== rightTask.attemptRef
+        leftTask.attemptRef !== rightTask.attemptRef ||
+        leftTask.issueId !== rightTask.issueId ||
+        leftTask.githubItemId !== rightTask.githubItemId ||
+        leftTask.notes !== rightTask.notes ||
+        leftTask.commentCount !== rightTask.commentCount ||
+        leftTask.comments.length !== rightTask.comments.length ||
+        leftTask.attachments.length !== rightTask.attachments.length
       ) {
         return false;
       }
+
+      for (
+        let attachmentIndex = 0;
+        attachmentIndex < leftTask.attachments.length;
+        attachmentIndex += 1
+      ) {
+        if (
+          leftTask.attachments[attachmentIndex] !==
+          rightTask.attachments[attachmentIndex]
+        ) {
+          return false;
+        }
+      }
+
+      for (
+        let commentIndex = 0;
+        commentIndex < leftTask.comments.length;
+        commentIndex += 1
+      ) {
+        if (
+          JSON.stringify(leftTask.comments[commentIndex]) !==
+          JSON.stringify(rightTask.comments[commentIndex])
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+
+  const leftGitHubProject = left.githubProject ?? null;
+  const rightGitHubProject = right.githubProject ?? null;
+  if (
+    JSON.stringify(leftGitHubProject) !== JSON.stringify(rightGitHubProject)
+  ) {
+    return false;
+  }
+
+  const leftActions = left.recentActions ?? [];
+  const rightActions = right.recentActions ?? [];
+  if (leftActions.length !== rightActions.length) {
+    return false;
+  }
+  for (let index = 0; index < leftActions.length; index += 1) {
+    if (
+      JSON.stringify(leftActions[index]) !== JSON.stringify(rightActions[index])
+    ) {
+      return false;
+    }
+  }
+
+  const leftDeliveries = left.recentWebhookDeliveries ?? [];
+  const rightDeliveries = right.recentWebhookDeliveries ?? [];
+  if (leftDeliveries.length !== rightDeliveries.length) {
+    return false;
+  }
+  for (let index = 0; index < leftDeliveries.length; index += 1) {
+    if (
+      JSON.stringify(leftDeliveries[index]) !==
+      JSON.stringify(rightDeliveries[index])
+    ) {
+      return false;
     }
   }
 
   return true;
 }
 
+function normalizeBoardResponse(value: BoardResponse): BoardResponse {
+  return {
+    ...value,
+    repository: value.repository ?? null,
+    githubProject: value.githubProject ?? null,
+    recentActions: Array.isArray(value.recentActions)
+      ? value.recentActions
+      : [],
+    recentWebhookDeliveries: Array.isArray(value.recentWebhookDeliveries)
+      ? value.recentWebhookDeliveries
+      : [],
+    columns: Array.isArray(value.columns)
+      ? value.columns.map((column) => ({
+          ...column,
+          tasks: Array.isArray(column.tasks)
+            ? column.tasks.map((task) => ({
+                ...task,
+                issueId: task.issueId ?? null,
+                githubItemId: task.githubItemId ?? null,
+                attachments: Array.isArray(task.attachments)
+                  ? task.attachments
+                  : [],
+                notes: task.notes ?? null,
+                commentCount:
+                  typeof task.commentCount === "number"
+                    ? task.commentCount
+                    : Array.isArray(task.comments)
+                    ? task.comments.length
+                    : 0,
+                comments: Array.isArray(task.comments) ? task.comments : [],
+              }))
+            : [],
+        }))
+      : [],
+  };
+}
+
 function formatLinkedSessionLabel(session: ProjectSession): string {
-  return session.branch?.trim() || session.summary?.trim() || session.id.slice(0, 8);
+  return (
+    session.branch?.trim() || session.summary?.trim() || session.id.slice(0, 8)
+  );
 }
 
 function getTaskLinkKey(task: BoardTask): string {
-  return task.taskRef?.trim() || task.id;
+  return task.issueId?.trim() || task.taskRef?.trim() || task.id;
 }
 
 function getSessionAgent(session: ProjectSession): string | null {
   const candidate = session.metadata?.agent;
-  return typeof candidate === "string" && candidate.trim().length > 0 ? candidate.trim() : null;
+  return typeof candidate === "string" && candidate.trim().length > 0
+    ? candidate.trim()
+    : null;
 }
 
 function formatSessionStatus(status: string): string {
@@ -228,7 +475,83 @@ function sessionStatusPillClass(status: string): string {
   return "border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[var(--vk-text-muted)]";
 }
 
-function compareProjectSessions(left: ProjectSession, right: ProjectSession, primaryId: string | null): number {
+function buildGitHubIssueUrl(
+  repository: string | null | undefined,
+  issueId: string | null | undefined
+): string | null {
+  const normalizedIssue = issueId?.trim();
+  if (!repository || !normalizedIssue || !/^\d+$/.test(normalizedIssue))
+    return null;
+  const normalizedRepo = repository
+    .trim()
+    .replace(/^https?:\/\/github\.com\//, "")
+    .replace(/^git@github\.com:/, "")
+    .replace(/^ssh:\/\/git@github\.com\//, "")
+    .replace(/\.git$/, "")
+    .replace(/\/+$/, "");
+  const [owner, repo] = normalizedRepo.split("/");
+  if (!owner || !repo) return null;
+  return `https://github.com/${owner}/${repo}/issues/${normalizedIssue}`;
+}
+
+function formatGitHubProjectLabel(
+  project: GitHubProjectLink | null | undefined
+): string {
+  if (!project?.id) return "No GitHub Project linked";
+  const number =
+    typeof project.number === "number" ? `#${project.number}` : "Project";
+  return `${number} ${project.title?.trim() || "Untitled"}`.trim();
+}
+
+function formatActivityTime(timestamp: string): string {
+  const parsed = Date.parse(timestamp);
+  if (Number.isNaN(parsed)) return timestamp;
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(parsed));
+}
+
+function formatWebhookStatus(status: string): string {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "synced") return "Synced";
+  if (normalized === "failed") return "Failed";
+  if (normalized === "skipped") return "Skipped";
+  return status;
+}
+
+function webhookStatusClass(status: string): string {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "synced") {
+    return "border-[rgba(84,176,79,0.35)] bg-[rgba(84,176,79,0.12)] text-[var(--vk-green)]";
+  }
+  if (normalized === "failed") {
+    return "border-[rgba(210,81,81,0.35)] bg-[rgba(210,81,81,0.12)] text-[var(--vk-red)]";
+  }
+  return "border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[var(--vk-text-muted)]";
+}
+
+function findBoardTask(
+  board: BoardResponse | null,
+  taskId: string
+): { task: BoardTask; role: BoardRole } | null {
+  if (!board) return null;
+  for (const column of board.columns) {
+    const task = column.tasks.find((item) => item.id === taskId);
+    if (task) {
+      return { task, role: column.role };
+    }
+  }
+  return null;
+}
+
+function compareProjectSessions(
+  left: ProjectSession,
+  right: ProjectSession,
+  primaryId: string | null
+): number {
   if (primaryId) {
     if (left.id === primaryId && right.id !== primaryId) return -1;
     if (right.id === primaryId && left.id !== primaryId) return 1;
@@ -238,12 +561,18 @@ function compareProjectSessions(left: ProjectSession, right: ProjectSession, pri
   return rightTime - leftTime;
 }
 
-export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: WorkspaceKanbanProps) {
+export function WorkspaceKanban({
+  projectId,
+  defaultAgent,
+  agentOptions,
+}: WorkspaceKanbanProps) {
   const router = useRouter();
+  const { preferences } = usePreferences();
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [viewFilter, setViewFilter] = useState<BoardViewFilter>("active");
 
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerRole, setComposerRole] = useState<BoardRole>("intake");
@@ -253,28 +582,51 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
   const [taskType, setTaskType] = useState("feature");
   const [priority, setPriority] = useState("normal");
   const [contextNotes, setContextNotes] = useState("");
-  const [selectedContextPaths, setSelectedContextPaths] = useState<string[]>([]);
+  const [selectedContextPaths, setSelectedContextPaths] = useState<string[]>(
+    []
+  );
   const [contextSearch, setContextSearch] = useState("");
   const [contextFiles, setContextFiles] = useState<ContextFile[]>([]);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
+  const [openingContextPath, setOpeningContextPath] = useState<string | null>(null);
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [projectSessions, setProjectSessions] = useState<ProjectSession[]>([]);
-  const [editingTask, setEditingTask] = useState<{ task: BoardTask; role: BoardRole } | null>(null);
+  const [editingTask, setEditingTask] = useState<{
+    task: BoardTask;
+    role: BoardRole;
+  } | null>(null);
   const [editRole, setEditRole] = useState<BoardRole>("intake");
   const [editTitle, setEditTitle] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editAgent, setEditAgent] = useState(defaultAgent);
   const [editTaskType, setEditTaskType] = useState("feature");
   const [editPriority, setEditPriority] = useState("normal");
+  const [editIssueId, setEditIssueId] = useState("");
+  const [editNotes, setEditNotes] = useState("");
   const [editLinkedSession, setEditLinkedSession] = useState("");
   const [editingBusy, setEditingBusy] = useState(false);
   const [editingError, setEditingError] = useState<string | null>(null);
-  const [draggingTask, setDraggingTask] = useState<{ taskId: string; role: BoardRole } | null>(null);
+  const [commentDraft, setCommentDraft] = useState("");
+  const [commentBusy, setCommentBusy] = useState(false);
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const [draggingTask, setDraggingTask] = useState<{
+    taskId: string;
+    role: BoardRole;
+  } | null>(null);
+  const [projectSyncOpen, setProjectSyncOpen] = useState(false);
+  const [projectSyncLoading, setProjectSyncLoading] = useState(false);
+  const [projectSyncSaving, setProjectSyncSaving] = useState(false);
+  const [projectSyncError, setProjectSyncError] = useState<string | null>(null);
+  const [projectSyncData, setProjectSyncData] =
+    useState<GitHubProjectsResponse | null>(null);
+  const [selectedGitHubProjectId, setSelectedGitHubProjectId] = useState("");
   const hasLoadedBoardRef = useRef(false);
   const boardRequestInFlightRef = useRef(false);
+  const preferredMarkdownEditor = preferences?.markdownEditor?.trim() || "obsidian";
+  const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
 
   const orderedAgentOptions = useMemo(() => {
     const normalized = [...new Set(agentOptions.filter(Boolean))];
@@ -297,30 +649,39 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
   }, [defaultAgent, editAgent, orderedAgentOptions]);
 
   useEffect(() => {
-    if (!composerOpen || !projectId) return;
+    if ((!composerOpen && !editingTask) || !projectId) return;
     let cancelled = false;
 
     const loadContextFiles = async () => {
       setContextLoading(true);
       setContextError(null);
       try {
-        const res = await fetch(`/api/context-files?projectId=${encodeURIComponent(projectId)}`);
+        const res = await fetch(
+          `/api/context-files?projectId=${encodeURIComponent(projectId)}`
+        );
         const payload = (await res.json().catch(() => null)) as
           | ContextFilesResponse
           | { error?: string }
           | null;
         if (!res.ok) {
-          throw new Error((payload as { error?: string } | null)?.error ?? `Failed to load context files: ${res.status}`);
+          throw new Error(
+            (payload as { error?: string } | null)?.error ??
+              `Failed to load context files: ${res.status}`
+          );
         }
         if (cancelled) return;
-        const files = Array.isArray((payload as ContextFilesResponse | null)?.files)
+        const files = Array.isArray(
+          (payload as ContextFilesResponse | null)?.files
+        )
           ? (payload as ContextFilesResponse).files
           : [];
         setContextFiles(files);
       } catch (err) {
         if (cancelled) return;
         setContextFiles([]);
-        setContextError(err instanceof Error ? err.message : "Failed to load context files");
+        setContextError(
+          err instanceof Error ? err.message : "Failed to load context files"
+        );
       } finally {
         if (!cancelled) setContextLoading(false);
       }
@@ -330,7 +691,7 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
     return () => {
       cancelled = true;
     };
-  }, [composerOpen, projectId]);
+  }, [composerOpen, editingTask, projectId]);
 
   useEffect(() => {
     if (!projectId || (!composerOpen && !editingTask)) return;
@@ -338,7 +699,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
     const loadProjectSessions = async () => {
       try {
-        const res = await fetch(`/api/sessions?project=${encodeURIComponent(projectId)}`);
+        const res = await fetch(
+          `/api/sessions?project=${encodeURIComponent(projectId)}`
+        );
         const payload = (await res.json().catch(() => null)) as
           | { sessions?: ProjectSession[] }
           | ProjectSession[]
@@ -350,8 +713,8 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
         const sessions = Array.isArray(payload)
           ? payload
           : Array.isArray(payload?.sessions)
-            ? payload.sessions
-            : [];
+          ? payload.sessions
+          : [];
         setProjectSessions(sessions);
       } catch {
         if (!cancelled) {
@@ -368,58 +731,123 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
   useEffect(() => {
     hasLoadedBoardRef.current = false;
+    setProjectSyncOpen(false);
+    setProjectSyncError(null);
+    setProjectSyncData(null);
+    setSelectedGitHubProjectId("");
   }, [projectId]);
 
-  const loadBoard = useCallback(async (options?: { silent?: boolean }) => {
-    if (!projectId) {
-      setBoard(null);
-      setError(null);
-      setLoading(false);
-      hasLoadedBoardRef.current = false;
-      return;
-    }
-    if (boardRequestInFlightRef.current) {
-      return;
-    }
-
-    boardRequestInFlightRef.current = true;
-
-    if (!options?.silent) {
-      setLoading(true);
-    }
-    try {
-      const res = await fetch(`/api/boards?projectId=${encodeURIComponent(projectId)}`);
-      const data = (await res.json().catch(() => null)) as BoardResponse | { error?: string } | null;
-      if (!res.ok) {
-        throw new Error((data as { error?: string } | null)?.error ?? `Failed to load board: ${res.status}`);
-      }
-
-      const nextBoard = data as BoardResponse;
-      hasLoadedBoardRef.current = true;
-      setBoard((current) => (boardsEqual(current, nextBoard) ? current : nextBoard));
-      setError(null);
-    } catch (err) {
-      if (!options?.silent || !hasLoadedBoardRef.current) {
+  const loadBoard = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!projectId) {
         setBoard(null);
-        setError(err instanceof Error ? err.message : "Failed to load board");
-      }
-    } finally {
-      if (!options?.silent) {
+        setError(null);
         setLoading(false);
+        hasLoadedBoardRef.current = false;
+        return;
       }
-      boardRequestInFlightRef.current = false;
-    }
-  }, [projectId]);
+      if (boardRequestInFlightRef.current) {
+        return;
+      }
+
+      boardRequestInFlightRef.current = true;
+
+      if (!options?.silent) {
+        setLoading(true);
+      }
+      try {
+        const res = await fetch(
+          `/api/boards?projectId=${encodeURIComponent(projectId)}`
+        );
+        const data = (await res.json().catch(() => null)) as
+          | BoardResponse
+          | { error?: string }
+          | null;
+        if (!res.ok) {
+          throw new Error(
+            (data as { error?: string } | null)?.error ??
+              `Failed to load board: ${res.status}`
+          );
+        }
+
+        const nextBoard = normalizeBoardResponse(data as BoardResponse);
+        hasLoadedBoardRef.current = true;
+        setBoard((current) =>
+          boardsEqual(current, nextBoard) ? current : nextBoard
+        );
+        setError(null);
+      } catch (err) {
+        if (!options?.silent || !hasLoadedBoardRef.current) {
+          setBoard(null);
+          setError(err instanceof Error ? err.message : "Failed to load board");
+        }
+      } finally {
+        if (!options?.silent) {
+          setLoading(false);
+        }
+        boardRequestInFlightRef.current = false;
+      }
+    },
+    [projectId]
+  );
 
   useEffect(() => {
     void loadBoard({ silent: false });
   }, [loadBoard]);
 
+  const loadGitHubProjects = useCallback(async () => {
+    if (!projectId) {
+      setProjectSyncData(null);
+      setProjectSyncError(null);
+      return;
+    }
+
+    setProjectSyncLoading(true);
+    setProjectSyncError(null);
+    try {
+      const res = await fetch(
+        `/api/github/projects?projectId=${encodeURIComponent(projectId)}`
+      );
+      const payload = (await res.json().catch(() => null)) as
+        | GitHubProjectsResponse
+        | { error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(
+          (payload as { error?: string } | null)?.error ??
+            `Failed to load GitHub Projects (${res.status})`
+        );
+      }
+
+      const next = {
+        ...(payload as GitHubProjectsResponse),
+        projects: Array.isArray((payload as GitHubProjectsResponse).projects)
+          ? (payload as GitHubProjectsResponse).projects
+          : [],
+      };
+      setProjectSyncData(next);
+      setSelectedGitHubProjectId(
+        next.linkedProject?.id?.trim() || next.projects[0]?.id?.trim() || ""
+      );
+    } catch (err) {
+      setProjectSyncError(
+        err instanceof Error ? err.message : "Failed to load GitHub Projects"
+      );
+      setProjectSyncData(null);
+      setSelectedGitHubProjectId("");
+    } finally {
+      setProjectSyncLoading(false);
+    }
+  }, [projectId]);
+
   useEffect(() => {
     if (!projectId) return;
 
     const refresh = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "hidden"
+      ) {
         return;
       }
       void loadBoard({ silent: true });
@@ -427,9 +855,10 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
     let timeoutId: number | null = null;
     const scheduleRefresh = () => {
-      const delay = document.visibilityState === "visible"
-        ? ACTIVE_BOARD_REFRESH_MS
-        : HIDDEN_BOARD_REFRESH_MS;
+      const delay =
+        document.visibilityState === "visible"
+          ? ACTIVE_BOARD_REFRESH_MS
+          : HIDDEN_BOARD_REFRESH_MS;
       timeoutId = window.setTimeout(() => {
         refresh();
         scheduleRefresh();
@@ -454,41 +883,91 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
     };
   }, [loadBoard, projectId]);
 
+  useEffect(() => {
+    if (!projectId) return;
+    return subscribeToSnapshotEvents(() => {
+      void loadBoard({ silent: true });
+    });
+  }, [loadBoard, projectId]);
+
+  useEffect(() => {
+    if (!projectSyncOpen || !projectId) return;
+    void loadGitHubProjects();
+  }, [loadGitHubProjects, projectId, projectSyncOpen]);
+
   const visibleColumns = useMemo(() => {
     const query = search.trim().toLowerCase();
     const source = board?.columns ?? [];
+    const allowedRoles =
+      viewFilter === "all"
+        ? null
+        : viewFilter === "backlog"
+        ? new Set<BoardRole>(["intake", "ready"])
+        : viewFilter === "cancelled"
+        ? new Set<BoardRole>(["cancelled"])
+        : new Set<BoardRole>([
+            "intake",
+            "ready",
+            "dispatching",
+            "inProgress",
+            "needsInput",
+            "blocked",
+            "errored",
+            "review",
+            "merge",
+          ]);
 
     return source
+      .filter((column) => !allowedRoles || allowedRoles.has(column.role))
       .map((column) => {
         if (!query) return column;
         return {
           ...column,
           tasks: column.tasks.filter((task) => {
-            const haystack = `${task.text} ${task.agent ?? ""} ${task.type ?? ""} ${task.priority ?? ""}`.toLowerCase();
+            const commentText = task.comments
+              .map((comment) => `${comment.author} ${comment.body}`)
+              .join(" ");
+            const haystack = `${task.text} ${task.agent ?? ""} ${
+              task.type ?? ""
+            } ${task.priority ?? ""} ${task.issueId ?? ""} ${
+              task.notes ?? ""
+            } ${task.attachments.join(" ")} ${commentText}`.toLowerCase();
             return haystack.includes(query);
           }),
         };
       });
-  }, [board?.columns, search]);
+  }, [board?.columns, search, viewFilter]);
 
   const filteredContextFiles = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
     if (!query) return contextFiles;
     return contextFiles.filter((file) => {
-      const haystack = `${file.path} ${file.name} ${file.source ?? ""}`.toLowerCase();
+      const haystack = `${file.path} ${file.name} ${
+        file.source ?? ""
+      }`.toLowerCase();
       return haystack.includes(query);
     });
   }, [contextFiles, contextSearch]);
   const editLinkedSessionOptions = useMemo(() => {
     if (!editingTask) return projectSessions;
-    const taskKey = getTaskLinkKey(editingTask.task);
+    const activeTask = findBoardTask(board, editingTask.task.id) ?? editingTask;
+    const taskKey = getTaskLinkKey(activeTask.task);
     return [...projectSessions].sort((left, right) => {
-      const leftRelated = left.id === editingTask.task.attemptRef || left.issueId?.trim() === taskKey;
-      const rightRelated = right.id === editingTask.task.attemptRef || right.issueId?.trim() === taskKey;
+      const leftRelated =
+        left.id === activeTask.task.attemptRef ||
+        left.issueId?.trim() === taskKey;
+      const rightRelated =
+        right.id === activeTask.task.attemptRef ||
+        right.issueId?.trim() === taskKey;
       if (leftRelated !== rightRelated) return leftRelated ? -1 : 1;
-      return compareProjectSessions(left, right, editingTask.task.attemptRef);
+      return compareProjectSessions(left, right, activeTask.task.attemptRef);
     });
-  }, [editingTask, projectSessions]);
+  }, [board, editingTask, projectSessions]);
+
+  const activeEditingTask = useMemo(() => {
+    if (!editingTask) return null;
+    return findBoardTask(board, editingTask.task.id) ?? editingTask;
+  }, [board, editingTask]);
 
   function openComposer(role: BoardRole) {
     setComposerRole(role);
@@ -500,18 +979,79 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
     setUploadFiles([]);
   }
 
+  function clearContextOpenError() {
+    if (editingTask) {
+      setEditingError(null);
+      return;
+    }
+    if (composerOpen) {
+      setSubmitError(null);
+      return;
+    }
+    setError(null);
+  }
+
+  function reportContextOpenError(message: string) {
+    if (editingTask) {
+      setEditingError(message);
+      return;
+    }
+    if (composerOpen) {
+      setSubmitError(message);
+      return;
+    }
+    setError(message);
+  }
+
+  const openContextAttachment = useCallback(
+    async (path: string) => {
+      if (!projectId) return;
+      setOpeningContextPath(path);
+      clearContextOpenError();
+      try {
+        const response = await fetch("/api/context-files/open", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId, path }),
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | { opened?: boolean; error?: string }
+          | null;
+        if (!response.ok) {
+          throw new Error(
+            payload?.error ?? `Failed to open context file: ${response.status}`
+          );
+        }
+      } catch (err) {
+        reportContextOpenError(
+          err instanceof Error ? err.message : "Failed to open context file"
+        );
+      } finally {
+        setOpeningContextPath((current) =>
+          current === path ? null : current
+        );
+      }
+    },
+    [composerOpen, editingTask, projectId]
+  );
+
   function toggleContextPath(path: string) {
-    setSelectedContextPaths((current) => (
+    setSelectedContextPaths((current) =>
       current.includes(path)
         ? current.filter((item) => item !== path)
         : [...current, path]
-    ));
+    );
   }
 
   function removeUploadFile(file: File) {
-    setUploadFiles((current) => current.filter((entry) => (
-      entry.name !== file.name || entry.size !== file.size || entry.lastModified !== file.lastModified
-    )));
+    setUploadFiles((current) =>
+      current.filter(
+        (entry) =>
+          entry.name !== file.name ||
+          entry.size !== file.size ||
+          entry.lastModified !== file.lastModified
+      )
+    );
   }
 
   async function handleCreateTask() {
@@ -531,18 +1071,23 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
           method: "POST",
           body: formData,
         });
-        const uploadPayload = (await uploadRes.json().catch(() => null)) as
-          | { files?: Array<{ path?: string }>; error?: string }
-          | null;
+        const uploadPayload = (await uploadRes.json().catch(() => null)) as {
+          files?: Array<{ path?: string }>;
+          error?: string;
+        } | null;
         if (!uploadRes.ok) {
-          throw new Error(uploadPayload?.error ?? `Upload failed: ${uploadRes.status}`);
+          throw new Error(
+            uploadPayload?.error ?? `Upload failed: ${uploadRes.status}`
+          );
         }
         uploadedPaths = (uploadPayload?.files ?? [])
           .map((entry) => entry.path?.trim())
           .filter((value): value is string => Boolean(value));
       }
 
-      const attachments = [...new Set([...selectedContextPaths, ...uploadedPaths])];
+      const attachments = [
+        ...new Set([...selectedContextPaths, ...uploadedPaths]),
+      ];
       const res = await fetch("/api/boards", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -565,12 +1110,15 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
         | null;
 
       if (!res.ok) {
-        throw new Error((payload as { error?: string } | null)?.error ?? `Failed to create task: ${res.status}`);
+        throw new Error(
+          (payload as { error?: string } | null)?.error ??
+            `Failed to create task: ${res.status}`
+        );
       }
 
       setBoard((current) => {
         if (!payload || !("columns" in payload)) return current;
-        const next = payload as BoardResponse;
+        const next = normalizeBoardResponse(payload as BoardResponse);
         return {
           ...(current ?? next),
           ...next,
@@ -587,7 +1135,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
       setUploadFiles([]);
       setComposerOpen(false);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Failed to create task");
+      setSubmitError(
+        err instanceof Error ? err.message : "Failed to create task"
+      );
     } finally {
       setSubmitting(false);
     }
@@ -599,28 +1149,119 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
     if (!projectId || mutatingRef.current) return;
     mutatingRef.current = true;
     try {
-    const res = await fetch("/api/boards", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        projectId,
-        ...payload,
-      }),
-    });
-    const data = (await res.json().catch(() => null)) as BoardResponse | { error?: string } | null;
-    if (!res.ok) {
-      throw new Error((data as { error?: string } | null)?.error ?? `Failed to update board: ${res.status}`);
-    }
-    const nextBoard = data as BoardResponse;
-    setBoard((current) => (boardsEqual(current, nextBoard) ? current : nextBoard));
-    setError(null);
+      const res = await fetch("/api/boards", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          ...payload,
+        }),
+      });
+      const data = (await res.json().catch(() => null)) as
+        | BoardResponse
+        | { error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(
+          (data as { error?: string } | null)?.error ??
+            `Failed to update board: ${res.status}`
+        );
+      }
+      const nextBoard = normalizeBoardResponse(data as BoardResponse);
+      setBoard((current) =>
+        boardsEqual(current, nextBoard) ? current : nextBoard
+      );
+      setError(null);
     } finally {
       mutatingRef.current = false;
     }
   }
 
+  async function handleSaveGitHubProjectLink(link: GitHubProjectLink | null) {
+    if (!projectId || projectSyncSaving) return;
+    setProjectSyncSaving(true);
+    setProjectSyncError(null);
+    try {
+      const res = await fetch("/api/github/projects", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          link: link?.id ? link : null,
+        }),
+      });
+      const payload = (await res.json().catch(() => null)) as {
+        githubProject?: GitHubProjectLink | null;
+        error?: string;
+      } | null;
+      if (!res.ok) {
+        throw new Error(
+          payload?.error ??
+            `Failed to update GitHub Project link (${res.status})`
+        );
+      }
+
+      setBoard((current) =>
+        current
+          ? { ...current, githubProject: payload?.githubProject ?? null }
+          : current
+      );
+      await loadGitHubProjects();
+    } catch (err) {
+      setProjectSyncError(
+        err instanceof Error
+          ? err.message
+          : "Failed to update GitHub Project link"
+      );
+    } finally {
+      setProjectSyncSaving(false);
+    }
+  }
+
+  async function handleGitHubProjectSync(direction: "pull" | "push") {
+    if (!projectId || projectSyncSaving) return;
+    setProjectSyncSaving(true);
+    setProjectSyncError(null);
+    try {
+      const res = await fetch("/api/github/projects/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, direction }),
+      });
+      const payload = (await res.json().catch(() => null)) as {
+        board?: BoardResponse;
+        error?: string;
+      } | null;
+      if (!res.ok) {
+        throw new Error(
+          payload?.error ??
+            `Failed to ${direction} GitHub Project (${res.status})`
+        );
+      }
+      if (payload?.board) {
+        const nextBoard = normalizeBoardResponse(payload.board);
+        setBoard((current) =>
+          boardsEqual(current, nextBoard) ? current : nextBoard
+        );
+      } else {
+        await loadBoard({ silent: true });
+      }
+      await loadGitHubProjects();
+    } catch (err) {
+      setProjectSyncError(
+        err instanceof Error
+          ? err.message
+          : `Failed to ${direction} GitHub Project`
+      );
+    } finally {
+      setProjectSyncSaving(false);
+    }
+  }
+
   function openEditor(task: BoardTask, role: BoardRole) {
-    const { title: nextTitle, description: nextDescription } = splitTaskText(task.text);
+    const { title: nextTitle, description: nextDescription } = splitTaskText(
+      task.text
+    );
     setEditingTask({ task, role });
     setEditRole(role);
     setEditTitle(nextTitle);
@@ -628,39 +1269,87 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
     setEditAgent(task.agent ?? orderedAgentOptions[0] ?? defaultAgent);
     setEditTaskType(task.type ?? "feature");
     setEditPriority(task.priority ?? "normal");
+    setEditIssueId(task.issueId ?? "");
+    setEditNotes(task.notes ?? "");
     setEditLinkedSession(task.attemptRef ?? "");
     setEditingError(null);
+    setCommentDraft("");
+    setCommentError(null);
   }
 
   function closeEditor() {
-    if (editingBusy) return;
+    if (editingBusy || commentBusy) return;
     setEditingTask(null);
     setEditingError(null);
+    setCommentDraft("");
+    setCommentError(null);
   }
 
   async function handleSaveEdit() {
-    if (!editingTask || !editTitle.trim()) return;
+    if (!activeEditingTask || !editTitle.trim()) return;
     setEditingBusy(true);
     setEditingError(null);
     try {
       await handleBoardMutation({
-        taskId: editingTask.task.id,
+        taskId: activeEditingTask.task.id,
         role: editRole,
         title: editTitle.trim(),
         description: editDescription,
+        contextNotes: editNotes.trim() || "",
+        issueId: editIssueId.trim() || "",
         agent: editAgent,
         type: editTaskType,
         priority: editPriority,
         attemptRef: editLinkedSession,
         taskRef: editLinkedSession
-          ? (editingTask.task.taskRef ?? editingTask.task.id)
-          : (editingTask.task.taskRef ?? ""),
+          ? activeEditingTask.task.taskRef ?? activeEditingTask.task.id
+          : activeEditingTask.task.taskRef ?? "",
       });
       setEditingTask(null);
     } catch (err) {
-      setEditingError(err instanceof Error ? err.message : "Failed to update task");
+      setEditingError(
+        err instanceof Error ? err.message : "Failed to update task"
+      );
     } finally {
       setEditingBusy(false);
+    }
+  }
+
+  async function handleAddComment() {
+    if (!projectId || !activeEditingTask || !commentDraft.trim()) return;
+    setCommentBusy(true);
+    setCommentError(null);
+    try {
+      const res = await fetch("/api/boards/comments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          taskId: activeEditingTask.task.id,
+          body: commentDraft.trim(),
+        }),
+      });
+      const payload = (await res.json().catch(() => null)) as
+        | BoardResponse
+        | { error?: string }
+        | null;
+      if (!res.ok) {
+        throw new Error(
+          (payload as { error?: string } | null)?.error ??
+            `Failed to add comment: ${res.status}`
+        );
+      }
+      const nextBoard = normalizeBoardResponse(payload as BoardResponse);
+      setBoard((current) =>
+        boardsEqual(current, nextBoard) ? current : nextBoard
+      );
+      setCommentDraft("");
+    } catch (err) {
+      setCommentError(
+        err instanceof Error ? err.message : "Failed to add comment"
+      );
+    } finally {
+      setCommentBusy(false);
     }
   }
 
@@ -677,10 +1366,28 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
       <header className="border-b border-[var(--vk-border)] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] p-px">
-            <span className="rounded-[2px] bg-[var(--vk-bg-active)] px-3 py-1 text-[13px] text-[var(--vk-text-strong)]">Active</span>
-            <span className="px-3 py-1 text-[13px] text-[var(--vk-text-muted)]">All</span>
-            <span className="px-3 py-1 text-[13px] text-[var(--vk-text-muted)]">Backlog</span>
-            <span className="px-3 py-1 text-[13px] text-[var(--vk-text-muted)]">Cancelled</span>
+            {(
+              [
+                ["active", "Active"],
+                ["all", "All"],
+                ["backlog", "Backlog"],
+                ["cancelled", "Cancelled"],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setViewFilter(value)}
+                className={cn(
+                  "px-3 py-1 text-[13px]",
+                  viewFilter === value
+                    ? "rounded-[2px] bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                )}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
           <div className="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:min-w-[220px] sm:flex-nowrap sm:flex-none">
@@ -705,8 +1412,231 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
           </div>
         </div>
 
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setProjectSyncOpen((current) => !current)}
+            className="inline-flex h-[31px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+          >
+            <span>GitHub Project</span>
+            <span className="text-[var(--vk-text-muted)]">
+              {board?.githubProject?.id
+                ? formatGitHubProjectLabel(board.githubProject)
+                : "Connect"}
+            </span>
+          </button>
+
+          {board?.githubProject?.url ? (
+            <a
+              href={board.githubProject.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-[31px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+            >
+              <span>Open Project</span>
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          ) : null}
+        </div>
+
+        {projectSyncOpen && (
+          <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="min-w-0 flex-1">
+                <span className="mb-1 block text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                  Linked project
+                </span>
+                <select
+                  value={selectedGitHubProjectId}
+                  onChange={(event) =>
+                    setSelectedGitHubProjectId(event.target.value)
+                  }
+                  disabled={projectSyncLoading || projectSyncSaving}
+                  className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                >
+                  <option value="">
+                    {projectSyncLoading
+                      ? "Loading GitHub Projects..."
+                      : "Select a GitHub Project"}
+                  </option>
+                  {(projectSyncData?.projects ?? []).map((project) => (
+                    <option
+                      key={project.id ?? "unknown"}
+                      value={project.id ?? ""}
+                    >
+                      {formatGitHubProjectLabel(project)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <button
+                type="button"
+                disabled={
+                  !selectedGitHubProjectId ||
+                  projectSyncLoading ||
+                  projectSyncSaving
+                }
+                onClick={() => {
+                  const project =
+                    projectSyncData?.projects.find(
+                      (item) => item.id === selectedGitHubProjectId
+                    ) ?? null;
+                  void handleSaveGitHubProjectLink(project);
+                }}
+                className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+              >
+                {projectSyncSaving ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  "Connect"
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={!board?.githubProject?.id || projectSyncSaving}
+                onClick={() => void handleSaveGitHubProjectLink(null)}
+                className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+              >
+                Disconnect
+              </button>
+
+              <button
+                type="button"
+                disabled={!board?.githubProject?.id || projectSyncSaving}
+                onClick={() => void handleGitHubProjectSync("pull")}
+                className="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+              >
+                {projectSyncSaving ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-4 w-4" />
+                )}
+                Pull
+              </button>
+
+              <button
+                type="button"
+                disabled={!board?.githubProject?.id || projectSyncSaving}
+                onClick={() => void handleGitHubProjectSync("push")}
+                className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+              >
+                Push
+              </button>
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-[12px] text-[var(--vk-text-muted)]">
+              <span>
+                Repository:{" "}
+                {board?.repository?.trim() ||
+                  projectSyncData?.repository?.trim() ||
+                  "Not configured"}
+              </span>
+              {projectSyncData?.ownerLogin ? (
+                <span>Owner: {projectSyncData.ownerLogin}</span>
+              ) : null}
+            </div>
+
+            {projectSyncError && (
+              <p className="mt-2 text-[12px] text-[var(--vk-red)]">
+                {projectSyncError}
+              </p>
+            )}
+
+            {(board?.recentWebhookDeliveries?.length ?? 0) > 0 && (
+              <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                    Webhook diagnostics
+                  </h3>
+                  <span className="text-[11px] text-[var(--vk-text-muted)]">
+                    {(board?.recentWebhookDeliveries ?? []).length}
+                  </span>
+                </div>
+
+                <div className="space-y-2">
+                  {(board?.recentWebhookDeliveries ?? [])
+                    .slice(0, 6)
+                    .map((delivery) => (
+                      <div
+                        key={delivery.id}
+                        className="rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span
+                            className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${webhookStatusClass(
+                              delivery.status
+                            )}`}
+                          >
+                            {formatWebhookStatus(delivery.status)}
+                          </span>
+                          <span className="text-[12px] text-[var(--vk-text-normal)]">
+                            {delivery.event}
+                            {delivery.action ? ` / ${delivery.action}` : ""}
+                          </span>
+                          <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">
+                            {formatActivityTime(delivery.timestamp)}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                          {delivery.detail}
+                        </p>
+                        {delivery.repository ? (
+                          <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
+                            Repo: {delivery.repository}
+                          </p>
+                        ) : null}
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {board?.watcherHint && (
-          <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">{board.watcherHint}</p>
+          <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">
+            {board.watcherHint}
+          </p>
+        )}
+
+        {(board?.recentActions?.length ?? 0) > 0 && (
+          <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h3 className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                Recent activity
+              </h3>
+              <span className="text-[11px] text-[var(--vk-text-muted)]">
+                {(board?.recentActions ?? []).length}
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              {(board?.recentActions ?? []).slice(0, 6).map((activity) => (
+                <div
+                  key={activity.id}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]"
+                >
+                  <span className="rounded-[3px] bg-[color:#292929] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
+                    {activity.source}
+                  </span>
+                  <span className="text-[var(--vk-text-normal)]">
+                    {activity.action}
+                  </span>
+                  <span
+                    className="min-w-0 flex-1 truncate text-[var(--vk-text-muted)]"
+                    title={activity.detail}
+                  >
+                    {activity.detail}
+                  </span>
+                  <span className="text-[11px] text-[var(--vk-text-muted)]">
+                    {formatActivityTime(activity.timestamp)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </header>
 
@@ -723,18 +1653,27 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
         ) : (
           <div
             className="flex min-w-0 flex-col gap-3 rounded-[4px] border border-[var(--vk-border)] lg:grid lg:gap-0"
-            style={{ gridTemplateColumns: `repeat(${Math.max(visibleColumns.length, 1)}, minmax(240px, 1fr))` }}
+            style={{
+              gridTemplateColumns: `repeat(${Math.max(
+                visibleColumns.length,
+                1
+              )}, minmax(240px, 1fr))`,
+            }}
           >
             {visibleColumns.map((column, columnIndex) => (
               <article
                 key={column.role}
                 className={cn(
                   "flex min-h-[320px] flex-col border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] lg:min-h-[540px] lg:border-b-0 lg:border-r",
-                  columnIndex === visibleColumns.length - 1 && "border-b-0 lg:border-r-0",
+                  columnIndex === visibleColumns.length - 1 &&
+                    "border-b-0 lg:border-r-0"
                 )}
               >
                 <header className="flex h-[41px] items-center border-b border-[var(--vk-border)] px-2">
-                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: ROLE_COLOR[column.role] }} />
+                  <span
+                    className="h-2 w-2 rounded-full"
+                    style={{ backgroundColor: ROLE_COLOR[column.role] }}
+                  />
                   <span className="ml-2 text-[14px] text-[var(--vk-text-normal)]">
                     {column.heading || ROLE_LABEL[column.role]}
                   </span>
@@ -751,7 +1690,8 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 <div
                   className={cn(
                     "flex-1 space-y-2 overflow-y-auto p-2",
-                    draggingTask?.role === column.role && "bg-[rgba(255,255,255,0.02)]",
+                    draggingTask?.role === column.role &&
+                      "bg-[rgba(255,255,255,0.02)]"
                   )}
                   onDragOver={(event) => {
                     if (!draggingTask) return;
@@ -759,12 +1699,17 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                   }}
                   onDrop={(event) => {
                     event.preventDefault();
-                    if (!draggingTask || draggingTask.role === column.role) return;
+                    if (!draggingTask || draggingTask.role === column.role)
+                      return;
                     void handleBoardMutation({
                       taskId: draggingTask.taskId,
                       role: column.role,
                     }).catch((err) => {
-                      setError(err instanceof Error ? err.message : "Failed to move task");
+                      setError(
+                        err instanceof Error
+                          ? err.message
+                          : "Failed to move task"
+                      );
                     });
                     setDraggingTask(null);
                   }}
@@ -775,35 +1720,63 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                     </div>
                   )}
 
-                  {column.tasks.slice(0, 50).map((task) => {
-                    const { title: taskTitle, description: taskDescription } = splitTaskText(task.text);
+                  {column.tasks.map((task) => {
+                    const { title: taskTitle, description: taskDescription } =
+                      splitTaskText(task.text);
                     const taskLinkKey = getTaskLinkKey(task);
+                    const issueUrl = buildGitHubIssueUrl(
+                      board?.repository,
+                      task.issueId
+                    );
                     const linkedSessions = projectSessions
-                      .filter((session) => session.id === task.attemptRef || session.issueId?.trim() === taskLinkKey)
-                      .sort((left, right) => compareProjectSessions(left, right, task.attemptRef ?? null));
+                      .filter(
+                        (session) =>
+                          session.id === task.attemptRef ||
+                          session.issueId?.trim() === taskLinkKey
+                      )
+                      .sort((left, right) =>
+                        compareProjectSessions(
+                          left,
+                          right,
+                          task.attemptRef ?? null
+                        )
+                      );
                     const primaryLinkedSession = task.attemptRef
-                      ? linkedSessions.find((session) => session.id === task.attemptRef) ?? null
-                      : (linkedSessions[0] ?? null);
-                    const unresolvedPrimaryLink = task.attemptRef
-                      && !linkedSessions.some((session) => session.id === task.attemptRef)
-                      ? task.attemptRef
-                      : null;
+                      ? linkedSessions.find(
+                          (session) => session.id === task.attemptRef
+                        ) ?? null
+                      : linkedSessions[0] ?? null;
+                    const unresolvedPrimaryLink =
+                      task.attemptRef &&
+                      !linkedSessions.some(
+                        (session) => session.id === task.attemptRef
+                      )
+                        ? task.attemptRef
+                        : null;
                     return (
                       <div
                         key={`${column.role}-${task.id}`}
                         draggable
-                        onDragStart={() => setDraggingTask({ taskId: task.id, role: column.role })}
+                        onDragStart={() =>
+                          setDraggingTask({
+                            taskId: task.id,
+                            role: column.role,
+                          })
+                        }
                         onDragEnd={() => setDraggingTask(null)}
                         className={cn(
                           "rounded-[3px] border border-[var(--vk-border)] bg-[color:#212121] p-2",
-                          draggingTask?.taskId === task.id && "opacity-60",
+                          draggingTask?.taskId === task.id && "opacity-60"
                         )}
                       >
                         <div className="flex items-start gap-2">
                           <p className="min-w-0 flex-1 font-mono text-[12px] text-[var(--vk-text-muted)]">
-                            {task.taskRef?.trim()
-                              || (task.id.length > 12
-                                ? `TASK-${task.id.split("-")[0]?.toUpperCase() ?? task.id.toUpperCase()}`
+                            {task.taskRef?.trim() ||
+                              (task.id.length > 12
+                                ? `TASK-${
+                                    task.id.split("-")[0]?.toUpperCase() ??
+                                    task.id.toUpperCase()
+                                  }`
                                 : task.id)}
                           </p>
                           <button
@@ -816,19 +1789,71 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                             <Pencil className="h-3.5 w-3.5" />
                           </button>
                         </div>
-                        <p className="pt-1 text-[15px] leading-[22px] text-[var(--vk-text-normal)]">{taskTitle}</p>
+                        <p className="pt-1 text-[15px] leading-[22px] text-[var(--vk-text-normal)]">
+                          {taskTitle}
+                        </p>
                         {taskDescription && (
-                          <p className="pt-1 text-[13px] leading-[20px] text-[var(--vk-text-muted)]">{taskDescription}</p>
+                          <p className="pt-1 text-[13px] leading-[20px] text-[var(--vk-text-muted)]">
+                            {taskDescription}
+                          </p>
+                        )}
+                        {task.notes && (
+                          <p className="pt-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+                            {task.notes}
+                          </p>
                         )}
 
-                        {(linkedSessions.length > 0 || unresolvedPrimaryLink) && (
+                        {task.commentCount > 0 && (
+                          <div className="mt-2 flex items-center gap-1 text-[11px] text-[var(--vk-text-muted)]">
+                            <MessageSquare className="h-3.5 w-3.5" />
+                            <span>
+                              {task.commentCount} comment
+                              {task.commentCount === 1 ? "" : "s"}
+                            </span>
+                          </div>
+                        )}
+
+                        {(task.issueId || task.attachments.length > 0) && (
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            {task.issueId ? (
+                              issueUrl ? (
+                                <a
+                                  href={issueUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="inline-flex h-5 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                                >
+                                  <span>Issue #{task.issueId}</span>
+                                  <ExternalLink className="h-3 w-3" />
+                                </a>
+                              ) : (
+                                <span className="inline-flex h-5 items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                                  Issue {task.issueId}
+                                </span>
+                              )
+                            ) : null}
+
+                            {task.attachments.map((attachment) => (
+                              <ContextAttachmentChip
+                                key={`${task.id}-${attachment}`}
+                                attachment={attachment}
+                                opening={openingContextPath === attachment}
+                                onOpen={() => void openContextAttachment(attachment)}
+                              />
+                            ))}
+                          </div>
+                        )}
+
+                        {(linkedSessions.length > 0 ||
+                          unresolvedPrimaryLink) && (
                           <div className="mt-3 rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2">
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
                                 Runs
                               </span>
                               <span className="text-[11px] text-[var(--vk-text-muted)]">
-                                {linkedSessions.length + (unresolvedPrimaryLink ? 1 : 0)}
+                                {linkedSessions.length +
+                                  (unresolvedPrimaryLink ? 1 : 0)}
                               </span>
                             </div>
 
@@ -836,17 +1861,32 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                               {primaryLinkedSession ? (
                                 <button
                                   type="button"
-                                  onClick={() => router.push(`/sessions/${encodeURIComponent(primaryLinkedSession.id)}?tab=chat`)}
+                                  onClick={() =>
+                                    router.push(
+                                      `/sessions/${encodeURIComponent(
+                                        primaryLinkedSession.id
+                                      )}?tab=chat`
+                                    )
+                                  }
                                   className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                   title={primaryLinkedSession.id}
                                 >
                                   <div className="flex min-w-0 items-center gap-2">
                                     {getSessionAgent(primaryLinkedSession) ? (
-                                      <AgentTileIcon seed={{ label: getSessionAgent(primaryLinkedSession) as string }} className="h-5 w-5" />
+                                      <AgentTileIcon
+                                        seed={{
+                                          label: getSessionAgent(
+                                            primaryLinkedSession
+                                          ) as string,
+                                        }}
+                                        className="h-5 w-5"
+                                      />
                                     ) : null}
                                     <div className="min-w-0">
                                       <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
-                                        {formatLinkedSessionLabel(primaryLinkedSession)}
+                                        {formatLinkedSessionLabel(
+                                          primaryLinkedSession
+                                        )}
                                       </div>
                                       <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
                                         Primary run
@@ -854,8 +1894,14 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                                     </div>
                                   </div>
                                   <div className="flex shrink-0 items-center gap-2">
-                                    <span className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(primaryLinkedSession.status)}`}>
-                                      {formatSessionStatus(primaryLinkedSession.status)}
+                                    <span
+                                      className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
+                                        primaryLinkedSession.status
+                                      )}`}
+                                    >
+                                      {formatSessionStatus(
+                                        primaryLinkedSession.status
+                                      )}
                                     </span>
                                     <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
                                   </div>
@@ -863,25 +1909,45 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                               ) : null}
 
                               {linkedSessions
-                                .filter((session) => session.id !== primaryLinkedSession?.id)
+                                .filter(
+                                  (session) =>
+                                    session.id !== primaryLinkedSession?.id
+                                )
                                 .map((session) => (
                                   <button
                                     key={session.id}
                                     type="button"
-                                    onClick={() => router.push(`/sessions/${encodeURIComponent(session.id)}?tab=chat`)}
+                                    onClick={() =>
+                                      router.push(
+                                        `/sessions/${encodeURIComponent(
+                                          session.id
+                                        )}?tab=chat`
+                                      )
+                                    }
                                     className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                     title={session.id}
                                   >
                                     <div className="flex min-w-0 items-center gap-2">
                                       {getSessionAgent(session) ? (
-                                        <AgentTileIcon seed={{ label: getSessionAgent(session) as string }} className="h-5 w-5" />
+                                        <AgentTileIcon
+                                          seed={{
+                                            label: getSessionAgent(
+                                              session
+                                            ) as string,
+                                          }}
+                                          className="h-5 w-5"
+                                        />
                                       ) : null}
                                       <span className="truncate text-[12px] text-[var(--vk-text-normal)]">
                                         {formatLinkedSessionLabel(session)}
                                       </span>
                                     </div>
                                     <div className="flex shrink-0 items-center gap-2">
-                                      <span className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(session.status)}`}>
+                                      <span
+                                        className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
+                                          session.status
+                                        )}`}
+                                      >
                                         {formatSessionStatus(session.status)}
                                       </span>
                                       <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
@@ -892,13 +1958,23 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                               {unresolvedPrimaryLink ? (
                                 <button
                                   type="button"
-                                  onClick={() => router.push(`/sessions/${encodeURIComponent(unresolvedPrimaryLink)}?tab=chat`)}
+                                  onClick={() =>
+                                    router.push(
+                                      `/sessions/${encodeURIComponent(
+                                        unresolvedPrimaryLink
+                                      )}?tab=chat`
+                                    )
+                                  }
                                   className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                   title={unresolvedPrimaryLink}
                                 >
                                   <div className="min-w-0">
-                                    <div className="truncate text-[12px] text-[var(--vk-text-normal)]">{unresolvedPrimaryLink}</div>
-                                    <div className="truncate text-[11px] text-[var(--vk-text-muted)]">Primary run</div>
+                                    <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
+                                      {unresolvedPrimaryLink}
+                                    </div>
+                                    <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
+                                      Primary run
+                                    </div>
                                   </div>
                                   <ExternalLink className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
                                 </button>
@@ -911,11 +1987,18 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                           <div className="flex min-w-0 items-center gap-1.5">
                             {task.agent ? (
                               <>
-                                <AgentTileIcon seed={{ label: task.agent }} className="h-6 w-6" />
-                                <span className="truncate text-[12px] text-[var(--vk-text-muted)]">{formatAgentLabel(task.agent)}</span>
+                                <AgentTileIcon
+                                  seed={{ label: task.agent }}
+                                  className="h-6 w-6"
+                                />
+                                <span className="truncate text-[12px] text-[var(--vk-text-muted)]">
+                                  {formatAgentLabel(task.agent)}
+                                </span>
                               </>
                             ) : (
-                              <span className="text-[12px] text-[var(--vk-text-muted)]">No agent</span>
+                              <span className="text-[12px] text-[var(--vk-text-muted)]">
+                                No agent
+                              </span>
                             )}
                           </div>
 
@@ -935,11 +2018,6 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                       </div>
                     );
                   })}
-                  {column.tasks.length > 50 && (
-                    <div className="rounded-[3px] border border-dashed border-[var(--vk-border)] px-2 py-2 text-center text-[12px] text-[var(--vk-text-muted)]">
-                      +{column.tasks.length - 50} more tasks
-                    </div>
-                  )}
                 </div>
               </article>
             ))}
@@ -947,8 +2025,11 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
         )}
       </div>
 
-      {editingTask && (
-        <div className="fixed inset-0 z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0" onClick={closeEditor}>
+      {activeEditingTask && (
+        <div
+          className="fixed inset-0 z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0"
+          onClick={closeEditor}
+        >
           <div
             className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[560px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]"
             onClick={(event) => event.stopPropagation()}
@@ -956,7 +2037,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
             aria-modal="true"
           >
             <header className="border-b border-[var(--vk-border)] px-4 py-3">
-              <h2 className="text-[18px] text-[var(--vk-text-strong)]">Edit Board Task</h2>
+              <h2 className="text-[18px] text-[var(--vk-text-strong)]">
+                Edit Board Task
+              </h2>
               <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">
                 Move the card, update the task, and link the latest session run.
               </p>
@@ -964,7 +2047,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
               <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Title</span>
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  Title
+                </span>
                 <input
                   value={editTitle}
                   onChange={(event) => setEditTitle(event.target.value)}
@@ -973,7 +2058,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               </label>
 
               <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Description</span>
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  Description
+                </span>
                 <textarea
                   value={editDescription}
                   onChange={(event) => setEditDescription(event.target.value)}
@@ -984,14 +2071,22 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Column</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Column
+                  </span>
                   <select
                     value={editRole}
-                    onChange={(event) => setEditRole(toRole(event.target.value))}
+                    onChange={(event) =>
+                      setEditRole(toRole(event.target.value))
+                    }
                     className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                   >
                     {board?.columns.map((column) => (
-                      <option key={column.role} value={column.role} className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">
+                      <option
+                        key={column.role}
+                        value={column.role}
+                        className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
+                      >
                         {column.heading || ROLE_LABEL[column.role]}
                       </option>
                     ))}
@@ -999,14 +2094,20 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 </label>
 
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Agent</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Agent
+                  </span>
                   <select
                     value={editAgent}
                     onChange={(event) => setEditAgent(event.target.value)}
                     className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                   >
                     {orderedAgentOptions.map((item) => (
-                      <option key={item} value={item} className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">
+                      <option
+                        key={item}
+                        value={item}
+                        className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
+                      >
                         {formatAgentLabel(item)}
                       </option>
                     ))}
@@ -1016,7 +2117,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Type</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Type
+                  </span>
                   <input
                     value={editTaskType}
                     onChange={(event) => setEditTaskType(event.target.value)}
@@ -1025,7 +2128,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 </label>
 
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Priority</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Priority
+                  </span>
                   <input
                     value={editPriority}
                     onChange={(event) => setEditPriority(event.target.value)}
@@ -1035,15 +2140,141 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               </div>
 
               <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Primary linked run</span>
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  GitHub issue id (optional)
+                </span>
+                <input
+                  value={editIssueId}
+                  onChange={(event) => setEditIssueId(event.target.value)}
+                  placeholder="123"
+                  className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  Notes
+                </span>
+                <textarea
+                  value={editNotes}
+                  onChange={(event) => setEditNotes(event.target.value)}
+                  rows={3}
+                  className="w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                />
+              </label>
+
+              {activeEditingTask.task.attachments.length > 0 && (
+                <div>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Attachments
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {activeEditingTask.task.attachments.map((attachment) => (
+                      <ContextAttachmentChip
+                        key={attachment}
+                        attachment={attachment}
+                        opening={openingContextPath === attachment}
+                        onOpen={() => void openContextAttachment(attachment)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <span className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                    Comments
+                  </span>
+                  <span className="text-[11px] text-[var(--vk-text-muted)]">
+                    {activeEditingTask.task.commentCount}
+                  </span>
+                </div>
+
+                <div className="space-y-2">
+                  {activeEditingTask.task.comments.length > 0 ? (
+                    activeEditingTask.task.comments.map((comment) => (
+                      <div
+                        key={comment.id}
+                        className="rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-3 py-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[12px] text-[var(--vk-text-normal)]">
+                            {comment.author}
+                          </span>
+                          <span className="text-[11px] text-[var(--vk-text-muted)]">
+                            {formatActivityTime(comment.timestamp)}
+                          </span>
+                        </div>
+                        <p className="pt-1 whitespace-pre-wrap text-[13px] leading-[20px] text-[var(--vk-text-muted)]">
+                          {comment.body}
+                        </p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-[12px] text-[var(--vk-text-muted)]">
+                      No comments yet.
+                    </p>
+                  )}
+                </div>
+
+                <label className="mt-3 block">
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Add comment
+                  </span>
+                  <textarea
+                    value={commentDraft}
+                    onChange={(event) => setCommentDraft(event.target.value)}
+                    rows={3}
+                    placeholder="Share status, request input, or leave implementation notes."
+                    className="w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                  />
+                </label>
+
+                {commentError && (
+                  <p className="mt-2 text-[12px] text-[var(--vk-red)]">
+                    {commentError}
+                  </p>
+                )}
+
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => void handleAddComment()}
+                    disabled={!commentDraft.trim() || commentBusy}
+                    className="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                  >
+                    {commentBusy ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <MessageSquare className="h-4 w-4" />
+                    )}
+                    Post comment
+                  </button>
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  Primary linked run
+                </span>
                 <select
                   value={editLinkedSession}
                   onChange={(event) => setEditLinkedSession(event.target.value)}
                   className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                 >
-                  <option value="" className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">No linked session</option>
+                  <option
+                    value=""
+                    className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
+                  >
+                    No linked session
+                  </option>
                   {editLinkedSessionOptions.map((session) => (
-                    <option key={session.id} value={session.id} className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">
+                    <option
+                      key={session.id}
+                      value={session.id}
+                      className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
+                    >
                       {formatLinkedSessionLabel(session)} · {session.status}
                     </option>
                   ))}
@@ -1051,7 +2282,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               </label>
 
               {editingError && (
-                <p className="text-[12px] text-[var(--vk-red)]">{editingError}</p>
+                <p className="text-[12px] text-[var(--vk-red)]">
+                  {editingError}
+                </p>
               )}
             </div>
 
@@ -1059,7 +2292,7 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               <button
                 type="button"
                 onClick={closeEditor}
-                disabled={editingBusy}
+                disabled={editingBusy || commentBusy}
                 className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
               >
                 Cancel
@@ -1070,7 +2303,11 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 disabled={!editTitle.trim() || editingBusy}
                 className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
               >
-                {editingBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save Task"}
+                {editingBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  "Save Task"
+                )}
               </button>
             </footer>
           </div>
@@ -1078,7 +2315,10 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
       )}
 
       {composerOpen && (
-        <div className="fixed inset-0 z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0" onClick={() => !submitting && setComposerOpen(false)}>
+        <div
+          className="fixed inset-0 z-[75] flex items-start justify-center overflow-y-auto bg-black/60 px-3 py-3 sm:items-center sm:py-0"
+          onClick={() => !submitting && setComposerOpen(false)}
+        >
           <div
             className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[560px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]"
             onClick={(event) => event.stopPropagation()}
@@ -1086,15 +2326,20 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
             aria-modal="true"
           >
             <header className="border-b border-[var(--vk-border)] px-4 py-3">
-              <h2 className="text-[18px] text-[var(--vk-text-strong)]">Create Board Task</h2>
+              <h2 className="text-[18px] text-[var(--vk-text-strong)]">
+                Create Board Task
+              </h2>
               <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">
-                Add a task card with project and agent tags for Obsidian + conductor watcher.
+                Add a task card with project and agent tags for Obsidian +
+                conductor watcher.
               </p>
             </header>
 
             <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
               <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Title</span>
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  Title
+                </span>
                 <input
                   value={title}
                   onChange={(event) => setTitle(event.target.value)}
@@ -1104,7 +2349,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               </label>
 
               <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Description (optional)</span>
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  Description (optional)
+                </span>
                 <textarea
                   value={description}
                   onChange={(event) => setDescription(event.target.value)}
@@ -1115,7 +2362,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               </label>
 
               <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Context notes (optional)</span>
+                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                  Context notes (optional)
+                </span>
                 <textarea
                   value={contextNotes}
                   onChange={(event) => setContextNotes(event.target.value)}
@@ -1127,14 +2376,20 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Agent</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Agent
+                  </span>
                   <select
                     value={agent}
                     onChange={(event) => setAgent(event.target.value)}
                     className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                   >
                     {orderedAgentOptions.map((item) => (
-                      <option key={item} value={item} className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">
+                      <option
+                        key={item}
+                        value={item}
+                        className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
+                      >
                         {formatAgentLabel(item)}
                       </option>
                     ))}
@@ -1142,14 +2397,22 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 </label>
 
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Column</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Column
+                  </span>
                   <select
                     value={composerRole}
-                    onChange={(event) => setComposerRole(toRole(event.target.value))}
+                    onChange={(event) =>
+                      setComposerRole(toRole(event.target.value))
+                    }
                     className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                   >
                     {visibleColumns.map((column) => (
-                      <option key={column.role} value={column.role} className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]">
+                      <option
+                        key={column.role}
+                        value={column.role}
+                        className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
+                      >
                         {column.heading || ROLE_LABEL[column.role]}
                       </option>
                     ))}
@@ -1159,7 +2422,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Type</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Type
+                  </span>
                   <input
                     value={taskType}
                     onChange={(event) => setTaskType(event.target.value)}
@@ -1169,7 +2434,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 </label>
 
                 <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Priority</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Priority
+                  </span>
                   <input
                     value={priority}
                     onChange={(event) => setPriority(event.target.value)}
@@ -1181,10 +2448,14 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
 
               <div className="rounded-[4px] border border-[var(--vk-border)] p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[12px] text-[var(--vk-text-muted)]">Context attachments</p>
+                  <p className="text-[12px] text-[var(--vk-text-muted)]">
+                    Context attachments
+                  </p>
                   <p className="text-[12px] text-[var(--vk-text-muted)]">
                     {selectedContextPaths.length} selected
-                    {uploadFiles.length > 0 ? ` · ${uploadFiles.length} upload(s)` : ""}
+                    {uploadFiles.length > 0
+                      ? ` · ${uploadFiles.length} upload(s)`
+                      : ""}
                   </p>
                 </div>
 
@@ -1200,11 +2471,12 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                         setUploadFiles((current) => {
                           const merged = [...current];
                           for (const file of next) {
-                            const exists = merged.some((entry) => (
-                              entry.name === file.name
-                              && entry.size === file.size
-                              && entry.lastModified === file.lastModified
-                            ));
+                            const exists = merged.some(
+                              (entry) =>
+                                entry.name === file.name &&
+                                entry.size === file.size &&
+                                entry.lastModified === file.lastModified
+                            );
                             if (!exists) merged.push(file);
                           }
                           return merged;
@@ -1226,7 +2498,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                         className="inline-flex items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-hover)] px-2 py-1 text-[11px] text-[var(--vk-text-normal)]"
                         title="Remove upload"
                       >
-                        <span className="truncate max-w-[220px]">{file.name}</span>
+                        <span className="truncate max-w-[220px]">
+                          {file.name}
+                        </span>
                         <span className="text-[var(--vk-text-muted)]">×</span>
                       </button>
                     ))}
@@ -1234,7 +2508,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 )}
 
                 <label className="mt-3 block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">Select existing context</span>
+                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
+                    Select existing context
+                  </span>
                   <input
                     value={contextSearch}
                     onChange={(event) => setContextSearch(event.target.value)}
@@ -1250,33 +2526,62 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                       <span>Loading context files...</span>
                     </div>
                   ) : contextError ? (
-                    <p className="px-2 py-2 text-[12px] text-[var(--vk-red)]">{contextError}</p>
+                    <p className="px-2 py-2 text-[12px] text-[var(--vk-red)]">
+                      {contextError}
+                    </p>
                   ) : filteredContextFiles.length === 0 ? (
-                    <p className="px-2 py-2 text-[12px] text-[var(--vk-text-muted)]">No context files found.</p>
+                    <p className="px-2 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                      No context files found.
+                    </p>
                   ) : (
                     <ul className="divide-y divide-[var(--vk-border)]">
                       {filteredContextFiles.map((file) => {
-                        const checked = selectedContextPaths.includes(file.path);
+                        const checked = selectedContextPaths.includes(
+                          file.path
+                        );
                         return (
                           <li key={file.path} className="px-2 py-1.5">
-                            <label className="flex cursor-pointer items-start gap-2 text-[12px] text-[var(--vk-text-normal)]">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => toggleContextPath(file.path)}
-                                className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--vk-border)] bg-transparent"
-                              />
-                              <span className="min-w-0">
-                                <span className="block truncate">
-                                  {file.path}
+                            <div className="flex items-start gap-2">
+                              <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 text-[12px] text-[var(--vk-text-normal)]">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleContextPath(file.path)}
+                                  className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--vk-border)] bg-transparent"
+                                />
+                                <span className="min-w-0">
+                                  <span className="block truncate">
+                                    {file.path}
+                                  </span>
+                                  <span className="block text-[11px] text-[var(--vk-text-muted)]">
+                                    {file.kind}
+                                    {file.source ? ` · ${file.source}` : ""}
+                                    {file.sizeBytes
+                                      ? ` · ${formatFileSize(file.sizeBytes)}`
+                                      : ""}
+                                  </span>
                                 </span>
-                                <span className="block text-[11px] text-[var(--vk-text-muted)]">
-                                  {file.kind}
-                                  {file.source ? ` · ${file.source}` : ""}
-                                  {file.sizeBytes ? ` · ${formatFileSize(file.sizeBytes)}` : ""}
+                              </label>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void openContextAttachment(file.path)
+                                }
+                                disabled={openingContextPath === file.path}
+                                className="inline-flex h-7 shrink-0 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60"
+                                title={`${contextOpenLabel}: ${file.path}`}
+                                aria-label={`${contextOpenLabel}: ${file.path}`}
+                              >
+                                {openingContextPath === file.path ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <ExternalLink className="h-3 w-3" />
+                                )}
+                                <span className="hidden sm:inline">
+                                  {contextOpenLabel}
                                 </span>
-                              </span>
-                            </label>
+                              </button>
+                            </div>
                           </li>
                         );
                       })}
@@ -1286,7 +2591,9 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
               </div>
 
               {submitError && (
-                <p className="text-[12px] text-[var(--vk-red)]">{submitError}</p>
+                <p className="text-[12px] text-[var(--vk-red)]">
+                  {submitError}
+                </p>
               )}
             </div>
 
@@ -1305,7 +2612,11 @@ export function WorkspaceKanban({ projectId, defaultAgent, agentOptions }: Works
                 disabled={!title.trim() || submitting}
                 className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
               >
-                {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Create Task"}
+                {submitting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  "Create Task"
+                )}
               </button>
             </footer>
           </div>

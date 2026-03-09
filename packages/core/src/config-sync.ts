@@ -72,6 +72,28 @@ function buildProjectScaffoldFromConfig(
     runtime: project.runtime ?? null,
     scm: project.scm?.plugin ?? null,
     boardDir: project.boardDir ?? null,
+    githubProject: project.githubProject
+      ? {
+          id: project.githubProject.id ?? null,
+          ownerLogin: project.githubProject.ownerLogin ?? null,
+          number: project.githubProject.number ?? null,
+          title: project.githubProject.title ?? null,
+          url: project.githubProject.url ?? null,
+          statusFieldId: project.githubProject.statusFieldId ?? null,
+          statusFieldName: project.githubProject.statusFieldName ?? null,
+        }
+      : null,
+    devServer: project.devServer
+      ? {
+          command: project.devServer.command ?? null,
+          cwd: project.devServer.cwd ?? null,
+          url: project.devServer.url ?? null,
+          port: project.devServer.port ?? null,
+          host: project.devServer.host ?? null,
+          path: project.devServer.path ?? null,
+          https: project.devServer.https ?? null,
+        }
+      : null,
     agentModel: project.agentConfig?.model ?? null,
     agentReasoningEffort: project.agentConfig?.reasoningEffort ?? null,
     agentPermissions: project.agentConfig?.permissions ?? "skip",
@@ -91,9 +113,8 @@ function buildExpectedYaml(
       onboardingAcknowledged: preferences.onboardingAcknowledged,
       codingAgent: preferences.codingAgent,
       ide: preferences.ide,
-      remoteSshHost: preferences.remoteSshHost,
-      remoteSshUser: preferences.remoteSshUser,
       markdownEditor: preferences.markdownEditor,
+      markdownEditorPath: preferences.markdownEditorPath,
       modelAccess: preferences.modelAccess ?? getDefaultModelAccessPreferences(),
       notifications: preferences.notifications,
     },

@@ -14,6 +14,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  ArrowRightLeft,
   BrainCircuit,
   ChevronDown,
   ChevronRight,
@@ -35,9 +36,22 @@ import {
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { useAgents } from "@/hooks/useAgents";
 import { useSessionFeed } from "@/hooks/useSessionFeed";
-import type { NormalizedChatEntry } from "@/lib/chatFeed";
+import { normalizeChatText, type NormalizedChatEntry } from "@/lib/chatFeed";
 import { normalizeAgentName } from "@/lib/agentUtils";
-import { getAvailableAgentModels, resolveAgentModelAccess } from "@conductor-oss/core/types";
+import {
+  formatCurrentModelLabel,
+  getAllStaticModelOptions,
+} from "@/lib/sessionModelCatalog";
+import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
+import { SessionRuntimeStatusBar } from "./SessionRuntimeStatusBar";
+import {
+  getAgentModelCatalog,
+  getAvailableAgentModels,
+  getAvailableAgentReasoningEfforts,
+  type AgentModelOption,
+  type AgentReasoningOption,
+  type ModelAccessPreferences,
+} from "@conductor-oss/core/types";
 
 interface ChatPanelProps {
   sessionId: string;
@@ -92,45 +106,25 @@ const COMMON_SLASH_COMMANDS: SlashCommandOption[] = [
   },
 ];
 
-function formatCurrentModelLabel(agentName: string, modelId: string): string {
-  const normalizedModel = modelId.trim();
-  const normalizedAgent = normalizeAgentName(agentName);
-  if (!normalizedModel) return normalizedModel;
+function findRuntimeCatalog(
+  agents: ReturnType<typeof useAgents>["agents"],
+  agentName: string,
+): RuntimeAgentModelCatalog | null {
+  const normalizedAgentName = normalizeAgentName(agentName);
+  if (!normalizedAgentName) return null;
 
-  if (normalizedAgent === "claude-code") {
-    const lower = normalizedModel.toLowerCase();
-    if (lower === "opus") return "Claude Opus";
-    if (lower === "sonnet") return "Claude Sonnet";
-    if (lower === "haiku") return "Claude Haiku";
-    const match = lower.match(/^claude-(sonnet|opus|haiku)-(\d+)-(\d+)(?:-\d{8})?$/);
-    if (match) {
-      const family = match[1];
-      return `Claude ${family[0]?.toUpperCase() + family.slice(1)} ${match[2]}.${match[3]}`;
-    }
-  }
-
-  return normalizedModel
-    .split(/[-_]+/g)
-    .filter(Boolean)
-    .map((segment) => {
-      const lower = segment.toLowerCase();
-      if (lower === "gpt") return "GPT";
-      if (/^\d+(?:\.\d+)?$/.test(segment)) return segment;
-      return segment[0]?.toUpperCase() + segment.slice(1);
-    })
-    .join("-");
+  return agents.find((agent) => normalizeAgentName(agent.name) === normalizedAgentName)?.runtimeModelCatalog ?? null;
 }
 
+
 function getModelOptions(
-  agents: ReturnType<typeof useAgents>["agents"],
+  runtimeCatalog: RuntimeAgentModelCatalog | null,
   agentName: string,
   currentModel: string,
 ): ModelOption[] {
   const options = new Map<string, ModelOption>();
-  const normalizedAgentName = normalizeAgentName(agentName);
 
-  const fallbackModels = getAvailableAgentModels(agentName, undefined);
-  for (const model of fallbackModels) {
+  for (const model of getAllStaticModelOptions(agentName)) {
     const id = model.id.trim();
     if (!id || options.has(id)) continue;
     options.set(id, {
@@ -140,25 +134,17 @@ function getModelOptions(
     });
   }
 
-  for (const agent of agents) {
-    if (normalizedAgentName && normalizeAgentName(agent.name) !== normalizedAgentName) {
-      continue;
-    }
-    const catalog = agent.runtimeModelCatalog;
-    if (!catalog) continue;
-
-    const modelsByAccess = catalog.modelsByAccess;
-    if (!modelsByAccess) continue;
-
-    for (const modelList of Object.values(modelsByAccess)) {
-      if (!Array.isArray(modelList)) continue;
-      for (const model of modelList) {
-        const id = typeof model.id === "string" ? model.id.trim() : "";
-        if (!id || options.has(id)) continue;
-        const label = typeof model.label === "string" && model.label.trim().length > 0 ? model.label.trim() : id;
-        const helper = typeof agent.name === "string" && agent.name.trim().length > 0 ? agent.name.trim() : "Runtime catalog";
-        options.set(id, { id, label, helper });
-      }
+  for (const modelList of Object.values(runtimeCatalog?.modelsByAccess ?? {})) {
+    if (!Array.isArray(modelList)) continue;
+    for (const model of modelList) {
+      const id = typeof model.id === "string" ? model.id.trim() : "";
+      if (!id || options.has(id)) continue;
+      const label = typeof model.label === "string" && model.label.trim().length > 0 ? model.label.trim() : id;
+      options.set(id, {
+        id,
+        label,
+        helper: "Detected locally",
+      });
     }
   }
 
@@ -171,6 +157,101 @@ function getModelOptions(
   }
 
   return [...options.values()].sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function getReasoningOptions(
+  agentName: string,
+  runtimeCatalog: RuntimeAgentModelCatalog | null,
+  model: string,
+): AgentReasoningOption[] {
+  const normalizedModel = model.trim();
+  const options = new Map<string, AgentReasoningOption>();
+
+  const push = (candidate: AgentReasoningOption | null | undefined) => {
+    if (!candidate?.id || options.has(candidate.id)) return;
+    options.set(candidate.id, candidate);
+  };
+
+  if (normalizedModel) {
+    for (const option of runtimeCatalog?.reasoningOptionsByModel?.[normalizedModel] ?? []) {
+      push(option);
+    }
+  }
+
+  for (const group of Object.values(runtimeCatalog?.reasoningOptionsByAccess ?? {})) {
+    if (!Array.isArray(group)) continue;
+    for (const option of group) {
+      push(option);
+    }
+  }
+
+  const catalog = getAgentModelCatalog(agentName);
+  if (catalog) {
+    for (const accessOption of catalog.accessOptions) {
+      const preferences = { [catalog.accessKey]: accessOption.id } as ModelAccessPreferences;
+      for (const option of getAvailableAgentReasoningEfforts(agentName, preferences)) {
+        push(option);
+      }
+    }
+  } else {
+    for (const option of getAvailableAgentReasoningEfforts(agentName, undefined)) {
+      push(option);
+    }
+  }
+
+  return [...options.values()];
+}
+
+function formatReasoningLabel(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return "Session default";
+  if (normalized === "xhigh") return "Extra High";
+  return normalized
+    .split(/[_\s-]+/g)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function getDefaultReasoningSelection(
+  agentName: string,
+  runtimeCatalog: RuntimeAgentModelCatalog | null,
+  model: string,
+  sessionReasoningEffort: string,
+): string {
+  const options = getReasoningOptions(agentName, runtimeCatalog, model);
+  const normalizedSession = sessionReasoningEffort.trim().toLowerCase();
+  if (normalizedSession && options.some((option) => option.id === normalizedSession)) {
+    return normalizedSession;
+  }
+
+  const normalizedModel = model.trim();
+  const runtimeDefault = normalizedModel
+    ? runtimeCatalog?.defaultReasoningByModel?.[normalizedModel] ?? null
+    : null;
+  const normalizedRuntimeDefault = runtimeDefault?.trim().toLowerCase() ?? "";
+  if (normalizedRuntimeDefault && options.some((option) => option.id === normalizedRuntimeDefault)) {
+    return normalizedRuntimeDefault;
+  }
+
+  for (const candidate of Object.values(runtimeCatalog?.defaultReasoningByAccess ?? {})) {
+    const normalizedCandidate = candidate?.trim().toLowerCase() ?? "";
+    if (normalizedCandidate && options.some((option) => option.id === normalizedCandidate)) {
+      return normalizedCandidate;
+    }
+  }
+
+  return options[0]?.id ?? "";
+}
+
+function getCustomModelPlaceholder(
+  agentName: string,
+  runtimeCatalog: RuntimeAgentModelCatalog | null,
+): string {
+  const runtimePlaceholder = runtimeCatalog?.customModelPlaceholder?.trim();
+  if (runtimePlaceholder) return runtimePlaceholder;
+  const label = getAgentModelCatalog(agentName)?.label ?? "agent";
+  return `Enter exact ${label} model id`;
 }
 
 function getSlashCommandOptions(agentName: string, message: string): SlashCommandOption[] {
@@ -610,13 +691,16 @@ function OutlineSummaryBlock({ sections }: { sections: ParsedOutlineSection[] })
 function extractToolContent(entry: NormalizedChatEntry): string[] {
   const raw = entry.metadata?.toolContent;
   if (Array.isArray(raw)) {
-    return raw.filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    return raw
+      .map((value) => typeof value === "string" ? normalizeChatText(value) : "")
+      .filter((value): value is string => value.trim().length > 0);
   }
-  return entry.text.trim().length > 0 ? [entry.text.trim()] : [];
+  const normalized = normalizeChatText(entry.text);
+  return normalized.trim().length > 0 ? [normalized.trim()] : [];
 }
 
 function getToolInlineSummary(entry: NormalizedChatEntry, content: string[]): string | null {
-  const title = typeof entry.metadata?.toolTitle === "string" ? entry.metadata.toolTitle.trim() : "";
+  const title = typeof entry.metadata?.toolTitle === "string" ? normalizeChatText(entry.metadata.toolTitle).trim() : "";
   const first = content[0]?.trim() ?? "";
   if (!first) return null;
   if (title && first.toLowerCase() === title.toLowerCase()) {
@@ -836,8 +920,8 @@ function ToolEntry({ entry }: { entry: NormalizedChatEntry }) {
   const content = extractToolContent(entry);
   const inlineSummary = getToolInlineSummary(entry, content);
   const toolTitle = typeof entry.metadata?.toolTitle === "string" && entry.metadata.toolTitle.trim().length > 0
-    ? entry.metadata.toolTitle.trim()
-    : entry.text.trim() || "Tool call";
+    ? normalizeChatText(entry.metadata.toolTitle).trim()
+    : normalizeChatText(entry.text).trim() || "Tool call";
   const toolStatus = typeof entry.metadata?.toolStatus === "string" ? entry.metadata.toolStatus : null;
   const statusTone = getToolStatusTone(toolStatus);
   const Icon = getToolIcon(entry);
@@ -1027,7 +1111,127 @@ function AssistantEntry({
   );
 }
 
-function SystemEntry({ entry }: { entry: NormalizedChatEntry }) {
+function asOptionalMetadataText(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function extractSessionPreferenceUpdate(entry: NormalizedChatEntry) {
+  const eventType = asOptionalMetadataText(entry.metadata?.eventType);
+  if (eventType !== "session_preferences_updated" && entry.source !== "session_preferences") {
+    return null;
+  }
+
+  const previousModel = asOptionalMetadataText(entry.metadata?.previousModel);
+  const nextModel = asOptionalMetadataText(entry.metadata?.model);
+  const previousReasoningEffort = asOptionalMetadataText(entry.metadata?.previousReasoningEffort);
+  const nextReasoningEffort = asOptionalMetadataText(entry.metadata?.reasoningEffort);
+  const modelChanged = typeof entry.metadata?.modelChanged === "boolean"
+    ? entry.metadata.modelChanged
+    : Boolean(nextModel && nextModel !== previousModel);
+  const reasoningChanged = typeof entry.metadata?.reasoningChanged === "boolean"
+    ? entry.metadata.reasoningChanged
+    : Boolean(nextReasoningEffort && nextReasoningEffort !== previousReasoningEffort);
+
+  if (!modelChanged && !reasoningChanged) {
+    return null;
+  }
+
+  return {
+    previousModel,
+    nextModel,
+    previousReasoningEffort,
+    nextReasoningEffort,
+    modelChanged,
+    reasoningChanged,
+  };
+}
+
+function ModelEventChip({
+  agentName,
+  model,
+  tone,
+}: {
+  agentName: string;
+  model: string | null;
+  tone: "muted" | "accent";
+}) {
+  const palette = tone === "accent"
+    ? "border-[#5a452f] bg-[rgba(234,122,42,0.08)] text-[#f2c79f]"
+    : "border-[#384244] bg-[rgba(255,255,255,0.04)] text-[#d6d6d6]";
+
+  return (
+    <span className={`inline-flex items-center gap-2 rounded-full border px-2 py-1 text-[12px] leading-[18px] ${palette}`}>
+      <span>{model ? formatCurrentModelLabel(agentName, model) : "Session default"}</span>
+    </span>
+  );
+}
+
+function SessionPreferenceEntry({
+  entry,
+  agentName,
+}: {
+  entry: NormalizedChatEntry;
+  agentName: string;
+}) {
+  const update = extractSessionPreferenceUpdate(entry);
+  const timestamp = formatTimestamp(entry.createdAt);
+
+  if (!update) {
+    return null;
+  }
+
+  const heading = update.modelChanged
+    ? "Model switched"
+    : "Reasoning updated";
+
+  return (
+    <div className="rounded-[3px] border border-[#5a452f] bg-[rgba(234,122,42,0.08)] px-3 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center gap-2 text-[12px] font-medium uppercase tracking-[0.18em] text-[#f2c79f]">
+          <ArrowRightLeft className="h-[14px] w-[14px]" strokeWidth={1.8} />
+          {heading}
+        </span>
+        {timestamp ? (
+          <span className="text-[12px] leading-[18px] text-[#b38358]">{timestamp}</span>
+        ) : null}
+      </div>
+
+      <div className="mt-3 space-y-3">
+        {update.modelChanged ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <ModelEventChip agentName={agentName} model={update.previousModel} tone="muted" />
+            <ChevronRight className="h-[14px] w-[14px] text-[#b38358]" strokeWidth={1.8} />
+            <ModelEventChip agentName={agentName} model={update.nextModel} tone="accent" />
+          </div>
+        ) : null}
+        {update.reasoningChanged ? (
+          <div className="flex flex-wrap items-center gap-2 text-[12px] leading-[18px] text-[#efd8c1]">
+            <span className="rounded-full border border-[#384244] bg-[rgba(255,255,255,0.04)] px-2 py-1">
+              {formatReasoningLabel(update.previousReasoningEffort ?? "")}
+            </span>
+            <ChevronRight className="h-[14px] w-[14px] text-[#b38358]" strokeWidth={1.8} />
+            <span className="rounded-full border border-[#5a452f] bg-[rgba(234,122,42,0.08)] px-2 py-1 text-[#f2c79f]">
+              {formatReasoningLabel(update.nextReasoningEffort ?? "")}
+            </span>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function SystemEntry({
+  entry,
+  agentName,
+}: {
+  entry: NormalizedChatEntry;
+  agentName: string;
+}) {
+  const preferenceEntry = extractSessionPreferenceUpdate(entry);
+  if (preferenceEntry) {
+    return <SessionPreferenceEntry entry={entry} agentName={agentName} />;
+  }
+
   return (
     <div className="rounded-[3px] border border-[#315434] bg-[rgba(84,176,79,0.08)] px-3 py-2">
       <p className="text-[12px] uppercase tracking-[0.18em] text-[#8bc886]">System</p>
@@ -1055,7 +1259,7 @@ function FeedEntry({
     case "tool":
       return <ToolEntry entry={entry} />;
     case "system":
-      return <SystemEntry entry={entry} />;
+      return <SystemEntry entry={entry} agentName={agentName} />;
     default:
       return <StatusEntry entry={entry} />;
   }
@@ -1102,6 +1306,23 @@ async function uploadAttachments(files: File[]): Promise<string[]> {
   return uploadedPaths.filter(Boolean);
 }
 
+async function postSessionTerminalKeys(
+  sessionId: string,
+  body: { keys?: string; special?: string },
+): Promise<void> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const data = (await response.json().catch(() => null)) as { error?: string } | null;
+  if (!response.ok) {
+    throw new Error(data?.error ?? `Failed to send terminal input: ${response.status}`);
+  }
+}
+
 export function ChatPanel({
   sessionId,
   agentName,
@@ -1110,48 +1331,110 @@ export function ChatPanel({
   sessionReasoningEffort,
 }: ChatPanelProps) {
   const { agents } = useAgents();
-  const { entries, error, loading, parserState, sessionStatus, refresh } = useSessionFeed(sessionId);
+  const { entries, error, loading, parserState, runtimeStatus, sessionStatus, refresh } = useSessionFeed(sessionId);
 
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [reasoningMenuOpen, setReasoningMenuOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState(sessionModel?.trim() || "");
+  const [customModelInput, setCustomModelInput] = useState("");
+  const [selectedReasoning, setSelectedReasoning] = useState(sessionReasoningEffort?.trim().toLowerCase() || "");
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
   const [selectedSlashIndex, setSelectedSlashIndex] = useState(0);
 
   const endRef = useRef<HTMLDivElement | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const reasoningMenuRef = useRef<HTMLDivElement | null>(null);
+  const shouldStickToBottomRef = useRef(true);
   const normalizedAgentName = agentName?.trim() || "";
   const normalizedSessionStatus = sessionStatus?.trim().toLowerCase() ?? "";
+  const runtimeCatalog = useMemo(
+    () => findRuntimeCatalog(agents, normalizedAgentName),
+    [agents, normalizedAgentName],
+  );
   const modelOptions = useMemo(
-    () => getModelOptions(agents, normalizedAgentName, sessionModel?.trim() || ""),
-    [agents, normalizedAgentName, sessionModel],
+    () => getModelOptions(runtimeCatalog, normalizedAgentName, sessionModel?.trim() || ""),
+    [runtimeCatalog, normalizedAgentName, sessionModel],
   );
   const router = useRouter();
+  const modelPlaceholder = useMemo(
+    () => getCustomModelPlaceholder(normalizedAgentName, runtimeCatalog),
+    [normalizedAgentName, runtimeCatalog],
+  );
+  const resolvedModelValue = selectedModel.trim();
+  const reasoningOptions = useMemo(
+    () => getReasoningOptions(
+      normalizedAgentName,
+      runtimeCatalog,
+      resolvedModelValue || sessionModel?.trim() || "",
+    ),
+    [normalizedAgentName, runtimeCatalog, resolvedModelValue, sessionModel],
+  );
+  const defaultReasoningSelection = useMemo(
+    () => getDefaultReasoningSelection(
+      normalizedAgentName,
+      runtimeCatalog,
+      resolvedModelValue || sessionModel?.trim() || "",
+      sessionReasoningEffort?.trim() || "",
+    ),
+    [normalizedAgentName, runtimeCatalog, resolvedModelValue, sessionModel, sessionReasoningEffort],
+  );
 
   useEffect(() => {
     setSelectedModel(sessionModel?.trim() || "");
+    setCustomModelInput(sessionModel?.trim() || "");
   }, [sessionModel]);
+
+  useEffect(() => {
+    setSelectedReasoning(sessionReasoningEffort?.trim().toLowerCase() || "");
+  }, [sessionReasoningEffort]);
+
+  useEffect(() => {
+    if (!selectedModel.trim()) {
+      setCustomModelInput("");
+      return;
+    }
+    if (modelOptions.some((option) => option.id === selectedModel.trim())) {
+      setCustomModelInput("");
+      return;
+    }
+    setCustomModelInput(selectedModel.trim());
+  }, [modelOptions, selectedModel]);
+
+  useEffect(() => {
+    if (!selectedReasoning) {
+      return;
+    }
+    if (reasoningOptions.some((option) => option.id === selectedReasoning)) {
+      return;
+    }
+    setSelectedReasoning(defaultReasoningSelection || "");
+  }, [defaultReasoningSelection, reasoningOptions, selectedReasoning]);
 
   // Clear transient error state when the session changes.
   useEffect(() => {
     setSendError(null);
   }, [sessionId]);
 
-  // Close model menu on click outside.
+  // Close model/reasoning menus on click outside.
   useEffect(() => {
-    if (!modelMenuOpen) return;
+    if (!modelMenuOpen && !reasoningMenuOpen) return;
     function onClickOutside(event: globalThis.MouseEvent) {
       if (modelMenuRef.current && !modelMenuRef.current.contains(event.target as Node)) {
         setModelMenuOpen(false);
       }
+      if (reasoningMenuRef.current && !reasoningMenuRef.current.contains(event.target as Node)) {
+        setReasoningMenuOpen(false);
+      }
     }
     document.addEventListener("mousedown", onClickOutside);
     return () => document.removeEventListener("mousedown", onClickOutside);
-  }, [modelMenuOpen]);
+  }, [modelMenuOpen, reasoningMenuOpen]);
 
   const displayEntries = useMemo(
     () => {
@@ -1165,6 +1448,10 @@ export function ChatPanel({
 
   const hasStreamingEntry = displayEntries.some((entry) => entry.streaming);
   const isSessionRunning = normalizedSessionStatus === "running" || normalizedSessionStatus === "working" || hasStreamingEntry;
+  const hasLiveTerminalSession = normalizedSessionStatus === "running"
+    || normalizedSessionStatus === "working"
+    || normalizedSessionStatus === "needs_input"
+    || normalizedSessionStatus === "stuck";
   const composerSummary = useMemo(
     () => extractComposerSummary(displayEntries),
     [displayEntries],
@@ -1179,15 +1466,42 @@ export function ChatPanel({
     [displayEntries],
   );
 
+  const updateBottomStickiness = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      shouldStickToBottomRef.current = true;
+      return;
+    }
+
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    shouldStickToBottomRef.current = distanceFromBottom <= 80;
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior) => {
+    shouldStickToBottomRef.current = true;
+    if (typeof window === "undefined") {
+      endRef.current?.scrollIntoView({ behavior, block: "end" });
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      endRef.current?.scrollIntoView({ behavior, block: "end" });
+    });
+  }, []);
+
+  useEffect(() => {
+    shouldStickToBottomRef.current = true;
+  }, [sessionId]);
+
   const prevEntryCountRef = useRef(0);
   useEffect(() => {
     const count = displayEntries.length;
-    // Only auto-scroll when entries are added or while streaming — not on every poll.
-    if (count !== prevEntryCountRef.current || hasStreamingEntry || sending) {
-      endRef.current?.scrollIntoView({ behavior: hasStreamingEntry ? "auto" : "smooth", block: "end" });
+    const countChanged = count !== prevEntryCountRef.current;
+    if ((countChanged || hasStreamingEntry || sending) && shouldStickToBottomRef.current) {
+      scrollToBottom(hasStreamingEntry ? "auto" : "smooth");
     }
     prevEntryCountRef.current = count;
-  }, [displayEntries, hasStreamingEntry, sending]);
+  }, [displayEntries, hasStreamingEntry, scrollToBottom, sending]);
 
   useEffect(() => {
     if (!showSlashCommandMenu) {
@@ -1198,18 +1512,33 @@ export function ChatPanel({
   }, [showSlashCommandMenu, slashCommandOptions.length]);
 
   const selectedModelLabel = useMemo(() => {
-    if (!selectedModel) return "Latest";
+    if (!selectedModel) {
+      return sessionModel?.trim()
+        ? formatCurrentModelLabel(normalizedAgentName, sessionModel)
+        : "Session default";
+    }
     return modelOptions.find((option) => option.id === selectedModel)?.label ?? selectedModel;
-  }, [modelOptions, selectedModel]);
+  }, [modelOptions, normalizedAgentName, selectedModel, sessionModel]);
+  const selectedReasoningLabel = useMemo(() => {
+    if (!selectedReasoning) {
+      return sessionReasoningEffort?.trim()
+        ? formatReasoningLabel(sessionReasoningEffort)
+        : defaultReasoningSelection
+          ? formatReasoningLabel(defaultReasoningSelection)
+          : "Reasoning";
+    }
+    return reasoningOptions.find((option) => option.id === selectedReasoning)?.label
+      ?? formatReasoningLabel(selectedReasoning);
+  }, [defaultReasoningSelection, reasoningOptions, selectedReasoning, sessionReasoningEffort]);
 
   const handleInterrupt = useCallback(async () => {
-    if (!isSessionRunning || interrupting) return;
+    if (!hasLiveTerminalSession || interrupting) return;
 
     setInterrupting(true);
     setSendError(null);
 
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/kill`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/interrupt`, {
         method: "POST",
       });
 
@@ -1218,22 +1547,34 @@ export function ChatPanel({
         | null;
 
       if (!response.ok) {
-        throw new Error(data?.error ?? `Failed to stop agent: ${response.status}`);
+        throw new Error(data?.error ?? `Failed to interrupt agent: ${response.status}`);
       }
-
-      await refresh();
     } catch (err) {
-      setSendError(err instanceof Error ? err.message : "Failed to stop agent");
+      setSendError(err instanceof Error ? err.message : "Failed to interrupt agent");
     } finally {
       setInterrupting(false);
     }
-  }, [isSessionRunning, interrupting, sessionId, refresh]);
+  }, [hasLiveTerminalSession, interrupting, sessionId]);
+
+  const handleSendTerminalSpecial = useCallback(async (special: string) => {
+    if (!hasLiveTerminalSession) return;
+
+    shouldStickToBottomRef.current = true;
+    setSendError(null);
+
+    try {
+      await postSessionTerminalKeys(sessionId, { special });
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : "Failed to send terminal input");
+    }
+  }, [hasLiveTerminalSession, sessionId]);
 
   const handleSend = useCallback(async () => {
     if (isSessionRunning || interrupting) return;
     const trimmedMessage = message.trim();
     if (!trimmedMessage && attachments.length === 0) return;
 
+    shouldStickToBottomRef.current = true;
     setSending(true);
     setSendError(null);
 
@@ -1249,7 +1590,7 @@ export function ChatPanel({
           message: trimmedMessage,
           attachments: attachmentPaths,
           model: selectedModel || null,
-          reasoningEffort: sessionReasoningEffort || null,
+          reasoningEffort: selectedReasoning || null,
           projectId: projectId || null,
         }),
       });
@@ -1274,7 +1615,7 @@ export function ChatPanel({
     } finally {
       setSending(false);
     }
-  }, [isSessionRunning, interrupting, message, attachments, sessionId, selectedModel, sessionReasoningEffort, projectId, router, refresh]);
+  }, [isSessionRunning, interrupting, message, attachments, sessionId, selectedModel, selectedReasoning, projectId, router, refresh]);
 
   function applySlashCommand(option: SlashCommandOption) {
     setMessage(option.command);
@@ -1282,6 +1623,10 @@ export function ChatPanel({
   }
 
   function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    const composerEmpty = message.length === 0 && attachments.length === 0;
+    const shouldPassthroughSpecial =
+      hasLiveTerminalSession && composerEmpty && !showSlashCommandMenu;
+
     if (showSlashCommandMenu && event.key === "ArrowDown") {
       event.preventDefault();
       setSelectedSlashIndex((current) => (
@@ -1298,9 +1643,22 @@ export function ChatPanel({
       return;
     }
 
-    if (event.key === "Escape" && isSessionRunning) {
+    if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && hasLiveTerminalSession) {
+      if (event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        void handleInterrupt();
+        return;
+      }
+      if (event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        void handleSendTerminalSpecial("C-d");
+        return;
+      }
+    }
+
+    if (shouldPassthroughSpecial && event.key === "Escape") {
       event.preventDefault();
-      void handleInterrupt();
+      void handleSendTerminalSpecial("Escape");
       return;
     }
 
@@ -1317,34 +1675,33 @@ export function ChatPanel({
           return;
         }
       }
+      if (shouldPassthroughSpecial) {
+        void handleSendTerminalSpecial("Enter");
+        return;
+      }
       if (!isSessionRunning) {
         void handleSend();
       }
+      return;
+    }
+
+    if (shouldPassthroughSpecial && event.key === "Tab") {
+      event.preventDefault();
+      void handleSendTerminalSpecial("Tab");
+      return;
+    }
+
+    if (shouldPassthroughSpecial && (
+      event.key === "ArrowUp"
+      || event.key === "ArrowDown"
+      || event.key === "ArrowLeft"
+      || event.key === "ArrowRight"
+      || event.key === "Backspace"
+    )) {
+      event.preventDefault();
+      void handleSendTerminalSpecial(event.key);
     }
   }
-
-  useEffect(() => {
-    if (!isSessionRunning) return;
-
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (
-        event.key !== "Escape"
-        || event.defaultPrevented
-        || event.metaKey
-        || event.ctrlKey
-        || event.altKey
-        || event.shiftKey
-      ) {
-        return;
-      }
-
-      event.preventDefault();
-      void handleInterrupt();
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleInterrupt, isSessionRunning]);
 
   function handleAttachmentChange(event: ChangeEvent<HTMLInputElement>) {
     const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
@@ -1373,7 +1730,11 @@ export function ChatPanel({
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[radial-gradient(circle_at_top,rgba(45,45,45,0.32),rgba(33,33,33,1)_40%)] text-[#c4c4c4]">
       <div className="mx-auto flex h-full min-h-0 w-full max-w-[855px] flex-col">
-        <div className="flex-1 overflow-y-auto px-3 pt-3 sm:px-4">
+        <div
+          ref={scrollContainerRef}
+          onScroll={updateBottomStickiness}
+          className="flex-1 overflow-y-auto px-3 pt-3 sm:px-4"
+        >
           <div className="mx-auto flex w-full max-w-[768px] flex-col gap-5 pb-6">
             {loading && displayEntries.length === 0 ? (
               <div className="flex items-center gap-2 px-4 text-[#8f8f8f]">
@@ -1437,7 +1798,10 @@ export function ChatPanel({
                   <div className="relative" ref={modelMenuRef}>
                     <button
                       type="button"
-                      onClick={() => setModelMenuOpen((open) => !open)}
+                      onClick={() => {
+                        setReasoningMenuOpen(false);
+                        setModelMenuOpen((open) => !open);
+                      }}
                       className="inline-flex min-h-[31px] items-center gap-2 rounded-[3px] border border-[#333] bg-[#1c1c1c] px-[9px] py-[5px] text-[14px] leading-[21px] text-[#c4c4c4] transition hover:bg-[#292929]"
                     >
                       <span className="max-w-[140px] truncate">{selectedModelLabel}</span>
@@ -1445,35 +1809,144 @@ export function ChatPanel({
                     </button>
 
                     {modelMenuOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 max-h-80 w-[280px] overflow-y-auto rounded-[4px] border border-[#333] bg-[#1c1c1c] p-1 shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedModel(sessionModel?.trim() || "");
-                            setModelMenuOpen(false);
-                          }}
-                          className="flex w-full flex-col rounded-[3px] px-3 py-2 text-left transition hover:bg-[#292929]"
-                        >
-                          <span className="text-[14px] leading-[21px] text-[#c4c4c4]">Session default</span>
-                          <span className="text-[12px] leading-[18px] text-[#8f8f8f]">
-                            Keep using the model configured on this session.
-                          </span>
-                        </button>
-
-                        {modelOptions.map((option) => (
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[320px] overflow-hidden rounded-[4px] border border-[#333] bg-[#1c1c1c] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
+                        <div className="border-b border-[#333] px-3 py-2">
+                          <p className="text-[12px] font-medium uppercase tracking-[0.16em] text-[#8f8f8f]">Model</p>
+                          <p className="mt-1 text-[12px] leading-[18px] text-[#6f6f6f]">
+                            Presets come from the local runtime catalog. You can also force any exact model id.
+                          </p>
+                        </div>
+                        <div className="max-h-72 overflow-y-auto p-1">
                           <button
-                            key={option.id}
                             type="button"
                             onClick={() => {
-                              setSelectedModel(option.id);
+                              setSelectedModel(sessionModel?.trim() || "");
+                              setCustomModelInput("");
                               setModelMenuOpen(false);
                             }}
-                            className={`flex w-full flex-col rounded-[3px] px-3 py-2 text-left transition hover:bg-[#292929] ${selectedModel === option.id ? "bg-[#292929]" : ""}`}
+                            className="flex w-full flex-col rounded-[3px] px-3 py-2 text-left transition hover:bg-[#292929]"
                           >
-                            <span className="text-[14px] leading-[21px] text-[#c4c4c4]">{option.label}</span>
-                            <span className="text-[12px] leading-[18px] text-[#8f8f8f]">{option.helper}</span>
+                            <span className="text-[14px] leading-[21px] text-[#c4c4c4]">Session default</span>
+                            <span className="text-[12px] leading-[18px] text-[#8f8f8f]">
+                              {sessionModel?.trim()
+                                ? `Use ${formatCurrentModelLabel(normalizedAgentName, sessionModel)} for follow-up turns.`
+                                : "Keep using the model configured on this session."}
+                            </span>
                           </button>
-                        ))}
+
+                          {modelOptions.map((option) => (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedModel(option.id);
+                                setCustomModelInput("");
+                                setModelMenuOpen(false);
+                              }}
+                              className={`flex w-full flex-col rounded-[3px] px-3 py-2 text-left transition hover:bg-[#292929] ${selectedModel === option.id ? "bg-[#292929]" : ""}`}
+                            >
+                              <span className="text-[14px] leading-[21px] text-[#c4c4c4]">{option.label}</span>
+                              <span className="text-[12px] leading-[18px] text-[#8f8f8f]">{option.helper}</span>
+                            </button>
+                          ))}
+                        </div>
+                        <div className="border-t border-[#333] p-3">
+                          <label className="mb-2 block text-[12px] leading-[18px] text-[#8f8f8f]">
+                            Exact model id
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              value={customModelInput}
+                              onChange={(event) => setCustomModelInput(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key !== "Enter") return;
+                                event.preventDefault();
+                                const nextModel = customModelInput.trim();
+                                if (!nextModel) return;
+                                setSelectedModel(nextModel);
+                                setModelMenuOpen(false);
+                              }}
+                              placeholder={modelPlaceholder}
+                              className="min-w-0 flex-1 rounded-[3px] border border-[#333] bg-[#171717] px-3 py-2 text-[13px] leading-[20px] text-[#d0d0d0] outline-none placeholder:text-[#666] focus:border-[#4a4a4a]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const nextModel = customModelInput.trim();
+                                if (!nextModel) return;
+                                setSelectedModel(nextModel);
+                                setModelMenuOpen(false);
+                              }}
+                              className="rounded-[3px] border border-[#333] px-3 py-2 text-[12px] leading-[18px] text-[#c4c4c4] transition hover:bg-[#292929]"
+                            >
+                              Use
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="relative" ref={reasoningMenuRef}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setModelMenuOpen(false);
+                        setReasoningMenuOpen((open) => !open);
+                      }}
+                      className="inline-flex min-h-[31px] items-center gap-2 rounded-[3px] border border-[#333] bg-[#1c1c1c] px-[9px] py-[5px] text-[14px] leading-[21px] text-[#c4c4c4] transition hover:bg-[#292929]"
+                    >
+                      <span className="max-w-[120px] truncate">{selectedReasoningLabel}</span>
+                      <ChevronDown className="h-[10px] w-[10px] text-[#8f8f8f]" strokeWidth={1.8} />
+                    </button>
+
+                    {reasoningMenuOpen ? (
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[260px] overflow-hidden rounded-[4px] border border-[#333] bg-[#1c1c1c] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
+                        <div className="border-b border-[#333] px-3 py-2">
+                          <p className="text-[12px] font-medium uppercase tracking-[0.16em] text-[#8f8f8f]">Reasoning</p>
+                          <p className="mt-1 text-[12px] leading-[18px] text-[#6f6f6f]">
+                            Override how hard the agent thinks for the next turns.
+                          </p>
+                        </div>
+                        <div className="max-h-72 overflow-y-auto p-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedReasoning("");
+                              setReasoningMenuOpen(false);
+                            }}
+                            className="flex w-full flex-col rounded-[3px] px-3 py-2 text-left transition hover:bg-[#292929]"
+                          >
+                            <span className="text-[14px] leading-[21px] text-[#c4c4c4]">Session default</span>
+                            <span className="text-[12px] leading-[18px] text-[#8f8f8f]">
+                              {sessionReasoningEffort?.trim()
+                                ? `Use ${formatReasoningLabel(sessionReasoningEffort)}.`
+                                : "Use the default reasoning level for the selected model."}
+                            </span>
+                          </button>
+
+                          {reasoningOptions.map((option) => (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedReasoning(option.id.trim().toLowerCase());
+                                setReasoningMenuOpen(false);
+                              }}
+                              className={`flex w-full flex-col rounded-[3px] px-3 py-2 text-left transition hover:bg-[#292929] ${selectedReasoning === option.id.trim().toLowerCase() ? "bg-[#292929]" : ""}`}
+                            >
+                              <span className="text-[14px] leading-[21px] text-[#c4c4c4]">{option.label}</span>
+                              <span className="text-[12px] leading-[18px] text-[#8f8f8f]">{option.description}</span>
+                            </button>
+                          ))}
+                          {reasoningOptions.length === 0 ? (
+                            <div className="px-3 py-2 text-[12px] leading-[18px] text-[#8f8f8f]">
+                              No explicit reasoning controls were detected for this agent.
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="border-t border-[#333] px-3 py-2 text-[12px] leading-[18px] text-[#6f6f6f]">
+                          Reasoning options can change with the selected model.
+                        </div>
                       </div>
                     ) : null}
                   </div>
@@ -1547,9 +2020,12 @@ export function ChatPanel({
                     <div className="inline-flex h-[29px] items-center justify-center rounded-[3px] border border-[#333] bg-[#1c1c1c] px-[9px] text-[#8f8f8f]">
                       <Code2 className="h-[15px] w-[15px]" strokeWidth={1.7} />
                     </div>
-                    {sessionReasoningEffort ? (
-                      <div className="hidden min-h-[29px] items-center rounded-[3px] bg-[#1c1c1c] px-[9px] py-[5px] text-[12px] leading-[18px] text-[#8f8f8f] sm:inline-flex">
-                        {sessionReasoningEffort}
+                    <div className="hidden min-h-[29px] items-center rounded-[3px] bg-[#1c1c1c] px-[9px] py-[5px] text-[12px] leading-[18px] text-[#8f8f8f] sm:inline-flex">
+                      {selectedReasoningLabel}
+                    </div>
+                    {hasLiveTerminalSession ? (
+                      <div className="hidden min-h-[29px] items-center rounded-[3px] border border-[#333] bg-[#171717] px-[9px] py-[5px] text-[12px] leading-[18px] text-[#8f8f8f] sm:inline-flex">
+                        Terminal keys: empty composer forwards Enter, Tab, arrows, Esc, Backspace. Ctrl+C interrupts.
                       </div>
                     ) : null}
                   </div>
@@ -1569,7 +2045,7 @@ export function ChatPanel({
                     ) : isSessionRunning ? (
                       <span className="inline-flex items-center gap-2">
                         <span>Stop</span>
-                        <span className="hidden text-[11px] leading-[11px] text-[#8f8f8f] sm:inline">Esc</span>
+                        <span className="hidden text-[11px] leading-[11px] text-[#8f8f8f] sm:inline">Ctrl+C</span>
                       </span>
                     ) : sending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -1580,6 +2056,14 @@ export function ChatPanel({
                 </div>
               </div>
             </div>
+
+            <SessionRuntimeStatusBar
+              agentName={normalizedAgentName}
+              sessionModel={sessionModel?.trim() || null}
+              sessionReasoningEffort={sessionReasoningEffort?.trim() || null}
+              runtimeStatus={runtimeStatus}
+              agents={agents}
+            />
           </div>
         </div>
       </div>

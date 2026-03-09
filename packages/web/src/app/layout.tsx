@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono, Tomorrow } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
 import { ThemeProvider } from "@/components/ThemeProvider";
+import { TooltipProvider } from "@/components/ui/Tooltip";
 import "./globals.css";
 
 const tomorrow = Tomorrow({
@@ -28,7 +29,6 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
 };
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -44,7 +44,9 @@ function Shell({ children }: { children: React.ReactNode }) {
         />
       </head>
       <body className="bg-[var(--bg-canvas)] text-[var(--text-strong)] antialiased">
-        <ThemeProvider>{children}</ThemeProvider>
+        <TooltipProvider>
+          <ThemeProvider>{children}</ThemeProvider>
+        </TooltipProvider>
       </body>
     </html>
   );

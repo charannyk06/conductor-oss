@@ -1,4 +1,4 @@
-use axum::extract::Json;
+use axum::extract::{Json, State};
 use axum::http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode};
 use axum::routing::post;
 use axum::Router;
@@ -29,6 +29,7 @@ struct SessionRequestBody {
 }
 
 async fn create_session(
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<SessionRequestBody>,
 ) -> (StatusCode, HeaderMap, axum::Json<serde_json::Value>) {
@@ -37,6 +38,14 @@ async fn create_session(
             StatusCode::NOT_FOUND,
             HeaderMap::new(),
             axum::Json(json!({ "error": "Built-in remote auth is not enabled" })),
+        );
+    }
+
+    if !state.config.read().await.access.allow_signed_share_links {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HeaderMap::new(),
+            axum::Json(json!({ "error": "Remote sign-in is not available for this session." })),
         );
     }
 
@@ -164,4 +173,100 @@ fn is_secure(headers: &HeaderMap) -> bool {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.eq_ignore_ascii_case("https"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use conductor_core::config::{ConductorConfig, DashboardAccessConfig};
+    use conductor_db::Database;
+    use tower::util::ServiceExt;
+
+    async fn build_state(access: DashboardAccessConfig) -> Arc<AppState> {
+        let mut config = ConductorConfig::default();
+        config.workspace =
+            std::env::temp_dir().join(format!("auth-route-test-{}", uuid::Uuid::new_v4()));
+        config.access = access;
+        let db = Database::in_memory().await.unwrap();
+        AppState::new(
+            std::env::temp_dir().join("auth-route-test.yaml"),
+            config,
+            db,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_requests_when_share_links_are_disabled() {
+        let _guard = crate::routes::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::set_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV, "test-token");
+            std::env::set_var(BUILTIN_REMOTE_SESSION_SECRET_ENV, "test-secret");
+        }
+
+        let state = build_state(DashboardAccessConfig::default()).await;
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"token":"test-token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        unsafe {
+            std::env::remove_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV);
+            std::env::remove_var(BUILTIN_REMOTE_SESSION_SECRET_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_session_sets_cookie_when_share_links_are_enabled() {
+        let _guard = crate::routes::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        unsafe {
+            std::env::set_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV, "test-token");
+            std::env::set_var(BUILTIN_REMOTE_SESSION_SECRET_ENV, "test-secret");
+        }
+
+        let state = build_state(DashboardAccessConfig {
+            allow_signed_share_links: true,
+            ..DashboardAccessConfig::default()
+        })
+        .await;
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/session")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-proto", "https")
+                    .body(Body::from(r#"{"token":"test-token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(SET_COOKIE).is_some());
+
+        unsafe {
+            std::env::remove_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV);
+            std::env::remove_var(BUILTIN_REMOTE_SESSION_SECRET_ENV);
+        }
+    }
 }
