@@ -3,7 +3,7 @@ use std::process::Command;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Urgency {
     Low,
     Normal,
