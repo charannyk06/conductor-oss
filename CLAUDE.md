@@ -45,7 +45,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 - `crates/conductor-server/src/state/session_manager.rs` - Core session lifecycle
 - `crates/conductor-server/src/state/tmux_runtime.rs` - tmux interaction layer
 - `crates/conductor-server/src/runtime.rs` - Runtime coordination
-- `crates/conductor-executors/src/agents/` - 11 agent adapters
+- `crates/conductor-executors/src/agents/` - 10 agent adapters
 
 ### Supported Agents
 
