@@ -581,6 +581,14 @@ impl AppState {
                 self.replace_session(updated).await?;
             }
 
+            if let Err(err) = self.reconcile_tmux_session_activity(session_id).await {
+                tracing::debug!(
+                    session_id,
+                    error = %err,
+                    "Failed to reconcile tmux activity immediately after restore"
+                );
+            }
+
             return Ok(());
         }
 
