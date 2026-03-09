@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use conductor_core::scaffold::{
-    resolve_scaffold_project, scaffold_workspace, ScaffoldWorkspaceOptions,
+    build_conductor_board, build_conductor_yaml, resolve_scaffold_project,
+    scaffold_workspace, ConductorYamlScaffoldConfig, ScaffoldPreferencesConfig,
+    ScaffoldWorkspaceOptions,
 };
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +69,11 @@ enum Commands {
         dashboard_url: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Create the launcher home workspace scaffold without adding a project entry.
+    BootstrapHome {
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// Start Conductor as an MCP server over stdio.
     McpServer,
@@ -239,6 +247,39 @@ async fn main() -> Result<()> {
                     );
                     println!();
                 }
+            }
+        }
+        Commands::BootstrapHome { path } => {
+            let workspace = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .context("Failed to resolve current directory")?
+                    .join(path)
+            };
+            fs::create_dir_all(&workspace)
+                .with_context(|| format!("failed to create {}", workspace.display()))?;
+
+            let board_path = workspace.join("CONDUCTOR.md");
+            if !board_path.exists() {
+                fs::write(&board_path, build_conductor_board("home", "Conductor Home"))
+                    .with_context(|| format!("failed to write {}", board_path.display()))?;
+            }
+
+            let config_path = workspace.join("conductor.yaml");
+            if !config_path.exists() {
+                let yaml = build_conductor_yaml(&ConductorYamlScaffoldConfig {
+                    preferences: Some(ScaffoldPreferencesConfig {
+                        onboarding_acknowledged: Some(false),
+                        coding_agent: Some("claude-code".to_string()),
+                        ide: Some("vscode".to_string()),
+                        markdown_editor: Some("obsidian".to_string()),
+                        ..ScaffoldPreferencesConfig::default()
+                    }),
+                    ..ConductorYamlScaffoldConfig::default()
+                })?;
+                fs::write(&config_path, yaml)
+                    .with_context(|| format!("failed to write {}", config_path.display()))?;
             }
         }
         Commands::McpServer => {

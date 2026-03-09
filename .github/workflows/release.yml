@@ -259,15 +259,6 @@ jobs:
       - name: Build core
         run: bun run --cwd packages/core build
 
-      - name: Build plugins
-        shell: bash
-        run: |
-          for dir in packages/plugins/*/; do
-            if [ -f "$dir/package.json" ]; then
-              bun run --cwd "$dir" build
-            fi
-          done
-
       - name: Build CLI
         run: bun run --cwd packages/cli build
 
@@ -327,6 +318,9 @@ jobs:
             --published-name @charannyk06/conductor-oss \
             --publish-registry https://npm.pkg.github.com | tail -n 1)
           echo "tarball_path=$tarball_path" >> "$GITHUB_OUTPUT"
+
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
 
       - name: Verify packaged CLI
         run: node scripts/verify-cli-package.mjs

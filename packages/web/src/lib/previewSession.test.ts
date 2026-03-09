@@ -59,7 +59,7 @@ test("discoverPreviewCandidateUrls prefers explicit dev server urls and ignores 
   global.fetch = (async (input: string | URL) => {
     const url = String(input);
     assert.match(url, /\/api\/sessions\/session-1\/output\?lines=400$/);
-    return new Response(JSON.stringify({ output: "stdout http://localhost:3002" }), {
+    return new Response(JSON.stringify({ output: "stdout localhost:3002" }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
@@ -67,7 +67,7 @@ test("discoverPreviewCandidateUrls prefers explicit dev server urls and ignores 
 
   try {
     const session = buildSession({
-      devServerUrl: "http://0.0.0.0:3000",
+      devServerUrl: "0.0.0.0:3000",
       devServerLog: logPath,
       other: "ignored http://127.0.0.1:4749/api/health",
     });
