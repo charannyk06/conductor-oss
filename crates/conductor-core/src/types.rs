@@ -105,12 +105,16 @@ pub const DEFAULT_OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     Queued,
+    Spawning,
     Working,
-    Done,
-    Errored,
-    Killed,
+    Idle,
     NeedsInput,
     Stuck,
+    Errored,
+    Killed,
+    Completed,
+    Done,
+    Restored,
     Archived,
     Merged,
     Terminated,
@@ -124,12 +128,16 @@ impl SessionStatus {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Queued => "queued",
+            Self::Spawning => "spawning",
             Self::Working => "working",
-            Self::Done => "done",
-            Self::Errored => "errored",
-            Self::Killed => "killed",
+            Self::Idle => "idle",
             Self::NeedsInput => "needs_input",
             Self::Stuck => "stuck",
+            Self::Errored => "errored",
+            Self::Killed => "killed",
+            Self::Completed => "completed",
+            Self::Done => "done",
+            Self::Restored => "restored",
             Self::Archived => "archived",
             Self::Merged => "merged",
             Self::Terminated => "terminated",
@@ -142,6 +150,7 @@ impl SessionStatus {
         matches!(
             self,
             Self::Done
+                | Self::Completed
                 | Self::Errored
                 | Self::Killed
                 | Self::Archived
@@ -162,12 +171,16 @@ impl From<&str> for SessionStatus {
     fn from(value: &str) -> Self {
         match value {
             "queued" => Self::Queued,
-            "working" => Self::Working,
-            "done" => Self::Done,
-            "errored" => Self::Errored,
-            "killed" => Self::Killed,
+            "spawning" => Self::Spawning,
+            "working" | "running" => Self::Working,
+            "idle" => Self::Idle,
             "needs_input" => Self::NeedsInput,
             "stuck" => Self::Stuck,
+            "errored" => Self::Errored,
+            "killed" => Self::Killed,
+            "completed" => Self::Completed,
+            "done" => Self::Done,
+            "restored" => Self::Restored,
             "archived" => Self::Archived,
             "merged" => Self::Merged,
             "terminated" => Self::Terminated,
@@ -215,7 +228,7 @@ pub struct SessionPrInfo {
 pub struct SessionRecord {
     pub id: String,
     pub project_id: String,
-    pub status: String,
+    pub status: SessionStatus,
     pub activity: Option<String>,
     pub branch: Option<String>,
     pub issue_id: Option<String>,
@@ -339,7 +352,7 @@ impl SessionRecordBuilder {
         SessionRecord {
             id: self.id,
             project_id: self.project_id,
-            status: "working".to_string(),
+            status: SessionStatus::Working,
             activity: Some("active".to_string()),
             branch: self.branch,
             issue_id: self.issue_id,

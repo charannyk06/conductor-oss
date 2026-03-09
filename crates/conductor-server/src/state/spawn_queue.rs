@@ -18,16 +18,15 @@ const LAUNCH_STATE_METADATA_KEY: &str = "launchState";
 const LAUNCH_STARTED_AT_METADATA_KEY: &str = "launchStartedAt";
 
 fn session_occupies_launch_capacity(session: &SessionRecord, is_live: bool) -> bool {
-    let status = SessionStatus::from(session.status.as_str());
-    if status.is_terminal() || status == SessionStatus::Queued {
+    if session.status.is_terminal() || session.status == SessionStatus::Queued {
         return false;
     }
 
-    if matches!(session.status.as_str(), "needs_input" | "stuck" | "errored") {
+    if matches!(session.status, SessionStatus::NeedsInput | SessionStatus::Stuck | SessionStatus::Errored) {
         return false;
     }
 
-    session.status == "spawning" || is_live
+    session.status == SessionStatus::Spawning || is_live
 }
 
 impl AppState {
@@ -72,7 +71,7 @@ impl AppState {
             request.prompt.clone(),
             None,
         );
-        record.status = SessionStatus::Queued.to_string();
+        record.status = SessionStatus::Queued;
         record.activity = Some("idle".to_string());
         record.summary = Some("Queued for launch".to_string());
         record
@@ -155,7 +154,7 @@ impl AppState {
 
             let mut queued = sessions
                 .values()
-                .filter(|session| session.status == SessionStatus::Queued.to_string())
+                .filter(|session| session.status == SessionStatus::Queued)
                 .map(|session| (session.created_at.clone(), session.id.clone()))
                 .collect::<Vec<_>>();
             queued.sort_by(|left, right| left.0.cmp(&right.0));
@@ -165,10 +164,9 @@ impl AppState {
             let active_prompts: std::collections::HashSet<(String, String)> = sessions
                 .values()
                 .filter(|s| {
-                    let status = SessionStatus::from(s.status.as_str());
-                    !status.is_terminal()
-                        && status != SessionStatus::Queued
-                        && (s.status == "spawning" || live_ids.contains(&s.id))
+                    !s.status.is_terminal()
+                        && s.status != SessionStatus::Queued
+                        && (s.status == SessionStatus::Spawning || live_ids.contains(&s.id))
                 })
                 .map(|s| (s.project_id.clone(), s.prompt.clone()))
                 .collect();
@@ -263,11 +261,11 @@ impl AppState {
         let session = sessions
             .get_mut(session_id)
             .with_context(|| format!("Queued session {session_id} not found"))?;
-        if session.status != SessionStatus::Queued.to_string() {
+        if session.status != SessionStatus::Queued {
             return Ok(());
         }
 
-        session.status = "spawning".to_string();
+        session.status = SessionStatus::Spawning;
         session.activity = Some("active".to_string());
         session.last_activity_at = Utc::now().to_rfc3339();
         session.summary = Some("Launching queued session".to_string());
@@ -306,7 +304,7 @@ impl AppState {
             .get_mut(session_id)
             .with_context(|| format!("Queued session {session_id} not found"))?;
 
-        session.status = "errored".to_string();
+        session.status = SessionStatus::Errored;
         session.activity = Some("exited".to_string());
         session.last_activity_at = Utc::now().to_rfc3339();
         session.summary = Some(error.trim().to_string());

@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::iter::Peekable;
 use std::path::Path;
 
-use super::types::{SessionRecord, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT};
+use super::types::{SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT};
 
 const SPAWN_REQUEST_METADATA_KEY: &str = "spawnRequest";
 const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
@@ -197,14 +197,14 @@ pub(super) fn is_runtime_status_line(line: &str) -> bool {
         || runtime_tool_metadata(normalized).is_some()
 }
 
-fn is_streaming_status(status: &str) -> bool {
-    matches!(status.trim().to_lowercase().as_str(), "working" | "running")
+fn is_streaming_status(status: &SessionStatus) -> bool {
+    matches!(status, SessionStatus::Working)
 }
 
-fn is_failed_session_status(status: &str) -> bool {
+fn is_failed_session_status(status: &SessionStatus) -> bool {
     matches!(
-        status.trim().to_lowercase().as_str(),
-        "errored" | "killed" | "terminated"
+        status,
+        SessionStatus::Errored | SessionStatus::Killed | SessionStatus::Terminated
     )
 }
 
@@ -530,10 +530,7 @@ fn build_runtime_output_entries(session: &SessionRecord) -> Vec<Value> {
     let mut assistant_text = String::new();
     let mut assistant_index = 0usize;
     let mut status_index = 0usize;
-    let is_streaming = matches!(
-        session.status.trim().to_lowercase().as_str(),
-        "working" | "running"
-    );
+    let is_streaming = matches!(session.status, SessionStatus::Working);
 
     let flush_assistant = |streaming: bool,
                            entries: &mut Vec<Value>,
@@ -691,8 +688,7 @@ fn push_runtime_assistant_segments(
 }
 
 fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]) -> Option<Value> {
-    let normalized_status = session.status.trim().to_lowercase();
-    if normalized_status == "working" || normalized_status == "running" {
+    if matches!(session.status, SessionStatus::Working) {
         return None;
     }
 
@@ -722,7 +718,7 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
         .filter(|value| !value.is_empty())
         .filter(|value| !is_runtime_internal_noise_text(value))
         .filter(|value| Some(*value) != last_assistant_text);
-    let summary = if matches!(normalized_status.as_str(), "needs_input" | "done")
+    let summary = if matches!(session.status, SessionStatus::NeedsInput | SessionStatus::Done)
         && summary
             .map(|value| value.contains('\n') || value.len() > 280)
             .unwrap_or(false)
@@ -732,7 +728,7 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
         summary
     };
 
-    if normalized_status == "done" && last_assistant_text.is_some() {
+    if session.status == SessionStatus::Done && last_assistant_text.is_some() {
         return None;
     }
 
@@ -740,7 +736,7 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
     if let Some(summary_text) = summary {
         parts.push(summary_text.to_string());
     }
-    if (normalized_status != "done" || parts.is_empty()) && !session.status.trim().is_empty() {
+    if (session.status != SessionStatus::Done || parts.is_empty()) && !matches!(session.status, SessionStatus::Other(ref s) if s.is_empty()) {
         parts.push(format!("Session status: {}", session.status));
     }
 
@@ -856,7 +852,7 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     feed
 }
 
-fn finalize_tool_statuses(feed: &mut [Value], session_status: &str) {
+fn finalize_tool_statuses(feed: &mut [Value], session_status: &SessionStatus) {
     let session_is_streaming = is_streaming_status(session_status);
     let session_failed = is_failed_session_status(session_status);
 
@@ -909,7 +905,6 @@ fn finalize_tool_statuses(feed: &mut [Value], session_status: &str) {
 }
 
 pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
-    let normalized_status = session.status.trim().to_lowercase();
     let normalized_activity = session
         .activity
         .as_deref()
@@ -943,7 +938,7 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
             .unwrap_or(false);
     let now = chrono::Utc::now().to_rfc3339();
 
-    if normalized_status == "queued" {
+    if session.status == SessionStatus::Queued {
         let mut changed = false;
         if session
             .activity
@@ -969,7 +964,7 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
         return changed;
     }
 
-    if normalized_status == "spawning" && has_spawn_request {
+    if session.status == SessionStatus::Spawning && has_spawn_request {
         requeue_recovered_session(
             session,
             &now,
@@ -978,7 +973,7 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
         return true;
     }
 
-    let is_active_status = normalized_status == "working" || normalized_status == "running";
+    let is_active_status = matches!(session.status, SessionStatus::Working);
     let is_active_activity =
         normalized_activity == "active" && !is_terminal_status(&session.status);
 
@@ -1029,7 +1024,7 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
         return false;
     }
 
-    session.status = "stuck".to_string();
+    session.status = SessionStatus::Stuck;
     session.activity = Some("blocked".to_string());
     session.last_activity_at = now.clone();
     record_restart_recovery(session, &now);
@@ -1074,7 +1069,7 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
 }
 
 fn requeue_recovered_session(session: &mut SessionRecord, recovered_at: &str, summary: &str) {
-    session.status = "queued".to_string();
+    session.status = SessionStatus::Queued;
     session.activity = Some("idle".to_string());
     session.pid = None;
     session.last_activity_at = recovered_at.to_string();
@@ -1136,7 +1131,7 @@ mod tests {
             }),
         ];
 
-        finalize_tool_statuses(&mut feed, "done");
+        finalize_tool_statuses(&mut feed, &SessionStatus::Done);
 
         assert_eq!(
             feed[0]
@@ -1155,7 +1150,7 @@ mod tests {
             "metadata": { "toolStatus": "running" }
         })];
 
-        finalize_tool_statuses(&mut feed, "errored");
+        finalize_tool_statuses(&mut feed, &SessionStatus::Errored);
 
         assert_eq!(
             feed[0]
@@ -1174,7 +1169,7 @@ mod tests {
             "metadata": { "toolStatus": "running" }
         })];
 
-        finalize_tool_statuses(&mut feed, "working");
+        finalize_tool_statuses(&mut feed, &SessionStatus::Working);
 
         assert_eq!(
             feed[0]
@@ -1200,7 +1195,7 @@ mod tests {
             "Investigate".to_string(),
             None,
         );
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         session.conversation.push(ConversationEntry {
             id: "runtime-log".to_string(),
             kind: "assistant_message".to_string(),
@@ -1248,7 +1243,7 @@ mod tests {
             "Investigate".to_string(),
             None,
         );
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         session.conversation.push(ConversationEntry {
             id: "runtime-log".to_string(),
             kind: "assistant_message".to_string(),
@@ -1292,7 +1287,7 @@ mod tests {
             "Review repo".to_string(),
             None,
         );
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         session.conversation.push(ConversationEntry {
             id: "runtime-help".to_string(),
             kind: "assistant_message".to_string(),
@@ -1343,7 +1338,7 @@ mod tests {
             "Investigate".to_string(),
             None,
         );
-        session.status = "spawning".to_string();
+        session.status = SessionStatus::Spawning;
         session.activity = Some("active".to_string());
         session.metadata.insert(
             SPAWN_REQUEST_METADATA_KEY.to_string(),
@@ -1353,7 +1348,7 @@ mod tests {
         let changed = normalize_loaded_session(&mut session);
 
         assert!(changed);
-        assert_eq!(session.status, "queued");
+        assert_eq!(session.status, SessionStatus::Queued);
         assert_eq!(session.activity.as_deref(), Some("idle"));
         assert_eq!(
             session
@@ -1378,13 +1373,13 @@ mod tests {
             "Investigate".to_string(),
             Some(u32::MAX),
         );
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         session.activity = Some("active".to_string());
 
         let changed = normalize_loaded_session(&mut session);
 
         assert!(changed);
-        assert_eq!(session.status, "stuck");
+        assert_eq!(session.status, SessionStatus::Stuck);
         assert_eq!(session.activity.as_deref(), Some("blocked"));
         assert_eq!(session.pid, None);
         assert_eq!(
@@ -1410,13 +1405,13 @@ mod tests {
             "Investigate".to_string(),
             Some(std::process::id()),
         );
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         session.activity = Some("active".to_string());
 
         let changed = normalize_loaded_session(&mut session);
 
         assert!(changed);
-        assert_eq!(session.status, "stuck");
+        assert_eq!(session.status, SessionStatus::Stuck);
         assert_eq!(
             session
                 .metadata
@@ -1458,7 +1453,6 @@ pub fn append_output(session: &mut SessionRecord, line: &str) {
     }
 }
 
-pub fn is_terminal_status(status: &str) -> bool {
-    use super::types::SessionStatus;
-    SessionStatus::from(status).is_terminal()
+pub fn is_terminal_status(status: &SessionStatus) -> bool {
+    status.is_terminal()
 }

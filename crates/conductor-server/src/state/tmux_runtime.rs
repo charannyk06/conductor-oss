@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::state::{AppState, SessionRecord};
+use crate::state::{AppState, SessionRecord, SessionStatus};
 
 pub(crate) const DIRECT_RUNTIME_MODE: &str = "direct";
 pub(crate) const TMUX_RUNTIME_MODE: &str = "tmux";
@@ -226,7 +226,7 @@ impl AppState {
             let sessions = self.sessions.read().await;
             sessions
                 .values()
-                .filter(|session| !super::helpers::is_terminal_status(&session.status))
+                .filter(|session| !session.status.is_terminal())
                 .filter(|session| {
                     session
                         .metadata
@@ -288,7 +288,7 @@ impl AppState {
             return Ok(false);
         };
 
-        if matches!(session.status.as_str(), "archived" | "killed") {
+        if matches!(session.status, SessionStatus::Archived | SessionStatus::Killed) {
             return Ok(false);
         }
 
@@ -316,7 +316,7 @@ impl AppState {
         let Some(snapshot) = self.get_session(session_id).await else {
             return Ok(());
         };
-        if super::helpers::is_terminal_status(&snapshot.status) || snapshot.status == "queued" {
+        if snapshot.status.is_terminal() || snapshot.status == SessionStatus::Queued {
             return Ok(());
         }
 
@@ -335,14 +335,14 @@ impl AppState {
         let Some(current) = sessions.get_mut(session_id) else {
             return Ok(());
         };
-        if super::helpers::is_terminal_status(&current.status) || current.status == "queued" {
+        if current.status.is_terminal() || current.status == SessionStatus::Queued {
             return Ok(());
         }
 
         let next_status = match activity {
-            TmuxActivityState::Active => "working",
-            TmuxActivityState::Ready | TmuxActivityState::WaitingInput => "needs_input",
-            TmuxActivityState::Blocked => "stuck",
+            TmuxActivityState::Active => SessionStatus::Working,
+            TmuxActivityState::Ready | TmuxActivityState::WaitingInput => SessionStatus::NeedsInput,
+            TmuxActivityState::Blocked => SessionStatus::Stuck,
         };
         let next_activity = match activity {
             TmuxActivityState::Active => "active",
@@ -358,7 +358,7 @@ impl AppState {
             return Ok(());
         }
 
-        current.status = next_status.to_string();
+        current.status = next_status;
         current.activity = Some(next_activity.to_string());
         if let Some(summary) = summary {
             current.summary = Some(summary.clone());
@@ -536,15 +536,14 @@ impl AppState {
             let mut sessions = self.sessions.write().await;
             if let Some(current) = sessions.get_mut(session_id) {
                 current.pid = Some(pid);
-                current.activity = match current.status.as_str() {
-                    "needs_input" => Some("waiting_input".to_string()),
-                    "queued" => Some("idle".to_string()),
+                current.activity = match &current.status {
+                    SessionStatus::NeedsInput => Some("waiting_input".to_string()),
+                    SessionStatus::Queued => Some("idle".to_string()),
                     _ => Some("active".to_string()),
                 };
-                current.status = match current.status.as_str() {
-                    "spawning" => "working".to_string(),
-                    other => other.to_string(),
-                };
+                if current.status == SessionStatus::Spawning {
+                    current.status = SessionStatus::Working;
+                }
                 current.metadata.remove("recoveryState");
                 current.metadata.remove("recoveryAction");
                 current.metadata.remove("detachedPid");
@@ -571,7 +570,7 @@ impl AppState {
 
         let mut sessions = self.sessions.write().await;
         if let Some(current) = sessions.get_mut(session_id) {
-            current.status = "stuck".to_string();
+            current.status = SessionStatus::Stuck;
             current.activity = Some("blocked".to_string());
             current.summary = Some(
                 "Tmux runtime was not found after restart. Send a message to resume in the same workspace."
@@ -1278,7 +1277,7 @@ mod tests {
             "Inspect".to_string(),
             Some(pid),
         );
-        record.status = "working".to_string();
+        record.status = SessionStatus::Working;
         record.activity = Some("active".to_string());
         record.metadata.extend(metadata);
         state.replace_session(record).await.unwrap();
@@ -1303,7 +1302,7 @@ mod tests {
         let final_session = timeout(Duration::from_secs(5), async {
             loop {
                 let session = restored.get_session(session_id).await.unwrap();
-                if session.status == "needs_input" && session.output.contains("phase-two") {
+                if session.status == SessionStatus::NeedsInput && session.output.contains("phase-two") {
                     return session;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1384,7 +1383,7 @@ mod tests {
             "Inspect".to_string(),
             Some(pid),
         );
-        record.status = "needs_input".to_string();
+        record.status = SessionStatus::NeedsInput;
         record.activity = Some("waiting_input".to_string());
         record.metadata.extend(metadata);
         state.replace_session(record).await.unwrap();
@@ -1546,7 +1545,7 @@ mod tests {
             "Inspect".to_string(),
             Some(pid),
         );
-        record.status = "working".to_string();
+        record.status = SessionStatus::Working;
         record.activity = Some("active".to_string());
         record.metadata.extend(launch.metadata);
         state.replace_session(record).await.unwrap();
@@ -1623,7 +1622,7 @@ mod tests {
         timeout(Duration::from_secs(3), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
-                if current.status == "killed" {
+                if current.status == SessionStatus::Killed {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1634,7 +1633,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(3)).await;
         let final_session = state.get_session(&session.id).await.unwrap();
-        assert_eq!(final_session.status, "killed");
+        assert_eq!(final_session.status, SessionStatus::Killed);
         assert_eq!(final_session.summary.as_deref(), Some("Interrupted"));
 
         let _ = fs::remove_dir_all(&root);

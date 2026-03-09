@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::helpers::{
-    append_output, is_runtime_status_line, is_terminal_status, merge_assistant_fragment,
+    append_output, is_runtime_status_line, merge_assistant_fragment,
     runtime_tool_metadata, sanitize_terminal_text,
 };
 use super::runtime_status::resolve_native_resume_target;
@@ -18,7 +18,7 @@ use super::tmux_runtime::{
     runtime_mode, tmux_runtime_metadata, tmux_session_exists, TMUX_RUNTIME_MODE,
 };
 use super::types::{
-    ConversationEntry, LiveSessionHandle, SessionRecord, SpawnRequest,
+    ConversationEntry, LiveSessionHandle, SessionRecord, SessionStatus, SpawnRequest,
     DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
@@ -84,8 +84,8 @@ fn detached_runtime_pid(session: &SessionRecord) -> Option<u32> {
 
 /// Shared Stdout event handler used by both `append_and_apply` and `apply_runtime_event`.
 fn apply_stdout_event(session: &mut SessionRecord, line: &str, is_live: bool) {
-    if is_live && !is_terminal_status(&session.status) {
-        session.status = "working".to_string();
+    if is_live && !session.status.is_terminal() {
+        session.status = SessionStatus::Working;
         session.activity = Some("active".to_string());
     }
     let trimmed = line.trim();
@@ -710,7 +710,7 @@ impl AppState {
             }
         };
 
-        if is_terminal_status(&session.status) {
+        if session.status.is_terminal() {
             drop(sessions);
             if clear_live_handle {
                 self.live_sessions.write().await.remove(session_id);
@@ -745,8 +745,8 @@ impl AppState {
                 ref text,
                 ref metadata,
             } => {
-                if is_live && !is_terminal_status(&session.status) {
-                    session.status = "working".to_string();
+                if is_live && !session.status.is_terminal() {
+                    session.status = SessionStatus::Working;
                     session.activity = Some("active".to_string());
                 }
                 append_runtime_status_entry_with_metadata(session, text, Some(metadata.clone()));
@@ -794,7 +794,7 @@ impl AppState {
             }
         };
 
-        if is_terminal_status(&session.status) {
+        if session.status.is_terminal() {
             drop(sessions);
             if clear_live_handle {
                 self.live_sessions.write().await.remove(session_id);
@@ -820,15 +820,15 @@ impl AppState {
                 session.metadata.insert("lastStderr".to_string(), line);
             }
             ExecutorOutput::StructuredStatus { text, metadata } => {
-                if is_live && !is_terminal_status(&session.status) {
-                    session.status = "working".to_string();
+                if is_live && !session.status.is_terminal() {
+                    session.status = SessionStatus::Working;
                     session.activity = Some("active".to_string());
                 }
                 append_runtime_status_entry_with_metadata(session, &text, Some(metadata));
             }
             ExecutorOutput::NeedsInput(prompt) => {
-                if is_live && !is_terminal_status(&session.status) {
-                    session.status = "needs_input".to_string();
+                if is_live && !session.status.is_terminal() {
+                    session.status = SessionStatus::NeedsInput;
                     session.activity = Some("waiting_input".to_string());
                     session.summary = Some(prompt.clone());
                     session
@@ -845,7 +845,7 @@ impl AppState {
                 session.metadata.remove("terminationRequested");
                 if requested_kill {
                     clear_parser_state(session);
-                    session.status = "killed".to_string();
+                    session.status = SessionStatus::Killed;
                     session.activity = Some("exited".to_string());
                     session
                         .metadata
@@ -859,7 +859,7 @@ impl AppState {
                     session
                         .metadata
                         .insert("exitCode".to_string(), exit_code.to_string());
-                    session.status = "needs_input".to_string();
+                    session.status = SessionStatus::NeedsInput;
                     session.activity = Some("waiting_input".to_string());
                     session
                         .metadata
@@ -878,7 +878,7 @@ impl AppState {
                     session
                         .metadata
                         .insert("exitCode".to_string(), exit_code.to_string());
-                    session.status = "errored".to_string();
+                    session.status = SessionStatus::Errored;
                     session.activity = Some("exited".to_string());
                     session
                         .metadata
@@ -908,9 +908,9 @@ impl AppState {
                     error.clone()
                 };
                 session.status = if requested_kill || error == "killed" {
-                    "killed".to_string()
+                    SessionStatus::Killed
                 } else {
-                    "errored".to_string()
+                    SessionStatus::Errored
                 };
                 session.activity = Some("exited".to_string());
                 session
@@ -978,7 +978,7 @@ impl AppState {
             .with_context(|| format!("Session {session_id} not found"))?;
         clear_parser_state(session);
         session.last_activity_at = Utc::now().to_rfc3339();
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         session.activity = Some("active".to_string());
         let previous_model = session.model.clone();
         let previous_reasoning_effort = session.reasoning_effort.clone();
@@ -1185,12 +1185,12 @@ impl AppState {
         let session = sessions
             .get_mut(session_id)
             .with_context(|| format!("Session {session_id} not found"))?;
-        if session.status == "archived" {
+        if session.status == SessionStatus::Archived {
             return Err(anyhow::anyhow!("Session {session_id} is archived"));
         }
 
         clear_parser_state(session);
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         session.activity = Some("active".to_string());
         session.last_activity_at = Utc::now().to_rfc3339();
         session.pid = Some(pid);
@@ -1286,8 +1286,8 @@ impl AppState {
         if let Some(session) = sessions.get_mut(session_id) {
             clear_parser_state(session);
             session.last_activity_at = Utc::now().to_rfc3339();
-            if !is_terminal_status(&session.status) {
-                session.status = "working".to_string();
+            if !session.status.is_terminal() {
+                session.status = SessionStatus::Working;
                 session.activity = Some("active".to_string());
             }
             let updated = session.clone();
@@ -1342,7 +1342,7 @@ impl AppState {
 
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
-            session.status = "killed".to_string();
+            session.status = SessionStatus::Killed;
             session.activity = Some("exited".to_string());
             session.last_activity_at = Utc::now().to_rfc3339();
             session.pid = None;
@@ -1401,11 +1401,11 @@ impl AppState {
         let session = sessions
             .get_mut(session_id)
             .with_context(|| format!("Session {session_id} not found"))?;
-        if session.status == "archived" {
+        if session.status == SessionStatus::Archived {
             return Ok(());
         }
 
-        session.status = "archived".to_string();
+        session.status = SessionStatus::Archived;
         session.activity = Some("exited".to_string());
         session.last_activity_at = Utc::now().to_rfc3339();
         session.pid = None;
@@ -1444,8 +1444,8 @@ impl AppState {
         {
             let mut sessions = self.sessions.write().await;
             if let Some(original) = sessions.get_mut(session_id) {
-                if original.status != "archived" {
-                    original.status = "restored".to_string();
+                if original.status != SessionStatus::Archived {
+                    original.status = SessionStatus::Restored;
                     original.activity = Some("exited".to_string());
                     original.last_activity_at = chrono::Utc::now().to_rfc3339();
                     let updated = original.clone();
@@ -1987,12 +1987,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(session.status, "queued");
+        assert_eq!(session.status, SessionStatus::Queued);
 
         let launched = timeout(Duration::from_secs(3), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
-                if current.status != "queued" && current.metadata.contains_key("worktree") {
+                if current.status != SessionStatus::Queued && current.metadata.contains_key("worktree") {
                     return current;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -2001,7 +2001,7 @@ mod tests {
         .await
         .expect("queued session should be promoted");
 
-        assert!(matches!(launched.status.as_str(), "spawning" | "working"));
+        assert!(matches!(launched.status, SessionStatus::Spawning | SessionStatus::Working));
         assert!(launched.metadata.contains_key("worktree"));
 
         let _ = fs::remove_dir_all(&root);
@@ -2035,7 +2035,7 @@ mod tests {
                 "Paused".to_string(),
                 None,
             );
-            paused.status = "needs_input".to_string();
+            paused.status = SessionStatus::NeedsInput;
             paused.activity = Some("waiting_input".to_string());
             paused.summary = Some("Ready for follow-up".to_string());
             paused
@@ -2065,7 +2065,7 @@ mod tests {
         let launched = timeout(Duration::from_secs(3), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
-                if current.status != "queued" && current.metadata.contains_key("worktree") {
+                if current.status != SessionStatus::Queued && current.metadata.contains_key("worktree") {
                     return current;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -2074,7 +2074,7 @@ mod tests {
         .await
         .expect("queued session should not be blocked by paused sessions");
 
-        assert!(matches!(launched.status.as_str(), "spawning" | "working"));
+        assert!(matches!(launched.status, SessionStatus::Spawning | SessionStatus::Working));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2156,7 +2156,7 @@ mod tests {
             "Investigate".to_string(),
             Some(pid),
         );
-        session.status = "stuck".to_string();
+        session.status = SessionStatus::Stuck;
         session.activity = Some("blocked".to_string());
         session
             .metadata
@@ -2215,7 +2215,7 @@ mod tests {
             "Investigate".to_string(),
             None,
         );
-        session.status = "needs_input".to_string();
+        session.status = SessionStatus::NeedsInput;
         session.activity = Some("waiting_input".to_string());
         session.summary = Some("Ready for follow-up".to_string());
         session
@@ -2301,7 +2301,7 @@ mod tests {
             "Investigate".to_string(),
             Some(pid),
         );
-        session.status = "stuck".to_string();
+        session.status = SessionStatus::Stuck;
         session.activity = Some("blocked".to_string());
         session
             .metadata
@@ -2322,7 +2322,7 @@ mod tests {
         assert!(waited.is_ok(), "detached runtime should terminate");
 
         let updated = state.get_session("detached-kill").await.unwrap();
-        assert_eq!(updated.status, "killed");
+        assert_eq!(updated.status, SessionStatus::Killed);
         assert!(!updated.metadata.contains_key(DETACHED_PID_METADATA_KEY));
 
         let _ = fs::remove_dir_all(&root);
@@ -2355,7 +2355,7 @@ mod tests {
             "Investigate".to_string(),
             None,
         );
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         state.replace_session(session).await.unwrap();
 
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
@@ -2425,7 +2425,7 @@ mod tests {
             "Investigate".to_string(),
             None,
         );
-        session.status = "working".to_string();
+        session.status = SessionStatus::Working;
         state.replace_session(session).await.unwrap();
 
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
