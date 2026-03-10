@@ -99,7 +99,7 @@ function normalizeWhitespace(value: string | null | undefined): string {
 function quoteInline(value: string | null | undefined, max = 180): string | null {
   const normalized = truncate(normalizeWhitespace(value), max);
   if (!normalized) return null;
-  return `"${normalized.replace(/"/g, '\\"')}"`;
+  return `"${normalized.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function buildInlineInsert(parts: Array<string | null | undefined>): string {
