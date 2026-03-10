@@ -19,6 +19,11 @@ export type ManagedRemoteAccessStatus = {
   autoInstallMethod: AutoInstallMethod;
 };
 
+export type BackendServeConfig = {
+  port: number;
+  target: string;
+};
+
 type TailscaleSupport = {
   provider: "tailscale";
   tailscalePath: string | null;
@@ -175,13 +180,13 @@ function resolveLocalDashboardUrl(): string {
   return `http://${host}:${port}`;
 }
 
-function resolveLocalBackendUrl(): string | null {
+export function resolveLocalBackendUrl(): string | null {
   const explicit = process.env.CONDUCTOR_BACKEND_URL?.trim();
   if (explicit) {
     try {
       const url = new URL(explicit);
       if (url.protocol === "http:" || url.protocol === "https:") {
-        return url.toString();
+        return explicit;
       }
     } catch {
       // Ignore invalid backend URLs and fall back to env port.
@@ -197,17 +202,88 @@ function resolveLocalBackendUrl(): string | null {
   return `http://127.0.0.1:${parsedPort}`;
 }
 
+function parsePortNumber(value: string): number | null {
+  const port = Number.parseInt(value, 10);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+function isLocalHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === "localhost"
+    || normalized === "127.0.0.1"
+    || normalized === "::1"
+    || normalized === "[::1]"
+    || normalized === "0.0.0.0"
+    || normalized === "::";
+}
+
 function parseServePort(url: string | null): number | null {
   if (!url) return null;
-  try {
-    const parsed = new URL(url);
-    if (parsed.port) {
-      const port = Number.parseInt(parsed.port, 10);
-      return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+
+  if (/^\d+$/.test(trimmed)) {
+    return parsePortNumber(trimmed);
+  }
+
+  if (!trimmed.includes("://")) {
+    const candidate = `http://${trimmed}`;
+    try {
+      const parsed = new URL(candidate);
+      if (!isLocalHostname(parsed.hostname)) {
+        return null;
+      }
+      if (parsed.port) {
+        return parsePortNumber(parsed.port);
+      }
+      const isBareLocalHost = trimmed === parsed.hostname
+        || trimmed === parsed.host
+        || trimmed === `[${parsed.hostname}]`;
+      return isBareLocalHost ? 80 : null;
+    } catch {
+      return null;
     }
-    return parsed.protocol === "https:" ? 443 : 80;
+  }
+
+  return null;
+}
+
+export function resolveBackendServeConfig(localBackendUrl: string | null): BackendServeConfig | null {
+  if (!localBackendUrl) return null;
+  const trimmed = localBackendUrl.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+    const port = parsed.port
+      ? parsePortNumber(parsed.port)
+      : (parsed.protocol === "https:" ? 443 : 80);
+    return port
+      ? {
+          port,
+          target: trimmed,
+        }
+      : null;
   } catch {
-    return null;
+    const port = parseServePort(trimmed);
+    if (!port) {
+      return null;
+    }
+
+    if (/^\d+$/.test(trimmed)) {
+      return {
+        port,
+        target: `http://127.0.0.1:${port}`,
+      };
+    }
+
+    return {
+      port,
+      target: new URL(`http://${trimmed}`).toString(),
+    };
   }
 }
 
@@ -242,14 +318,14 @@ function ensureTailscaleServedEndpoints(
     throw new Error(serve.stderr.trim() || serve.stdout.trim() || "Tailscale Serve could not publish a private HTTPS URL.");
   }
 
-  const backendPort = parseServePort(localBackendUrl);
-  if (!backendPort) {
+  const backendServeConfig = resolveBackendServeConfig(localBackendUrl);
+  if (!backendServeConfig) {
     return;
   }
 
   const backendServe = spawnSync(
     tailscalePath,
-    ["serve", "--bg", "--https", String(backendPort), String(backendPort)],
+    ["serve", "--bg", "--https", String(backendServeConfig.port), backendServeConfig.target],
     {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
