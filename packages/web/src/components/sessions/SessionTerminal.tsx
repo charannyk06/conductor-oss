@@ -920,7 +920,7 @@ export function SessionTerminal({
       searchRef.current = null;
       setTerminalReady(false);
     };
-  }, [isRemoteLiveConsole, scheduleRendererRecovery, sendTerminalKeys, showLiveInputRail, updateScrollState]);
+  }, [isRemoteLiveConsole, scheduleRendererRecovery, sendTerminalKeys, updateScrollState]);
 
   useEffect(() => {
     const term = termRef.current;
