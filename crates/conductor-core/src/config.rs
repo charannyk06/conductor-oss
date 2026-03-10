@@ -686,16 +686,20 @@ mod tests {
 
     #[test]
     fn test_effective_port_uses_port_field() {
-        let mut config = ConductorConfig::default();
-        config.port = 8080;
+        let mut config = ConductorConfig {
+            port: 8080,
+            ..ConductorConfig::default()
+        };
         config.server.port = 9090;
         assert_eq!(config.effective_port(), 8080);
     }
 
     #[test]
     fn test_effective_port_falls_back_to_server_port() {
-        let mut config = ConductorConfig::default();
-        config.port = 0;
+        let mut config = ConductorConfig {
+            port: 0,
+            ..ConductorConfig::default()
+        };
         config.server.port = 9090;
         assert_eq!(config.effective_port(), 9090);
     }

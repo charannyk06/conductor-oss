@@ -459,6 +459,42 @@ fn tool_metadata(
     metadata
 }
 
+fn extract_text(value: &Value) -> Option<String> {
+    if let Some(text) = value
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(text.to_string());
+    }
+
+    if let Some(message) = value.get("message") {
+        if let Some(text) = extract_text(message) {
+            return Some(text);
+        }
+    }
+
+    let content = value.get("content").and_then(|v| v.as_array())?;
+    let text = content
+        .iter()
+        .filter_map(|item| {
+            item.get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.as_str())
+                .map(str::trim)
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,41 +638,5 @@ mod tests {
             panic!("expected stdout suppression");
         };
         assert!(text.is_empty());
-    }
-}
-
-fn extract_text(value: &Value) -> Option<String> {
-    if let Some(text) = value
-        .get("text")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        return Some(text.to_string());
-    }
-
-    if let Some(message) = value.get("message") {
-        if let Some(text) = extract_text(message) {
-            return Some(text);
-        }
-    }
-
-    let content = value.get("content").and_then(|v| v.as_array())?;
-    let text = content
-        .iter()
-        .filter_map(|item| {
-            item.get("text")
-                .and_then(|v| v.as_str())
-                .or_else(|| item.as_str())
-                .map(str::trim)
-        })
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
     }
 }

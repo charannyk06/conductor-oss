@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(board.columns[0].cards[0].title, "Build login page");
         assert_eq!(board.columns[0].cards[1].tags, vec!["urgent"]);
         assert_eq!(board.columns[1].state, TaskState::InProgress);
-        assert_eq!(board.columns[2].cards[0].completed, true);
+        assert!(board.columns[2].cards[0].completed);
     }
 
     #[test]
