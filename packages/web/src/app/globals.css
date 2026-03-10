@@ -185,6 +185,7 @@ a:hover {
 }
 
 .xterm .xterm-viewport {
+  height: 100% !important;
   width: 100%;
   overscroll-behavior: contain;
   scrollbar-width: none;

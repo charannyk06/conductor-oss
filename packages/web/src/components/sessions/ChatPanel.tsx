@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1347,10 +1348,12 @@ export function ChatPanel({
 
   const endRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
   const reasoningMenuRef = useRef<HTMLDivElement | null>(null);
   const shouldStickToBottomRef = useRef(true);
+  const previousScrollTopRef = useRef(0);
   const normalizedAgentName = agentName?.trim() || "";
   const normalizedSessionStatus = sessionStatus?.trim().toLowerCase() ?? "";
   const runtimeCatalog = useMemo(
@@ -1466,6 +1469,10 @@ export function ChatPanel({
     [displayEntries],
   );
 
+  const normalizeWhitespaceOnlyDraft = useCallback(() => {
+    setMessage((current) => (current.trim().length === 0 ? "" : current));
+  }, []);
+
   const updateBottomStickiness = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) {
@@ -1473,25 +1480,65 @@ export function ChatPanel({
       return;
     }
 
+    previousScrollTopRef.current = container.scrollTop;
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    shouldStickToBottomRef.current = distanceFromBottom <= 80;
+    shouldStickToBottomRef.current = distanceFromBottom <= 16;
   }, []);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior) => {
     shouldStickToBottomRef.current = true;
-    if (typeof window === "undefined") {
+    const container = scrollContainerRef.current;
+    if (!container) {
       endRef.current?.scrollIntoView({ behavior, block: "end" });
       return;
     }
 
     window.requestAnimationFrame(() => {
-      endRef.current?.scrollIntoView({ behavior, block: "end" });
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior,
+      });
     });
   }, []);
 
   useEffect(() => {
     shouldStickToBottomRef.current = true;
+    previousScrollTopRef.current = 0;
   }, [sessionId]);
+
+  useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    if (shouldStickToBottomRef.current) {
+      previousScrollTopRef.current = container.scrollTop;
+      return;
+    }
+
+    container.scrollTop = previousScrollTopRef.current;
+  }, [feedItems, hasStreamingEntry, parserState, runtimeStatus, sending]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        return;
+      }
+      normalizeWhitespaceOnlyDraft();
+    };
+
+    const handleWindowFocus = () => {
+      normalizeWhitespaceOnlyDraft();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleWindowFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleWindowFocus);
+    };
+  }, [normalizeWhitespaceOnlyDraft]);
 
   const prevEntryCountRef = useRef(0);
   useEffect(() => {
@@ -1733,7 +1780,12 @@ export function ChatPanel({
         <div
           ref={scrollContainerRef}
           onScroll={updateBottomStickiness}
-          className="flex-1 overflow-y-auto px-3 pt-3 sm:px-4"
+          onWheelCapture={(event) => {
+            if (event.deltaY < 0) {
+              shouldStickToBottomRef.current = false;
+            }
+          }}
+          className="flex-1 overflow-y-auto px-3 pt-3 sm:px-4 [overflow-anchor:none]"
         >
           <div className="mx-auto flex w-full max-w-[768px] flex-col gap-5 pb-6">
             {loading && displayEntries.length === 0 ? (
@@ -1955,8 +2007,12 @@ export function ChatPanel({
 
               <div className="px-2 py-2">
                 <textarea
+                  ref={composerRef}
                   value={message}
                   onChange={(event) => setMessage(event.target.value)}
+                  onFocus={() => {
+                    normalizeWhitespaceOnlyDraft();
+                  }}
                   onKeyDown={handleComposerKeyDown}
                   placeholder="Continue working on this task..."
                   rows={1}

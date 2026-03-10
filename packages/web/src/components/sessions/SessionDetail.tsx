@@ -81,6 +81,8 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
   }, []);
   useEffect(() => {
     autoPreviewOpenedRef.current = false;
+    terminalInsertNonceRef.current = 0;
+    setPendingTerminalInsert(null);
   }, [sessionId]);
   const handlePreviewConnectionChange = useCallback((connected: boolean) => {
     if (!connected || activeTab !== "terminal" || autoPreviewOpenedRef.current) {
@@ -134,7 +136,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <Tabs value={activeTab} onValueChange={handleTabChange} className="flex min-h-0 flex-1 flex-col gap-1.5 p-1.5 sm:gap-2 sm:p-3">
+      <Tabs key={sessionId} value={activeTab} onValueChange={handleTabChange} className="flex min-h-0 flex-1 flex-col gap-1.5 p-1.5 sm:gap-2 sm:p-3">
         <div className="flex min-w-0 flex-col gap-1.5 sm:gap-2">
           <TabsList className="grid w-full grid-cols-4 sm:w-fit sm:inline-flex">
             <TabsTrigger value="overview" className="justify-center px-2 text-[11px] sm:px-2.5 sm:text-[12px]">
@@ -166,7 +168,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
 
         <div className="relative min-h-0 flex-1">
           <TabsContent value="overview" className="min-h-0 h-full overflow-auto">
-            <SessionOverview session={session} />
+            <SessionOverview key={sessionId} session={session} />
           </TabsContent>
 
           <TabsContent
@@ -175,6 +177,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
             className="min-h-0 h-full overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[#212121] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
           >
             <SessionTerminal
+              key={sessionId}
               sessionId={sessionId}
               agentName={agentName}
               projectId={session.projectId}
@@ -192,6 +195,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
             className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
           >
             <SessionPreview
+              key={sessionId}
               sessionId={sessionId}
               onQueueTerminalInsert={queueTerminalInsert}
               onConnectionChange={handlePreviewConnectionChange}
@@ -199,7 +203,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
           </TabsContent>
 
           <TabsContent value="diff" className="min-h-0 h-full overflow-auto">
-            <SessionDiff sessionId={sessionId} />
+            <SessionDiff key={sessionId} sessionId={sessionId} />
           </TabsContent>
         </div>
       </Tabs>

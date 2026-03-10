@@ -46,7 +46,7 @@ const RECONNECT_BASE_DELAY_MS = 300;
 const RECONNECT_MAX_DELAY_MS = 1600;
 const RENDERER_RECOVERY_THROTTLE_MS = 120;
 const LIVE_TERMINAL_SCROLLBACK = 200000;
-const TERMINAL_SNAPSHOT_LINES = 200000;
+const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 200000;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
 
 function shellEscapePath(path: string): string {
@@ -109,8 +109,8 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
   return { wsUrl: data.wsUrl.trim() };
 }
 
-async function fetchTerminalSnapshot(sessionId: string): Promise<TerminalSnapshot> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${TERMINAL_SNAPSHOT_LINES}`, {
+async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}`, {
     cache: "no-store",
   });
   const data = (await response.json().catch(() => null)) as
@@ -136,6 +136,25 @@ function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): st
 
 function normalizeTerminalSnapshot(snapshot: string): string {
   return snapshot.replace(/\r?\n/g, "\r\n");
+}
+
+function terminalHasRenderedContent(term: XTerminal): boolean {
+  const buffer = term.buffer.active;
+  if (buffer.baseY > 0) {
+    return true;
+  }
+
+  for (let row = 0; row < term.rows; row += 1) {
+    const line = buffer.getLine(row);
+    if (!line) {
+      continue;
+    }
+    if (line.translateToString(true).trim().length > 0) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function getTerminalViewportOptions(width: number): Pick<ITerminalOptions, "fontFamily" | "fontSize" | "lineHeight"> {
@@ -186,15 +205,19 @@ export function SessionTerminal({
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const scrollDisposableRef = useRef<IDisposable | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const resumeTextareaRef = useRef<HTMLTextAreaElement>(null);
   const latestStatusRef = useRef(sessionState);
   const activeRef = useRef(active);
   const hasConnectedOnceRef = useRef(false);
   const reconnectNoticeWrittenRef = useRef(false);
   const snapshotAppliedRef = useRef<string | null>(null);
+  const liveOutputStartedRef = useRef(false);
+  const previousLiveTerminalRef = useRef(false);
   const recoveryFrameRef = useRef<number | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryLastRunRef = useRef(0);
   const recoveryPendingResizeRef = useRef(false);
+  const visibilityRecoveryTimersRef = useRef<number[]>([]);
   const lastAppliedInsertNonceRef = useRef<number>(0);
 
   const [terminalReady, setTerminalReady] = useState(false);
@@ -232,6 +255,10 @@ export function SessionTerminal({
     : normalizedSessionStatus === "needs_input" || normalizedSessionStatus === "stuck"
       ? "Answer the agent and resume..."
       : "Restart this session with a follow-up...";
+
+  const normalizeWhitespaceOnlyDraft = useCallback(() => {
+    setMessage((current) => (current.trim().length === 0 ? "" : current));
+  }, []);
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current !== null) {
@@ -301,6 +328,13 @@ export function SessionTerminal({
     recoveryPendingResizeRef.current = false;
   }, []);
 
+  const clearVisibilityRecoveryTimers = useCallback(() => {
+    for (const timer of visibilityRecoveryTimersRef.current) {
+      window.clearTimeout(timer);
+    }
+    visibilityRecoveryTimersRef.current = [];
+  }, []);
+
   const runRendererRecovery = useCallback((forceResize: boolean) => {
     const term = termRef.current;
     const fit = fitRef.current;
@@ -329,7 +363,9 @@ export function SessionTerminal({
       return;
     }
 
-    term.refresh(0, Math.max(0, term.rows - 1));
+    if (forceResize) {
+      term.refresh(0, Math.max(0, term.rows - 1));
+    }
 
     if (forceResize || term.cols !== previousCols || term.rows !== previousRows) {
       sendResize();
@@ -404,19 +440,58 @@ export function SessionTerminal({
   }, [connectionState, expectsLiveTerminal, injectFilesIntoTerminal, queueResumeAttachments]);
 
   useEffect(() => {
+    const wasLiveTerminal = previousLiveTerminalRef.current;
+    previousLiveTerminalRef.current = expectsLiveTerminal;
+    if (wasLiveTerminal && !expectsLiveTerminal) {
+      snapshotAppliedRef.current = null;
+      liveOutputStartedRef.current = false;
+    }
+  }, [expectsLiveTerminal]);
+
+  useEffect(() => {
     hasConnectedOnceRef.current = false;
     reconnectNoticeWrittenRef.current = false;
     snapshotAppliedRef.current = null;
-  }, [sessionId]);
+    liveOutputStartedRef.current = false;
+    reconnectCountRef.current = 0;
+    connectAttemptRef.current = 0;
+    lastAppliedInsertNonceRef.current = 0;
+    clearReconnectTimer();
+    clearScheduledRecovery();
+    socketRef.current?.close();
+    socketRef.current = null;
+    setSocketBaseUrl(null);
+    setConnectionState("connecting");
+    setTransportError(null);
+    setMessage("");
+    setAttachments([]);
+    setSending(false);
+    setSendError(null);
+    setDragActive(false);
+    setSearchOpen(false);
+    setSearchQuery("");
+    setShowScrollToBottom(false);
+    setSnapshotReady(false);
+    setSnapshotAnsi("");
+    termRef.current?.reset();
+    updateScrollState();
+  }, [clearReconnectTimer, clearScheduledRecovery, sessionId, updateScrollState]);
 
   useEffect(() => {
     let mounted = true;
     setSnapshotReady(false);
     setSnapshotAnsi("");
 
+    if (expectsLiveTerminal) {
+      setSnapshotReady(true);
+      return () => {
+        mounted = false;
+      };
+    }
+
     void (async () => {
       try {
-        const snapshot = await fetchTerminalSnapshot(sessionId);
+        const snapshot = await fetchTerminalSnapshot(sessionId, READ_ONLY_TERMINAL_SNAPSHOT_LINES);
         if (!mounted) return;
         setSnapshotAnsi(snapshot.snapshot);
       } catch {
@@ -432,7 +507,7 @@ export function SessionTerminal({
     return () => {
       mounted = false;
     };
-  }, [sessionId]);
+  }, [expectsLiveTerminal, sessionId]);
 
   useEffect(() => {
     let mounted = true;
@@ -557,12 +632,10 @@ export function SessionTerminal({
           term.options.fontFamily = nextViewportOptions.fontFamily;
           term.options.fontSize = nextViewportOptions.fontSize;
           term.options.lineHeight = nextViewportOptions.lineHeight;
-          fit?.fit();
         } catch {
           return;
         }
-        sendResize();
-        updateScrollState();
+        scheduleRendererRecovery(true);
       });
       resizeObserverRef.current.observe(containerRef.current);
     }
@@ -583,21 +656,29 @@ export function SessionTerminal({
       searchRef.current = null;
       setTerminalReady(false);
     };
-  }, [sendResize, updateScrollState]);
+  }, [scheduleRendererRecovery, sendResize, updateScrollState]);
 
   useEffect(() => {
     if (!active) {
       return;
     }
 
-    const handle = window.requestAnimationFrame(() => {
+    clearVisibilityRecoveryTimers();
+    const frameHandle = window.requestAnimationFrame(() => {
       scheduleRendererRecovery(true);
+      visibilityRecoveryTimersRef.current.push(window.setTimeout(() => {
+        scheduleRendererRecovery(true);
+      }, 48));
+      visibilityRecoveryTimersRef.current.push(window.setTimeout(() => {
+        scheduleRendererRecovery(true);
+      }, 140));
     });
 
     return () => {
-      window.cancelAnimationFrame(handle);
+      window.cancelAnimationFrame(frameHandle);
+      clearVisibilityRecoveryTimers();
     };
-  }, [active, scheduleRendererRecovery]);
+  }, [active, clearVisibilityRecoveryTimers, scheduleRendererRecovery]);
 
   useEffect(() => {
     if (!terminalReady || !snapshotReady) {
@@ -609,13 +690,26 @@ export function SessionTerminal({
       return;
     }
 
+    if (expectsLiveTerminal && (liveOutputStartedRef.current || terminalHasRenderedContent(term))) {
+      snapshotAppliedRef.current = sessionId;
+      updateScrollState();
+      return;
+    }
+
     snapshotAppliedRef.current = sessionId;
-    term.reset();
     if (snapshotAnsi.length > 0) {
+      term.reset();
       term.write(normalizeTerminalSnapshot(snapshotAnsi), () => {
+        if (termRef.current !== term) {
+          return;
+        }
         updateScrollState();
         if (activeRef.current) {
-          term.focus();
+          try {
+            term.focus();
+          } catch {
+            // Terminal may have been disposed while the write callback was queued.
+          }
         }
       });
       return;
@@ -629,11 +723,13 @@ export function SessionTerminal({
       if (document.hidden) {
         return;
       }
-      scheduleRendererRecovery(activeRef.current);
+      normalizeWhitespaceOnlyDraft();
+      scheduleRendererRecovery(false);
     };
 
     const handleWindowFocus = () => {
-      scheduleRendererRecovery(activeRef.current);
+      normalizeWhitespaceOnlyDraft();
+      scheduleRendererRecovery(false);
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -643,10 +739,10 @@ export function SessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [scheduleRendererRecovery]);
+  }, [normalizeWhitespaceOnlyDraft, scheduleRendererRecovery]);
 
   useEffect(() => {
-    if (!terminalReady || !snapshotReady || !socketBaseUrl || !termRef.current) return;
+    if (!terminalReady || !socketBaseUrl || !termRef.current || !expectsLiveTerminal) return;
 
     const term = termRef.current;
     const socketUrl = buildTerminalSocketUrl(socketBaseUrl, term.cols, term.rows);
@@ -694,10 +790,18 @@ export function SessionTerminal({
       }
 
       if (event.data instanceof ArrayBuffer) {
+        liveOutputStartedRef.current = true;
         const shouldFollow = term.buffer.active.viewportY >= term.buffer.active.baseY;
         term.write(new Uint8Array(event.data), () => {
+          if (termRef.current !== term) {
+            return;
+          }
           if (shouldFollow) {
-            term.scrollToBottom();
+            try {
+              term.scrollToBottom();
+            } catch {
+              return;
+            }
           }
           updateScrollState();
         });
@@ -734,7 +838,7 @@ export function SessionTerminal({
       }
       socket.close();
     };
-  }, [clearReconnectTimer, reconnectToken, scheduleReconnect, scheduleRendererRecovery, snapshotReady, socketBaseUrl, terminalReady, updateScrollState]);
+  }, [clearReconnectTimer, expectsLiveTerminal, reconnectToken, scheduleReconnect, scheduleRendererRecovery, socketBaseUrl, terminalReady, updateScrollState]);
 
   useEffect(() => {
     if (!terminalReady || !snapshotReady || !expectsLiveTerminal) {
@@ -760,8 +864,9 @@ export function SessionTerminal({
   useEffect(() => () => {
     clearReconnectTimer();
     clearScheduledRecovery();
+    clearVisibilityRecoveryTimers();
     socketRef.current?.close();
-  }, [clearReconnectTimer, clearScheduledRecovery]);
+  }, [clearReconnectTimer, clearScheduledRecovery, clearVisibilityRecoveryTimers]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -991,7 +1096,9 @@ export function SessionTerminal({
         </div>
       )}
 
-      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3" />
+      <div className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3">
+        <div ref={containerRef} className="h-full w-full overflow-hidden" />
+      </div>
 
       {showScrollToBottom ? (
         <div className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 ${showResumeRail ? "bottom-24" : "bottom-4"}`}>
@@ -1041,8 +1148,12 @@ export function SessionTerminal({
 
           <div className="flex items-end gap-2">
             <textarea
+              ref={resumeTextareaRef}
               value={message}
               onChange={(event) => setMessage(event.target.value)}
+              onFocus={() => {
+                normalizeWhitespaceOnlyDraft();
+              }}
               onKeyDown={(event) => {
                 if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                   event.preventDefault();

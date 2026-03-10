@@ -24,7 +24,8 @@ type TerminalSnapshot = {
 };
 
 const READ_ONLY_SCROLLBACK = 200000;
-const TERMINAL_SNAPSHOT_LINES = 200000;
+const LIVE_TERMINAL_SNAPSHOT_LINES = 12000;
+const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 200000;
 const RECONNECT_BASE_DELAY_MS = 300;
 const RECONNECT_MAX_DELAY_MS = 1600;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
@@ -40,8 +41,8 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
   return { wsUrl: data.wsUrl.trim() };
 }
 
-async function fetchTerminalSnapshot(sessionId: string): Promise<TerminalSnapshot> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${TERMINAL_SNAPSHOT_LINES}`, {
+async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}`, {
     cache: "no-store",
   });
   const data = (await response.json().catch(() => null)) as
@@ -67,6 +68,25 @@ function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): st
 
 function normalizeTerminalSnapshot(snapshot: string): string {
   return snapshot.replace(/\r?\n/g, "\r\n");
+}
+
+function terminalHasRenderedContent(term: XTerminal): boolean {
+  const buffer = term.buffer.active;
+  if (buffer.baseY > 0) {
+    return true;
+  }
+
+  for (let row = 0; row < term.rows; row += 1) {
+    const line = buffer.getLine(row);
+    if (!line) {
+      continue;
+    }
+    if (line.translateToString(true).trim().length > 0) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function getTerminalViewportOptions(width: number): Pick<ITerminalOptions, "fontFamily" | "fontSize" | "lineHeight"> {
@@ -105,6 +125,7 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
   const hasConnectedOnceRef = useRef(false);
   const reconnectNoticeWrittenRef = useRef(false);
   const snapshotAppliedRef = useRef<string | null>(null);
+  const liveOutputStartedRef = useRef(false);
 
   const [terminalReady, setTerminalReady] = useState(false);
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
@@ -186,7 +207,10 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
     hasConnectedOnceRef.current = false;
     reconnectNoticeWrittenRef.current = false;
     snapshotAppliedRef.current = null;
-  }, [sessionId]);
+    liveOutputStartedRef.current = false;
+    termRef.current?.reset();
+    updateScrollState();
+  }, [sessionId, updateScrollState]);
 
   useEffect(() => {
     let mounted = true;
@@ -195,12 +219,18 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
 
     void (async () => {
       try {
-        const snapshot = await fetchTerminalSnapshot(sessionId);
+        const snapshot = await fetchTerminalSnapshot(sessionId, LIVE_TERMINAL_SNAPSHOT_LINES);
         if (!mounted) return;
         setSnapshotAnsi(snapshot.snapshot);
       } catch {
-        if (!mounted) return;
-        setSnapshotAnsi("");
+        try {
+          const fallbackSnapshot = await fetchTerminalSnapshot(sessionId, READ_ONLY_TERMINAL_SNAPSHOT_LINES);
+          if (!mounted) return;
+          setSnapshotAnsi(fallbackSnapshot.snapshot);
+        } catch {
+          if (!mounted) return;
+          setSnapshotAnsi("");
+        }
       } finally {
         if (mounted) {
           setSnapshotReady(true);
@@ -362,12 +392,25 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
       return;
     }
 
+    if (liveOutputStartedRef.current || terminalHasRenderedContent(term)) {
+      snapshotAppliedRef.current = sessionId;
+      updateScrollState();
+      return;
+    }
+
     snapshotAppliedRef.current = sessionId;
-    term.reset();
     if (snapshotAnsi.length > 0) {
+      term.reset();
       term.write(normalizeTerminalSnapshot(snapshotAnsi), () => {
+        if (termRef.current !== term) {
+          return;
+        }
         updateScrollState();
-        term.focus();
+        try {
+          term.focus();
+        } catch {
+          // Terminal may have been disposed while the write callback was queued.
+        }
       });
       return;
     }
@@ -429,10 +472,18 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
       }
 
       if (event.data instanceof ArrayBuffer) {
+        liveOutputStartedRef.current = true;
         const shouldFollow = term.buffer.active.viewportY >= term.buffer.active.baseY;
         term.write(new Uint8Array(event.data), () => {
+          if (termRef.current !== term) {
+            return;
+          }
           if (shouldFollow) {
-            term.scrollToBottom();
+            try {
+              term.scrollToBottom();
+            } catch {
+              return;
+            }
           }
           updateScrollState();
         });
@@ -537,7 +588,9 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
         </div>
       )}
 
-      <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3" />
+      <div className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3">
+        <div ref={containerRef} className="h-full w-full overflow-hidden" />
+      </div>
 
       {showScrollToBottom ? (
         <div className="pointer-events-none absolute bottom-4 left-1/2 z-10 -translate-x-1/2">

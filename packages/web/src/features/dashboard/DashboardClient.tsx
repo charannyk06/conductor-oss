@@ -1839,7 +1839,7 @@ export default function DashboardClient() {
 
   const workspaceContent = useMemo(() => {
     if (selectedSessionId) {
-      return <SessionDetail sessionId={selectedSessionId} />;
+      return <SessionDetail key={selectedSessionId} sessionId={selectedSessionId} />;
     }
 
     if (selectedProjectId !== null) {
