@@ -8,7 +8,6 @@ import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xter
 import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { SUPERSET_TERMINAL_FONT_FAMILY, getSupersetLikeTerminalTheme } from "@/components/terminal/xtermTheme";
-import { useSessionFeed } from "@/hooks/useSessionFeed";
 import type { TerminalInsertRequest } from "./terminalInsert";
 
 interface SessionTerminalProps {
@@ -45,9 +44,16 @@ const RESUMABLE_STATUSES = new Set(["done", "needs_input", "stuck", "errored", "
 const RECONNECT_BASE_DELAY_MS = 300;
 const RECONNECT_MAX_DELAY_MS = 1600;
 const RENDERER_RECOVERY_THROTTLE_MS = 120;
-const LIVE_TERMINAL_SCROLLBACK = 200000;
-const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 200000;
+const LIVE_TERMINAL_SCROLLBACK = 50000;
+const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
+const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
+const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
+  /\x1b\[(?:I|O)/g,
+  /\x1b\[\d+;\d+R/g,
+  /\x1b\[(?:[?>])[\d;]*c/g,
+  /\x1b\](?:10|11|12|4;\d+);[\s\S]*?(?:\x07|\x1b\\)/g,
+];
 
 function shellEscapePath(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
@@ -127,6 +133,41 @@ async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<
   };
 }
 
+async function fetchLiveTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}&live=1`,
+    {
+      cache: "no-store",
+    },
+  );
+  const data = (await response.json().catch(() => null)) as
+    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; error?: string }
+    | null;
+  if (!response.ok) {
+    throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
+  }
+  return {
+    snapshot: typeof data?.snapshot === "string" ? data.snapshot : "",
+    source: typeof data?.source === "string" ? data.source : "empty",
+    live: data?.live === true,
+    restored: data?.restored === true,
+  };
+}
+
+async function fetchSessionStatus(sessionId: string): Promise<string | null> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load session: ${response.status}`);
+  }
+
+  const data = (await response.json().catch(() => null)) as { status?: unknown } | null;
+  return typeof data?.status === "string" && data.status.trim().length > 0
+    ? data.status.trim()
+    : null;
+}
+
 function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): string {
   const url = new URL(baseUrl);
   url.searchParams.set("cols", String(Math.max(1, cols)));
@@ -136,6 +177,14 @@ function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): st
 
 function normalizeTerminalSnapshot(snapshot: string): string {
   return snapshot.replace(/\r?\n/g, "\r\n");
+}
+
+function stripBrowserTerminalResponses(data: string): string {
+  let sanitized = data;
+  for (const pattern of BROWSER_TERMINAL_RESPONSE_PATTERNS) {
+    sanitized = sanitized.replace(pattern, "");
+  }
+  return sanitized;
 }
 
 function terminalHasRenderedContent(term: XTerminal): boolean {
@@ -192,7 +241,6 @@ export function SessionTerminal({
   pendingInsert,
 }: SessionTerminalProps) {
   const router = useRouter();
-  const { sessionStatus, refresh } = useSessionFeed(sessionId);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerminal | null>(null);
   const fitRef = useRef<XFitAddon | null>(null);
@@ -235,20 +283,23 @@ export function SessionTerminal({
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [snapshotAnsi, setSnapshotAnsi] = useState("");
+  const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
+  const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
 
   const normalizedSessionStatus = useMemo(
     () => {
-      const candidate = typeof sessionStatus === "string" && sessionStatus.trim().length > 0
-        ? sessionStatus
+      const candidate = typeof sessionStatusOverride === "string" && sessionStatusOverride.trim().length > 0
+        ? sessionStatusOverride
         : sessionState;
       return candidate.trim().toLowerCase();
     },
-    [sessionState, sessionStatus],
+    [sessionState, sessionStatusOverride],
   );
   latestStatusRef.current = normalizedSessionStatus;
   activeRef.current = active;
 
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
+  const shouldStreamLiveTerminal = expectsLiveTerminal && active && pageVisible;
   const showResumeRail = RESUMABLE_STATUSES.has(normalizedSessionStatus) && !expectsLiveTerminal;
   const railPlaceholder = normalizedSessionStatus === "done"
     ? "Continue the session..."
@@ -299,11 +350,15 @@ export function SessionTerminal({
   }, []);
 
   const sendTerminalKeys = useCallback((data: string) => {
+    const keys = stripBrowserTerminalResponses(data);
+    if (keys.length === 0) {
+      return;
+    }
     const socket = socketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("Terminal is not connected");
     }
-    socket.send(JSON.stringify({ type: "keys", keys: data }));
+    socket.send(JSON.stringify({ type: "keys", keys }));
   }, []);
 
   const updateScrollState = useCallback(() => {
@@ -473,22 +528,56 @@ export function SessionTerminal({
     setShowScrollToBottom(false);
     setSnapshotReady(false);
     setSnapshotAnsi("");
+    setSessionStatusOverride(null);
     termRef.current?.reset();
     updateScrollState();
   }, [clearReconnectTimer, clearScheduledRecovery, sessionId, updateScrollState]);
 
   useEffect(() => {
+    setSessionStatusOverride(null);
+  }, [sessionState]);
+
+  useEffect(() => {
     let mounted = true;
     setSnapshotReady(false);
-    setSnapshotAnsi("");
 
     if (expectsLiveTerminal) {
-      setSnapshotReady(true);
+      if (!shouldStreamLiveTerminal) {
+        setSnapshotAnsi("");
+        return () => {
+          mounted = false;
+        };
+      }
+
+      liveOutputStartedRef.current = false;
+      snapshotAppliedRef.current = null;
+      void (async () => {
+        try {
+          const snapshot = await fetchLiveTerminalSnapshot(sessionId, LIVE_TERMINAL_SNAPSHOT_LINES);
+          if (!mounted) return;
+          setSnapshotAnsi(snapshot.snapshot);
+        } catch {
+          try {
+            const fallbackSnapshot = await fetchTerminalSnapshot(sessionId, READ_ONLY_TERMINAL_SNAPSHOT_LINES);
+            if (!mounted) return;
+            setSnapshotAnsi(fallbackSnapshot.snapshot);
+          } catch {
+            if (!mounted) return;
+            setSnapshotAnsi("");
+          }
+        } finally {
+          if (mounted) {
+            setSnapshotReady(true);
+          }
+        }
+      })();
+
       return () => {
         mounted = false;
       };
     }
 
+    setSnapshotAnsi("");
     void (async () => {
       try {
         const snapshot = await fetchTerminalSnapshot(sessionId, READ_ONLY_TERMINAL_SNAPSHOT_LINES);
@@ -507,10 +596,20 @@ export function SessionTerminal({
     return () => {
       mounted = false;
     };
-  }, [expectsLiveTerminal, sessionId]);
+  }, [expectsLiveTerminal, sessionId, shouldStreamLiveTerminal]);
 
   useEffect(() => {
     let mounted = true;
+
+    if (expectsLiveTerminal && !shouldStreamLiveTerminal) {
+      setSocketBaseUrl(null);
+      setConnectionState("closed");
+      setTransportError(null);
+      return () => {
+        mounted = false;
+      };
+    }
+
     void (async () => {
       try {
         setSocketBaseUrl(null);
@@ -528,7 +627,7 @@ export function SessionTerminal({
     return () => {
       mounted = false;
     };
-  }, [reconnectToken, sessionId]);
+  }, [expectsLiveTerminal, reconnectToken, sessionId, shouldStreamLiveTerminal]);
 
   useEffect(() => {
     let term: XTerminal | null = null;
@@ -615,9 +714,11 @@ export function SessionTerminal({
       updateScrollState();
 
       inputDisposableRef.current = term.onData((data) => {
-        const socket = socketRef.current;
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-        socket.send(JSON.stringify({ type: "keys", keys: data }));
+        try {
+          sendTerminalKeys(data);
+        } catch {
+          // Ignore transient disconnects while xterm is still flushing local input.
+        }
       });
       scrollDisposableRef.current = term.onScroll(() => {
         updateScrollState();
@@ -656,7 +757,7 @@ export function SessionTerminal({
       searchRef.current = null;
       setTerminalReady(false);
     };
-  }, [scheduleRendererRecovery, sendResize, updateScrollState]);
+  }, [scheduleRendererRecovery, sendResize, sendTerminalKeys, updateScrollState]);
 
   useEffect(() => {
     if (!active) {
@@ -720,6 +821,8 @@ export function SessionTerminal({
 
   useEffect(() => {
     const handleVisibilityChange = () => {
+      const visible = !document.hidden;
+      setPageVisible(visible);
       if (document.hidden) {
         return;
       }
@@ -728,6 +831,7 @@ export function SessionTerminal({
     };
 
     const handleWindowFocus = () => {
+      setPageVisible(!document.hidden);
       normalizeWhitespaceOnlyDraft();
       scheduleRendererRecovery(false);
     };
@@ -742,7 +846,20 @@ export function SessionTerminal({
   }, [normalizeWhitespaceOnlyDraft, scheduleRendererRecovery]);
 
   useEffect(() => {
-    if (!terminalReady || !socketBaseUrl || !termRef.current || !expectsLiveTerminal) return;
+    if (shouldStreamLiveTerminal) {
+      return;
+    }
+
+    clearReconnectTimer();
+    const socket = socketRef.current;
+    socketRef.current = null;
+    if (socket) {
+      socket.close();
+    }
+  }, [clearReconnectTimer, shouldStreamLiveTerminal]);
+
+  useEffect(() => {
+    if (!terminalReady || !snapshotReady || !socketBaseUrl || !termRef.current || !shouldStreamLiveTerminal) return;
 
     const term = termRef.current;
     const socketUrl = buildTerminalSocketUrl(socketBaseUrl, term.cols, term.rows);
@@ -838,10 +955,10 @@ export function SessionTerminal({
       }
       socket.close();
     };
-  }, [clearReconnectTimer, expectsLiveTerminal, reconnectToken, scheduleReconnect, scheduleRendererRecovery, socketBaseUrl, terminalReady, updateScrollState]);
+  }, [clearReconnectTimer, reconnectToken, scheduleReconnect, scheduleRendererRecovery, shouldStreamLiveTerminal, snapshotReady, socketBaseUrl, terminalReady, updateScrollState]);
 
   useEffect(() => {
-    if (!terminalReady || !snapshotReady || !expectsLiveTerminal) {
+    if (!terminalReady || !snapshotReady || !shouldStreamLiveTerminal) {
       return;
     }
 
@@ -859,7 +976,7 @@ export function SessionTerminal({
     }
 
     scheduleReconnect();
-  }, [connectionState, expectsLiveTerminal, scheduleReconnect, snapshotReady, terminalReady]);
+  }, [connectionState, scheduleReconnect, shouldStreamLiveTerminal, snapshotReady, terminalReady]);
 
   useEffect(() => () => {
     clearReconnectTimer();
@@ -930,13 +1047,18 @@ export function SessionTerminal({
         return;
       }
       setReconnectToken((value) => value + 1);
-      await refresh();
+      try {
+        const nextStatus = await fetchSessionStatus(sessionId);
+        setSessionStatusOverride(nextStatus);
+      } catch {
+        // The session page hook will still reconcile status through the shared session stream.
+      }
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to resume session");
     } finally {
       setSending(false);
     }
-  }, [attachments, message, projectId, refresh, router, sessionId, sessionModel, sessionReasoningEffort]);
+  }, [attachments, message, projectId, router, sessionId, sessionModel, sessionReasoningEffort]);
 
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
@@ -989,6 +1111,19 @@ export function SessionTerminal({
       term.focus();
     }
   }, [updateScrollState]);
+
+  const focusTerminal = useCallback(() => {
+    const term = termRef.current;
+    if (!term) {
+      return;
+    }
+    try {
+      term.focus();
+    } catch {
+      return;
+    }
+    scheduleRendererRecovery(false);
+  }, [scheduleRendererRecovery]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
@@ -1097,7 +1232,11 @@ export function SessionTerminal({
       )}
 
       <div className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3">
-        <div ref={containerRef} className="h-full w-full overflow-hidden" />
+        <div
+          ref={containerRef}
+          className="h-full w-full overflow-hidden touch-manipulation"
+          onPointerDown={focusTerminal}
+        />
       </div>
 
       {showScrollToBottom ? (

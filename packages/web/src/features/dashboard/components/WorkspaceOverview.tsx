@@ -75,6 +75,28 @@ function getStatusLabel(session: DashboardSession): string {
   return "Running";
 }
 
+function selectRecentSessions(sessions: DashboardSession[], limit: number): DashboardSession[] {
+  const recent: DashboardSession[] = [];
+
+  for (const session of sessions) {
+    let insertAt = recent.length;
+    while (insertAt > 0 && recent[insertAt - 1]!.lastActivityAt.localeCompare(session.lastActivityAt) < 0) {
+      insertAt -= 1;
+    }
+
+    if (insertAt >= limit) {
+      continue;
+    }
+
+    recent.splice(insertAt, 0, session);
+    if (recent.length > limit) {
+      recent.pop();
+    }
+  }
+
+  return recent;
+}
+
 export function WorkspaceOverview({
   projects,
   sessions,
@@ -89,10 +111,23 @@ export function WorkspaceOverview({
     [sessions],
   );
 
+  const sessionsByProjectId = useMemo(() => {
+    const grouped = new Map<string, DashboardSession[]>();
+    for (const session of visibleSessions) {
+      const current = grouped.get(session.projectId);
+      if (current) {
+        current.push(session);
+      } else {
+        grouped.set(session.projectId, [session]);
+      }
+    }
+    return grouped;
+  }, [visibleSessions]);
+
   const projectSummaries = useMemo<ProjectSummary[]>(() => {
     return projects
       .map((project) => {
-        const projectSessions = visibleSessions.filter((session) => session.projectId === project.id);
+        const projectSessions = sessionsByProjectId.get(project.id) ?? [];
         const activeSessions = projectSessions.filter((session) => getAttentionLevel(session) !== "done").length;
 
         return {
@@ -104,28 +139,40 @@ export function WorkspaceOverview({
         };
       })
       .sort((left, right) => right.activeSessions - left.activeSessions || right.totalSessions - left.totalSessions || left.id.localeCompare(right.id));
-  }, [projects, visibleSessions]);
+  }, [projects, sessionsByProjectId]);
 
   const recentSessions = useMemo(() => {
-    return [...visibleSessions]
-      .sort((left, right) => new Date(right.lastActivityAt).getTime() - new Date(left.lastActivityAt).getTime())
-      .slice(0, 5);
+    return selectRecentSessions(visibleSessions, 5);
   }, [visibleSessions]);
 
-  const activeSessions = visibleSessions.filter((session) => getAttentionLevel(session) !== "done").length;
-  const needsAttention = visibleSessions.filter((session) => {
-    const level = getAttentionLevel(session);
-    return level === "merge" || level === "respond" || level === "review";
-  }).length;
-  const mergeReady = visibleSessions.filter((session) => getAttentionLevel(session) === "merge").length;
+  const sessionStats = useMemo(() => {
+    let active = 0;
+    let attention = 0;
+    let merge = 0;
+
+    for (const session of visibleSessions) {
+      const level = getAttentionLevel(session);
+      if (level !== "done") {
+        active += 1;
+      }
+      if (level === "merge") {
+        merge += 1;
+        attention += 1;
+      } else if (level === "respond" || level === "review") {
+        attention += 1;
+      }
+    }
+
+    return { active, attention, merge };
+  }, [visibleSessions]);
   const selectedProject = projectSummaries.find((project) => project.id === selectedProjectId) ?? null;
   const showWelcomeState = projects.length === 0 && visibleSessions.length === 0;
 
   const statCards = [
     { label: "Projects", value: String(projects.length), icon: FolderGit2 },
-    { label: "Active sessions", value: String(activeSessions), icon: Layers3 },
-    { label: "Need attention", value: String(needsAttention), icon: Sparkles },
-    { label: "Merge ready", value: String(mergeReady), icon: GitBranch },
+    { label: "Active sessions", value: String(sessionStats.active), icon: Layers3 },
+    { label: "Need attention", value: String(sessionStats.attention), icon: Sparkles },
+    { label: "Merge ready", value: String(sessionStats.merge), icon: GitBranch },
   ];
 
   if (showWelcomeState) {
@@ -197,7 +244,10 @@ export function WorkspaceOverview({
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           {statCards.map(({ label, value, icon: Icon }) => (
-            <Card key={label} className="bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_86%,transparent)]">
+            <Card
+              key={label}
+              className="bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_86%,transparent)] [content-visibility:auto] [contain-intrinsic-size:104px]"
+            >
               <CardContent className="flex items-center gap-3 py-3">
                 <span className="inline-flex h-10 w-10 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]">
                   <Icon className="h-4 w-4" />
@@ -230,7 +280,7 @@ export function WorkspaceOverview({
                   key={session.id}
                   type="button"
                   onClick={() => onSelectSession(session.id)}
-                  className="flex w-full items-center gap-3 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3 text-left transition-colors hover:bg-[var(--vk-bg-hover)]"
+                  className="flex w-full items-center gap-3 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3 text-left transition-colors hover:bg-[var(--vk-bg-hover)] [content-visibility:auto] [contain-intrinsic-size:82px]"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
@@ -287,7 +337,7 @@ export function WorkspaceOverview({
                   key={project.id}
                   type="button"
                   onClick={() => onSelectProject(project.id)}
-                  className={`flex w-full items-start justify-between gap-3 rounded-[6px] border px-3 py-2.5 text-left ${
+                  className={`flex w-full items-start justify-between gap-3 rounded-[6px] border px-3 py-2.5 text-left [content-visibility:auto] [contain-intrinsic-size:72px] ${
                     selectedProjectId === project.id
                       ? "border-[var(--vk-border)] bg-[var(--vk-bg-hover)]"
                       : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] hover:bg-[var(--vk-bg-hover)]"

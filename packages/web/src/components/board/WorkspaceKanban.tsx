@@ -3,7 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
+  FileImage,
+  FileText,
+  Folder,
+  FolderOpen,
   Loader2,
   MessageSquare,
   Pencil,
@@ -14,7 +20,6 @@ import {
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { usePreferences } from "@/hooks/usePreferences";
 import { cn } from "@/lib/cn";
-import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 
 type BoardRole =
   | "intake"
@@ -43,6 +48,8 @@ type BoardTask = {
   githubItemId: string | null;
   attachments: string[];
   notes: string | null;
+  briefPath?: string | null;
+  vaultBriefPath?: string | null;
   commentCount: number;
   comments: BoardComment[];
 };
@@ -102,6 +109,7 @@ type BoardResponse = {
   recentActions?: BoardActivity[];
   recentWebhookDeliveries?: WebhookDelivery[];
   watcherHint?: string;
+  createdTaskId?: string;
 };
 
 type GitHubProjectsResponse = {
@@ -124,6 +132,20 @@ type ContextFilesResponse = {
   files: ContextFile[];
 };
 
+type ContextTreeNode =
+  | {
+      kind: "folder";
+      name: string;
+      path: string;
+      children: ContextTreeNode[];
+    }
+  | {
+      kind: "file";
+      name: string;
+      path: string;
+      file: ContextFile;
+    };
+
 type ProjectSession = {
   id: string;
   branch: string | null;
@@ -138,6 +160,7 @@ interface WorkspaceKanbanProps {
   projectId: string | null;
   defaultAgent: string;
   agentOptions: string[];
+  projectSessions: ProjectSession[];
 }
 
 type BoardViewFilter = "active" | "all" | "backlog" | "cancelled";
@@ -169,8 +192,9 @@ const ROLE_LABEL: Record<BoardRole, string> = {
   done: "Done",
   cancelled: "Cancelled",
 };
-const ACTIVE_BOARD_REFRESH_MS = 10_000;
-const HIDDEN_BOARD_REFRESH_MS = 30_000;
+const ACTIVE_BOARD_REFRESH_MS = 20_000;
+const HIDDEN_BOARD_REFRESH_MS = 60_000;
+const BOARD_REFRESH_DEBOUNCE_MS = 1200;
 const MARKDOWN_EDITOR_LABELS: Record<string, string> = {
   obsidian: "Obsidian",
   vscode: "VS Code",
@@ -231,6 +255,105 @@ function getContextOpenLabel(editorId: string): string {
   return "Open file";
 }
 
+function normalizePathSegments(path: string): string[] {
+  return path
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function compareContextNodes(left: ContextTreeNode, right: ContextTreeNode): number {
+  if (left.kind !== right.kind) {
+    return left.kind === "folder" ? -1 : 1;
+  }
+  return left.name.localeCompare(right.name, undefined, {
+    sensitivity: "base",
+    numeric: true,
+  });
+}
+
+function buildContextTree(files: ContextFile[]): ContextTreeNode[] {
+  const folderChildren = new Map<string, Map<string, ContextTreeNode>>();
+  folderChildren.set("", new Map());
+
+  const ensureFolder = (path: string, name: string) => {
+    if (!folderChildren.has(path)) {
+      folderChildren.set(path, new Map());
+    }
+    return {
+      kind: "folder" as const,
+      name,
+      path,
+      children: [],
+    };
+  };
+
+  for (const file of files) {
+    const segments = normalizePathSegments(file.path);
+    if (segments.length === 0) {
+      continue;
+    }
+
+    let parentPath = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index]!;
+      const folderPath = parentPath ? `${parentPath}/${segment}` : segment;
+      const siblings = folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
+      folderChildren.set(parentPath, siblings);
+      if (!siblings.has(folderPath)) {
+        siblings.set(folderPath, ensureFolder(folderPath, segment));
+      }
+      if (!folderChildren.has(folderPath)) {
+        folderChildren.set(folderPath, new Map());
+      }
+      parentPath = folderPath;
+    }
+
+    const siblings = folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
+    siblings.set(file.path, {
+      kind: "file",
+      name: file.name,
+      path: file.path,
+      file,
+    });
+    folderChildren.set(parentPath, siblings);
+  }
+
+  const buildChildren = (parentPath: string): ContextTreeNode[] =>
+    [...(folderChildren.get(parentPath)?.values() ?? [])]
+      .map((node) =>
+        node.kind === "folder"
+          ? { ...node, children: buildChildren(node.path) }
+          : node
+      )
+      .sort(compareContextNodes);
+
+  return buildChildren("");
+}
+
+function collectContextFolderPaths(nodes: ContextTreeNode[], out = new Set<string>()): Set<string> {
+  for (const node of nodes) {
+    if (node.kind === "folder") {
+      out.add(node.path);
+      collectContextFolderPaths(node.children, out);
+    }
+  }
+  return out;
+}
+
+function collectContextAncestorFolders(paths: string[]): Set<string> {
+  const ancestors = new Set<string>();
+  for (const path of paths) {
+    const segments = normalizePathSegments(path);
+    let current = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      current = current ? `${current}/${segments[index]}` : segments[index]!;
+      ancestors.add(current);
+    }
+  }
+  return ancestors;
+}
+
 function ContextAttachmentChip({
   attachment,
   onOpen,
@@ -256,6 +379,127 @@ function ContextAttachmentChip({
       )}
       <span className="truncate">{attachment}</span>
     </button>
+  );
+}
+
+function ContextTreeRow({
+  node,
+  depth,
+  expandedFolders,
+  selectedPaths,
+  openingContextPath,
+  contextOpenLabel,
+  onToggleFolder,
+  onTogglePath,
+  onOpenPath,
+}: {
+  node: ContextTreeNode;
+  depth: number;
+  expandedFolders: Set<string>;
+  selectedPaths: string[];
+  openingContextPath: string | null;
+  contextOpenLabel: string;
+  onToggleFolder: (path: string) => void;
+  onTogglePath: (path: string) => void;
+  onOpenPath: (path: string) => void;
+}) {
+  const paddingLeft = 10 + depth * 16;
+
+  if (node.kind === "folder") {
+    const expanded = expandedFolders.has(node.path);
+    return (
+      <li>
+        <button
+          type="button"
+          onClick={() => onToggleFolder(node.path)}
+          className="flex w-full items-center gap-1.5 py-1 text-left text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+          style={{ paddingLeft: `${paddingLeft}px`, paddingRight: "10px" }}
+          aria-expanded={expanded}
+        >
+          {expanded ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          )}
+          {expanded ? (
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[var(--vk-orange)]" />
+          ) : (
+            <Folder className="h-3.5 w-3.5 shrink-0 text-[var(--vk-orange)]" />
+          )}
+          <span className="truncate">{node.name}</span>
+        </button>
+        {expanded ? (
+          <ul>
+            {node.children.map((child) => (
+              <ContextTreeRow
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                expandedFolders={expandedFolders}
+                selectedPaths={selectedPaths}
+                openingContextPath={openingContextPath}
+                contextOpenLabel={contextOpenLabel}
+                onToggleFolder={onToggleFolder}
+                onTogglePath={onTogglePath}
+                onOpenPath={onOpenPath}
+              />
+            ))}
+          </ul>
+        ) : null}
+      </li>
+    );
+  }
+
+  const checked = selectedPaths.includes(node.path);
+  return (
+    <li className="border-t border-[var(--vk-border)] first:border-t-0">
+      <div
+        className="flex items-start gap-2 py-1.5"
+        style={{ paddingLeft: `${paddingLeft + 22}px`, paddingRight: "10px" }}
+      >
+        <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 text-[12px] text-[var(--vk-text-normal)]">
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={() => onTogglePath(node.path)}
+            className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--vk-border)] bg-transparent"
+          />
+          {node.file.kind === "image" ? (
+            <FileImage className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          ) : (
+            <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          )}
+          <span className="min-w-0">
+            <span className="block truncate">{node.name}</span>
+            <span className="block truncate text-[11px] text-[var(--vk-text-muted)]">
+              {node.path}
+            </span>
+            <span className="block text-[11px] text-[var(--vk-text-muted)]">
+              {node.file.kind}
+              {node.file.source ? ` · ${node.file.source}` : ""}
+              {node.file.sizeBytes
+                ? ` · ${formatFileSize(node.file.sizeBytes)}`
+                : ""}
+            </span>
+          </span>
+        </label>
+        <button
+          type="button"
+          onClick={() => onOpenPath(node.path)}
+          disabled={openingContextPath === node.path}
+          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60"
+          title={`${contextOpenLabel}: ${node.path}`}
+          aria-label={`${contextOpenLabel}: ${node.path}`}
+        >
+          {openingContextPath === node.path ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <ExternalLink className="h-3 w-3" />
+          )}
+          <span className="hidden sm:inline">{contextOpenLabel}</span>
+        </button>
+      </div>
+    </li>
   );
 }
 
@@ -317,6 +561,8 @@ function boardsEqual(
         leftTask.issueId !== rightTask.issueId ||
         leftTask.githubItemId !== rightTask.githubItemId ||
         leftTask.notes !== rightTask.notes ||
+        leftTask.briefPath !== rightTask.briefPath ||
+        leftTask.vaultBriefPath !== rightTask.vaultBriefPath ||
         leftTask.commentCount !== rightTask.commentCount ||
         leftTask.comments.length !== rightTask.comments.length ||
         leftTask.attachments.length !== rightTask.attachments.length
@@ -413,6 +659,8 @@ function normalizeBoardResponse(value: BoardResponse): BoardResponse {
                   ? task.attachments
                   : [],
                 notes: task.notes ?? null,
+                briefPath: task.briefPath ?? null,
+                vaultBriefPath: task.vaultBriefPath ?? null,
                 commentCount:
                   typeof task.commentCount === "number"
                     ? task.commentCount
@@ -435,6 +683,18 @@ function formatLinkedSessionLabel(session: ProjectSession): string {
 
 function getTaskLinkKey(task: BoardTask): string {
   return task.issueId?.trim() || task.taskRef?.trim() || task.id;
+}
+
+function sessionMatchesTask(session: ProjectSession, task: BoardTask): boolean {
+  if (session.id === task.attemptRef) return true;
+  if (session.metadata?.taskId === task.id) return true;
+  if (
+    task.taskRef?.trim() &&
+    session.metadata?.taskRef?.trim() === task.taskRef.trim()
+  ) {
+    return true;
+  }
+  return session.issueId?.trim() === getTaskLinkKey(task);
 }
 
 function getSessionAgent(session: ProjectSession): string | null {
@@ -565,6 +825,7 @@ export function WorkspaceKanban({
   projectId,
   defaultAgent,
   agentOptions,
+  projectSessions,
 }: WorkspaceKanbanProps) {
   const router = useRouter();
   const { preferences } = usePreferences();
@@ -585,6 +846,9 @@ export function WorkspaceKanban({
   const [selectedContextPaths, setSelectedContextPaths] = useState<string[]>(
     []
   );
+  const [expandedContextFolders, setExpandedContextFolders] = useState<string[]>(
+    []
+  );
   const [contextSearch, setContextSearch] = useState("");
   const [contextFiles, setContextFiles] = useState<ContextFile[]>([]);
   const [contextLoading, setContextLoading] = useState(false);
@@ -593,7 +857,6 @@ export function WorkspaceKanban({
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [projectSessions, setProjectSessions] = useState<ProjectSession[]>([]);
   const [editingTask, setEditingTask] = useState<{
     task: BoardTask;
     role: BoardRole;
@@ -625,8 +888,10 @@ export function WorkspaceKanban({
   const [selectedGitHubProjectId, setSelectedGitHubProjectId] = useState("");
   const hasLoadedBoardRef = useRef(false);
   const boardRequestInFlightRef = useRef(false);
+  const boardRefreshTimeoutRef = useRef<number | null>(null);
   const preferredMarkdownEditor = preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
+  const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
 
   const orderedAgentOptions = useMemo(() => {
     const normalized = [...new Set(agentOptions.filter(Boolean))];
@@ -694,42 +959,6 @@ export function WorkspaceKanban({
   }, [composerOpen, editingTask, projectId]);
 
   useEffect(() => {
-    if (!projectId || (!composerOpen && !editingTask)) return;
-    let cancelled = false;
-
-    const loadProjectSessions = async () => {
-      try {
-        const res = await fetch(
-          `/api/sessions?project=${encodeURIComponent(projectId)}`
-        );
-        const payload = (await res.json().catch(() => null)) as
-          | { sessions?: ProjectSession[] }
-          | ProjectSession[]
-          | null;
-        if (!res.ok) {
-          throw new Error(`Failed to load sessions: ${res.status}`);
-        }
-        if (cancelled) return;
-        const sessions = Array.isArray(payload)
-          ? payload
-          : Array.isArray(payload?.sessions)
-          ? payload.sessions
-          : [];
-        setProjectSessions(sessions);
-      } catch {
-        if (!cancelled) {
-          setProjectSessions([]);
-        }
-      }
-    };
-
-    void loadProjectSessions();
-    return () => {
-      cancelled = true;
-    };
-  }, [composerOpen, editingTask, projectId]);
-
-  useEffect(() => {
     hasLoadedBoardRef.current = false;
     setProjectSyncOpen(false);
     setProjectSyncError(null);
@@ -791,6 +1020,19 @@ export function WorkspaceKanban({
     [projectId]
   );
 
+  const scheduleBoardRefresh = useCallback((options?: { silent?: boolean }) => {
+    if (!projectId) {
+      return;
+    }
+    if (boardRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(boardRefreshTimeoutRef.current);
+    }
+    boardRefreshTimeoutRef.current = window.setTimeout(() => {
+      boardRefreshTimeoutRef.current = null;
+      void loadBoard(options);
+    }, BOARD_REFRESH_DEBOUNCE_MS);
+  }, [loadBoard, projectId]);
+
   useEffect(() => {
     void loadBoard({ silent: false });
   }, [loadBoard]);
@@ -844,10 +1086,7 @@ export function WorkspaceKanban({
     if (!projectId) return;
 
     const refresh = () => {
-      if (
-        typeof document !== "undefined" &&
-        document.visibilityState === "hidden"
-      ) {
+      if (!pageVisible) {
         return;
       }
       void loadBoard({ silent: true });
@@ -855,10 +1094,9 @@ export function WorkspaceKanban({
 
     let timeoutId: number | null = null;
     const scheduleRefresh = () => {
-      const delay =
-        document.visibilityState === "visible"
-          ? ACTIVE_BOARD_REFRESH_MS
-          : HIDDEN_BOARD_REFRESH_MS;
+      const delay = pageVisible
+        ? ACTIVE_BOARD_REFRESH_MS
+        : HIDDEN_BOARD_REFRESH_MS;
       timeoutId = window.setTimeout(() => {
         refresh();
         scheduleRefresh();
@@ -868,7 +1106,9 @@ export function WorkspaceKanban({
 
     window.addEventListener("focus", refresh);
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
+      const visible = document.visibilityState === "visible";
+      setPageVisible(visible);
+      if (visible) {
         refresh();
       }
     };
@@ -881,14 +1121,18 @@ export function WorkspaceKanban({
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [loadBoard, projectId]);
+  }, [loadBoard, pageVisible, projectId]);
 
   useEffect(() => {
-    if (!projectId) return;
-    return subscribeToSnapshotEvents(() => {
-      void loadBoard({ silent: true });
-    });
-  }, [loadBoard, projectId]);
+    if (!projectId || !hasLoadedBoardRef.current) return;
+    scheduleBoardRefresh({ silent: true });
+  }, [projectId, projectSessions, scheduleBoardRefresh]);
+
+  useEffect(() => () => {
+    if (boardRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(boardRefreshTimeoutRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!projectSyncOpen || !projectId) return;
@@ -931,7 +1175,7 @@ export function WorkspaceKanban({
               task.type ?? ""
             } ${task.priority ?? ""} ${task.issueId ?? ""} ${
               task.notes ?? ""
-            } ${task.attachments.join(" ")} ${commentText}`.toLowerCase();
+            } ${task.briefPath ?? ""} ${task.attachments.join(" ")} ${commentText}`.toLowerCase();
             return haystack.includes(query);
           }),
         };
@@ -940,14 +1184,56 @@ export function WorkspaceKanban({
 
   const filteredContextFiles = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
-    if (!query) return contextFiles;
-    return contextFiles.filter((file) => {
-      const haystack = `${file.path} ${file.name} ${
-        file.source ?? ""
-      }`.toLowerCase();
-      return haystack.includes(query);
-    });
+    const matchingFiles = !query
+      ? contextFiles
+      : contextFiles.filter((file) => {
+          const haystack = `${file.path} ${file.name} ${
+            file.source ?? ""
+          }`.toLowerCase();
+          return haystack.includes(query);
+        });
+
+    const uniqueFiles = new Map<string, ContextFile>();
+    for (const file of matchingFiles) {
+      if (!uniqueFiles.has(file.path)) {
+        uniqueFiles.set(file.path, file);
+      }
+    }
+    return [...uniqueFiles.values()];
   }, [contextFiles, contextSearch]);
+  const filteredContextTree = useMemo(
+    () => buildContextTree(filteredContextFiles),
+    [filteredContextFiles]
+  );
+  const defaultExpandedContextFolders = useMemo(
+    () =>
+      new Set(
+        filteredContextTree
+          .filter((node) => node.kind === "folder")
+          .map((node) => node.path)
+      ),
+    [filteredContextTree]
+  );
+  const autoExpandedContextFolders = useMemo(() => {
+    if (contextSearch.trim().length > 0) {
+      return collectContextFolderPaths(filteredContextTree);
+    }
+    return collectContextAncestorFolders(selectedContextPaths);
+  }, [contextSearch, filteredContextTree, selectedContextPaths]);
+  const effectiveExpandedContextFolders = useMemo(() => {
+    const expanded = new Set(defaultExpandedContextFolders);
+    for (const path of expandedContextFolders) {
+      expanded.add(path);
+    }
+    for (const path of autoExpandedContextFolders) {
+      expanded.add(path);
+    }
+    return expanded;
+  }, [
+    autoExpandedContextFolders,
+    defaultExpandedContextFolders,
+    expandedContextFolders,
+  ]);
   const editLinkedSessionOptions = useMemo(() => {
     if (!editingTask) return projectSessions;
     const activeTask = findBoardTask(board, editingTask.task.id) ?? editingTask;
@@ -976,6 +1262,7 @@ export function WorkspaceKanban({
     setContextNotes("");
     setContextSearch("");
     setSelectedContextPaths([]);
+    setExpandedContextFolders([]);
     setUploadFiles([]);
   }
 
@@ -1043,6 +1330,14 @@ export function WorkspaceKanban({
     );
   }
 
+  function toggleContextFolder(path: string) {
+    setExpandedContextFolders((current) =>
+      current.includes(path)
+        ? current.filter((item) => item !== path)
+        : [...current, path]
+    );
+  }
+
   function removeUploadFile(file: File) {
     setUploadFiles((current) =>
       current.filter(
@@ -1060,10 +1355,44 @@ export function WorkspaceKanban({
     setSubmitError(null);
 
     try {
-      let uploadedPaths: string[] = [];
-      if (uploadFiles.length > 0) {
+      const res = await fetch("/api/boards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          title: title.trim(),
+          description: description.trim() || undefined,
+          contextNotes: contextNotes.trim() || undefined,
+          attachments:
+            selectedContextPaths.length > 0 ? selectedContextPaths : undefined,
+          agent,
+          role: composerRole,
+          type: taskType.trim() || undefined,
+          priority: priority.trim() || undefined,
+        }),
+      });
+
+      const payload = (await res.json().catch(() => null)) as
+        | BoardResponse
+        | { error?: string }
+        | null;
+
+      if (!res.ok || !payload || !("columns" in payload)) {
+        throw new Error(
+          (payload as { error?: string } | null)?.error ??
+            `Failed to create task: ${res.status}`
+        );
+      }
+
+      let nextBoard = normalizeBoardResponse(payload as BoardResponse);
+      const createdTask = nextBoard.columns
+        .flatMap((column) => column.tasks)
+        .find((task) => task.id === payload.createdTaskId);
+
+      if (uploadFiles.length > 0 && createdTask) {
         const formData = new FormData();
         formData.append("projectId", projectId);
+        formData.append("taskRef", createdTask.taskRef?.trim() || createdTask.id);
         for (const file of uploadFiles) {
           formData.append("files", file);
         }
@@ -1080,50 +1409,41 @@ export function WorkspaceKanban({
             uploadPayload?.error ?? `Upload failed: ${uploadRes.status}`
           );
         }
-        uploadedPaths = (uploadPayload?.files ?? [])
+
+        const uploadedPaths = (uploadPayload?.files ?? [])
           .map((entry) => entry.path?.trim())
           .filter((value): value is string => Boolean(value));
+
+        if (uploadedPaths.length > 0) {
+          const patchRes = await fetch("/api/boards", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              projectId,
+              taskId: createdTask.id,
+              attachments: [
+                ...new Set([...createdTask.attachments, ...uploadedPaths]),
+              ],
+            }),
+          });
+          const patchPayload = (await patchRes.json().catch(() => null)) as
+            | BoardResponse
+            | { error?: string }
+            | null;
+          if (!patchRes.ok || !patchPayload || !("columns" in patchPayload)) {
+            throw new Error(
+              (patchPayload as { error?: string } | null)?.error ??
+                `Failed to attach uploads: ${patchRes.status}`
+            );
+          }
+          nextBoard = normalizeBoardResponse(patchPayload as BoardResponse);
+        }
       }
 
-      const attachments = [
-        ...new Set([...selectedContextPaths, ...uploadedPaths]),
-      ];
-      const res = await fetch("/api/boards", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId,
-          title: title.trim(),
-          description: description.trim() || undefined,
-          contextNotes: contextNotes.trim() || undefined,
-          attachments: attachments.length > 0 ? attachments : undefined,
-          agent,
-          role: composerRole,
-          type: taskType.trim() || undefined,
-          priority: priority.trim() || undefined,
-        }),
-      });
-
-      const payload = (await res.json().catch(() => null)) as
-        | BoardResponse
-        | { error?: string }
-        | null;
-
-      if (!res.ok) {
-        throw new Error(
-          (payload as { error?: string } | null)?.error ??
-            `Failed to create task: ${res.status}`
-        );
-      }
-
-      setBoard((current) => {
-        if (!payload || !("columns" in payload)) return current;
-        const next = normalizeBoardResponse(payload as BoardResponse);
-        return {
-          ...(current ?? next),
-          ...next,
-        };
-      });
+      setBoard((current) => ({
+        ...(current ?? nextBoard),
+        ...nextBoard,
+      }));
 
       setTitle("");
       setDescription("");
@@ -1729,11 +2049,7 @@ export function WorkspaceKanban({
                       task.issueId
                     );
                     const linkedSessions = projectSessions
-                      .filter(
-                        (session) =>
-                          session.id === task.attemptRef ||
-                          session.issueId?.trim() === taskLinkKey
-                      )
+                      .filter((session) => sessionMatchesTask(session, task))
                       .sort((left, right) =>
                         compareProjectSessions(
                           left,
@@ -1765,7 +2081,7 @@ export function WorkspaceKanban({
                         }
                         onDragEnd={() => setDraggingTask(null)}
                         className={cn(
-                          "rounded-[3px] border border-[var(--vk-border)] bg-[color:#212121] p-2",
+                          "rounded-[3px] border border-[var(--vk-border)] bg-[color:#212121] p-2 [content-visibility:auto] [contain-intrinsic-size:220px]",
                           draggingTask?.taskId === task.id && "opacity-60"
                         )}
                       >
@@ -1813,7 +2129,9 @@ export function WorkspaceKanban({
                           </div>
                         )}
 
-                        {(task.issueId || task.attachments.length > 0) && (
+                        {(task.issueId ||
+                          task.briefPath ||
+                          task.attachments.length > 0) && (
                           <div className="mt-2 flex flex-wrap items-center gap-1.5">
                             {task.issueId ? (
                               issueUrl ? (
@@ -1831,6 +2149,16 @@ export function WorkspaceKanban({
                                   Issue {task.issueId}
                                 </span>
                               )
+                            ) : null}
+
+                            {task.briefPath ? (
+                              <ContextAttachmentChip
+                                attachment={task.briefPath}
+                                opening={openingContextPath === task.briefPath}
+                                onOpen={() =>
+                                  void openContextAttachment(task.briefPath as string)
+                                }
+                              />
                             ) : null}
 
                             {task.attachments.map((attachment) => (
@@ -2534,57 +2862,23 @@ export function WorkspaceKanban({
                       No context files found.
                     </p>
                   ) : (
-                    <ul className="divide-y divide-[var(--vk-border)]">
-                      {filteredContextFiles.map((file) => {
-                        const checked = selectedContextPaths.includes(
-                          file.path
-                        );
-                        return (
-                          <li key={file.path} className="px-2 py-1.5">
-                            <div className="flex items-start gap-2">
-                              <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 text-[12px] text-[var(--vk-text-normal)]">
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={() => toggleContextPath(file.path)}
-                                  className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--vk-border)] bg-transparent"
-                                />
-                                <span className="min-w-0">
-                                  <span className="block truncate">
-                                    {file.path}
-                                  </span>
-                                  <span className="block text-[11px] text-[var(--vk-text-muted)]">
-                                    {file.kind}
-                                    {file.source ? ` · ${file.source}` : ""}
-                                    {file.sizeBytes
-                                      ? ` · ${formatFileSize(file.sizeBytes)}`
-                                      : ""}
-                                  </span>
-                                </span>
-                              </label>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void openContextAttachment(file.path)
-                                }
-                                disabled={openingContextPath === file.path}
-                                className="inline-flex h-7 shrink-0 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60"
-                                title={`${contextOpenLabel}: ${file.path}`}
-                                aria-label={`${contextOpenLabel}: ${file.path}`}
-                              >
-                                {openingContextPath === file.path ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <ExternalLink className="h-3 w-3" />
-                                )}
-                                <span className="hidden sm:inline">
-                                  {contextOpenLabel}
-                                </span>
-                              </button>
-                            </div>
-                          </li>
-                        );
-                      })}
+                    <ul className="py-1">
+                      {filteredContextTree.map((node) => (
+                        <ContextTreeRow
+                          key={node.path}
+                          node={node}
+                          depth={0}
+                          expandedFolders={effectiveExpandedContextFolders}
+                          selectedPaths={selectedContextPaths}
+                          openingContextPath={openingContextPath}
+                          contextOpenLabel={contextOpenLabel}
+                          onToggleFolder={toggleContextFolder}
+                          onTogglePath={toggleContextPath}
+                          onOpenPath={(path) =>
+                            void openContextAttachment(path)
+                          }
+                        />
+                      ))}
                     </ul>
                   )}
                 </div>

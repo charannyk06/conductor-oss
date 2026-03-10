@@ -196,19 +196,24 @@ a:hover {
   width: 100%;
 }
 
+.xterm textarea.xterm-helper-textarea {
+  opacity: 0 !important;
+  pointer-events: auto !important;
+}
+
 .xterm .xterm-viewport::-webkit-scrollbar {
   width: 0;
   height: 0;
 }
 
 @media (pointer: coarse) {
-  .xterm .xterm-screen,
-  .xterm .xterm-screen canvas {
-    pointer-events: none !important;
+  .xterm {
+    touch-action: manipulation;
   }
 
+  .xterm .xterm-screen,
+  .xterm .xterm-screen canvas,
   .xterm textarea.xterm-helper-textarea {
-    pointer-events: none !important;
-    opacity: 0 !important;
+    pointer-events: auto !important;
   }
 }

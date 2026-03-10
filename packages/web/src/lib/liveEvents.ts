@@ -1,8 +1,8 @@
 "use client";
 
-import type { AppUpdateStatus, SSESnapshotEvent } from "@/lib/types";
+import type { AppUpdateStatus, SSESessionEvent, SSESnapshotSession } from "@/lib/types";
 
-type SnapshotListener = (event: SSESnapshotEvent) => void;
+type SnapshotListener = (event: SSESessionEvent) => void;
 type AppUpdateListener = (update: AppUpdateStatus | null) => void;
 
 const listeners = new Set<SnapshotListener>();
@@ -10,20 +10,21 @@ const appUpdateListeners = new Set<AppUpdateListener>();
 let eventSource: EventSource | null = null;
 let refreshInFlight: Promise<void> | null = null;
 
-function normalizeSessionArray(value: unknown): SSESnapshotEvent | null {
+function normalizeSessionArray(value: unknown): SSESessionEvent | null {
   if (Array.isArray(value)) {
-    return { type: "snapshot", sessions: value as SSESnapshotEvent["sessions"] };
+    return { type: "snapshot", sessions: value as SSESnapshotSession[] };
   }
 
   if (!value || typeof value !== "object") {
     return null;
   }
 
-  if ((value as SSESnapshotEvent).type !== "snapshot") {
+  const type = (value as { type?: string }).type;
+  if (type !== "snapshot" && type !== "snapshot_delta") {
     return null;
   }
 
-  const payload = value as SSESnapshotEvent;
+  const payload = value as SSESessionEvent;
   return Array.isArray(payload.sessions) ? payload : null;
 }
 
@@ -36,7 +37,7 @@ function normalizeAppUpdate(value: unknown): AppUpdateStatus | null {
   return typeof candidate.enabled === "boolean" ? candidate : null;
 }
 
-function dispatchSnapshots(payload: SSESnapshotEvent) {
+function dispatchSnapshots(payload: SSESessionEvent) {
   for (const listener of listeners) {
     listener(payload);
   }

@@ -9,8 +9,16 @@ function isDesktopViewport(): boolean {
 }
 
 export function useResponsiveSidebarState() {
+  return useResponsiveSidebarStateWithOptions();
+}
+
+interface ResponsiveSidebarOptions {
+  initialDesktopOpen?: boolean;
+}
+
+export function useResponsiveSidebarStateWithOptions(options?: ResponsiveSidebarOptions) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(options?.initialDesktopOpen ?? true);
 
   const toggleSidebar = useCallback(() => {
     if (isDesktopViewport()) {

@@ -109,25 +109,36 @@ export interface AppUpdateStatus {
   restartRequired: boolean;
 }
 
-/** SSE snapshot event from /api/events */
+export interface SSESnapshotSession {
+  id: string;
+  status: SessionStatus;
+  activity: ActivityState | null;
+  attentionLevel: AttentionLevel;
+  projectId: string;
+  issueId: string | null;
+  branch: string | null;
+  createdAt: string;
+  lastActivityAt: string;
+  metadata: Record<string, string>;
+  summary?: string | null;
+  pr?: DashboardPR | null;
+}
+
+/** SSE events from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";
-  sessions: Array<{
-    id: string;
-    status: SessionStatus;
-    activity: ActivityState | null;
-    attentionLevel: AttentionLevel;
-    projectId: string;
-    issueId: string | null;
-    branch: string | null;
-    createdAt: string;
-    lastActivityAt: string;
-    metadata: Record<string, string>;
-    summary?: string | null;
-    pr?: DashboardPR | null;
-  }>;
+  sessions: SSESnapshotSession[];
   appUpdate?: AppUpdateStatus | null;
 }
+
+export interface SSESnapshotDeltaEvent {
+  type: "snapshot_delta";
+  sessions: SSESnapshotSession[];
+  removedSessionIds?: string[];
+  appUpdate?: AppUpdateStatus | null;
+}
+
+export type SSESessionEvent = SSESnapshotEvent | SSESnapshotDeltaEvent;
 
 /** Session statuses that indicate the session is no longer active. */
 export const TERMINAL_STATUSES = new Set([

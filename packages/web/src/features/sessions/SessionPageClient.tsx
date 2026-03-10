@@ -2,12 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { useResponsiveSidebarState } from "@/hooks/useResponsiveSidebarState";
+import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { SessionDetail } from "@/components/sessions/SessionDetail";
 import { useConfig } from "@/hooks/useConfig";
+import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
 import type { DashboardSession } from "@/lib/types";
 
@@ -15,23 +16,21 @@ export default function SessionPageClient() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const { projects } = useConfig();
-  const { sessions, refresh } = useSessions();
-  const dashboardSessions = sessions as unknown as DashboardSession[];
+  const { session: currentSession } = useSession(params.id);
   const {
     mobileSidebarOpen,
     desktopSidebarOpen,
     toggleSidebar,
     closeSidebarOnMobile,
-  } = useResponsiveSidebarState();
+  } = useResponsiveSidebarStateWithOptions({ initialDesktopOpen: false });
+  const sidebarVisible = mobileSidebarOpen || desktopSidebarOpen;
+  const { sessions, refresh } = useSessions(undefined, { enabled: sidebarVisible });
+  const dashboardSessions = sessions as unknown as DashboardSession[];
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
 
-  const selectedSession = useMemo(
-    () => dashboardSessions.find((session) => session.id === params.id) ?? null,
-    [dashboardSessions, params.id],
-  );
   const topBarTitle = useMemo(() => {
-    if (selectedSession) {
-      return [selectedSession.projectId, selectedSession.branch].filter(Boolean).join(" \u00b7 ");
+    if (currentSession) {
+      return [currentSession.projectId, currentSession.branch].filter(Boolean).join(" \u00b7 ");
     }
 
     if (selectedProjectId) {
@@ -39,17 +38,17 @@ export default function SessionPageClient() {
     }
 
     return "Session";
-  }, [selectedProjectId, selectedSession]);
+  }, [currentSession, selectedProjectId]);
 
   useEffect(() => {
-    if (selectedSession?.projectId) {
-      setSelectedProjectId(selectedSession.projectId);
+    if (currentSession?.projectId) {
+      setSelectedProjectId(currentSession.projectId);
       return;
     }
     if (!selectedProjectId && projects.length > 0) {
       setSelectedProjectId(projects[0]?.id ?? null);
     }
-  }, [projects, selectedProjectId, selectedSession?.projectId]);
+  }, [currentSession?.projectId, projects, selectedProjectId]);
 
   async function handleArchiveSession(sessionId: string) {
     let res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
@@ -95,7 +94,7 @@ export default function SessionPageClient() {
       mobileSidebarOpen={mobileSidebarOpen}
       desktopSidebarOpen={desktopSidebarOpen}
       onToggleSidebar={toggleSidebar}
-      sidebar={
+      sidebar={sidebarVisible ? (
         <WorkspaceSidebarPanel
           projects={projects}
           selectedProjectId={selectedProjectId}
@@ -117,13 +116,13 @@ export default function SessionPageClient() {
             router.push("/");
           }}
         />
-      }
+      ) : null}
     >
       <TopBar
         title={topBarTitle}
       />
       <div className="min-h-0 flex-1 overflow-hidden">
-        <SessionDetail key={params.id} sessionId={params.id} />
+        <SessionDetail key={params.id} sessionId={params.id} initialSession={currentSession} />
       </div>
     </AppShell>
   );
