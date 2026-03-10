@@ -437,6 +437,14 @@ impl AppState {
             return;
         }
 
+        if let Err(err) = self.append_terminal_capture(session_id, &bytes).await {
+            tracing::debug!(
+                session_id,
+                error = %err,
+                "Failed to persist terminal capture bytes"
+            );
+        }
+
         let handle = self.ensure_terminal_host(session_id).await;
         if let Ok(mut store) = handle.terminal_store.lock() {
             store.process(&bytes);
@@ -445,6 +453,18 @@ impl AppState {
     }
 
     pub(crate) async fn process_terminal_bytes(&self, session_id: &str, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        if let Err(err) = self.append_terminal_capture(session_id, bytes).await {
+            tracing::debug!(
+                session_id,
+                error = %err,
+                "Failed to persist terminal capture bytes"
+            );
+        }
+
         if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
             if let Ok(mut store) = handle.terminal_store.lock() {
                 store.process(bytes);

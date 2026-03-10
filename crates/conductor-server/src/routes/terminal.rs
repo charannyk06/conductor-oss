@@ -42,6 +42,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
         .route(
+            "/api/sessions/{id}/terminal/resize",
+            axum::routing::post(terminal_resize),
+        )
+        .route(
             "/api/sessions/{id}/terminal/snapshot",
             get(terminal_snapshot),
         )
@@ -62,6 +66,12 @@ struct TerminalQuery {
 struct TerminalSnapshotQuery {
     lines: Option<usize>,
     live: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalResizeBody {
+    cols: u16,
+    rows: u16,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -144,6 +154,24 @@ async fn terminal_snapshot(
     }
 }
 
+async fn terminal_resize(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<TerminalResizeBody>,
+) -> Response {
+    if state.get_session(&id).await.is_none() {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    }
+
+    match state
+        .resize_live_terminal(&id, body.cols.max(1), body.rows.max(1))
+        .await
+    {
+        Ok(()) => Json(json!({ "ok": true, "sessionId": id })).into_response(),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
 async fn build_terminal_snapshot(
     state: &AppState,
     session: &SessionRecord,
@@ -191,6 +219,17 @@ async fn build_terminal_snapshot(
                 }
             }
         }
+    }
+
+    let terminal_capture_path = state.session_terminal_capture_path(&session.id);
+    if let Some(snapshot) = read_terminal_log_tail(&terminal_capture_path, lines, max_bytes).await? {
+        let live = state.terminal_runtime_attached(&session.id).await;
+        return Ok(json!({
+            "snapshot": snapshot,
+            "source": "terminal_capture",
+            "live": live,
+            "restored": true,
+        }));
     }
 
     if let Some(log_path) = session
