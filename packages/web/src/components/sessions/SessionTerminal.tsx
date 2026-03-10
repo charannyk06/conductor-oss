@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
 import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
@@ -50,6 +50,7 @@ const RENDERER_RECOVERY_THROTTLE_MS = 120;
 const LIVE_TERMINAL_SCROLLBACK = 50000;
 const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
+const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
 const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
@@ -276,6 +277,16 @@ function getTerminalViewportOptions(width: number): Pick<ITerminalOptions, "font
   };
 }
 
+function shouldUseMobileTerminalInputRail(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  const touchCapable = navigator.maxTouchPoints > 0;
+  return window.innerWidth < MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX && (coarsePointer || touchCapable);
+}
+
 export function SessionTerminal({
   sessionId,
   agentName,
@@ -338,6 +349,7 @@ export function SessionTerminal({
   const [snapshotAnsi, setSnapshotAnsi] = useState("");
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
+  const [useMobileInputRail, setUseMobileInputRail] = useState(() => shouldUseMobileTerminalInputRail());
 
   const normalizedSessionStatus = useMemo(
     () => {
@@ -355,6 +367,8 @@ export function SessionTerminal({
   const shouldStreamLiveTerminal = expectsLiveTerminal && active && pageVisible;
   const showResumeRail = RESUMABLE_STATUSES.has(normalizedSessionStatus) && !expectsLiveTerminal;
   const showRemoteInputRail = expectsLiveTerminal && transportMode === "http-poll";
+  const showMobileInputRail = expectsLiveTerminal && useMobileInputRail;
+  const showLiveInputRail = showRemoteInputRail || showMobileInputRail;
   const isRemoteLiveConsole = showRemoteInputRail;
   const remoteConsoleText = useMemo(
     () => sanitizeRemoteTerminalSnapshot(snapshotAnsi),
@@ -615,6 +629,28 @@ export function SessionTerminal({
   }, [expectsLiveTerminal]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = typeof window.matchMedia === "function"
+      ? window.matchMedia("(pointer: coarse)")
+      : null;
+    const syncMobileInputRail = () => {
+      setUseMobileInputRail(shouldUseMobileTerminalInputRail());
+    };
+
+    syncMobileInputRail();
+    window.addEventListener("resize", syncMobileInputRail);
+    mediaQuery?.addEventListener?.("change", syncMobileInputRail);
+
+    return () => {
+      window.removeEventListener("resize", syncMobileInputRail);
+      mediaQuery?.removeEventListener?.("change", syncMobileInputRail);
+    };
+  }, []);
+
+  useEffect(() => {
     hasConnectedOnceRef.current = false;
     reconnectNoticeWrittenRef.current = false;
     snapshotAppliedRef.current = null;
@@ -838,7 +874,7 @@ export function SessionTerminal({
       termRef.current = term;
       fitRef.current = fit;
       searchRef.current = searchAddon;
-      term.options.disableStdin = transportMode === "http-poll";
+      term.options.disableStdin = showLiveInputRail;
       setTerminalReady(true);
       updateScrollState();
 
@@ -884,15 +920,15 @@ export function SessionTerminal({
       searchRef.current = null;
       setTerminalReady(false);
     };
-  }, [isRemoteLiveConsole, scheduleRendererRecovery, sendTerminalKeys, transportMode, updateScrollState]);
+  }, [isRemoteLiveConsole, scheduleRendererRecovery, sendTerminalKeys, updateScrollState]);
 
   useEffect(() => {
     const term = termRef.current;
     if (!term) {
       return;
     }
-    term.options.disableStdin = transportMode === "http-poll";
-  }, [transportMode]);
+    term.options.disableStdin = showLiveInputRail;
+  }, [showLiveInputRail]);
 
   useEffect(() => {
     if (!active) {
@@ -1417,12 +1453,17 @@ export function SessionTerminal({
     term.scrollToBottom();
     updateScrollState();
     if (activeRef.current) {
-      term.focus();
+      if (showLiveInputRail) {
+        liveInputRef.current?.focus();
+      } else {
+        term.focus();
+      }
     }
-  }, [isRemoteLiveConsole, updateScrollState]);
+  }, [isRemoteLiveConsole, showLiveInputRail, updateScrollState]);
 
   const focusTerminal = useCallback(() => {
-    if (showRemoteInputRail) {
+    if (showLiveInputRail) {
+      liveInputRef.current?.focus();
       return;
     }
     const term = termRef.current;
@@ -1435,15 +1476,26 @@ export function SessionTerminal({
       return;
     }
     scheduleRendererRecovery(false);
-  }, [scheduleRendererRecovery, showRemoteInputRail]);
+  }, [scheduleRendererRecovery, showLiveInputRail]);
+
+  const handleTerminalPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "touch") {
+      return;
+    }
+    focusTerminal();
+  }, [focusTerminal]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setSearchQuery("");
     if (activeRef.current) {
-      termRef.current?.focus();
+      if (showLiveInputRail) {
+        liveInputRef.current?.focus();
+      } else {
+        termRef.current?.focus();
+      }
     }
-  }, []);
+  }, [showLiveInputRail]);
 
   useEffect(() => {
     if (isRemoteLiveConsole && searchOpen) {
@@ -1599,14 +1651,15 @@ export function SessionTerminal({
         ) : (
           <div
             ref={containerRef}
-            className="h-full w-full overflow-hidden touch-manipulation"
-            onPointerDown={focusTerminal}
+            className="h-full w-full overflow-hidden touch-pan-y"
+            onClick={focusTerminal}
+            onPointerDown={handleTerminalPointerDown}
           />
         )}
       </div>
 
       {showScrollToBottom ? (
-        <div className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 ${showResumeRail ? "bottom-24" : showRemoteInputRail ? "bottom-36 sm:bottom-32" : "bottom-4"}`}>
+        <div className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 ${showResumeRail ? "bottom-24" : showLiveInputRail ? "bottom-36 sm:bottom-32" : "bottom-4"}`}>
           <Button
             type="button"
             size="sm"
@@ -1631,7 +1684,7 @@ export function SessionTerminal({
         </div>
       ) : null}
 
-      {showRemoteInputRail ? (
+      {showLiveInputRail ? (
         <div className="border-t border-white/8 bg-[#0b0808]/98 px-3 py-3">
           <div className="flex items-center gap-2">
             <input
@@ -1650,6 +1703,9 @@ export function SessionTerminal({
               placeholder="Type into terminal..."
               autoCapitalize="off"
               autoCorrect="off"
+              autoComplete="off"
+              enterKeyHint="send"
+              inputMode="text"
               spellCheck={false}
               className="h-10 flex-1 rounded-[12px] border border-white/10 bg-black/35 px-3 text-[14px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20"
             />
@@ -1676,7 +1732,7 @@ export function SessionTerminal({
           </div>
 
           <div className="mt-2 flex flex-wrap gap-2">
-            {["Tab", "Escape", "Backspace", "ArrowUp", "ArrowDown", "C-c"].map((special) => (
+            {["Tab", "Escape", "Backspace", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "C-c"].map((special) => (
               <button
                 key={special}
                 type="button"
@@ -1694,7 +1750,9 @@ export function SessionTerminal({
           </div>
 
           <p className="mt-2 text-[11px] text-[#8e847d]">
-            Remote/mobile terminal uses a synchronized input rail so typing stays reliable while the terminal view updates.
+            {showRemoteInputRail
+              ? "Remote/mobile terminal uses a synchronized input rail so typing stays reliable while the terminal view updates."
+              : "Mobile terminal uses a synchronized input rail so your draft stays visible while the live console keeps its place."}
           </p>
 
           {sendError ? (
