@@ -75,7 +75,7 @@ export function AppShell({
   return (
     <div
       style={shellStyle}
-      className="relative flex h-dvh min-h-[100dvh] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]"
+      className="relative flex h-dvh min-h-[100dvh] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)]"
     >
       {mobileSidebarOpen && (
         <button
@@ -88,7 +88,7 @@ export function AppShell({
 
       <aside
         className={cn(
-          "absolute inset-y-0 left-0 z-30 flex h-full w-[min(90vw,var(--workspace-sidebar-width))] flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)] transition-[transform,width] duration-200",
+          "absolute inset-y-0 left-0 z-30 flex h-full w-full max-w-none flex-col border-r border-[var(--vk-border)] bg-[var(--vk-bg-panel)] transition-[transform,width] duration-200 sm:w-[min(90vw,var(--workspace-sidebar-width))] sm:max-w-[28rem]",
           mobileSidebarOpen ? "translate-x-0" : "-translate-x-full",
           desktopSidebarOpen
             ? "lg:w-[var(--workspace-sidebar-width)]"
@@ -125,7 +125,7 @@ export function AppShell({
           <button
             type="button"
             onClick={onToggleSidebar}
-            className="absolute left-2 top-2 z-40 inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] lg:hidden"
+            className="absolute left-2 top-2 z-40 inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_10px_24px_rgba(0,0,0,0.28)] hover:bg-[var(--vk-bg-hover)] lg:hidden"
             aria-label="Open workspace panel"
           >
             <PanelLeftOpen className="h-5 w-5" />

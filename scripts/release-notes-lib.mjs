@@ -58,9 +58,14 @@ function normalizeHeading(value) {
 }
 
 function stripTemplateNoise(markdown) {
-  return normalizeNewlines(markdown)
-    .replace(CODE_RABBIT_BLOCK_RE, "")
-    .replace(HTML_COMMENT_RE, "");
+  let result = normalizeNewlines(markdown);
+  // Loop until stable to handle nested/overlapping comment markers
+  let previous;
+  do {
+    previous = result;
+    result = result.replace(CODE_RABBIT_BLOCK_RE, "").replace(HTML_COMMENT_RE, "");
+  } while (result !== previous);
+  return result;
 }
 
 function cleanupInlineMarkdown(value) {

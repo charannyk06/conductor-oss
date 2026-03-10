@@ -1118,6 +1118,34 @@ fn record_restart_recovery(session: &mut SessionRecord, recovered_at: &str) {
     );
 }
 
+pub fn append_output(session: &mut SessionRecord, line: &str) {
+    let sanitized = sanitize_terminal_text(line);
+    let normalized = sanitized.trim_end();
+    if normalized.trim().is_empty() {
+        return;
+    }
+    if !session.output.is_empty() {
+        session.output.push('\n');
+    }
+    session.output.push_str(normalized);
+    if session.output.len() > DEFAULT_OUTPUT_LIMIT_BYTES {
+        let start = session
+            .output
+            .len()
+            .saturating_sub(DEFAULT_OUTPUT_LIMIT_BYTES);
+        // Find the next valid UTF-8 char boundary to avoid panicking on multi-byte chars.
+        let mut safe_start = start;
+        while safe_start < session.output.len() && !session.output.is_char_boundary(safe_start) {
+            safe_start += 1;
+        }
+        session.output.drain(..safe_start);
+    }
+}
+
+pub fn is_terminal_status(status: &SessionStatus) -> bool {
+    status.is_terminal()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1440,32 +1468,4 @@ mod tests {
             Some(std::process::id().to_string().as_str())
         );
     }
-}
-
-pub fn append_output(session: &mut SessionRecord, line: &str) {
-    let sanitized = sanitize_terminal_text(line);
-    let normalized = sanitized.trim_end();
-    if normalized.trim().is_empty() {
-        return;
-    }
-    if !session.output.is_empty() {
-        session.output.push('\n');
-    }
-    session.output.push_str(normalized);
-    if session.output.len() > DEFAULT_OUTPUT_LIMIT_BYTES {
-        let start = session
-            .output
-            .len()
-            .saturating_sub(DEFAULT_OUTPUT_LIMIT_BYTES);
-        // Find the next valid UTF-8 char boundary to avoid panicking on multi-byte chars.
-        let mut safe_start = start;
-        while safe_start < session.output.len() && !session.output.is_char_boundary(safe_start) {
-            safe_start += 1;
-        }
-        session.output.drain(..safe_start);
-    }
-}
-
-pub fn is_terminal_status(status: &SessionStatus) -> bool {
-    status.is_terminal()
 }

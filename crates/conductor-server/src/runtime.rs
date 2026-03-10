@@ -223,7 +223,7 @@ async fn process_board_change(
         return Ok(());
     }
 
-    // Serialize board-triggered spawns to prevent TOCTOU races in limit checks
+    // Serialize board-triggered dispatch bookkeeping to prevent TOCTOU races in limit checks.
     let _spawn_guard = state.spawn_guard.lock().await;
 
     let (active_global, active_project) = active_session_counts(&state, &project_id).await;
@@ -253,7 +253,7 @@ async fn process_board_change(
         let reasoning_effort = card.metadata.get("reasoningEffort").cloned();
 
         let spawn_result = state
-            .spawn_session(SpawnRequest {
+            .enqueue_session_spawn_deferred(SpawnRequest {
                 project_id: project_id.clone(),
                 prompt: card.title.clone(),
                 issue_id: None,
@@ -300,6 +300,9 @@ async fn process_board_change(
     if moved_cards.is_empty() {
         return Ok(());
     }
+
+    drop(_spawn_guard);
+    state.kick_spawn_supervisor().await;
 
     let mut updated_board = Board::from_file(&board_path)
         .with_context(|| format!("Failed to reload board {}", board_path.display()))?;
@@ -466,18 +469,23 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = ConductorConfig::default();
-        config.workspace = root.clone();
-        config.preferences.coding_agent = "codex".to_string();
-        config.projects = BTreeMap::from([(
-            "demo".to_string(),
-            ProjectConfig {
-                path: project_root.to_string_lossy().to_string(),
-                agent: Some("codex".to_string()),
-                runtime: Some("direct".to_string()),
-                ..ProjectConfig::default()
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: conductor_core::config::PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..conductor_core::config::PreferencesConfig::default()
             },
-        )]);
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: project_root.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("direct".to_string()),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
 
         let db = Database::in_memory().await.unwrap();
         let config_path = root.join("conductor.yaml");

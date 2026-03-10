@@ -71,6 +71,7 @@ impl Executor for ClaudeCodeExecutor {
             let mut args = Vec::new();
 
             if options.structured_output {
+                args.push("--print".to_string());
                 args.push("--output-format".to_string());
                 args.push("stream-json".to_string());
                 args.push("--include-partial-messages".to_string());

@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process_no_stdin;
+use crate::process::{spawn_process, spawn_process_no_stdin};
 
 #[derive(Clone)]
 pub struct OpenCodeExecutor {
@@ -50,8 +50,11 @@ impl Executor for OpenCodeExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle =
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle = if options.interactive {
+            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+        } else {
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
         Ok(ExecutorHandle::new(
             handle.pid,
@@ -71,6 +74,18 @@ impl Executor for OpenCodeExecutor {
                 args.push("json".to_string());
                 args.push("--thinking".to_string());
             }
+
+            if let Some(model) = &options.model {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+
+            if let Some(reasoning_effort) = normalize_variant(options.reasoning_effort.as_deref()) {
+                args.push("--variant".to_string());
+                args.push(reasoning_effort);
+            }
+
+            args.extend(options.sanitized_extra_args());
 
             if !options.prompt.trim().is_empty() {
                 args.push(options.prompt.clone());

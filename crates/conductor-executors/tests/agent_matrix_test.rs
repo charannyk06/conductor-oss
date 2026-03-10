@@ -283,3 +283,33 @@ fn parse_output_handles_representative_agent_formats() {
         ExecutorOutput::Stdout(ref text) if text == "plain qwen output"
     ));
 }
+
+#[test]
+fn interactive_structured_output_includes_print_for_claude_family() {
+    let mut interactive = options("review");
+    interactive.interactive = true;
+    interactive.structured_output = true;
+
+    let claude = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&interactive);
+    assert_contains(
+        &claude,
+        &[
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+        ],
+    );
+
+    let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&interactive);
+    assert_contains(
+        &ccr,
+        &[
+            "code",
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+        ],
+    );
+}

@@ -1581,9 +1581,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_accepts_verified_cloudflare_access_jwt() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         clear_cloudflare_test_cache();
         cache_cloudflare_test_key(TEST_TEAM_DOMAIN);
 
@@ -1607,9 +1605,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_rejects_cloudflare_email_header_mismatch() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         clear_cloudflare_test_cache();
         cache_cloudflare_test_key(TEST_TEAM_DOMAIN);
 
@@ -1635,9 +1631,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_rejects_misconfigured_cloudflare_access() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         clear_cloudflare_test_cache();
 
         let mut access = cloudflare_access_config();
@@ -1658,9 +1652,7 @@ mod tests {
 
     #[test]
     fn access_control_ignores_builtin_remote_auth_until_share_links_are_enabled() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
             std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
@@ -1680,9 +1672,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_rejects_legacy_generic_trusted_headers() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         let access = DashboardAccessConfig {
             require_auth: true,
             trusted_headers: TrustedHeaderAccessConfig {

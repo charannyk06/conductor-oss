@@ -123,7 +123,7 @@ export default function SessionPageClient() {
         title={topBarTitle}
       />
       <div className="min-h-0 flex-1 overflow-hidden">
-        <SessionDetail sessionId={params.id} />
+        <SessionDetail key={params.id} sessionId={params.id} />
       </div>
     </AppShell>
   );

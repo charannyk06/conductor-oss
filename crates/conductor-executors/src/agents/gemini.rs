@@ -79,6 +79,9 @@ impl Executor for GeminiExecutor {
             if options.skip_permissions {
                 args.push("--yolo".to_string());
             }
+
+            args.extend(options.sanitized_extra_args());
+
             if let Some(resume_target) = &options.resume_target {
                 args.push("--resume".to_string());
                 args.push(resume_target.clone());

@@ -218,11 +218,11 @@ function SessionDiffBadge({
   return (
     <span
       className={cn(
-        "shrink-0 rounded-[10px] px-3 py-1.5 font-mono text-[12px] leading-none tabular-nums",
+        "inline-flex shrink-0 items-center rounded-[10px] px-3 py-1.5 font-mono text-[12px] leading-none tabular-nums",
         isSelected ? "bg-[rgba(255,255,255,0.1)]" : "bg-[rgba(255,255,255,0.06)]",
       )}
     >
-      <span className="flex items-center gap-3">
+      <span className="inline-flex items-center gap-3">
         <span className="text-[#18c58f]">+{additions}</span>
         <span className="text-[#f26d6d]">−{deletions}</span>
       </span>
@@ -382,7 +382,10 @@ export function Sidebar({
               const statusBadge = getStatusBadge(session, level);
               const sessionAgent = getSessionAgent(session);
               const isSelected = session.id === selectedId;
-              const isRunning = level === "working";
+              const isRunning = session.activity === "active"
+                || session.status === "spawning"
+                || session.status === "running"
+                || session.status === "working";
               const isArchiving = archivingId === session.id;
               const hasArchiveError = archiveError === session.id;
 
@@ -403,7 +406,7 @@ export function Sidebar({
                   <SessionRuntimeIcon running={isRunning} />
 
                   <span className="min-w-0 flex-1">
-                    <span className="flex items-start gap-2">
+                    <span className="flex min-w-0 items-start gap-2">
                       <span className="min-w-0 flex flex-1 items-center gap-2">
                         {sessionAgent ? (
                           <span
@@ -419,11 +422,18 @@ export function Sidebar({
                         </span>
                       </span>
                       {diffStats ? (
-                        <SessionDiffBadge
-                          additions={diffStats.additions}
-                          deletions={diffStats.deletions}
-                          isSelected={isSelected}
-                        />
+                        <>
+                          <span className="hidden shrink-0 sm:block">
+                            <SessionDiffBadge
+                              additions={diffStats.additions}
+                              deletions={diffStats.deletions}
+                              isSelected={isSelected}
+                            />
+                          </span>
+                          <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium sm:hidden">
+                            <span className={statusBadge.className}>{statusBadge.label}</span>
+                          </span>
+                        </>
                       ) : (
                         <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium">
                           <span className={statusBadge.className}>{statusBadge.label}</span>

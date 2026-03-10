@@ -31,11 +31,14 @@ import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { ScrollArea } from "@/components/ui/ScrollArea";
 import { cn } from "@/lib/cn";
 import type {
+  PreviewElementSelection,
   PreviewCommandRequest,
   PreviewDomNode,
   PreviewDomResponse,
+  PreviewLogEntry,
   PreviewStatusResponse,
 } from "@/lib/previewTypes";
+import type { TerminalInsertRequest } from "./terminalInsert";
 
 const STATUS_POLL_INTERVAL_MS = 4_000;
 const AUTO_CONNECT_RETRY_MS = 5_000;
@@ -62,7 +65,8 @@ const PREVIEW_SPECIAL_KEYS = new Map<string, string>([
 
 interface SessionPreviewProps {
   sessionId: string;
-  projectId?: string | null;
+  onQueueTerminalInsert: (request: Omit<TerminalInsertRequest, "nonce">) => void;
+  onConnectionChange?: (connected: boolean) => void;
 }
 
 type PreviewSendTarget = "selection" | "console" | "network";
@@ -88,57 +92,106 @@ function truncate(value: string, max = 120): string {
   return `${value.slice(0, max - 1)}…`;
 }
 
-function pointWithinBounds(
-  x: number,
-  y: number,
-  bounds: { x: number; y: number; width: number; height: number },
-): boolean {
-  return x >= bounds.x
-    && x <= bounds.x + bounds.width
-    && y >= bounds.y
-    && y <= bounds.y + bounds.height;
+function normalizeWhitespace(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
 }
 
-async function uploadPreviewAttachments(projectId: string, files: File[]): Promise<string[]> {
-  if (!files.length) return [];
+function quoteInline(value: string | null | undefined, max = 180): string | null {
+  const normalized = truncate(normalizeWhitespace(value), max);
+  if (!normalized) return null;
+  return `"${normalized.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
 
-  const formData = new FormData();
-  formData.append("projectId", projectId);
-  for (const file of files) {
-    formData.append("files", file);
-  }
+function buildInlineInsert(parts: Array<string | null | undefined>): string {
+  return parts
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part))
+    .join("; ");
+}
 
-  const response = await fetch("/api/attachments", {
-    method: "POST",
-    body: formData,
-  });
+function buildDraftInsert(title: string, lines: Array<string | null | undefined>): string {
+  return [
+    `[${title}]`,
+    ...lines
+      .map((line) => line?.trim())
+      .filter((line): line is string => Boolean(line)),
+  ].join("\n");
+}
 
-  const payload = await response.json().catch(() => null) as
-    | { error?: string; files?: Array<Record<string, unknown>> }
-    | null;
+function buildSelectionInsert(
+  selection: PreviewElementSelection,
+  currentUrl: string | null,
+): Omit<TerminalInsertRequest, "nonce"> {
+  return {
+    inlineText: buildInlineInsert([
+      "[Browser selection]",
+      `selector=${quoteInline(selection.selector, 220)}`,
+      `tag=${selection.tag}`,
+      selection.role ? `role=${selection.role}` : null,
+      selection.name ? `name=${quoteInline(selection.name, 140)}` : null,
+      selection.text ? `text=${quoteInline(selection.text, 180)}` : null,
+      selection.frameName ? `frame=${quoteInline(selection.frameName, 120)}` : null,
+      currentUrl ? `page=${quoteInline(currentUrl, 220)}` : null,
+    ]),
+    draftText: buildDraftInsert("Browser selection", [
+      currentUrl ? `Page: ${currentUrl}` : null,
+      `Frame: ${selection.frameName} (${selection.frameUrl})`,
+      `Selector: ${selection.selector}`,
+      `Tag: ${selection.tag}`,
+      selection.role ? `Role: ${selection.role}` : null,
+      selection.name ? `Name: ${selection.name}` : null,
+      selection.text ? `Text: ${selection.text}` : null,
+      selection.htmlPreview ? `HTML preview: ${selection.htmlPreview}` : null,
+    ]),
+    successMessage: "Queued the selected element for terminal input.",
+  };
+}
 
-  if (!response.ok) {
-    throw new Error(payload?.error ?? `Failed to upload preview attachments: ${response.status}`);
-  }
-
-  const fileRecords = Array.isArray(payload?.files) ? payload?.files : [];
-  const paths = fileRecords.flatMap((record) => {
-    const candidates = [
-      record.absolutePath,
-      record.path,
-      record.filePath,
+function buildLogInsert(
+  kind: "console" | "network",
+  entries: PreviewLogEntry[],
+  currentUrl: string | null,
+  selectedElement: PreviewElementSelection | null,
+): Omit<TerminalInsertRequest, "nonce"> {
+  const title = kind === "console" ? "Browser console logs" : "Browser network logs";
+  const recentEntries = entries.slice(kind === "console" ? -8 : -10);
+  const inlineEntries = recentEntries.map((entry) => {
+    const baseParts = [
+      entry.level,
+      quoteInline(entry.message, 120),
     ];
-    return candidates.filter((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
+    if (kind === "network") {
+      baseParts.unshift(entry.method ?? "GET");
+      baseParts.push(typeof entry.status === "number" ? String(entry.status) : null);
+      baseParts.push(entry.url ? quoteInline(entry.url, 120) : null);
+    }
+    return baseParts.filter(Boolean).join(" ");
   });
 
-  if (!paths.length) {
-    throw new Error("Attachment upload did not return file paths");
-  }
-
-  return paths;
+  return {
+    inlineText: buildInlineInsert([
+      kind === "console" ? "[Browser console]" : "[Browser network]",
+      currentUrl ? `page=${quoteInline(currentUrl, 220)}` : null,
+      selectedElement ? `selected=${quoteInline(selectedElement.selector, 180)}` : null,
+      `entries=${quoteInline(inlineEntries.join(" | "), 520)}`,
+    ]),
+    draftText: buildDraftInsert(title, [
+      currentUrl ? `Page: ${currentUrl}` : null,
+      selectedElement ? `Selected element: ${selectedElement.selector}` : null,
+      ...recentEntries.map((entry) => {
+        if (kind === "console") {
+          return `- ${formatTime(entry.timestamp)} ${entry.level}: ${entry.message}`;
+        }
+        return `- ${formatTime(entry.timestamp)} ${entry.method ?? "GET"} ${entry.status ?? "-"} ${entry.url ?? entry.message}`;
+      }),
+    ]),
+    successMessage: kind === "console"
+      ? "Queued recent console logs for terminal input."
+      : "Queued recent network logs for terminal input.",
+  };
 }
 
-export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
+export function SessionPreview({ sessionId, onQueueTerminalInsert, onConnectionChange }: SessionPreviewProps) {
   const [status, setStatus] = useState<PreviewStatusResponse | null>(null);
   const [domNodes, setDomNodes] = useState<PreviewDomNode[]>([]);
   const [domLoading, setDomLoading] = useState(false);
@@ -152,7 +205,6 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
   const [previewMode, setPreviewMode] = useState<PreviewInteractionMode>("navigate");
   const [selectionComposer, setSelectionComposer] = useState<SelectionComposerState | null>(null);
   const [urlInput, setUrlInput] = useState("");
-  const [instruction, setInstruction] = useState("");
   const [imageMetrics, setImageMetrics] = useState({
     naturalWidth: 0,
     naturalHeight: 0,
@@ -163,7 +215,6 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
   const autoConnectRef = useRef<{ candidate: string; attemptedAt: number } | null>(null);
   const previewCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const imageRef = useRef<HTMLImageElement | null>(null);
-  const instructionRef = useRef<HTMLTextAreaElement | null>(null);
   const previewSurfaceRef = useRef<HTMLDivElement | null>(null);
 
   const loadStatus = useCallback(async () => {
@@ -191,7 +242,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     });
   }, [sessionId, status?.currentUrl]);
 
-  const runCommand = useCallback(async (command: PreviewCommandRequest) => {
+  const runCommand = useCallback(async (command: PreviewCommandRequest): Promise<PreviewStatusResponse> => {
     setBusy(true);
     setCommandError(null);
     try {
@@ -214,7 +265,9 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
         throw new Error(payload && "error" in payload ? payload.error ?? "Preview command failed" : `Preview command failed: ${response.status}`);
       }
 
-      setStatus(payload as PreviewStatusResponse);
+      const nextStatus = payload as PreviewStatusResponse;
+      setStatus(nextStatus);
+      return nextStatus;
     } finally {
       setBusy(false);
     }
@@ -324,6 +377,10 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     });
   }, [runCommand, status?.candidateUrls, status?.connected]);
 
+  useEffect(() => {
+    onConnectionChange?.(Boolean(status?.connected && status?.screenshotKey));
+  }, [onConnectionChange, status?.connected, status?.screenshotKey]);
+
   const screenshotUrl = useMemo(() => (
     status?.connected
       ? `/api/sessions/${encodeURIComponent(sessionId)}/preview/screenshot?ts=${encodeURIComponent(status.screenshotKey)}`
@@ -359,26 +416,6 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
       top: `${bounds.y * scaleY}px`,
       width: `${Math.max(bounds.width * scaleX, 2)}px`,
       height: `${Math.max(bounds.height * scaleY, 2)}px`,
-    };
-  }, [imageMetrics, mainFrame, status?.selectedElement]);
-
-  const selectedElementRenderedBounds = useMemo(() => {
-    const bounds = status?.selectedElement?.bounds;
-    if (!status?.selectedElement || !bounds || !mainFrame || status.selectedElement.frameId !== mainFrame.id) {
-      return null;
-    }
-    if (!imageMetrics.naturalWidth || !imageMetrics.naturalHeight || !imageMetrics.renderedWidth || !imageMetrics.renderedHeight) {
-      return null;
-    }
-
-    const scaleX = imageMetrics.renderedWidth / imageMetrics.naturalWidth;
-    const scaleY = imageMetrics.renderedHeight / imageMetrics.naturalHeight;
-
-    return {
-      x: bounds.x * scaleX,
-      y: bounds.y * scaleY,
-      width: Math.max(bounds.width * scaleX, 2),
-      height: Math.max(bounds.height * scaleY, 2),
     };
   }, [imageMetrics, mainFrame, status?.selectedElement]);
 
@@ -456,11 +493,6 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
   }, [imageMetrics.renderedHeight, imageMetrics.renderedWidth, selectionComposer]);
 
   useEffect(() => {
-    if (!selectionComposer || selectionComposer.pending) return;
-    instructionRef.current?.focus();
-  }, [selectionComposer]);
-
-  useEffect(() => {
     if (!selectionComposer) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -475,18 +507,77 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     };
   }, [selectionComposer]);
 
-  const handleImageClick = useCallback(async (event: ReactMouseEvent<HTMLImageElement>) => {
-    if (!imageRef.current || busy) return;
+  const resolveImagePoint = useCallback((event: ReactMouseEvent<HTMLImageElement>) => {
+    if (!imageRef.current) {
+      return null;
+    }
 
     const rect = imageRef.current.getBoundingClientRect();
     if (!rect.width || !rect.height || !imageRef.current.naturalWidth || !imageRef.current.naturalHeight) {
-      return;
+      return null;
     }
 
     const anchorX = event.clientX - rect.left;
     const anchorY = event.clientY - rect.top;
-    const x = (anchorX / rect.width) * imageRef.current.naturalWidth;
-    const y = (anchorY / rect.height) * imageRef.current.naturalHeight;
+    return {
+      anchorX,
+      anchorY,
+      x: (anchorX / rect.width) * imageRef.current.naturalWidth,
+      y: (anchorY / rect.height) * imageRef.current.naturalHeight,
+    };
+  }, []);
+
+  const queueContextInsert = useCallback((request: Omit<TerminalInsertRequest, "nonce">) => {
+    onQueueTerminalInsert(request);
+    setSendError(null);
+    setSendSuccess(request.successMessage);
+  }, [onQueueTerminalInsert]);
+
+  const selectElementAtPoint = useCallback(async (
+    x: number,
+    y: number,
+    anchorX: number,
+    anchorY: number,
+  ): Promise<PreviewStatusResponse> => {
+    openSelectionComposer(anchorX, anchorY, true);
+    try {
+      const nextStatus = await runCommand({ command: "selectAtPoint", x, y });
+      openSelectionComposer(anchorX, anchorY, false);
+      return nextStatus;
+    } catch (error) {
+      setSelectionComposer(null);
+      throw error;
+    }
+  }, [openSelectionComposer, runCommand]);
+
+  const selectDomNode = useCallback(async (
+    selector: string,
+    frameId?: string | null,
+  ): Promise<PreviewStatusResponse> => {
+    const anchorX = Math.max(imageMetrics.renderedWidth - 44, SELECTION_COMPOSER_MARGIN_PX);
+    const anchorY = SELECTION_COMPOSER_MARGIN_PX;
+    openSelectionComposer(anchorX, anchorY, true);
+    try {
+      const nextStatus = await runCommand({
+        command: "selectBySelector",
+        selector,
+        frameId,
+      });
+      openSelectionComposer(anchorX, anchorY, false);
+      return nextStatus;
+    } catch (error) {
+      setSelectionComposer(null);
+      throw error;
+    }
+  }, [imageMetrics.renderedWidth, openSelectionComposer, runCommand]);
+
+  const handleImageClick = useCallback(async (event: ReactMouseEvent<HTMLImageElement>) => {
+    if (busy) return;
+
+    const point = resolveImagePoint(event);
+    if (!point) {
+      return;
+    }
 
     setSelectionComposer(null);
     setSendError(null);
@@ -495,7 +586,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     if (previewMode === "navigate") {
       previewSurfaceRef.current?.focus({ preventScroll: true });
       try {
-        await runCommand({ command: "clickAtPoint", x, y });
+        await runCommand({ command: "clickAtPoint", x: point.x, y: point.y });
       } catch (error) {
         setCommandError(error instanceof Error ? error.message : "Failed to interact with preview");
       }
@@ -504,29 +595,43 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
 
     if (!canSelectByPoint) return;
 
-    if (
-      selectedElementRenderedBounds
-      && !selectionComposer?.pending
-      && pointWithinBounds(anchorX, anchorY, selectedElementRenderedBounds)
-    ) {
-      openSelectionComposer(anchorX, anchorY, false);
-      return;
-    }
-
     try {
-      await runCommand({ command: "selectAtPoint", x, y });
+      await selectElementAtPoint(point.x, point.y, point.anchorX, point.anchorY);
     } catch (error) {
       setCommandError(error instanceof Error ? error.message : "Failed to select element");
     }
   }, [
     busy,
     canSelectByPoint,
-    openSelectionComposer,
     previewMode,
+    resolveImagePoint,
     runCommand,
-    selectedElementRenderedBounds,
-    selectionComposer?.pending,
+    selectElementAtPoint,
   ]);
+
+  const handleImageDoubleClick = useCallback(async (event: ReactMouseEvent<HTMLImageElement>) => {
+    if (busy || previewMode !== "inspect" || !canSelectByPoint) {
+      return;
+    }
+
+    const point = resolveImagePoint(event);
+    if (!point) {
+      return;
+    }
+
+    setSendError(null);
+    setSendSuccess(null);
+
+    try {
+      const nextStatus = await selectElementAtPoint(point.x, point.y, point.anchorX, point.anchorY);
+      if (!nextStatus.selectedElement) {
+        throw new Error("No element found at the selected point");
+      }
+      queueContextInsert(buildSelectionInsert(nextStatus.selectedElement, nextStatus.currentUrl));
+    } catch (error) {
+      setCommandError(error instanceof Error ? error.message : "Failed to queue selected element");
+    }
+  }, [busy, canSelectByPoint, previewMode, queueContextInsert, resolveImagePoint, selectElementAtPoint]);
 
   const handlePreviewKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (previewMode !== "navigate" || !status?.connected) {
@@ -564,11 +669,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     queuePreviewCommand({ command: "typeText", text }, "Failed to paste into preview");
   }, [previewMode, queuePreviewCommand, status?.connected]);
 
-  const handleSendContext = useCallback(async (target: PreviewSendTarget) => {
-    if (!projectId) {
-      setSendError("Preview attachments require a project-backed session.");
-      return;
-    }
+  const handleSendContext = useCallback((target: PreviewSendTarget) => {
     if (!status) {
       setSendError("Preview state is not loaded yet.");
       return;
@@ -578,7 +679,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     const recentNetworkLogs = status.networkLogs.slice(-80);
 
     if (target === "selection" && !status.selectedElement) {
-      setSendError("Select an element before sending preview context to the agent.");
+      setSendError("Select an element before queueing preview context for terminal input.");
       return;
     }
 
@@ -595,115 +696,23 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
     setSendingTarget(target);
     setSendError(null);
     setSendSuccess(null);
-
     try {
-      const basePreviewPayload = {
-        sessionId,
-        currentUrl: status.currentUrl,
-        activeFrameId: status.activeFrameId,
-        selectedElement: status.selectedElement,
-        frames: status.frames,
-      };
-
-      const payloadByTarget = {
-        selection: {
-          ...basePreviewPayload,
-          recentConsoleLogs,
-          recentNetworkLogs,
-        },
-        console: {
-          ...basePreviewPayload,
-          recentConsoleLogs,
-        },
-        network: {
-          ...basePreviewPayload,
-          recentNetworkLogs,
-        },
-      } satisfies Record<PreviewSendTarget, Record<string, unknown>>;
-
-      const jsonPayload = {
-        generatedAt: new Date().toISOString(),
-        target,
-        preview: payloadByTarget[target],
-      };
-
-      const files: File[] = [
-        new File(
-          [JSON.stringify(jsonPayload, null, 2)],
-          `${sessionId}-preview-${target}.json`,
-          { type: "application/json" },
-        ),
-      ];
-
-      if (screenshotUrl) {
-        const screenshotResponse = await fetch(screenshotUrl, { cache: "no-store" });
-        if (screenshotResponse.ok) {
-          const screenshotBlob = await screenshotResponse.blob();
-          files.push(new File([screenshotBlob], `${sessionId}-preview-${target}.png`, { type: "image/png" }));
-        }
-      }
-
-      const attachmentPaths = await uploadPreviewAttachments(projectId, files);
-      const messageByTarget = {
-        selection: [
-          "Use the attached preview context JSON and screenshot to update the UI.",
-          `Selected element selector: ${status.selectedElement?.selector ?? "n/a"}`,
-          `Selected frame: ${status.selectedElement?.frameName ?? "n/a"} (${status.selectedElement?.frameUrl ?? "n/a"})`,
-          instruction.trim() || "Apply the requested UI change to the selected element and surrounding layout as needed.",
-        ],
-        console: [
-          "Use the attached preview console logs and screenshot to debug the current page state.",
-          `Preview URL: ${status.currentUrl ?? "unavailable"}`,
-          status.selectedElement ? `Current selected element: ${status.selectedElement.selector}` : null,
-          instruction.trim() || "Investigate the console output, identify the root cause, and apply the needed fix.",
-        ],
-        network: [
-          "Use the attached preview network logs and screenshot to debug failed or unexpected requests.",
-          `Preview URL: ${status.currentUrl ?? "unavailable"}`,
-          status.selectedElement ? `Current selected element: ${status.selectedElement.selector}` : null,
-          instruction.trim() || "Investigate the network activity, identify the failing request or sequencing issue, and apply the needed fix.",
-        ],
-      } satisfies Record<PreviewSendTarget, Array<string | null>>;
-
-      const successMessageByTarget = {
-        selection: "Preview context sent to the session agent.",
-        console: "Console logs sent to the session agent.",
-        network: "Network logs sent to the session agent.",
-      } satisfies Record<PreviewSendTarget, string>;
-
-      const elementSummary = messageByTarget[target].filter((line): line is string => Boolean(line)).join("\n");
-
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: elementSummary,
-          attachments: attachmentPaths,
-        }),
-      });
-
-      const payload = await response.json().catch(() => null) as { error?: string } | null;
-      if (!response.ok) {
-        throw new Error(payload?.error ?? `Failed to send preview context: ${response.status}`);
-      }
-
-      setInstruction("");
+      const request = target === "selection" && status.selectedElement
+        ? buildSelectionInsert(status.selectedElement, status.currentUrl)
+        : target === "console"
+          ? buildLogInsert("console", recentConsoleLogs, status.currentUrl, status.selectedElement)
+          : buildLogInsert("network", recentNetworkLogs, status.currentUrl, status.selectedElement);
+      queueContextInsert(request);
       if (target === "selection") {
         setSelectionComposer(null);
       }
-      setSendSuccess(successMessageByTarget[target]);
     } catch (error) {
-      setSendError(error instanceof Error ? error.message : "Failed to send preview context");
+      setSendError(error instanceof Error ? error.message : "Failed to queue preview context");
     } finally {
       setSendingTarget(null);
     }
   }, [
-    instruction,
-    projectId,
-    screenshotUrl,
-    sessionId,
+    queueContextInsert,
     status,
   ]);
 
@@ -842,7 +851,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                 {previewMode === "navigate"
                   ? "navigate mode: clicks interact with the page"
                   : canSelectByPoint
-                    ? "inspect mode: click once to select, again to message"
+                    ? "inspect mode: click once to select, double-click to queue for terminal input"
                     : "inspect mode: use DOM list for this frame"}
               </Badge>
             </div>
@@ -876,6 +885,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                         : "cursor-default",
                   )}
                   onClick={(event) => void handleImageClick(event)}
+                  onDoubleClick={(event) => void handleImageDoubleClick(event)}
                   onLoad={(event) => {
                     const target = event.currentTarget;
                     setImageMetrics({
@@ -899,9 +909,9 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                   >
                     <div className="flex items-start justify-between gap-3 border-b border-[var(--vk-border)] px-3 py-3">
                       <div className="min-w-0">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">Current chat</div>
+                        <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">Terminal input</div>
                         <div className="mt-1 text-[13px] font-medium text-[var(--vk-text-normal)]">
-                          {selectionComposer.pending ? "Selecting element…" : "Send to current agent"}
+                          {selectionComposer.pending ? "Selecting element…" : "Queue selection for the terminal"}
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
@@ -944,17 +954,8 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                               {status.selectedElement.selector}
                             </div>
                           </div>
-                          <div className="space-y-2">
-                            <label className="text-[11px] uppercase tracking-[0.14em] text-[var(--vk-text-muted)]">
-                              Instruction
-                            </label>
-                            <textarea
-                              ref={instructionRef}
-                              value={instruction}
-                              onChange={(event) => setInstruction(event.target.value)}
-                              placeholder="Describe the change and send it straight to this agent session…"
-                              className="min-h-[108px] w-full rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                            />
+                          <div className="rounded-[6px] border border-dashed border-[var(--vk-border)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                            Double-click the element in the preview to queue it immediately, or use the button below. The text is inserted into terminal input instead of being sent to the agent, so you can add more context before submitting.
                           </div>
                           {sendError ? (
                             <div className="text-[12px] text-[var(--vk-red)]">{sendError}</div>
@@ -967,12 +968,12 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                             disabled={sending || !status.selectedElement}
                           >
                             {sendingTarget === "selection" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                            Send to current agent
+                            Queue for terminal input
                           </Button>
                         </>
                       ) : (
                         <div className="rounded-[6px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
-                          Click the current selection again to open the composer and send it into the current session chat.
+                          Single-click an element to inspect it here. Double-click to queue it for terminal input.
                         </div>
                       )}
                     </div>
@@ -981,7 +982,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
               </div>
             ) : (
               <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
-                Connect a local dev URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select an element and send it to the current agent.
+                Connect a local dev URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select UI elements and queue browser context into terminal input.
               </div>
             )}
           </div>
@@ -1050,7 +1051,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                 <div className="space-y-1 p-2">
                   {previewMode === "navigate" ? (
                     <div className="rounded-[4px] border border-dashed border-[var(--vk-border)] px-2 py-2 text-[11px] text-[var(--vk-text-muted)]">
-                      Switch to Inspect mode to pick DOM nodes or send selected UI context to the current agent.
+                      Switch to Inspect mode to pick DOM nodes. Single-click selects a node. Double-click queues it for terminal input.
                     </div>
                   ) : null}
                   {domLoading ? (
@@ -1071,29 +1072,26 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                         )}
                         disabled={previewMode !== "inspect"}
                         onClick={() => {
-                          if (
-                            status?.selectedElement
-                            && status.selectedElement.selector === node.selector
-                            && status.selectedElement.frameId === status.activeFrameId
-                          ) {
-                            openSelectionComposer(
-                              Math.max(imageMetrics.renderedWidth - 44, SELECTION_COMPOSER_MARGIN_PX),
-                              SELECTION_COMPOSER_MARGIN_PX,
-                              false,
-                            );
-                            return;
-                          }
-
                           setSelectionComposer(null);
                           setSendError(null);
                           setSendSuccess(null);
-                          void runCommand({
-                            command: "selectBySelector",
-                            selector: node.selector,
-                            frameId: status?.activeFrameId,
-                          })
+                          void selectDomNode(node.selector, status?.activeFrameId)
                             .catch((error: unknown) => {
                               setCommandError(error instanceof Error ? error.message : "Failed to select DOM node");
+                            });
+                        }}
+                        onDoubleClick={() => {
+                          setSendError(null);
+                          setSendSuccess(null);
+                          void selectDomNode(node.selector, status?.activeFrameId)
+                            .then((nextStatus) => {
+                              if (!nextStatus.selectedElement) {
+                                throw new Error("Failed to resolve the selected DOM node");
+                              }
+                              queueContextInsert(buildSelectionInsert(nextStatus.selectedElement, nextStatus.currentUrl));
+                            })
+                            .catch((error: unknown) => {
+                              setCommandError(error instanceof Error ? error.message : "Failed to queue DOM node");
                             });
                         }}
                       >
@@ -1139,7 +1137,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                 disabled={sending || !status?.consoleLogs.length}
               >
                 {sendingTarget === "console" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                Send to agent
+                Queue for terminal
               </Button>
             </CardHeader>
             <CardContent>
@@ -1183,7 +1181,7 @@ export function SessionPreview({ sessionId, projectId }: SessionPreviewProps) {
                 disabled={sending || !status?.networkLogs.length}
               >
                 {sendingTarget === "network" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                Send to agent
+                Queue for terminal
               </Button>
             </CardHeader>
             <CardContent>

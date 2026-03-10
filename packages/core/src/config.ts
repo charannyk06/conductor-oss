@@ -262,8 +262,14 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+const MAX_PROJECT_ID_INPUT_LENGTH = 512;
+
 function slugifyProjectId(value: string): string {
-  const normalized = value
+  // Guard against excessively long input to prevent ReDoS on uncontrolled data
+  const bounded = value.length > MAX_PROJECT_ID_INPUT_LENGTH
+    ? value.slice(0, MAX_PROJECT_ID_INPUT_LENGTH)
+    : value;
+  const normalized = bounded
     .trim()
     .toLowerCase()
     .replace(/\.git$/i, "")

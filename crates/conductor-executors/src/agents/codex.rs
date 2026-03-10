@@ -78,7 +78,7 @@ impl Executor for CodexExecutor {
             args.push("--json".to_string());
 
             if options.skip_permissions {
-                args.push("--full-auto".to_string());
+                args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
             }
 
             if let Some(model) = &options.model {
@@ -125,7 +125,7 @@ impl Executor for CodexExecutor {
                 }
 
                 if options.skip_permissions {
-                    args.push("--full-auto".to_string());
+                    args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
                 }
 
                 args.extend(options.sanitized_extra_args());
@@ -144,7 +144,7 @@ impl Executor for CodexExecutor {
             }
 
             if options.skip_permissions {
-                args.push("--full-auto".to_string());
+                args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
             }
 
             args.extend(options.sanitized_extra_args());
@@ -162,7 +162,7 @@ impl Executor for CodexExecutor {
         ];
 
         if options.skip_permissions {
-            args.push("--full-auto".to_string());
+            args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
         }
 
         if let Some(model) = &options.model {
@@ -459,6 +459,42 @@ fn tool_metadata(
     metadata
 }
 
+fn extract_text(value: &Value) -> Option<String> {
+    if let Some(text) = value
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Some(text.to_string());
+    }
+
+    if let Some(message) = value.get("message") {
+        if let Some(text) = extract_text(message) {
+            return Some(text);
+        }
+    }
+
+    let content = value.get("content").and_then(|v| v.as_array())?;
+    let text = content
+        .iter()
+        .filter_map(|item| {
+            item.get("text")
+                .and_then(|v| v.as_str())
+                .or_else(|| item.as_str())
+                .map(str::trim)
+        })
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,7 +559,7 @@ mod tests {
 
         assert_eq!(args.first().map(String::as_str), Some("--no-alt-screen"));
         assert!(args.contains(&"resume".to_string()));
-        assert!(args.contains(&"--full-auto".to_string()));
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!args.contains(&"--yolo".to_string()));
         assert!(args.contains(&"session-123".to_string()));
         assert!(!args.contains(&"continue".to_string()));
@@ -602,41 +638,5 @@ mod tests {
             panic!("expected stdout suppression");
         };
         assert!(text.is_empty());
-    }
-}
-
-fn extract_text(value: &Value) -> Option<String> {
-    if let Some(text) = value
-        .get("text")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        return Some(text.to_string());
-    }
-
-    if let Some(message) = value.get("message") {
-        if let Some(text) = extract_text(message) {
-            return Some(text);
-        }
-    }
-
-    let content = value.get("content").and_then(|v| v.as_array())?;
-    let text = content
-        .iter()
-        .filter_map(|item| {
-            item.get("text")
-                .and_then(|v| v.as_str())
-                .or_else(|| item.as_str())
-                .map(str::trim)
-        })
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
     }
 }

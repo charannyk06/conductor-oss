@@ -185,10 +185,12 @@ mod tests {
     use tower::util::ServiceExt;
 
     async fn build_state(access: DashboardAccessConfig) -> Arc<AppState> {
-        let mut config = ConductorConfig::default();
-        config.workspace =
-            std::env::temp_dir().join(format!("auth-route-test-{}", uuid::Uuid::new_v4()));
-        config.access = access;
+        let config = ConductorConfig {
+            workspace: std::env::temp_dir()
+                .join(format!("auth-route-test-{}", uuid::Uuid::new_v4())),
+            access,
+            ..ConductorConfig::default()
+        };
         let db = Database::in_memory().await.unwrap();
         AppState::new(
             std::env::temp_dir().join("auth-route-test.yaml"),
@@ -200,9 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_rejects_requests_when_share_links_are_disabled() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         unsafe {
             std::env::set_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV, "test-token");
             std::env::set_var(BUILTIN_REMOTE_SESSION_SECRET_ENV, "test-secret");
@@ -233,9 +233,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_sets_cookie_when_share_links_are_enabled() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         unsafe {
             std::env::set_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV, "test-token");
             std::env::set_var(BUILTIN_REMOTE_SESSION_SECRET_ENV, "test-secret");

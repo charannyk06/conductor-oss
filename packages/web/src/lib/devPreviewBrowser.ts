@@ -149,14 +149,23 @@ function normalizeNavigationInput(value: string): string {
   return trimmed;
 }
 
+function isLocalHost(hostname: string): boolean {
+  const normalized = normalizeNavigationHostname(hostname);
+  return LOCAL_NAVIGATION_HOSTS.includes(normalized as (typeof LOCAL_NAVIGATION_HOSTS)[number]);
+}
+
 function buildNavigationCandidates(value: string): string[] {
   const normalizedInput = normalizeNavigationInput(value);
   try {
     const parsed = new URL(normalizedInput);
     const normalized = parsed.toString();
     const hostname = normalizeNavigationHostname(parsed.hostname);
-    if (!LOCAL_NAVIGATION_HOSTS.includes(hostname as (typeof LOCAL_NAVIGATION_HOSTS)[number])) {
-      return [normalized];
+
+    // SECURITY: Only allow navigation to local addresses to prevent SSRF
+    if (!isLocalHost(hostname)) {
+      throw new Error(
+        `Navigation blocked: only localhost URLs are allowed. Got hostname "${parsed.hostname}".`,
+      );
     }
 
     const variants = new Set<string>([normalized]);
@@ -166,7 +175,10 @@ function buildNavigationCandidates(value: string): string[] {
       variants.add(candidate.toString());
     }
     return [...variants];
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Navigation blocked:")) {
+      throw error;
+    }
     return [normalizedInput];
   }
 }

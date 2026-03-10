@@ -6,24 +6,30 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use hmac::{Hmac, Mac};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::future::pending;
-use std::io::{Read, Write};
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::path::{Path as StdPath, PathBuf};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use tokio::sync::broadcast;
 
 use crate::routes::config::access_control_enabled;
-use crate::state::{tmux_runtime_metadata, tmux_session_exists, AppState};
+use crate::state::{
+    capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
+    SessionRecord, TerminalStreamEvent, TMUX_LOG_PATH_METADATA_KEY,
+};
 
 type ApiResponse = (StatusCode, Json<Value>);
 type HmacSha256 = Hmac<sha2::Sha256>;
 
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
+const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 200000;
+const LIVE_TERMINAL_RESTORE_LINES: usize = 12000;
+const MAX_TERMINAL_SNAPSHOT_LINES: usize = 200000;
+const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
@@ -33,6 +39,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
+        .route(
+            "/api/sessions/{id}/terminal/snapshot",
+            get(terminal_snapshot),
+        )
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
@@ -44,6 +54,11 @@ struct TerminalQuery {
     cols: Option<u16>,
     rows: Option<u16>,
     token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalSnapshotQuery {
+    lines: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -67,155 +82,6 @@ enum TerminalClientMessage {
     },
 }
 
-enum TerminalAttachEvent {
-    Output(Vec<u8>),
-    Exit(i32),
-    Error(String),
-}
-
-struct TmuxAttachClient {
-    writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
-    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-}
-
-impl TmuxAttachClient {
-    fn spawn(
-        socket_path: PathBuf,
-        tmux_session: String,
-        cols: u16,
-        rows: u16,
-    ) -> Result<(Self, mpsc::UnboundedReceiver<TerminalAttachEvent>)> {
-        let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows: rows.max(1),
-            cols: cols.max(1),
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
-
-        let mut command = CommandBuilder::new("tmux");
-        command.env("TERM", "xterm-256color");
-        command.arg("-S");
-        command.arg(socket_path.to_string_lossy().to_string());
-        command.arg("attach-session");
-        command.arg("-t");
-        command.arg(tmux_session);
-
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .context("Failed to spawn tmux attach client")?;
-        drop(pair.slave);
-
-        let reader = pair.master.try_clone_reader()?;
-        let writer: Arc<Mutex<Option<Box<dyn Write + Send>>>> =
-            Arc::new(Mutex::new(Some(pair.master.take_writer()?)));
-        let master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>> =
-            Arc::new(Mutex::new(Some(pair.master)));
-
-        let (events_tx, events_rx) = mpsc::unbounded_channel::<TerminalAttachEvent>();
-
-        let output_tx = events_tx.clone();
-        std::thread::spawn(move || {
-            let mut reader = reader;
-            let mut buffer = [0_u8; 8192];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if output_tx
-                            .send(TerminalAttachEvent::Output(buffer[..read].to_vec()))
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = output_tx.send(TerminalAttachEvent::Error(format!(
-                            "Failed to read tmux terminal output: {err}"
-                        )));
-                        break;
-                    }
-                }
-            }
-        });
-
-        let exit_tx = events_tx.clone();
-        let master_for_cleanup = Arc::clone(&master);
-        std::thread::spawn(move || {
-            let result = child.wait();
-            if let Ok(mut guard) = master_for_cleanup.lock() {
-                guard.take();
-            }
-            match result {
-                Ok(status) => {
-                    let _ = exit_tx.send(TerminalAttachEvent::Exit(status.exit_code() as i32));
-                }
-                Err(err) => {
-                    let _ = exit_tx.send(TerminalAttachEvent::Error(format!(
-                        "Tmux terminal client exited unexpectedly: {err}"
-                    )));
-                }
-            }
-        });
-
-        Ok((Self { writer, master }, events_rx))
-    }
-
-    async fn write_raw(&self, bytes: &[u8]) -> Result<()> {
-        let writer = Arc::clone(&self.writer);
-        let payload = bytes.to_vec();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let mut guard = writer
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let writer = guard
-                .as_mut()
-                .ok_or_else(|| anyhow!("Terminal writer is no longer available"))?;
-            writer.write_all(&payload)?;
-            writer.flush()?;
-            Ok(())
-        })
-        .await
-        .context("Failed to join terminal write task")?
-    }
-
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let master = Arc::clone(&self.master);
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let guard = master
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let master = guard
-                .as_ref()
-                .ok_or_else(|| anyhow!("Terminal is no longer attached"))?;
-            master.resize(PtySize {
-                rows: rows.max(1),
-                cols: cols.max(1),
-                pixel_width: 0,
-                pixel_height: 0,
-            })?;
-            Ok(())
-        })
-        .await
-        .context("Failed to join terminal resize task")?
-    }
-
-    async fn close(self) {
-        let writer = Arc::clone(&self.writer);
-        let master = Arc::clone(&self.master);
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(mut guard) = writer.lock() {
-                guard.take();
-            }
-            if let Ok(mut guard) = master.lock() {
-                guard.take();
-            }
-        })
-        .await;
-    }
-}
-
 async fn terminal_websocket(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -235,10 +101,7 @@ async fn terminal_websocket(
     ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, id, cols, rows))
 }
 
-async fn terminal_token(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Response {
+async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     if state.get_session(&id).await.is_none() {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     }
@@ -251,6 +114,166 @@ async fn terminal_token(
     };
 
     Json(json!({ "token": token })).into_response()
+}
+
+async fn terminal_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<TerminalSnapshotQuery>,
+) -> Response {
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
+
+    let lines = query
+        .lines
+        .unwrap_or(DEFAULT_TERMINAL_SNAPSHOT_LINES)
+        .clamp(50, MAX_TERMINAL_SNAPSHOT_LINES);
+
+    match build_terminal_snapshot(&state, &session, lines).await {
+        Ok(snapshot) => Json(snapshot).into_response(),
+        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn build_terminal_snapshot(
+    state: &AppState,
+    session: &SessionRecord,
+    lines: usize,
+) -> Result<Value> {
+    if let Some(snapshot) = build_terminal_restore_snapshot(state, session, lines).await? {
+        let live = state.terminal_runtime_attached(&session.id).await;
+        return Ok(json!({
+            "snapshot": String::from_utf8_lossy(&snapshot),
+            "source": "terminal_store",
+            "live": live,
+            "restored": true,
+        }));
+    }
+
+    if let Some(snapshot) = state.current_terminal_snapshot(&session.id).await {
+        if !snapshot.is_empty() {
+            let live = state.terminal_runtime_attached(&session.id).await;
+            return Ok(json!({
+                "snapshot": String::from_utf8_lossy(&snapshot),
+                "source": "terminal_store",
+                "live": live,
+                "restored": true,
+            }));
+        }
+    }
+
+    if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(session) {
+        if tmux_session_exists(&socket_path, &tmux_session)
+            .await
+            .unwrap_or(false)
+        {
+            if let Ok(snapshot) = capture_tmux_pane(&socket_path, &tmux_session, lines).await {
+                if !snapshot.trim().is_empty() {
+                    return Ok(json!({
+                        "snapshot": snapshot,
+                        "source": "tmux_live",
+                        "live": true,
+                        "restored": true,
+                    }));
+                }
+            }
+        }
+    }
+
+    if let Some(log_path) = session
+        .metadata
+        .get(TMUX_LOG_PATH_METADATA_KEY)
+        .map(PathBuf::from)
+    {
+        if let Some(snapshot) = read_terminal_log_tail(&log_path, lines).await? {
+            return Ok(json!({
+                "snapshot": snapshot,
+                "source": "tmux_log",
+                "live": false,
+                "restored": true,
+            }));
+        }
+    }
+
+    let snapshot = trim_lines_tail(&session.output, lines);
+    Ok(json!({
+        "snapshot": snapshot,
+        "source": if session.output.trim().is_empty() { "empty" } else { "session_output" },
+        "live": false,
+        "restored": !session.output.trim().is_empty(),
+    }))
+}
+
+async fn build_terminal_restore_snapshot(
+    state: &AppState,
+    session: &SessionRecord,
+    lines: usize,
+) -> Result<Option<Vec<u8>>> {
+    let Some(state_snapshot) = state.current_terminal_snapshot(&session.id).await else {
+        return Ok(None);
+    };
+    if state_snapshot.is_empty() {
+        return Ok(None);
+    }
+
+    let history = if let Some(log_path) = session
+        .metadata
+        .get(TMUX_LOG_PATH_METADATA_KEY)
+        .map(PathBuf::from)
+    {
+        read_terminal_log_tail_bytes(&log_path, lines).await?
+    } else {
+        let snapshot = trim_lines_tail(&session.output, lines);
+        if snapshot.trim().is_empty() {
+            None
+        } else {
+            Some(snapshot.into_bytes())
+        }
+    };
+
+    let Some(mut history) = history else {
+        return Ok(Some(state_snapshot));
+    };
+
+    if !history.ends_with(b"\n") && !history.ends_with(b"\r") {
+        history.extend_from_slice(b"\r\n");
+    }
+    history.extend_from_slice(&state_snapshot);
+    Ok(Some(history))
+}
+
+async fn read_terminal_log_tail(path: &StdPath, lines: usize) -> Result<Option<String>> {
+    let Some(bytes) = read_terminal_log_tail_bytes(path, lines).await? else {
+        return Ok(None);
+    };
+    let snapshot = String::from_utf8_lossy(&bytes).to_string();
+    if snapshot.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(snapshot))
+    }
+}
+
+async fn read_terminal_log_tail_bytes(path: &StdPath, lines: usize) -> Result<Option<Vec<u8>>> {
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let len = file.metadata().await?.len();
+    let start = len.saturating_sub(MAX_TERMINAL_LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).await?;
+
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).await?;
+    let snapshot = trim_lines_tail(String::from_utf8_lossy(&bytes).as_ref(), lines).into_bytes();
+    if String::from_utf8_lossy(&snapshot).trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(snapshot))
+    }
 }
 
 async fn handle_terminal_socket(
@@ -268,56 +291,83 @@ async fn handle_terminal_socket(
         return;
     }
 
-    let mut attach_client: Option<TmuxAttachClient> = None;
-    let mut attach_events: Option<mpsc::UnboundedReceiver<TerminalAttachEvent>> = None;
+    let _ = state.ensure_session_live(&session_id).await;
+    let _ = state.resize_live_terminal(&session_id, cols, rows).await;
+    if let Some(session) = state.get_session(&session_id).await {
+        if let Ok(Some(snapshot)) =
+            build_terminal_restore_snapshot(&state, &session, LIVE_TERMINAL_RESTORE_LINES).await
+        {
+            if socket.send(Message::Binary(snapshot.into())).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    let mut terminal_events = state.subscribe_terminal_stream(&session_id).await;
     let mut attach_retry = tokio::time::interval(ATTACH_RETRY_INTERVAL);
     attach_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
-            _ = attach_retry.tick(), if attach_client.is_none() => {
-                match maybe_attach_tmux_client(&state, &session_id, cols, rows).await {
-                    Ok(Some((client, events_rx))) => {
-                        attach_client = Some(client);
-                        attach_events = Some(events_rx);
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        if socket.send(Message::Text(server_error_event(&session_id, err.to_string()).into())).await.is_err() {
-                            break;
-                        }
+            _ = attach_retry.tick(), if terminal_events.is_none() => {
+                let _ = state.ensure_session_live(&session_id).await;
+                if terminal_events.is_none() {
+                    terminal_events = state.subscribe_terminal_stream(&session_id).await;
+                    if terminal_events.is_some() {
+                        let _ = state.resize_live_terminal(&session_id, cols, rows).await;
                     }
                 }
             }
             attach_event = async {
-                match attach_events.as_mut() {
-                    Some(receiver) => receiver.recv().await,
+                match terminal_events.as_mut() {
+                    Some(receiver) => Some(receiver.recv().await),
                     None => pending().await,
                 }
             } => {
                 match attach_event {
-                    Some(TerminalAttachEvent::Output(bytes)) => {
+                    Some(Ok(TerminalStreamEvent::Output(bytes))) => {
                         if socket.send(Message::Binary(bytes.into())).await.is_err() {
                             break;
                         }
                     }
-                    Some(TerminalAttachEvent::Exit(exit_code)) => {
-                        attach_client = None;
-                        attach_events = None;
+                    Some(Ok(TerminalStreamEvent::Exit(exit_code))) => {
                         if socket.send(Message::Text(server_exit_event(&session_id, exit_code).into())).await.is_err() {
                             break;
                         }
                     }
-                    Some(TerminalAttachEvent::Error(err)) => {
-                        attach_client = None;
-                        attach_events = None;
+                    Some(Ok(TerminalStreamEvent::Error(err))) => {
                         if socket.send(Message::Text(server_error_event(&session_id, err).into())).await.is_err() {
                             break;
                         }
                     }
+                    Some(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                        if let Some(session) = state.get_session(&session_id).await {
+                            if let Ok(Some(snapshot)) =
+                                build_terminal_restore_snapshot(&state, &session, LIVE_TERMINAL_RESTORE_LINES).await
+                            {
+                                if socket.send(Message::Binary(snapshot.into())).await.is_err() {
+                                    break;
+                                }
+                            } else if socket
+                                .send(Message::Text(server_error_event(&session_id, format!("Terminal stream skipped {skipped} frames while catching up")).into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        } else if socket
+                            .send(Message::Text(server_error_event(&session_id, format!("Terminal stream skipped {skipped} frames while catching up")).into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Some(Err(broadcast::error::RecvError::Closed)) => {
+                        terminal_events = None;
+                    }
                     None => {
-                        attach_client = None;
-                        attach_events = None;
+                        terminal_events = None;
                     }
                 }
             }
@@ -329,7 +379,6 @@ async fn handle_terminal_socket(
                                 let response = match handle_client_message(
                                     &state,
                                     &session_id,
-                                    &mut attach_client,
                                     &mut cols,
                                     &mut rows,
                                     command,
@@ -378,44 +427,11 @@ async fn handle_terminal_socket(
             }
         }
     }
-
-    if let Some(client) = attach_client {
-        client.close().await;
-    }
-}
-
-async fn maybe_attach_tmux_client(
-    state: &Arc<AppState>,
-    session_id: &str,
-    cols: u16,
-    rows: u16,
-) -> Result<
-    Option<(
-        TmuxAttachClient,
-        mpsc::UnboundedReceiver<TerminalAttachEvent>,
-    )>,
-> {
-    let session = match state.get_session(session_id).await {
-        Some(session) => session,
-        None => return Ok(None),
-    };
-
-    let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&session) else {
-        return Ok(None);
-    };
-
-    if !tmux_session_exists(&socket_path, &tmux_session).await? {
-        return Ok(None);
-    }
-
-    let client = TmuxAttachClient::spawn(socket_path, tmux_session, cols, rows)?;
-    Ok(Some(client))
 }
 
 async fn handle_client_message(
     state: &Arc<AppState>,
     session_id: &str,
-    attach_client: &mut Option<TmuxAttachClient>,
     cols: &mut u16,
     rows: &mut u16,
     message: TerminalClientMessage,
@@ -471,9 +487,7 @@ async fn handle_client_message(
         }
         TerminalClientMessage::Keys { keys, special } => {
             let chunk = resolve_terminal_keys(keys, special)?;
-            if let Some(client) = attach_client.as_ref() {
-                client.write_raw(chunk.as_bytes()).await?;
-            } else if state.ensure_session_live(session_id).await? {
+            if state.ensure_session_live(session_id).await? {
                 state.send_raw_to_session(session_id, chunk).await?;
             } else {
                 return Err(anyhow!("Terminal is not currently attached"));
@@ -486,9 +500,7 @@ async fn handle_client_message(
         } => {
             *cols = next_cols.max(1);
             *rows = next_rows.max(1);
-            if let Some(client) = attach_client.as_ref() {
-                client.resize(*cols, *rows).await?;
-            }
+            state.resize_live_terminal(session_id, *cols, *rows).await?;
             Ok(None)
         }
     }
@@ -659,9 +671,7 @@ mod tests {
 
     #[test]
     fn verify_terminal_token_accepts_valid_signature() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::set_var(TERMINAL_TOKEN_SECRET_ENV, "test-secret");
         }
@@ -681,9 +691,7 @@ mod tests {
 
     #[test]
     fn terminal_token_is_not_required_for_local_auth_only_configs() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
             std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
@@ -700,9 +708,7 @@ mod tests {
 
     #[test]
     fn terminal_token_round_trip_works_without_env_secret() {
-        let _guard = crate::routes::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
         }

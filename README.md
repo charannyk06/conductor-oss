@@ -2,9 +2,9 @@
 
 # Conductor OSS
 
-### AI agents that write code while you sleep.
+### Local-first orchestration for coding-agent CLIs
 
-**One command. Local-first. No cloud relay.**
+**One command. Markdown-native. No cloud relay.**
 
 [![npm version](https://img.shields.io/npm/v/conductor-oss?style=flat-square&color=0ea5e9)](https://www.npmjs.com/package/conductor-oss)
 [![CI](https://img.shields.io/github/actions/workflow/status/charannyk06/conductor-oss/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/charannyk06/conductor-oss/actions/workflows/ci.yml)
@@ -14,64 +14,85 @@
 
 </div>
 
-Conductor turns your repo into a local agent control plane.
+Conductor OSS is a local-first control plane for software work driven by AI coding agents.
 
-Run one command, open a dashboard, drag work into a ready lane, and let your installed coding agents pick it up in parallel. Conductor keeps the state on your machine, runs a local Rust backend, stores data in local SQLite, and streams updates into the dashboard over SSE.
+It turns Markdown kanban boards into dispatchable work, launches installed coding CLIs inside isolated workspaces, persists state in local files plus SQLite, and gives you a browser dashboard for live terminal access, normalized session history, preview, diff review, and recovery workflows.
 
-If you like Claude Code, Codex, Gemini, Qwen, Amp, Cursor Agent, or Copilot but want orchestration instead of a single terminal session, this is the missing layer.
+If you already use tools like Claude Code, Codex, Gemini, Qwen Code, Cursor Agent, Amp, OpenCode, Copilot, or CCR, Conductor is the orchestration layer around them rather than a replacement for them.
 
-## Why Conductor
+## What Conductor Does
 
-- One command to a working dashboard.
-- Local-first architecture with no hosted relay in the middle.
-- Bring your own agent CLI and auth; Conductor does not proxy provider credentials.
-- Markdown-backed Kanban board in `CONDUCTOR.md`.
-- Multi-session orchestration with retries, restore, archive, and diff review.
-- Worktree-aware repo isolation so multiple agents can work on the same codebase safely.
-- GitHub-aware flows for repos, PRs, checks, and project sync.
+- Dispatches tasks from `CONDUCTOR.md` boards into real agent sessions.
+- Runs agents locally in the repo or in isolated git worktrees.
+- Uses a terminal-first runtime so each session remains an interactive shell-backed workspace.
+- Streams session status into a dashboard over SSE and websocket-backed terminal connections.
+- Tracks retries, restores, kill/archive flows, session diffs, checks, previews, and feedback loops.
+- Stores state locally in `conductor.yaml`, `CONDUCTOR.md`, and `.conductor/conductor.db`.
+- Keeps agent authentication and billing with the upstream CLI you already installed.
+
+## Core Workflow
+
+1. Add a local repo or clone one into a managed workspace.
+2. Create or edit tasks in `CONDUCTOR.md`.
+3. Move a task into `Ready to Dispatch`.
+4. Conductor launches the selected agent in an isolated workspace.
+5. Follow the session from the browser:
+   - `Terminal`: the live terminal is the primary session workspace.
+   - `Overview`: normalized feed, runtime state, metadata, and recovery hints.
+   - `Preview`: connect a local dev URL and interact with the app from the session page.
+   - `Diff`: inspect changed files, workspace contents, and checks.
+6. Retry, restore, send feedback, or archive the session when needed.
+
+## Highlights
+
+- Local-first by design: no hosted relay, no repo proxy, no hosted state store.
+- Markdown-native planning: boards remain readable outside the app.
+- Multi-agent support with adapter-based discovery and launch logic.
+- Worktree-aware execution for parallel changes in the same repository.
+- Session recovery after backend restarts, including tmux reattach for live runtimes.
+- GitHub-aware flows for repository import, PR metadata, checks, and project syncing.
+- MCP server mode for integrating Conductor with external clients.
+
+## Supported Agents
+
+Built-in adapters currently exist for:
+
+- Claude Code
+- Codex
+- Gemini
+- Qwen Code
+- Amp
+- Cursor Agent
+- OpenCode
+- Droid
+- GitHub Copilot
+- CCR
+
+Availability still depends on what is installed and authenticated on your machine.
 
 ## Quick Start
 
-### 1. Make sure the machine has the basics
+### Requirements
 
 - Node.js `>= 18`
 - `git`
 - `tmux`
-- at least one supported coding-agent CLI installed and already authenticated
+- at least one supported coding-agent CLI installed and authenticated
 
-### 2. Launch Conductor
+### Launch Conductor
 
 ```bash
 npx conductor-oss@latest
 ```
 
-What that does today:
+The npm launcher defaults to `co start --open`, which starts the local stack and opens the dashboard.
 
-- starts the local Conductor dashboard
-- launches the local Rust backend
-- opens the app in your browser
-- keeps your project state local
+Launcher defaults:
 
-The published npm package includes platform-native backend packages for:
+- dashboard: `http://127.0.0.1:4747`
+- Rust backend: `http://127.0.0.1:4748`
 
-- macOS (`arm64` and `x64`)
-- Linux (`x64`)
-- Windows (`x64`)
-
-### 3. Add a repo and dispatch work
-
-From the dashboard you can:
-
-- add an existing local repo
-- clone a Git repo into a managed workspace
-- create tasks in the board
-- drag a task into `Ready to Dispatch`
-
-Conductor will spin up a session, stream output live, track the diff, and keep the attempt history attached to the task.
-
-## Inside An Existing Repo
-
-If you want to bootstrap Conductor files inside the repo you are already in:
+### Initialize an existing repo
 
 ```bash
 npx conductor-oss@latest init
@@ -91,133 +112,91 @@ npm install -g conductor-oss
 co
 ```
 
-The CLI exposes `conductor-oss`, `conductor`, and `co`.
+The launcher exposes `conductor-oss`, `conductor`, and `co`.
 
-## What You Get
+## CLI Overview
 
-- Workspace dashboard for repositories, projects, sessions, and agents
-- Markdown-native Kanban board stored in `CONDUCTOR.md`
-- Local Rust backend for orchestration, persistence, and API routes
-- SQLite persistence in `.conductor/conductor.db`
-- Live session chat/output streaming
-- Session diff inspection and preview tooling
-- Retry, restore, archive, kill, and feedback flows
-- Worktree or in-place execution modes
-- GitHub repo discovery, webhook handling, and project sync
-- Access controls for shared/private dashboard setups
+The npm launcher is the main user-facing CLI. Run `co --help` for the full surface.
 
-## Why This Exists
+Common launcher commands:
 
-Raw coding-agent CLIs are good at one task in one terminal.
-
-Conductor adds the missing operating system around them:
-
-- queueing
-- board automation
-- task history
-- worktree isolation
-- session recovery
-- browser visibility
-- multi-agent coordination
-
-## Local-First, Explicitly
-
-Conductor is opinionated about where your code and session state live:
-
-- your repositories stay on your machine
-- the main backend runs locally
-- state is stored in local files plus local SQLite
-- the dashboard talks to the local backend
-- upstream agent auth and billing stay with the agent vendor you already use
-
-Conductor is not a hosted agent SaaS and not a relay that forwards your repo through a third-party service.
-
-## Supported Agents
-
-Built-in adapters currently exist for:
-
-- Claude Code
-- Codex
-- Gemini
-- Qwen Code
-- Amp
-- Cursor Agent
-- OpenCode
-- Droid
-- GitHub Copilot
-- CCR
-
-Availability still depends on what is installed and authenticated on your machine.
-
-## Current Reality
-
-Conductor is already usable, but strangers should know the current edges:
-
-- The runtime is still `tmux`-first, so `tmux` is effectively required.
-- Agent behavior depends on the upstream CLI you install.
-- GitHub-heavy flows are best with `gh` installed and authenticated.
-- Preview tooling is strongest when a repo has an explicit local dev server configured.
-- The product is currently a hybrid stack: Rust backend plus Next.js dashboard/launcher.
-
-## Important Commands
-
-- `co start` - start the dashboard and local backend
+- `co start` - start the Rust backend and web dashboard
+- `co dashboard` - open the dashboard
 - `co init` - scaffold `conductor.yaml` and `CONDUCTOR.md`
-- `co setup` - guided environment setup
-- `co spawn` - start a new session for a project
+- `co setup` - guided first-run setup
+- `co doctor` - diagnose backend and runtime issues
+- `co spawn` - create a session
 - `co list` - list sessions
-- `co status` - summarize active sessions
+- `co status` - summarize session state
 - `co send` - send a follow-up to a session
-- `co restore` - relaunch a dead session
-- `co retry` - create a new attempt from a prior task/session
+- `co attach` - attach your terminal to a session's tmux pane
+- `co restore` - restore an exited session
+- `co retry` - create a new attempt from an earlier task or session
 - `co kill` - terminate a session
 - `co cleanup` - reclaim resources from completed sessions
-- `co mcp-server` - run Conductor as an MCP server
+- `co feedback` - send reviewer feedback back into a session
+- `co task` - task graph helpers
+- `co mcp-server` - run Conductor as an MCP server over stdio
 
-## Developer Setup
+There is also a native Rust CLI in `crates/conductor-cli` used by the launcher and source development. Its command set is intentionally smaller and lower-level than the npm launcher.
 
-If you are hacking on Conductor itself:
+## Configuration and Local Data
 
-### Requirements
+Conductor uses a small set of local files:
 
-- Bun `>= 1.2`
-- Rust toolchain
-- Node.js `>= 18`
+- `conductor.yaml`
+  Workspace and project configuration, agent defaults, access settings, and runtime preferences.
+- `CONDUCTOR.md`
+  Markdown kanban board used for planning and dispatch.
+- `.conductor/conductor.db`
+  SQLite persistence for sessions, metadata, and runtime state.
+- `.conductor/rust-backend/tmux/`
+  Runtime artifacts for tmux-backed sessions.
+- `attachments/...`
+  Uploaded session files and generated artifacts.
 
-### Run from source
+## Application Surfaces
 
-```bash
-bun install
-bun run dev:full
-```
+### Dashboard
 
-Default dev ports:
+The Next.js dashboard is the main UI for:
 
-- dashboard: `http://localhost:3000`
-- Rust backend: `http://127.0.0.1:4749`
+- project and repository management
+- board editing and task comments
+- session monitoring
+- terminal access
+- preview browser controls
+- diff and file inspection
+- PR and check visibility
+- app update notices and runtime health
 
-Useful scripts:
+### Rust Backend
 
-```bash
-bun run dev
-bun run dev:backend
-bun run dev:full
-bun run prod:prepare
-bun run prod:full
-bun run build
-bun run build:frontend
-bun run clean
-```
+The Rust backend is the orchestration core. It handles:
+
+- session lifecycle and spawn queueing
+- executor discovery and agent adapters
+- tmux-backed runtime management
+- workspace and worktree preparation
+- SQLite persistence
+- SSE event streaming
+- terminal websocket transport
+- board automation and filesystem watching
+- GitHub and notification integrations
+
+### Terminal-First Sessions
+
+The live terminal is now the primary session workspace. The dashboard still provides a normalized feed and metadata, but interactive work is expected to happen through the terminal surface, not a synthetic chat-only shell.
 
 ## Architecture
 
-### User-facing stack
+User-facing stack:
 
-- npm CLI for install and launch
-- Next.js dashboard for the browser UI
-- Rust backend for orchestration, API routes, session state, Git integration, and persistence
+- npm launcher in `packages/cli`
+- Next.js dashboard in `packages/web`
+- Rust backend in `crates/conductor-server`
 
-### Rust crates
+Rust workspace crates:
 
 - `crates/conductor-cli`
 - `crates/conductor-core`
@@ -227,12 +206,72 @@ bun run clean
 - `crates/conductor-server`
 - `crates/conductor-watcher`
 
-### Local data
+Key runtime properties:
 
-- `conductor.yaml` for workspace and project config
-- `CONDUCTOR.md` for the board
-- `.conductor/conductor.db` for local state
-- `attachments/<project>/...` for uploaded files
+- local-first
+- SQLite-only persistence
+- tmux-backed interactive sessions
+- agent-agnostic execution
+- Markdown-native board state
+
+## Develop From Source
+
+Requirements:
+
+- Bun `>= 1.2`
+- Node.js `>= 18`
+- Rust toolchain
+- `tmux`
+
+Install dependencies:
+
+```bash
+bun install
+```
+
+Run the full dev stack:
+
+```bash
+bun run dev:full
+```
+
+Source-dev defaults:
+
+- dashboard: `http://localhost:3000`
+- Rust backend: `http://127.0.0.1:4749`
+
+Useful commands:
+
+```bash
+bun run dev
+bun run dev:backend
+bun run dev:full
+bun run build
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+bun run typecheck
+```
+
+## Current Constraints
+
+- `tmux` is effectively required for the interactive runtime.
+- Agent behavior and output quality depend on the upstream CLI you install.
+- GitHub-heavy flows work best with `gh` installed and authenticated.
+- Preview tooling is strongest when a repo exposes a local dev server or preview URL.
+- Public tunnel-style remote access was removed; protected remote setups should use your own network or proxy layer.
+
+## Why Conductor Exists
+
+Single-agent terminals are useful for one task at a time. Conductor adds the operating layer around them:
+
+- queueing
+- planning
+- isolation
+- visibility
+- retries
+- recovery
+- review
+- browser-based coordination
 
 ## Links
 

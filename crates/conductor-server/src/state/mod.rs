@@ -15,9 +15,12 @@ pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
-pub(crate) use tmux_runtime::{tmux_runtime_metadata, tmux_session_exists};
+pub(crate) use tmux_runtime::{
+    capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, TMUX_LOG_PATH_METADATA_KEY,
+};
 pub use types::{
-    ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus, SpawnRequest,
+    ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
+    SpawnRequest, TerminalStreamEvent,
 };
 pub use workspace::{expand_path, resolve_workspace_path};
 
@@ -28,12 +31,12 @@ use conductor_core::config::{ConductorConfig, DashboardAccessConfig, Preferences
 use conductor_core::support::{startup_config_sync, sync_workspace_support_files};
 use conductor_core::types::AgentKind;
 use conductor_db::Database;
-use conductor_executors::executor::Executor;
+use conductor_executors::executor::{Executor, ExecutorInput};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 pub(crate) struct DevServerRecord {
     pub pid: u32,
@@ -97,10 +100,12 @@ impl AppState {
         state
     }
 
-    pub async fn discover_executors(&self) {
+    pub async fn discover_executors(self: &Arc<Self>) {
         let discovered = conductor_executors::discover_executors().await;
         let mut executors = self.executors.write().await;
         *executors = discovered;
+        drop(executors);
+        self.kick_spawn_supervisor().await;
     }
 
     pub async fn save_config(&self) -> Result<()> {
@@ -203,6 +208,124 @@ impl AppState {
 
     pub async fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
         self.sessions.read().await.get(session_id).cloned()
+    }
+
+    pub(crate) fn new_terminal_stream(&self) -> broadcast::Sender<TerminalStreamEvent> {
+        let (sender, _) = broadcast::channel(2048);
+        sender
+    }
+
+    pub(crate) async fn ensure_terminal_host(&self, session_id: &str) -> Arc<LiveSessionHandle> {
+        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
+            return handle;
+        }
+
+        let mut live_sessions = self.live_sessions.write().await;
+        if let Some(handle) = live_sessions.get(session_id).cloned() {
+            return handle;
+        }
+
+        let handle = Arc::new(LiveSessionHandle {
+            input_tx: RwLock::new(None),
+            terminal_tx: self.new_terminal_stream(),
+            terminal_store: Arc::new(std::sync::Mutex::new(types::TerminalStateStore::new())),
+            kill_tx: Mutex::new(None),
+        });
+        live_sessions.insert(session_id.to_string(), handle.clone());
+        handle
+    }
+
+    pub(crate) async fn attach_terminal_runtime(
+        &self,
+        session_id: &str,
+        input_tx: mpsc::Sender<ExecutorInput>,
+        kill_tx: oneshot::Sender<()>,
+    ) -> Arc<LiveSessionHandle> {
+        let handle = self.ensure_terminal_host(session_id).await;
+        *handle.input_tx.write().await = Some(input_tx);
+        *handle.kill_tx.lock().await = Some(kill_tx);
+        handle
+    }
+
+    pub(crate) async fn detach_terminal_runtime(&self, session_id: &str) {
+        let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() else {
+            return;
+        };
+        *handle.input_tx.write().await = None;
+        let _ = handle.kill_tx.lock().await.take();
+    }
+
+    pub(crate) async fn subscribe_terminal_stream(
+        &self,
+        session_id: &str,
+    ) -> Option<broadcast::Receiver<TerminalStreamEvent>> {
+        self.live_sessions
+            .read()
+            .await
+            .get(session_id)
+            .map(|handle| handle.terminal_tx.subscribe())
+    }
+
+    pub(crate) async fn terminal_runtime_attached(&self, session_id: &str) -> bool {
+        let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() else {
+            return false;
+        };
+        let attached = handle.input_tx.read().await.is_some();
+        attached
+    }
+
+    pub(crate) async fn emit_terminal_stream_event(
+        &self,
+        session_id: &str,
+        event: TerminalStreamEvent,
+    ) {
+        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
+            let _ = handle.terminal_tx.send(event);
+        }
+    }
+
+    pub(crate) async fn emit_terminal_text(&self, session_id: &str, text: impl AsRef<str>) {
+        let bytes = text.as_ref().as_bytes().to_vec();
+        if bytes.is_empty() {
+            return;
+        }
+
+        let handle = self.ensure_terminal_host(session_id).await;
+        if let Ok(mut store) = handle.terminal_store.lock() {
+            store.process(&bytes);
+        }
+        let _ = handle.terminal_tx.send(TerminalStreamEvent::Output(bytes));
+    }
+
+    pub(crate) async fn process_terminal_bytes(&self, session_id: &str, bytes: &[u8]) {
+        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
+            if let Ok(mut store) = handle.terminal_store.lock() {
+                store.process(bytes);
+            }
+        }
+    }
+
+    pub(crate) async fn resize_terminal_store(&self, session_id: &str, cols: u16, rows: u16) {
+        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
+            if let Ok(mut store) = handle.terminal_store.lock() {
+                store.resize(cols, rows);
+            }
+        }
+    }
+
+    pub(crate) async fn current_terminal_snapshot(&self, session_id: &str) -> Option<Vec<u8>> {
+        self.live_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .and_then(|handle| {
+                handle
+                    .terminal_store
+                    .lock()
+                    .ok()
+                    .map(|store| store.snapshot())
+            })
     }
 
     pub fn config_projects_payload(&self, config: &ConductorConfig) -> Value {

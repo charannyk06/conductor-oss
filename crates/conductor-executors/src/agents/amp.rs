@@ -7,7 +7,7 @@ use tokio::process::Command;
 use super::claude_code::parse_claude_stream_json_output;
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process_no_stdin;
+use crate::process::{spawn_process, spawn_process_no_stdin};
 
 #[derive(Clone)]
 pub struct AmpExecutor {
@@ -47,8 +47,11 @@ impl Executor for AmpExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle =
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle = if options.interactive {
+            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+        } else {
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
         Ok(ExecutorHandle::new(
             handle.pid,
@@ -67,6 +70,17 @@ impl Executor for AmpExecutor {
                 args.push("--stream-json".to_string());
                 args.push("--stream-json-thinking".to_string());
             }
+
+            if options.skip_permissions {
+                args.push("--dangerously-allow-all".to_string());
+            }
+
+            if let Some(mode) = normalize_amp_mode(options.model.as_deref()) {
+                args.push("--mode".to_string());
+                args.push(mode.to_string());
+            }
+
+            args.extend(options.sanitized_extra_args());
 
             if !options.prompt.trim().is_empty() {
                 args.push(options.prompt.clone());
