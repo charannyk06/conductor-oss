@@ -29,13 +29,13 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Enable pnpm for audit-ci
+      - name: Enable pnpm
         run: |
           corepack enable
           corepack prepare pnpm@latest --activate
 
       - name: Run dependency audit
-        run: npx audit-ci --high
+        run: pnpm audit --audit-level=high
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
