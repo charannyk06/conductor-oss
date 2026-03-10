@@ -57,12 +57,51 @@ jobs:
           [ -z "$tag_ver" ] && tag_ver="0.0.0"
 
           pkg_ver=$(node -p "require('./packages/cli/package.json').version")
-          npm_ver=$(npm view conductor-oss version 2>/dev/null || echo "0.0.0")
 
-          echo "Tag: $tag_ver | Package: $pkg_ver | npm: $npm_ver"
+          npm_highest=$(node -e "
+            const { execSync } = require('child_process');
+            let raw = '[]';
+            try {
+              raw = execSync('npm view conductor-oss versions --json', { stdio: ['ignore', 'pipe', 'ignore'] })
+                .toString()
+                .trim() || '[]';
+            } catch {}
+
+            let versions;
+            try {
+              versions = JSON.parse(raw);
+            } catch {
+              versions = [];
+            }
+
+            if (typeof versions === 'string') versions = [versions];
+            if (!Array.isArray(versions)) versions = [];
+
+            const stable = versions
+              .map((v) => String(v).trim())
+              .filter((v) => /^\d+\.\d+\.\d+$/.test(v));
+
+            if (stable.length === 0) {
+              console.log('0.0.0');
+              process.exit(0);
+            }
+
+            const p = (v) => v.split('.').map(Number);
+            stable.sort((a, b) => {
+              const pa = p(a), pb = p(b);
+              for (let i = 0; i < 3; i++) {
+                if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+              }
+              return 0;
+            });
+
+            console.log(stable[stable.length - 1]);
+          ")
+
+          echo "Tag: $tag_ver | Package: $pkg_ver | npm-highest: $npm_highest"
 
           base=$(node -e "
-            const vs=['$tag_ver','$pkg_ver','$npm_ver'];
+            const vs=['$tag_ver','$pkg_ver','$npm_highest'];
             const p=v=>v.split('.').map(Number);
             vs.sort((a,b)=>{const pa=p(a),pb=p(b);for(let i=0;i<3;i++)if((pa[i]||0)!==(pb[i]||0))return(pa[i]||0)-(pb[i]||0);return 0});
             console.log(vs[vs.length-1]);
