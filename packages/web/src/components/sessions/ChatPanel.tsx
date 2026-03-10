@@ -45,6 +45,7 @@ import {
 } from "@/lib/sessionModelCatalog";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import { SessionRuntimeStatusBar } from "./SessionRuntimeStatusBar";
+import { uploadProjectAttachments } from "./attachmentUploads";
 import {
   getAgentModelCatalog,
   getAvailableAgentModels,
@@ -1266,47 +1267,6 @@ function FeedEntry({
   }
 }
 
-async function uploadAttachments(files: File[]): Promise<string[]> {
-  if (!files.length) return [];
-
-  const uploadedPaths = await Promise.all(files.map(async (file) => {
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const response = await fetch("/api/attachments", {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to upload ${file.name}`);
-    }
-
-    const payload = await response.json();
-    const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : null;
-    const nested = record?.attachment && typeof record.attachment === "object"
-      ? record.attachment as Record<string, unknown>
-      : null;
-
-    for (const candidate of [
-      record?.absolutePath,
-      record?.path,
-      record?.filePath,
-      nested?.absolutePath,
-      nested?.path,
-      nested?.filePath,
-    ]) {
-      if (typeof candidate === "string" && candidate.trim().length > 0) {
-        return candidate.trim();
-      }
-    }
-
-    throw new Error(`Attachment response for ${file.name} did not include a file path`);
-  }));
-
-  return uploadedPaths.filter(Boolean);
-}
-
 async function postSessionTerminalKeys(
   sessionId: string,
   body: { keys?: string; special?: string },
@@ -1626,7 +1586,11 @@ export function ChatPanel({
     setSendError(null);
 
     try {
-      const attachmentPaths = await uploadAttachments(attachments.map((attachment) => attachment.file));
+      const attachmentPaths = await uploadProjectAttachments({
+        files: attachments.map((attachment) => attachment.file),
+        projectId: projectId ?? "",
+        preferAbsolute: true,
+      });
 
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
         method: "POST",

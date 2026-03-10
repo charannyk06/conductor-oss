@@ -175,6 +175,42 @@ function resolveLocalDashboardUrl(): string {
   return `http://${host}:${port}`;
 }
 
+function resolveLocalBackendUrl(): string | null {
+  const explicit = process.env.CONDUCTOR_BACKEND_URL?.trim();
+  if (explicit) {
+    try {
+      const url = new URL(explicit);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        return url.toString();
+      }
+    } catch {
+      // Ignore invalid backend URLs and fall back to env port.
+    }
+  }
+
+  const rawPort = process.env.CONDUCTOR_BACKEND_PORT?.trim();
+  const parsedPort = rawPort ? Number.parseInt(rawPort, 10) : Number.NaN;
+  if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    return null;
+  }
+
+  return `http://127.0.0.1:${parsedPort}`;
+}
+
+function parseServePort(url: string | null): number | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.port) {
+      const port = Number.parseInt(parsed.port, 10);
+      return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+    }
+    return parsed.protocol === "https:" ? 443 : 80;
+  } catch {
+    return null;
+  }
+}
+
 function buildTailscaleUrl(dnsName: string): string {
   return `https://${dnsName}`;
 }
@@ -185,6 +221,50 @@ function parseDashboardPort(localUrl: string): string {
     return url.port || "80";
   } catch {
     return "3000";
+  }
+}
+
+function ensureTailscaleServedEndpoints(
+  tailscalePath: string,
+  localUrl: string,
+  localBackendUrl: string | null,
+): void {
+  const port = parseDashboardPort(localUrl);
+  const serve = spawnSync(tailscalePath, ["serve", "--bg", port], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: {
+      ...process.env,
+      NO_COLOR: "1",
+    },
+  });
+  if (serve.status !== 0) {
+    throw new Error(serve.stderr.trim() || serve.stdout.trim() || "Tailscale Serve could not publish a private HTTPS URL.");
+  }
+
+  const backendPort = parseServePort(localBackendUrl);
+  if (!backendPort) {
+    return;
+  }
+
+  const backendServe = spawnSync(
+    tailscalePath,
+    ["serve", "--bg", "--https", String(backendPort), String(backendPort)],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        NO_COLOR: "1",
+      },
+    },
+  );
+  if (backendServe.status !== 0) {
+    throw new Error(
+      backendServe.stderr.trim()
+        || backendServe.stdout.trim()
+        || "Tailscale could not publish the private backend endpoint.",
+    );
   }
 }
 
@@ -255,6 +335,31 @@ function refreshTailscaleState(
       tunnelPid: null,
       logPath: null,
       lastError: support.connectionError ?? "Tailscale is installed but not signed in on this machine.",
+      startedAt: state.startedAt ?? null,
+    });
+  }
+
+  try {
+    const tailscalePath = support.tailscalePath;
+    if (!tailscalePath) {
+      throw new Error("Tailscale is installed but the executable path could not be resolved.");
+    }
+    ensureTailscaleServedEndpoints(
+      tailscalePath,
+      localUrl,
+      resolveLocalBackendUrl(),
+    );
+  } catch (error) {
+    return writeRemoteAccessRuntimeState({
+      status: "error",
+      provider: "tailscale",
+      publicUrl: null,
+      localUrl: state.localUrl ?? localUrl,
+      accessToken: null,
+      sessionSecret: null,
+      tunnelPid: null,
+      logPath: null,
+      lastError: error instanceof Error ? error.message : "Tailscale could not refresh the private remote endpoints.",
       startedAt: state.startedAt ?? null,
     });
   }
@@ -424,19 +529,11 @@ function enableTailscalePrivateLink(
   if (!support.tailscalePath || !support.dnsName) {
     throw new Error("Tailscale did not expose a private DNS name for this machine.");
   }
-
-  const port = parseDashboardPort(localUrl);
-  const serve = spawnSync(support.tailscalePath, ["serve", "--bg", port], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      NO_COLOR: "1",
-    },
-  });
-  if (serve.status !== 0) {
-    throw new Error(serve.stderr.trim() || serve.stdout.trim() || "Tailscale Serve could not publish a private HTTPS URL.");
-  }
+  ensureTailscaleServedEndpoints(
+    support.tailscalePath,
+    localUrl,
+    resolveLocalBackendUrl(),
+  );
 
   return writeRemoteAccessRuntimeState({
     status: "ready",
