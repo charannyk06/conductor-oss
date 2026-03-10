@@ -1,9 +1,9 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::iter::Peekable;
 use std::path::Path;
 
 use super::types::{
-    DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT, SessionRecord, SessionStatus,
+    SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT,
 };
 
 const SPAWN_REQUEST_METADATA_KEY: &str = "spawnRequest";
@@ -1262,16 +1262,12 @@ mod tests {
             .filter_map(|entry| entry.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>();
 
-        assert!(
-            texts
-                .iter()
-                .any(|text| text.contains("shell inspection now"))
-        );
-        assert!(
-            texts
-                .iter()
-                .all(|text| !text.contains("codex_core::mcp_connection_manager"))
-        );
+        assert!(texts
+            .iter()
+            .any(|text| text.contains("shell inspection now")));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("codex_core::mcp_connection_manager")));
     }
 
     #[test]
@@ -1358,21 +1354,15 @@ mod tests {
             .filter_map(|entry| entry.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>();
 
-        assert!(
-            texts
-                .iter()
-                .any(|text| text.contains("reviewing the repository layout"))
-        );
-        assert!(
-            texts
-                .iter()
-                .all(|text| !text.contains("generate shell completion script"))
-        );
-        assert!(
-            texts
-                .iter()
-                .all(|text| !text.contains("manage MCP (Model Context Protocol) servers"))
-        );
+        assert!(texts
+            .iter()
+            .any(|text| text.contains("reviewing the repository layout")));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("generate shell completion script")));
+        assert!(texts
+            .iter()
+            .all(|text| !text.contains("manage MCP (Model Context Protocol) servers")));
     }
 
     #[test]

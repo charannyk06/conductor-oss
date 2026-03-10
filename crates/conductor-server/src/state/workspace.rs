@@ -1,7 +1,7 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use conductor_core::config::ProjectConfig;
 use glob::Pattern;
-use std::fs::{self, OpenOptions, create_dir_all};
+use std::fs::{self, create_dir_all, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -620,8 +620,8 @@ pub(crate) fn terminate_process(pid: u32) -> bool {
     {
         use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
-            WaitForSingleObject,
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_TERMINATE,
         };
         const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
 

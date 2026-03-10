@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS projects (
     path TEXT NOT NULL,
     board_path TEXT,
     default_executor TEXT,
-    max_sessions INTEGER NOT NULL DEFAULT 2,
+    max_sessions INTEGER NOT NULL DEFAULT 5,
     setup_script TEXT,
     cleanup_script TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

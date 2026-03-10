@@ -7,8 +7,8 @@ use uuid::Uuid;
 use super::{ConversationEntry, SessionRecord, SessionStatus, SpawnRequest};
 use crate::state::AppState;
 
-const MAX_GLOBAL_CONCURRENT_LAUNCHES: usize = 5;
-const MAX_PROJECT_CONCURRENT_LAUNCHES: usize = 2;
+const MAX_GLOBAL_CONCURRENT_LAUNCHES: usize = 25;
+const MAX_PROJECT_CONCURRENT_LAUNCHES: usize = 5;
 const SPAWN_REQUEST_METADATA_KEY: &str = "spawnRequest";
 const QUEUED_AT_METADATA_KEY: &str = "queuedAt";
 const QUEUED_SOURCE_METADATA_KEY: &str = "queueSource";
@@ -40,6 +40,21 @@ impl AppState {
     pub async fn enqueue_session_spawn(
         self: &Arc<Self>,
         request: SpawnRequest,
+    ) -> Result<SessionRecord> {
+        self.enqueue_session_spawn_inner(request, true).await
+    }
+
+    pub(crate) async fn enqueue_session_spawn_deferred(
+        self: &Arc<Self>,
+        request: SpawnRequest,
+    ) -> Result<SessionRecord> {
+        self.enqueue_session_spawn_inner(request, false).await
+    }
+
+    async fn enqueue_session_spawn_inner(
+        self: &Arc<Self>,
+        request: SpawnRequest,
+        kick_supervisor: bool,
     ) -> Result<SessionRecord> {
         let config = self.config.read().await.clone();
         let project = config
@@ -109,43 +124,42 @@ impl AppState {
         });
 
         self.replace_session(record.clone()).await?;
-        self.kick_spawn_supervisor();
+        if kick_supervisor {
+            self.kick_spawn_supervisor().await;
+        }
         Ok(record)
     }
 
-    pub(crate) fn kick_spawn_supervisor(self: &Arc<Self>) {
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            let _guard = state.spawn_guard.lock().await;
+    pub(crate) async fn kick_spawn_supervisor(self: &Arc<Self>) {
+        let _guard = self.spawn_guard.lock().await;
 
-            loop {
-                let Some((session_id, request)) = state.next_queueable_spawn().await else {
-                    break;
-                };
+        loop {
+            let Some((session_id, request)) = self.next_queueable_spawn().await else {
+                break;
+            };
 
-                if let Err(err) = state.mark_queued_session_launching(&session_id).await {
-                    tracing::warn!(session_id, error = %err, "Failed to mark queued session as launching");
-                    continue;
-                }
+            if let Err(err) = self.mark_queued_session_launching(&session_id).await {
+                tracing::warn!(session_id, error = %err, "Failed to mark queued session as launching");
+                continue;
+            }
 
-                match state
-                    .spawn_session_now(request.clone(), Some(session_id.clone()))
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        tracing::warn!(session_id, error = %err, "Queued session launch failed");
-                        let _ = state
-                            .mark_queued_session_failed(&session_id, &err.to_string())
-                            .await;
-                    }
+            match self
+                .spawn_session_now(request.clone(), Some(session_id.clone()))
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(session_id, error = %err, "Queued session launch failed");
+                    let _ = self
+                        .mark_queued_session_failed(&session_id, &err.to_string())
+                        .await;
                 }
             }
-        });
+        }
     }
 
     async fn next_queueable_spawn(&self) -> Option<(String, SpawnRequest)> {
-        let (queued_ids, active_prompts) = {
+        let (queued_ids, active_launch_fingerprints) = {
             let sessions = self.sessions.read().await;
             let live_ids = self
                 .live_sessions
@@ -163,26 +177,46 @@ impl AppState {
             queued.sort_by(|left, right| left.0.cmp(&right.0));
             let queued_ids: Vec<_> = queued.into_iter().map(|(_, id)| id).collect();
 
-            // Collect (project_id, prompt) pairs for all active (non-terminal, non-queued) sessions.
-            let active_prompts: std::collections::HashSet<(String, String)> = sessions
+            // Only suppress true duplicates. Manual launches with the same prompt but a different
+            // agent should still be allowed to run side-by-side.
+            let active_launch_fingerprints: std::collections::HashSet<(
+                String,
+                String,
+                String,
+                String,
+            )> = sessions
                 .values()
                 .filter(|s| {
                     !s.status.is_terminal()
                         && s.status != SessionStatus::Queued
                         && (s.status == SessionStatus::Spawning || live_ids.contains(&s.id))
                 })
-                .map(|s| (s.project_id.clone(), s.prompt.clone()))
+                .map(|s| {
+                    (
+                        s.project_id.clone(),
+                        s.prompt.clone(),
+                        s.agent.clone(),
+                        s.branch.clone().unwrap_or_default(),
+                    )
+                })
                 .collect();
 
-            (queued_ids, active_prompts)
+            (queued_ids, active_launch_fingerprints)
         };
 
         if queued_ids.is_empty() {
             return None;
         }
 
+        let queued_count = queued_ids.len();
         let (global_active, per_project_active) = self.launch_capacity_snapshot().await;
         if global_active >= MAX_GLOBAL_CONCURRENT_LAUNCHES {
+            tracing::debug!(
+                queued_count,
+                global_active,
+                global_limit = MAX_GLOBAL_CONCURRENT_LAUNCHES,
+                "Spawn queue is blocked by the global launch limit"
+            );
             return None;
         }
 
@@ -191,12 +225,21 @@ impl AppState {
                 continue;
             };
 
-            // Dedup: skip if an active session already exists for the same project + prompt.
-            if active_prompts.contains(&(session.project_id.clone(), session.prompt.clone())) {
+            let launch_fingerprint = (
+                session.project_id.clone(),
+                session.prompt.clone(),
+                session.agent.clone(),
+                session.branch.clone().unwrap_or_default(),
+            );
+
+            // Dedup only exact launch duplicates. Different agents should not block each other.
+            if active_launch_fingerprints.contains(&launch_fingerprint) {
                 tracing::debug!(
                     session_id,
                     project_id = session.project_id,
-                    "Skipping duplicate spawn: active session exists with same prompt"
+                    agent = session.agent,
+                    branch = session.branch.clone().unwrap_or_default(),
+                    "Spawn queue skipped an exact duplicate request"
                 );
                 continue;
             }
@@ -206,6 +249,13 @@ impl AppState {
                 .copied()
                 .unwrap_or_default();
             if project_active >= MAX_PROJECT_CONCURRENT_LAUNCHES {
+                tracing::debug!(
+                    session_id,
+                    project_id = session.project_id,
+                    project_active,
+                    project_limit = MAX_PROJECT_CONCURRENT_LAUNCHES,
+                    "Spawn queue is blocked by the per-project launch limit"
+                );
                 continue;
             }
 
@@ -221,7 +271,15 @@ impl AppState {
             };
 
             match serde_json::from_str::<SpawnRequest>(&raw_request) {
-                Ok(request) => return Some((session_id, request)),
+                Ok(request) => {
+                    tracing::debug!(
+                        session_id,
+                        project_id = session.project_id,
+                        agent = session.agent,
+                        "Spawn queue selected a queued session for launch"
+                    );
+                    return Some((session_id, request));
+                }
                 Err(err) => {
                     let _ = self
                         .mark_queued_session_failed(
@@ -233,6 +291,11 @@ impl AppState {
             }
         }
 
+        tracing::debug!(
+            queued_count,
+            global_active,
+            "Spawn queue found queued sessions but none were eligible to launch"
+        );
         None
     }
 

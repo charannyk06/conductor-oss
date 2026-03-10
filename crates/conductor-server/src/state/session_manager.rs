@@ -6,25 +6,25 @@ use conductor_executors::executor::{ExecutorInput, ExecutorOutput, SpawnOptions}
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use super::AppState;
 use super::helpers::{
     append_output, is_runtime_status_line, merge_assistant_fragment, runtime_tool_metadata,
     sanitize_terminal_text,
 };
 use super::runtime_status::resolve_native_resume_target;
 use super::tmux_runtime::{
-    TMUX_RUNTIME_MODE, runtime_mode, tmux_runtime_metadata, tmux_session_exists,
+    runtime_mode, tmux_runtime_metadata, tmux_session_exists, TMUX_RUNTIME_MODE,
 };
 use super::types::{
-    ConversationEntry, DEFAULT_SESSION_HISTORY_LIMIT, LiveSessionHandle, SessionRecord,
-    SessionStatus, SpawnRequest,
+    ConversationEntry, SessionRecord, SessionStatus, SpawnRequest, TerminalStreamEvent,
+    DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
+use super::AppState;
 
 const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
+const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
 
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
@@ -56,6 +56,10 @@ fn resolve_skip_permissions(
         Some("ask") | Some("plan") => false,
         _ => project_defaults_to_skip_permissions(project),
     }
+}
+
+fn format_launch_progress(message: &str) -> String {
+    format!("{LAUNCH_PROGRESS_PREFIX} {message}\r\n")
 }
 
 fn persisted_output_line(event: &ExecutorOutput) -> Option<String> {
@@ -348,11 +352,29 @@ impl AppState {
         self.persist_session(&updated).await
     }
 
+    async fn update_launch_stage(&self, session_id: &str, summary: &str) -> Result<()> {
+        let mut sessions = self.sessions.write().await;
+        let Some(session) = sessions.get_mut(session_id) else {
+            return Ok(());
+        };
+        session.summary = Some(summary.to_string());
+        session
+            .metadata
+            .insert("summary".to_string(), summary.to_string());
+        session.last_activity_at = Utc::now().to_rfc3339();
+        let updated = session.clone();
+        drop(sessions);
+        self.persist_session(&updated).await?;
+        self.publish_snapshot().await;
+        Ok(())
+    }
+
     pub(crate) fn start_output_consumer(
         self: &Arc<Self>,
         session_id: String,
         executor: Arc<dyn conductor_executors::executor::Executor>,
         mut output_rx: tokio::sync::mpsc::Receiver<ExecutorOutput>,
+        mirror_terminal_output: bool,
         output_is_parsed: bool,
         timeout: Option<std::time::Duration>,
     ) {
@@ -370,6 +392,20 @@ impl AppState {
             while let Some(event) = output_rx.recv().await {
                 match event {
                     ExecutorOutput::Stdout(line) => {
+                        if mirror_terminal_output {
+                            let raw_output = if line.ends_with('\n') || line.ends_with('\r') {
+                                line.clone().into_bytes()
+                            } else {
+                                format!("{line}\r\n").into_bytes()
+                            };
+                            state.process_terminal_bytes(&session_id, &raw_output).await;
+                            state
+                                .emit_terminal_stream_event(
+                                    &session_id,
+                                    TerminalStreamEvent::Output(raw_output),
+                                )
+                                .await;
+                        }
                         let sanitized = sanitize_terminal_text(&line);
                         let mapped = if output_is_parsed {
                             ExecutorOutput::Stdout(sanitized)
@@ -379,6 +415,20 @@ impl AppState {
                         let _ = state.apply_parsed_output(&session_id, mapped).await;
                     }
                     ExecutorOutput::Stderr(line) => {
+                        if mirror_terminal_output {
+                            let raw_output = if line.ends_with('\n') || line.ends_with('\r') {
+                                line.clone().into_bytes()
+                            } else {
+                                format!("{line}\r\n").into_bytes()
+                            };
+                            state.process_terminal_bytes(&session_id, &raw_output).await;
+                            state
+                                .emit_terminal_stream_event(
+                                    &session_id,
+                                    TerminalStreamEvent::Output(raw_output),
+                                )
+                                .await;
+                        }
                         let sanitized = sanitize_terminal_text(&line);
                         let prefixed = format!("[stderr] {sanitized}");
                         let _ = state
@@ -390,13 +440,36 @@ impl AppState {
                             .await;
                     }
                     other => {
+                        match &other {
+                            ExecutorOutput::Completed { exit_code } => {
+                                state
+                                    .emit_terminal_stream_event(
+                                        &session_id,
+                                        TerminalStreamEvent::Exit(*exit_code),
+                                    )
+                                    .await;
+                            }
+                            ExecutorOutput::Failed { error, exit_code } => {
+                                let message = match exit_code {
+                                    Some(code) => format!("{error} (exit {code})"),
+                                    None => error.clone(),
+                                };
+                                state
+                                    .emit_terminal_stream_event(
+                                        &session_id,
+                                        TerminalStreamEvent::Error(message),
+                                    )
+                                    .await;
+                            }
+                            _ => {}
+                        }
                         let should_kick = matches!(
                             other,
                             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
                         );
                         let _ = state.apply_runtime_event(&session_id, other).await;
                         if should_kick {
-                            state.kick_spawn_supervisor();
+                            state.kick_spawn_supervisor().await;
                         }
                     }
                 }
@@ -450,23 +523,68 @@ impl AppState {
                 session_id.get(..8).unwrap_or(&session_id)
             ))
         });
-        let workspace_path = self
-            .prepare_workspace(
-                &request.project_id,
+        self.ensure_terminal_host(&session_id).await;
+        let _ = self
+            .update_launch_stage(&session_id, "Preparing workspace")
+            .await;
+        self.emit_terminal_text(
+            &session_id,
+            format_launch_progress("Preparing workspace..."),
+        )
+        .await;
+        let workspace_job = async {
+            let workspace_path = self
+                .prepare_workspace(
+                    &request.project_id,
+                    &session_id,
+                    &project,
+                    request.use_worktree.unwrap_or(true),
+                    branch.as_deref(),
+                    request.base_branch.as_deref(),
+                )
+                .await?;
+            let _ = self
+                .update_launch_stage(&session_id, "Running workspace setup")
+                .await;
+            self.emit_terminal_text(
                 &session_id,
-                &project,
-                request.use_worktree.unwrap_or(true),
-                branch.as_deref(),
-                request.base_branch.as_deref(),
+                format_launch_progress("Running workspace setup..."),
             )
-            .await?;
-        if let Err(err) = self.initialize_workspace(&project, &workspace_path).await {
-            let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
-            return Err(err);
-        }
-        let dev_server = match self.ensure_dev_server(&request.project_id, &project).await {
+            .await;
+            if let Err(err) = self.initialize_workspace(&project, &workspace_path).await {
+                let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
+                return Err(err);
+            }
+            Ok::<_, anyhow::Error>(workspace_path)
+        };
+        let dev_server_job = async {
+            self.emit_terminal_text(
+                &session_id,
+                format_launch_progress("Checking shared dev server..."),
+            )
+            .await;
+            self.ensure_dev_server(&request.project_id, &project).await
+        };
+        let (workspace_result, dev_server_result) = tokio::join!(workspace_job, dev_server_job);
+        let workspace_path = match workspace_result {
+            Ok(path) => path,
+            Err(err) => {
+                self.emit_terminal_text(
+                    &session_id,
+                    format_launch_progress(&format!("Launch failed: {err}")),
+                )
+                .await;
+                return Err(err);
+            }
+        };
+        let dev_server = match dev_server_result {
             Ok(dev_server) => dev_server,
             Err(err) => {
+                self.emit_terminal_text(
+                    &session_id,
+                    format_launch_progress(&format!("Launch failed: {err}")),
+                )
+                .await;
                 let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
                 return Err(err);
             }
@@ -489,6 +607,23 @@ impl AppState {
 
         let skip_permissions =
             resolve_skip_permissions(request.permission_mode.as_deref(), &project);
+
+        if self
+            .get_session(&session_id)
+            .await
+            .map(|session| session.status.is_terminal())
+            .unwrap_or(false)
+        {
+            self.emit_terminal_text(
+                &session_id,
+                format_launch_progress("Launch cancelled before runtime attach."),
+            )
+            .await;
+            let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
+            return Err(anyhow::anyhow!(
+                "Session {session_id} was cancelled during launch"
+            ));
+        }
 
         let mut spawn_env = HashMap::new();
         if executor.kind() == AgentKind::ClaudeCode {
@@ -526,12 +661,29 @@ impl AppState {
         {
             Ok(handle) => handle,
             Err(err) => {
+                self.emit_terminal_text(
+                    &session_id,
+                    format_launch_progress(&format!("Launch failed: {err}")),
+                )
+                .await;
                 let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
                 return Err(err);
             }
         };
 
         let (pid, _kind, output_rx, input_tx, kill_tx) = runtime_launch.handle.into_parts();
+        if self
+            .get_session(&session_id)
+            .await
+            .map(|session| session.status.is_terminal())
+            .unwrap_or(false)
+        {
+            let _ = kill_tx.send(());
+            let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
+            return Err(anyhow::anyhow!(
+                "Session {session_id} was cancelled during launch"
+            ));
+        }
 
         let mut record = SessionRecord::new(
             session_id.clone(),
@@ -546,6 +698,11 @@ impl AppState {
             Some(pid),
         );
         let started_at = Utc::now().to_rfc3339();
+        self.emit_terminal_text(
+            &session_id,
+            format_launch_progress("Runtime attached. Streaming session..."),
+        )
+        .await;
         record.metadata.insert(
             "worktree".to_string(),
             workspace_path.root_path.to_string_lossy().to_string(),
@@ -661,17 +818,19 @@ impl AppState {
             let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
             return Err(err.context("Failed to persist session after spawn"));
         }
-        self.live_sessions.write().await.insert(
-            session_id.clone(),
-            Arc::new(LiveSessionHandle {
-                input_tx,
-                kill_tx: Mutex::new(kill_tx.take()),
-            }),
-        );
+        self.attach_terminal_runtime(
+            &session_id,
+            input_tx,
+            kill_tx
+                .take()
+                .expect("runtime kill channel should exist before terminal attachment"),
+        )
+        .await;
         self.start_output_consumer(
             session_id.clone(),
             executor,
             output_rx,
+            runtime_mode(&project) != TMUX_RUNTIME_MODE,
             true,
             project
                 .agent_config
@@ -734,7 +893,7 @@ impl AppState {
             None => {
                 drop(sessions);
                 if clear_live_handle {
-                    self.live_sessions.write().await.remove(session_id);
+                    self.detach_terminal_runtime(session_id).await;
                 }
                 return Ok(());
             }
@@ -743,7 +902,7 @@ impl AppState {
         if session.status.is_terminal() {
             drop(sessions);
             if clear_live_handle {
-                self.live_sessions.write().await.remove(session_id);
+                self.detach_terminal_runtime(session_id).await;
             }
             return Ok(());
         }
@@ -787,7 +946,7 @@ impl AppState {
         let updated = session.clone();
         drop(sessions);
         if clear_live_handle {
-            self.live_sessions.write().await.remove(session_id);
+            self.detach_terminal_runtime(session_id).await;
         }
         self.persist_session(&updated).await?;
         if let Some(output_line) = line {
@@ -818,7 +977,7 @@ impl AppState {
             None => {
                 drop(sessions);
                 if clear_live_handle {
-                    self.live_sessions.write().await.remove(session_id);
+                    self.detach_terminal_runtime(session_id).await;
                 }
                 return Ok(());
             }
@@ -827,7 +986,7 @@ impl AppState {
         if session.status.is_terminal() {
             drop(sessions);
             if clear_live_handle {
-                self.live_sessions.write().await.remove(session_id);
+                self.detach_terminal_runtime(session_id).await;
             }
             return Ok(());
         }
@@ -964,7 +1123,7 @@ impl AppState {
         let updated = session.clone();
         drop(sessions);
         if clear_live_handle {
-            self.live_sessions.write().await.remove(session_id);
+            self.detach_terminal_runtime(session_id).await;
         }
         self.persist_session(&updated).await?;
         self.publish_snapshot().await;
@@ -988,6 +1147,12 @@ impl AppState {
             .get(session_id)
             .cloned()
             .with_context(|| format!("Session {session_id} is not running"))?;
+        let input_tx = handle
+            .input_tx
+            .read()
+            .await
+            .clone()
+            .with_context(|| format!("Session {session_id} is still launching"))?;
 
         let effective_message = if attachments.is_empty() {
             message.clone()
@@ -1084,8 +1249,7 @@ impl AppState {
         drop(sessions);
         self.persist_session(&updated).await?;
         self.publish_snapshot().await;
-        handle
-            .input_tx
+        input_tx
             .send(ExecutorInput::Text(effective_message))
             .await?;
         Ok(())
@@ -1263,17 +1427,13 @@ impl AppState {
         drop(sessions);
 
         self.replace_session(updated).await?;
-        self.live_sessions.write().await.insert(
-            session_id.to_string(),
-            Arc::new(LiveSessionHandle {
-                input_tx,
-                kill_tx: Mutex::new(Some(kill_tx)),
-            }),
-        );
+        self.attach_terminal_runtime(session_id, input_tx, kill_tx)
+            .await;
         self.start_output_consumer(
             session_id.to_string(),
             handle,
             output_rx,
+            runtime_mode(&project) != TMUX_RUNTIME_MODE,
             true,
             project
                 .agent_config
@@ -1310,8 +1470,14 @@ impl AppState {
             .get(session_id)
             .cloned()
             .with_context(|| format!("Session {session_id} is not running"))?;
+        let input_tx = handle
+            .input_tx
+            .read()
+            .await
+            .clone()
+            .with_context(|| format!("Session {session_id} is still launching"))?;
 
-        handle.input_tx.send(ExecutorInput::Raw(keys)).await?;
+        input_tx.send(ExecutorInput::Raw(keys)).await?;
 
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
@@ -1343,8 +1509,10 @@ impl AppState {
         let had_live_handle = if let Some(handle) = live_handle {
             if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
                 let _ = kill_tx.send(());
+                true
+            } else {
+                false
             }
-            true
         } else {
             false
         };
@@ -1400,8 +1568,10 @@ impl AppState {
         let had_live_handle = if let Some(handle) = live_handle {
             if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
                 let _ = kill_tx.send(());
+                true
+            } else {
+                false
             }
-            true
         } else {
             false
         };
@@ -1519,6 +1689,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::types::{LiveSessionHandle, TerminalStateStore};
     use anyhow::Result;
     use async_trait::async_trait;
     use conductor_core::config::{ConductorConfig, ProjectConfig};
@@ -1531,7 +1702,7 @@ mod tests {
     use std::process::{Child, Command as StdCommand};
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
     struct TestExecutor {
@@ -2448,6 +2619,7 @@ mod tests {
             Arc::new(PrefixingExecutor),
             output_rx,
             true,
+            true,
             None,
         );
         output_tx
@@ -2478,6 +2650,79 @@ mod tests {
             .find(|entry| entry.kind == "assistant_message")
             .expect("assistant message");
         assert_eq!(assistant.text, "parsed::hello");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn start_output_consumer_fanouts_terminal_bytes_for_live_sessions() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-terminal-stream-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let mut session = SessionRecord::new(
+            "terminal-stream".to_string(),
+            "demo".to_string(),
+            Some("session/terminal-stream".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = SessionStatus::Working;
+        state.replace_session(session).await.unwrap();
+
+        let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        let terminal_tx = state.new_terminal_stream();
+        let mut terminal_rx = terminal_tx.subscribe();
+        state.live_sessions.write().await.insert(
+            "terminal-stream".to_string(),
+            Arc::new(LiveSessionHandle {
+                input_tx: tokio::sync::RwLock::new(Some(input_tx)),
+                terminal_tx,
+                terminal_store: Arc::new(std::sync::Mutex::new(TerminalStateStore::new())),
+                kill_tx: tokio::sync::Mutex::new(Some(kill_tx)),
+            }),
+        );
+
+        let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
+        state.start_output_consumer(
+            "terminal-stream".to_string(),
+            Arc::new(PrefixingExecutor),
+            output_rx,
+            true,
+            true,
+            None,
+        );
+        output_tx
+            .send(ExecutorOutput::Stdout("hello".to_string()))
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(3), terminal_rx.recv())
+            .await
+            .expect("terminal event should arrive")
+            .expect("broadcast event should be readable");
+        match event {
+            TerminalStreamEvent::Output(bytes) => {
+                assert_eq!(String::from_utf8_lossy(&bytes), "hello\r\n");
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -2517,6 +2762,7 @@ mod tests {
             "tmux-output".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
+            false,
             false,
             None,
         );

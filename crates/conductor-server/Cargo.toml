@@ -31,6 +31,7 @@ libc = "0.2"
 glob = { workspace = true }
 async-trait = { workspace = true }
 portable-pty = { workspace = true }
+vt100 = "0.16"
 
 [dev-dependencies]
 tower = "0.5"

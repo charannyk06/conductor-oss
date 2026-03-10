@@ -25,7 +25,7 @@ impl Project {
             path,
             board_path: None,
             default_executor: None,
-            max_sessions: 2,
+            max_sessions: 5,
             setup_script: None,
             cleanup_script: None,
             active_sessions: 0,

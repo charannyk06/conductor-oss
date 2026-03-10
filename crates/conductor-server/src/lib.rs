@@ -29,7 +29,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     state.restore_runtime_sessions().await;
     state.start_tmux_activity_watchdog();
     let _runtime = runtime::initialize_runtime(config, state.clone(), _event_bus.clone()).await?;
-    state.kick_spawn_supervisor();
+    state.kick_spawn_supervisor().await;
     state.start_app_update_watchdog();
     state.publish_snapshot().await;
 

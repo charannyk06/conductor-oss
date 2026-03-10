@@ -413,7 +413,7 @@ async fn send_to_session(
 async fn kill_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
     match state.kill_session(&id).await {
         Ok(()) => {
-            state.kick_spawn_supervisor();
+            state.kick_spawn_supervisor().await;
             ok(json!({ "ok": true, "sessionId": id }))
         }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
@@ -436,7 +436,7 @@ async fn archive_session(
 ) -> ApiResponse {
     match state.archive_session(&id).await {
         Ok(()) => {
-            state.kick_spawn_supervisor();
+            state.kick_spawn_supervisor().await;
             ok(json!({ "ok": true, "sessionId": id }))
         }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
