@@ -8,7 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{mpsc, oneshot};
@@ -34,7 +34,8 @@ const TMUX_ACTIVITY_WATCH_INTERVAL: Duration = Duration::from_millis(750);
 const TMUX_ACTIVITY_OUTPUT_GRACE_PERIOD: Duration = Duration::from_millis(2500);
 const TMUX_DEFAULT_COLUMNS: &str = "120";
 const TMUX_DEFAULT_ROWS: &str = "32";
-const TMUX_HISTORY_LIMIT: &str = "200000";
+const TMUX_HISTORY_LIMIT: &str = "50000";
+static TMUX_AVAILABILITY: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn new_tmux_command() -> tokio::process::Command {
     let mut command = tokio::process::Command::new("tmux");
@@ -178,11 +179,9 @@ fn classify_tmux_pane(agent: &str, pane: &str) -> TmuxActivityState {
         || tail_compact.contains("proceed")
         || tail_compact.contains("select an option")
         || tail_compact.contains("press enter to continue")
-        || tail_compact.contains("bypass permissions")
         || tail_compact.contains("do you trust the files in this folder")
         || tail_compact.contains("enter to select")
         || tail_compact.contains("yes, and remember this folder for future sessions")
-        || tail_nowhitespace.contains("bypasspermissions")
         || tail_nowhitespace.contains("doyouwant")
         || tail_nowhitespace.contains("doyoutrustthefilesinthisfolder")
         || tail_nowhitespace.contains("pressentertocontinue")
@@ -533,36 +532,7 @@ impl AppState {
         .await
         .with_context(|| format!("Failed to create tmux session {session_name}"))?;
 
-        run_tmux_command(
-            &socket_path,
-            [
-                "set-option",
-                "-t",
-                session_name.as_str(),
-                "history-limit",
-                TMUX_HISTORY_LIMIT,
-            ],
-            None,
-        )
-        .await
-        .with_context(|| format!("Failed to set tmux history limit for {session_name}"))?;
-
-        run_tmux_command(
-            &socket_path,
-            [
-                "set-option",
-                "-as",
-                "-t",
-                session_name.as_str(),
-                "terminal-overrides",
-                ",xterm-256color:Tc,screen-256color:Tc,tmux-256color:Tc",
-            ],
-            None,
-        )
-        .await
-        .with_context(|| format!("Failed to enable tmux truecolor for {session_name}"))?;
-
-        disable_tmux_status(&socket_path, &session_name).await?;
+        configure_tmux_session(&socket_path, &session_name).await?;
 
         let pipe_command = format!("cat >> {}", shell_escape(&log_path.to_string_lossy()));
         run_tmux_command(
@@ -998,6 +968,7 @@ pub(crate) async fn capture_tmux_pane(
     session_name: &str,
     lines: usize,
 ) -> Result<String> {
+    let history_start = lines.saturating_sub(1);
     let output = new_tmux_command()
         .arg("-S")
         .arg(socket_path)
@@ -1007,29 +978,45 @@ pub(crate) async fn capture_tmux_pane(
         .arg("-t")
         .arg(session_name)
         .arg("-S")
-        .arg("-")
+        .arg(format!("-{history_start}"))
         .output()
         .await
         .with_context(|| format!("Failed to capture tmux pane for {session_name}"))?;
 
     if output.status.success() {
-        let snapshot = String::from_utf8_lossy(&output.stdout).to_string();
-        let mut collected = snapshot.lines().rev().take(lines).collect::<Vec<_>>();
-        collected.reverse();
-        Ok(collected.join("\n"))
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         Err(anyhow!("tmux capture-pane failed for {session_name}"))
     }
 }
 
-pub(crate) async fn disable_tmux_status(socket_path: &Path, session_name: &str) -> Result<()> {
+async fn configure_tmux_session(socket_path: &Path, session_name: &str) -> Result<()> {
     run_tmux_command(
         socket_path,
-        ["set-option", "-t", session_name, "status", "off"],
+        [
+            "set-option",
+            "-t",
+            session_name,
+            "history-limit",
+            TMUX_HISTORY_LIMIT,
+            ";",
+            "set-option",
+            "-as",
+            "-t",
+            session_name,
+            "terminal-overrides",
+            ",xterm-256color:Tc,screen-256color:Tc,tmux-256color:Tc",
+            ";",
+            "set-option",
+            "-t",
+            session_name,
+            "status",
+            "off",
+        ],
         None,
     )
     .await
-    .with_context(|| format!("Failed to disable tmux status line for {session_name}"))
+    .with_context(|| format!("Failed to configure tmux session {session_name}"))
 }
 
 pub(crate) async fn kill_tmux_session(socket_path: &Path, session_name: &str) -> Result<()> {
@@ -1050,16 +1037,29 @@ pub(crate) async fn kill_tmux_session(socket_path: &Path, session_name: &str) ->
 }
 
 async fn ensure_tmux_available() -> Result<()> {
-    let status = new_tmux_command()
+    if let Some(cached) = TMUX_AVAILABILITY.get() {
+        return cached
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| anyhow!(error.clone()));
+    }
+
+    let result = match new_tmux_command()
         .arg("-V")
         .status()
         .await
-        .context("Failed to execute tmux")?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!("tmux is required for runtime 'tmux'"))
-    }
+        .context("Failed to execute tmux")
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => Err("tmux is required for runtime 'tmux'".to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+
+    let cached = TMUX_AVAILABILITY.get_or_init(|| result.clone());
+    cached
+        .as_ref()
+        .map(|_| ())
+        .map_err(|error| anyhow!(error.clone()))
 }
 
 async fn tmux_pane_pid(socket_path: &Path, session_name: &str) -> Result<u32> {
@@ -1382,13 +1382,13 @@ mod tests {
     }
 
     #[test]
-    fn classify_tmux_pane_marks_claude_bypass_prompt_waiting_input() {
+    fn classify_tmux_pane_keeps_claude_bypass_prompt_active() {
         assert_eq!(
             classify_tmux_pane(
                 "claude-code",
                 "\u{001b}[38;2;255;107;128m⏵⏵\u{001b}[39m\u{001b}[38;2;255;107;128mbypasspermissionson\u{001b}[39m (shift+tab to cycle)"
             ),
-            TmuxActivityState::WaitingInput
+            TmuxActivityState::Active
         );
     }
 
@@ -2064,10 +2064,12 @@ mod tests {
                     branch: None,
                     base_branch: None,
                     task_id: None,
+                    task_ref: None,
                     attempt_id: None,
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },

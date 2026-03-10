@@ -33,9 +33,10 @@ use conductor_core::types::AgentKind;
 use conductor_db::Database;
 use conductor_executors::executor::{Executor, ExecutorInput};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 pub(crate) struct DevServerRecord {
@@ -48,6 +49,28 @@ pub(crate) struct DevServerLaunch {
     pub preview_url: Option<String>,
     pub preview_port: Option<u16>,
 }
+
+struct RuntimeStatusCacheEntry {
+    fetched_at: Instant,
+    status: Option<SessionRuntimeStatus>,
+}
+
+struct DashboardSessionCacheEntry {
+    value: Value,
+    serialized: String,
+}
+
+#[derive(Default)]
+struct DashboardSnapshotCache {
+    ordered_ids: Vec<String>,
+    sessions_by_id: HashMap<String, DashboardSessionCacheEntry>,
+}
+
+struct FeedPayloadCacheEntry {
+    payload: Value,
+}
+
+const RUNTIME_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
 
 /// Shared application state for the HTTP server.
 pub struct AppState {
@@ -68,6 +91,9 @@ pub struct AppState {
     /// Serializes board-triggered spawns to prevent TOCTOU races in limit checks.
     pub spawn_guard: Mutex<()>,
     dev_servers: Mutex<HashMap<String, DevServerRecord>>,
+    runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
+    dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
+    feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
 }
 
 impl AppState {
@@ -93,6 +119,9 @@ impl AppState {
             board_collaboration: RwLock::new(BoardCollaborationStore::default()),
             spawn_guard: Mutex::new(()),
             dev_servers: Mutex::new(HashMap::new()),
+            runtime_status_cache: Mutex::new(HashMap::new()),
+            dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
+            feed_payload_cache: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;
@@ -148,7 +177,7 @@ impl AppState {
         Ok(access)
     }
 
-    pub async fn snapshot_sessions(&self) -> Vec<Value> {
+    async fn refresh_dashboard_snapshot_cache(&self) -> (Vec<Value>, Vec<String>) {
         let sessions = self.sessions.read().await;
         let mut list: Vec<SessionRecord> = sessions
             .values()
@@ -170,32 +199,96 @@ impl AppState {
             .map(|(index, (_, id))| (id, index + 1))
             .collect::<HashMap<_, _>>();
 
-        list.into_iter()
-            .map(|mut session| {
-                if let Some(position) = queue_positions.get(&session.id) {
-                    session
-                        .metadata
-                        .insert("queuePosition".to_string(), position.to_string());
-                    session
-                        .metadata
-                        .insert("queueDepth".to_string(), queue_depth.to_string());
-                }
-                session_to_dashboard_value(&session)
-            })
+        let mut cache = self.dashboard_snapshot_cache.lock().await;
+        let mut changed_sessions = Vec::new();
+        let mut ordered_ids = Vec::with_capacity(list.len());
+        let active_ids = list
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<HashSet<_>>();
+
+        let removed_ids = cache
+            .sessions_by_id
+            .keys()
+            .filter(|session_id| !active_ids.contains(*session_id))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for session_id in &removed_ids {
+            cache.sessions_by_id.remove(session_id);
+        }
+
+        for mut session in list {
+            if let Some(position) = queue_positions.get(&session.id) {
+                session
+                    .metadata
+                    .insert("queuePosition".to_string(), position.to_string());
+                session
+                    .metadata
+                    .insert("queueDepth".to_string(), queue_depth.to_string());
+            }
+
+            let value = session_to_dashboard_value(&session);
+            let serialized = serde_json::to_string(&value).unwrap_or_default();
+            let session_id = session.id.clone();
+            ordered_ids.push(session_id.clone());
+
+            let changed = cache
+                .sessions_by_id
+                .get(&session_id)
+                .map(|entry| entry.serialized != serialized)
+                .unwrap_or(true);
+
+            if changed {
+                cache.sessions_by_id.insert(
+                    session_id,
+                    DashboardSessionCacheEntry {
+                        value: value.clone(),
+                        serialized,
+                    },
+                );
+                changed_sessions.push(value);
+            }
+        }
+
+        cache.ordered_ids = ordered_ids;
+        (changed_sessions, removed_ids)
+    }
+
+    async fn cached_snapshot_sessions(&self) -> Vec<Value> {
+        let cache = self.dashboard_snapshot_cache.lock().await;
+        cache
+            .ordered_ids
+            .iter()
+            .filter_map(|session_id| cache.sessions_by_id.get(session_id))
+            .map(|entry| entry.value.clone())
             .collect()
     }
 
+    pub async fn snapshot_sessions(&self) -> Vec<Value> {
+        let _ = self.refresh_dashboard_snapshot_cache().await;
+        self.cached_snapshot_sessions().await
+    }
+
     pub async fn snapshot_event_json(&self) -> String {
+        let _ = self.refresh_dashboard_snapshot_cache().await;
         serde_json::to_string(&json!({
             "type": "snapshot",
-            "sessions": self.snapshot_sessions().await,
+            "sessions": self.cached_snapshot_sessions().await,
             "appUpdate": self.app_update_snapshot().await,
         }))
         .unwrap_or_else(|_| "{\"type\":\"snapshot\",\"sessions\":[]}".to_string())
     }
 
     pub async fn publish_snapshot(&self) {
-        let payload = self.snapshot_event_json().await;
+        let (sessions, removed_session_ids) = self.refresh_dashboard_snapshot_cache().await;
+        let payload = serde_json::to_string(&json!({
+            "type": "snapshot_delta",
+            "sessions": sessions,
+            "removedSessionIds": removed_session_ids,
+            "appUpdate": self.app_update_snapshot().await,
+        }))
+        .unwrap_or_else(|_| "{\"type\":\"snapshot_delta\",\"sessions\":[]}".to_string());
         let _ = self.event_snapshots.send(payload);
     }
 
@@ -208,6 +301,60 @@ impl AppState {
 
     pub async fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
         self.sessions.read().await.get(session_id).cloned()
+    }
+
+    pub async fn dashboard_session(&self, session_id: &str) -> Option<Value> {
+        let _ = self.refresh_dashboard_snapshot_cache().await;
+        let cache = self.dashboard_snapshot_cache.lock().await;
+        cache
+            .sessions_by_id
+            .get(session_id)
+            .map(|entry| entry.value.clone())
+    }
+
+    pub async fn session_runtime_status(
+        &self,
+        session: &SessionRecord,
+    ) -> Option<SessionRuntimeStatus> {
+        {
+            let cache = self.runtime_status_cache.lock().await;
+            if let Some(entry) = cache.get(&session.id) {
+                if entry.fetched_at.elapsed() < RUNTIME_STATUS_CACHE_TTL {
+                    return entry.status.clone();
+                }
+            }
+        }
+
+        let status = build_session_runtime_status(session).await;
+        let mut cache = self.runtime_status_cache.lock().await;
+        cache.insert(
+            session.id.clone(),
+            RuntimeStatusCacheEntry {
+                fetched_at: Instant::now(),
+                status: status.clone(),
+            },
+        );
+        status
+    }
+
+    pub(crate) async fn invalidate_session_caches(&self, session_id: &str) {
+        self.runtime_status_cache.lock().await.remove(session_id);
+        self.feed_payload_cache.lock().await.remove(session_id);
+    }
+
+    pub(crate) async fn cached_feed_payload(&self, session_id: &str) -> Option<Value> {
+        self.feed_payload_cache
+            .lock()
+            .await
+            .get(session_id)
+            .map(|entry| entry.payload.clone())
+    }
+
+    pub(crate) async fn store_feed_payload(&self, session_id: &str, payload: Value) {
+        self.feed_payload_cache
+            .lock()
+            .await
+            .insert(session_id.to_string(), FeedPayloadCacheEntry { payload });
     }
 
     pub(crate) fn new_terminal_stream(&self) -> broadcast::Sender<TerminalStreamEvent> {
@@ -326,6 +473,22 @@ impl AppState {
                     .ok()
                     .map(|store| store.snapshot())
             })
+    }
+
+    pub(crate) async fn current_terminal_history(&self, session_id: &str) -> Option<Vec<u8>> {
+        self.live_sessions
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+            .and_then(|handle| {
+                handle
+                    .terminal_store
+                    .lock()
+                    .ok()
+                    .map(|store| store.history_tail())
+            })
+            .filter(|history| !history.is_empty())
     }
 
     pub fn config_projects_payload(&self, config: &ConductorConfig) -> Value {

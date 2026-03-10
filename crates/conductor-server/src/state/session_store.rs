@@ -60,12 +60,25 @@ impl AppState {
             let mut guard = self.sessions.write().await;
             guard.extend(loaded);
         }
+        self.dashboard_snapshot_cache
+            .lock()
+            .await
+            .ordered_ids
+            .clear();
+        self.dashboard_snapshot_cache
+            .lock()
+            .await
+            .sessions_by_id
+            .clear();
+        self.feed_payload_cache.lock().await.clear();
+        self.runtime_status_cache.lock().await.clear();
     }
 
     pub(crate) async fn persist_session(&self, session: &SessionRecord) -> Result<()> {
         let path = self.session_snapshot_path(&session.id);
         let content = serde_json::to_string_pretty(session)?;
         tokio::fs::write(path, content).await?;
+        self.invalidate_session_caches(&session.id).await;
         Ok(())
     }
 
