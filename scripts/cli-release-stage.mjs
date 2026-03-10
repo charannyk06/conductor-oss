@@ -17,6 +17,9 @@ import { CLI_NATIVE_TARGETS } from "./cli-native-packages.mjs";
 
 const NPM_EXECUTABLE = "npm";
 
+// Keep the web bundle manifest explicit so npm publication verification can assert it is present.
+const CLI_RELEASE_FILES = ["dist/", "web/package.json", "web/", "README.md", "LICENSE"];
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -357,7 +360,7 @@ export function createCliReleaseStage({
     optionalDependencies: publishedOptionalDependencies,
     publishConfig,
   });
-  stagedManifest.files = ["dist/", "web/package.json", "web/", "README.md", "LICENSE"];
+  stagedManifest.files = CLI_RELEASE_FILES;
   stagedManifest.bundleDependencies = internalDependencyNames;
   writeJson(join(outputDir, "package.json"), stagedManifest);
 
@@ -431,7 +434,7 @@ export function createCliReleaseStage({
     optionalDependencies: publishedOptionalDependencies,
     publishConfig,
   });
-  publishedManifest.files = ["dist/", "web/package.json", "web/", "README.md", "LICENSE"];
+  publishedManifest.files = CLI_RELEASE_FILES;
   publishedManifest.bundleDependencies = internalDependencyNames;
   writeJson(join(outputDir, "package.json"), publishedManifest);
   rmSync(join(outputDir, "node_modules", ".package-lock.json"), { force: true });
