@@ -71,6 +71,18 @@ function getSessionAgent(session: DashboardSession): string | null {
   return agent ? agent : null;
 }
 
+function isSessionActivelyGenerating(session: DashboardSession): boolean {
+  const observedActivity = session.metadata["tmuxObservedActivity"]?.trim().toLowerCase();
+  if (observedActivity === "active") {
+    return true;
+  }
+  if (observedActivity === "waiting_input" || observedActivity === "blocked") {
+    return false;
+  }
+
+  return session.status === "spawning" || session.status === "working";
+}
+
 function parseDiffStats(session: DashboardSession): { additions: number; deletions: number } | null {
   const candidates = [
     session.metadata["lastStderr"],
@@ -292,10 +304,7 @@ export function Sidebar({
               const statusBadge = getStatusBadge(session, level);
               const sessionAgent = getSessionAgent(session);
               const isSelected = session.id === selectedId;
-              const isRunning = session.activity === "active"
-                || session.status === "spawning"
-                || session.status === "running"
-                || session.status === "working";
+              const isRunning = isSessionActivelyGenerating(session);
               const isArchiving = archivingId === session.id;
               const hasArchiveError = archiveError === session.id;
 
