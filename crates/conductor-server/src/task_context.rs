@@ -5,6 +5,7 @@ use conductor_core::support::resolve_project_path;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::task;
 
 use crate::routes::boards::{split_task_text, BoardTaskRecord};
 use crate::state::AppState;
@@ -35,15 +36,43 @@ pub(crate) async fn ensure_task_brief(
     project: &ProjectConfig,
     task: &BoardTaskRecord,
 ) -> Result<TaskBriefPaths> {
-    let task_ref = task_ref_for_storage(task);
     let config = state.config.read().await.clone();
+    let workspace_path = state.workspace_path.clone();
+    let project_id = project_id.to_string();
+    let project = project.clone();
+    let task = task.clone();
+    let markdown_editor = config.preferences.markdown_editor;
+    let markdown_editor_path = config.preferences.markdown_editor_path;
+
+    task::spawn_blocking(move || {
+        ensure_task_brief_sync(
+            &workspace_path,
+            &project_id,
+            &project,
+            &task,
+            &markdown_editor,
+            &markdown_editor_path,
+        )
+    })
+    .await?
+}
+
+fn ensure_task_brief_sync(
+    workspace_path: &Path,
+    project_id: &str,
+    project: &ProjectConfig,
+    task: &BoardTaskRecord,
+    markdown_editor: &str,
+    markdown_editor_path: &str,
+) -> Result<TaskBriefPaths> {
+    let task_ref = task_ref_for_storage(task);
     let paths = resolve_task_brief_paths(
-        &state.workspace_path,
+        workspace_path,
         project_id,
         project,
         &task_ref,
-        config.preferences.markdown_editor.as_str(),
-        config.preferences.markdown_editor_path.as_str(),
+        markdown_editor,
+        markdown_editor_path,
     );
     let (title, description) = split_task_text(&task.text);
     let template = render_task_brief(
