@@ -290,11 +290,15 @@ fn interactive_structured_output_includes_print_for_claude_family() {
     interactive.interactive = true;
     interactive.structured_output = true;
 
-    let claude =
-        ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&interactive);
+    let claude = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&interactive);
     assert_contains(
         &claude,
-        &["--print", "--output-format", "stream-json", "--include-partial-messages"],
+        &[
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+        ],
     );
 
     let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&interactive);

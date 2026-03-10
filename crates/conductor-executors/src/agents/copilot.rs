@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process_no_stdin;
+use crate::process::{spawn_process, spawn_process_no_stdin};
 
 #[derive(Clone)]
 pub struct CopilotExecutor {
@@ -47,8 +47,11 @@ impl Executor for CopilotExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle =
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle = if options.interactive {
+            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+        } else {
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
         Ok(ExecutorHandle::new(
             handle.pid,
@@ -74,7 +77,15 @@ impl Executor for CopilotExecutor {
                 args.push("--allow-all".to_string());
             }
 
+            if let Some(model) = &options.model {
+                args.push("--model".to_string());
+                args.push(model.clone());
+            }
+
+            args.extend(options.sanitized_extra_args());
+
             if !options.prompt.trim().is_empty() {
+                args.push("-i".to_string());
                 args.push(options.prompt.clone());
             }
             return args;
@@ -317,5 +328,34 @@ mod tests {
             metadata.get("toolStatus").and_then(Value::as_str),
             Some("running")
         );
+    }
+
+    #[test]
+    fn build_args_interactive_uses_inline_prompt_mode() {
+        let executor = CopilotExecutor::new(PathBuf::from("/usr/bin/copilot"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("."),
+            prompt: "review the app".to_string(),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: None,
+            skip_permissions: true,
+            extra_args: vec!["--foo".to_string()],
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(args.contains(&"--allow-all".to_string()));
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"gpt-5".to_string()));
+        assert!(args.contains(&"--foo".to_string()));
+        assert_eq!(
+            args.iter().position(|arg| arg == "-i"),
+            Some(args.len() - 2)
+        );
+        assert_eq!(args.last().map(String::as_str), Some("review the app"));
     }
 }

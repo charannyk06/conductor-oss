@@ -7,7 +7,7 @@ use tokio::process::Command;
 use super::claude_code::parse_claude_stream_json_output;
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process_no_stdin;
+use crate::process::{spawn_process, spawn_process_no_stdin};
 
 #[derive(Clone)]
 pub struct CcrExecutor {
@@ -49,8 +49,11 @@ impl Executor for CcrExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle =
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle = if options.interactive {
+            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+        } else {
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
 
         Ok(ExecutorHandle::new(
@@ -82,6 +85,10 @@ impl Executor for CcrExecutor {
                 args.push("--effort".to_string());
                 args.push(reasoning_effort.clone());
             }
+            if options.skip_permissions {
+                args.push("--dangerously-skip-permissions".to_string());
+            }
+            args.extend(options.sanitized_extra_args());
             if !options.prompt.trim().is_empty() {
                 args.push(options.prompt.clone());
             }
