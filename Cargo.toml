@@ -55,7 +55,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 clap = { version = "4.0", features = ["derive"] }
 glob = "0.3"
-which = "7"
+which = "8"
 regex = "1"
 
 # Crypto (for webhook HMAC, auth)
