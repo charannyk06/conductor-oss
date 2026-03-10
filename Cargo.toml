@@ -30,7 +30,7 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "uuid", "derive"] }
 
 # Git
 git2 = { version = "0.19", default-features = false }
