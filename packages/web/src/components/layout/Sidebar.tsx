@@ -33,11 +33,6 @@ interface SessionDiffStats {
   deletions: number;
 }
 
-interface SessionDiffStatsCacheEntry {
-  key: string;
-  stats: SessionDiffStats | null;
-}
-
 function formatAge(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
   if (diffMs < 0 || !Number.isFinite(diffMs)) return "now";
@@ -76,6 +71,18 @@ function getSessionAgent(session: DashboardSession): string | null {
   return agent ? agent : null;
 }
 
+function isSessionActivelyGenerating(session: DashboardSession): boolean {
+  const observedActivity = session.metadata["tmuxObservedActivity"]?.trim().toLowerCase();
+  if (observedActivity === "active") {
+    return true;
+  }
+  if (observedActivity === "waiting_input" || observedActivity === "blocked") {
+    return false;
+  }
+
+  return session.status === "spawning" || session.status === "working";
+}
+
 function parseDiffStats(session: DashboardSession): { additions: number; deletions: number } | null {
   const candidates = [
     session.metadata["lastStderr"],
@@ -95,44 +102,6 @@ function parseDiffStats(session: DashboardSession): { additions: number; deletio
   }
 
   return null;
-}
-
-function getSessionDiffCacheKey(session: DashboardSession): string {
-  return [
-    session.id,
-    session.status,
-    session.lastActivityAt,
-    session.branch ?? "",
-    session.metadata["worktree"] ?? "",
-  ].join(":");
-}
-
-function parseSessionDiffPayload(payload: unknown): SessionDiffStats | null {
-  if (!payload || typeof payload !== "object") return null;
-
-  const files = Array.isArray((payload as { files?: unknown }).files)
-    ? (payload as { files: Array<{ additions?: unknown; deletions?: unknown }> }).files
-    : [];
-
-  let additions = 0;
-  let deletions = 0;
-
-  for (const file of files) {
-    const nextAdditions = typeof file?.additions === "number" && Number.isFinite(file.additions)
-      ? Math.max(0, file.additions)
-      : 0;
-    const nextDeletions = typeof file?.deletions === "number" && Number.isFinite(file.deletions)
-      ? Math.max(0, file.deletions)
-      : 0;
-    additions += nextAdditions;
-    deletions += nextDeletions;
-  }
-
-  if (additions <= 0 && deletions <= 0) {
-    return null;
-  }
-
-  return { additions, deletions };
 }
 
 function getStatusBadge(session: DashboardSession, level: AttentionLevel): { label: string; className: string } {
@@ -241,7 +210,6 @@ export function Sidebar({
   const [search, setSearch] = useState("");
   const [archivingId, setArchivingId] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
-  const [diffStatsBySessionId, setDiffStatsBySessionId] = useState<Record<string, SessionDiffStatsCacheEntry>>({});
 
   const filtered = useMemo(() => {
     const visibleSessions = sessions.filter((session) => session.status !== "archived");
@@ -295,52 +263,6 @@ export function Sidebar({
     );
   }, [filtered]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const sessionsToFetch = orderedSessions.filter((session) => {
-      const cacheKey = getSessionDiffCacheKey(session);
-      return diffStatsBySessionId[session.id]?.key !== cacheKey;
-    });
-
-    if (sessionsToFetch.length === 0) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    void Promise.all(
-      sessionsToFetch.map(async (session) => {
-        const cacheKey = getSessionDiffCacheKey(session);
-        try {
-          const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/diff`);
-          if (!response.ok) {
-            return [session.id, { key: cacheKey, stats: null }] as const;
-          }
-          const payload = await response.json();
-          return [session.id, { key: cacheKey, stats: parseSessionDiffPayload(payload) }] as const;
-        } catch (error) {
-          console.error("Failed to load session diff stats", error);
-          return [session.id, { key: cacheKey, stats: null }] as const;
-        }
-      }),
-    ).then((entries) => {
-      if (cancelled) return;
-      const resolvedEntries = entries.filter((entry): entry is readonly [string, SessionDiffStatsCacheEntry] => entry !== null);
-      if (resolvedEntries.length === 0) return;
-      setDiffStatsBySessionId((current) => {
-        const next = { ...current };
-        for (const [sessionId, entry] of resolvedEntries) {
-          next[sessionId] = entry;
-        }
-        return next;
-      });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [diffStatsBySessionId, orderedSessions]);
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       {showHeader && (
@@ -378,14 +300,11 @@ export function Sidebar({
           <div className="space-y-2">
             {orderedSessions.map((session) => {
               const level = getAttentionLevel(session);
-              const diffStats = diffStatsBySessionId[session.id]?.stats ?? parseDiffStats(session);
+              const diffStats = parseDiffStats(session);
               const statusBadge = getStatusBadge(session, level);
               const sessionAgent = getSessionAgent(session);
               const isSelected = session.id === selectedId;
-              const isRunning = session.activity === "active"
-                || session.status === "spawning"
-                || session.status === "running"
-                || session.status === "working";
+              const isRunning = isSessionActivelyGenerating(session);
               const isArchiving = archivingId === session.id;
               const hasArchiveError = archiveError === session.id;
 
@@ -398,6 +317,7 @@ export function Sidebar({
                   tabIndex={0}
                   className={cn(
                     "group flex w-full items-start gap-3 rounded-[8px] border px-3 py-3 text-left transition-colors",
+                    "[content-visibility:auto] [contain-intrinsic-size:92px]",
                     isSelected
                       ? "border-[rgba(234,122,42,0.28)] bg-[rgba(255,255,255,0.08)]"
                       : "border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] hover:bg-[var(--vk-bg-hover)]",

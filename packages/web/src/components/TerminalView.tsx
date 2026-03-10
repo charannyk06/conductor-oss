@@ -23,9 +23,9 @@ type TerminalSnapshot = {
   restored: boolean;
 };
 
-const READ_ONLY_SCROLLBACK = 200000;
-const LIVE_TERMINAL_SNAPSHOT_LINES = 12000;
-const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 200000;
+const READ_ONLY_SCROLLBACK = 50000;
+const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
+const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
 const RECONNECT_BASE_DELAY_MS = 300;
 const RECONNECT_MAX_DELAY_MS = 1600;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
@@ -45,6 +45,27 @@ async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<
   const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}`, {
     cache: "no-store",
   });
+  const data = (await response.json().catch(() => null)) as
+    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; error?: string }
+    | null;
+  if (!response.ok) {
+    throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
+  }
+  return {
+    snapshot: typeof data?.snapshot === "string" ? data.snapshot : "",
+    source: typeof data?.source === "string" ? data.source : "empty",
+    live: data?.live === true,
+    restored: data?.restored === true,
+  };
+}
+
+async function fetchLiveTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}&live=1`,
+    {
+      cache: "no-store",
+    },
+  );
   const data = (await response.json().catch(() => null)) as
     | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; error?: string }
     | null;
@@ -219,7 +240,7 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
 
     void (async () => {
       try {
-        const snapshot = await fetchTerminalSnapshot(sessionId, LIVE_TERMINAL_SNAPSHOT_LINES);
+        const snapshot = await fetchLiveTerminalSnapshot(sessionId, LIVE_TERMINAL_SNAPSHOT_LINES);
         if (!mounted) return;
         setSnapshotAnsi(snapshot.snapshot);
       } catch {

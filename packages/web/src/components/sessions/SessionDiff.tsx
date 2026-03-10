@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
-import { TERMINAL_STATUSES, type SSESnapshotEvent } from "@/lib/types";
+import { TERMINAL_STATUSES, type SSESessionEvent } from "@/lib/types";
 
 type ReviewDiffKind = "meta" | "hunk" | "context" | "add" | "remove" | "info";
 type ReviewDiffSource = "working-tree" | "remote-pr" | "not-found";
@@ -486,7 +486,7 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
         const next = { ...current };
         for (const file of nextFiles.slice(0, 10)) {
           if (next[file.path] == null) {
-            next[file.path] = true;
+            next[file.path] = false;
           }
         }
         return next;
@@ -602,7 +602,7 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
     snapshotSignatureRef.current = null;
     terminalRef.current = false;
     void fetchDiff();
-    const unsubscribe = subscribeToSnapshotEvents((event: SSESnapshotEvent) => {
+    const unsubscribe = subscribeToSnapshotEvents((event: SSESessionEvent) => {
       if (!mountedRef.current) return;
       const matchingSession = event.sessions.find((value) => value.id === sessionId);
       if (!matchingSession) return;
@@ -727,7 +727,7 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
 
   function toggleFile(path: string) {
     setExpandedFiles((current) => {
-      const currentlyExpanded = current[path] ?? true;
+      const currentlyExpanded = current[path] ?? false;
       return { ...current, [path]: !currentlyExpanded };
     });
   }
@@ -886,7 +886,7 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
             {!error &&
               allFiles.length > 0 &&
               allFiles.map((file) => {
-                const expanded = expandedFiles[file.path] ?? true;
+                const expanded = expandedFiles[file.path] ?? false;
                 const selected = selectedFile?.path === file.path;
 
                 return (

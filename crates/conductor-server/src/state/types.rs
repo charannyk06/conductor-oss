@@ -1,4 +1,5 @@
 use conductor_executors::executor::ExecutorInput;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
@@ -18,9 +19,11 @@ pub enum TerminalStreamEvent {
 const DEFAULT_TERMINAL_STORE_COLS: u16 = 120;
 const DEFAULT_TERMINAL_STORE_ROWS: u16 = 32;
 const DEFAULT_TERMINAL_STORE_SCROLLBACK: usize = 4000;
+const DEFAULT_TERMINAL_HISTORY_BYTES: usize = 512 * 1024;
 
 pub struct TerminalStateStore {
     parser: vt100::Parser,
+    history: VecDeque<u8>,
 }
 
 impl Default for TerminalStateStore {
@@ -37,11 +40,16 @@ impl TerminalStateStore {
                 DEFAULT_TERMINAL_STORE_COLS,
                 DEFAULT_TERMINAL_STORE_SCROLLBACK,
             ),
+            history: VecDeque::with_capacity(DEFAULT_TERMINAL_HISTORY_BYTES),
         }
     }
 
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
+        self.history.extend(bytes.iter().copied());
+        while self.history.len() > DEFAULT_TERMINAL_HISTORY_BYTES {
+            self.history.pop_front();
+        }
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -50,6 +58,10 @@ impl TerminalStateStore {
 
     pub fn snapshot(&self) -> Vec<u8> {
         self.parser.screen().state_formatted()
+    }
+
+    pub fn history_tail(&self) -> Vec<u8> {
+        self.history.iter().copied().collect()
     }
 }
 

@@ -12,14 +12,17 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { useSession } from "@/hooks/useSession";
+import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
 import { SessionDiff } from "./SessionDiff";
 import { SessionPreview } from "./SessionPreview";
+import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
 import { SessionTerminal } from "./SessionTerminal";
 import type { TerminalInsertRequest } from "./terminalInsert";
 
 interface SessionDetailProps {
   sessionId: string;
+  initialSession?: DashboardSession | null;
 }
 
 type SessionTab = "overview" | "terminal" | "diff" | "preview";
@@ -48,11 +51,11 @@ function getCompactSessionStatusLabel(status: string): string {
   }
 }
 
-export function SessionDetail({ sessionId }: SessionDetailProps) {
+export function SessionDetail({ sessionId, initialSession = null }: SessionDetailProps) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { session, loading, error } = useSession(sessionId);
+  const { session, loading, error } = useSession(sessionId, initialSession);
   const terminalInsertNonceRef = useRef(0);
   const autoPreviewOpenedRef = useRef(false);
   const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
@@ -133,6 +136,7 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
   const sessionModel = session.metadata["model"]?.trim() ?? "";
   const sessionReasoningEffort = session.metadata["reasoningEffort"]?.trim() ?? "";
   const compactStatusLabel = getCompactSessionStatusLabel(status);
+  const showProjectOpenMenu = status !== "queued" && status !== "spawning";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -157,12 +161,15 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
             </TabsTrigger>
           </TabsList>
           <div className="flex min-w-0 items-center justify-between gap-2">
-            <Badge variant="outline" className="h-[23px] max-w-full">
-              <span className="sm:hidden">{compactStatusLabel}</span>
-              <span className="hidden sm:inline">{status}</span>
-            </Badge>
-            <span className="font-mono text-[10px] text-[var(--vk-text-muted)] sm:hidden">{sessionId.slice(0, 6)}</span>
-            <span className="hidden min-w-0 truncate font-mono text-[10px] text-[var(--vk-text-muted)] sm:block">{sessionId}</span>
+            <div className="flex min-w-0 items-center gap-2">
+              <Badge variant="outline" className="h-[23px] max-w-full">
+                <span className="sm:hidden">{compactStatusLabel}</span>
+                <span className="hidden sm:inline">{status}</span>
+              </Badge>
+              <span className="font-mono text-[10px] text-[var(--vk-text-muted)] sm:hidden">{sessionId.slice(0, 6)}</span>
+              <span className="hidden min-w-0 truncate font-mono text-[10px] text-[var(--vk-text-muted)] sm:block">{sessionId}</span>
+            </div>
+            {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} /> : null}
           </div>
         </div>
 
@@ -191,15 +198,17 @@ export function SessionDetail({ sessionId }: SessionDetailProps) {
 
           <TabsContent
             value="preview"
-            forceMount
             className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
           >
-            <SessionPreview
-              key={sessionId}
-              sessionId={sessionId}
-              onQueueTerminalInsert={queueTerminalInsert}
-              onConnectionChange={handlePreviewConnectionChange}
-            />
+            {activeTab === "preview" ? (
+              <SessionPreview
+                key={sessionId}
+                sessionId={sessionId}
+                active
+                onQueueTerminalInsert={queueTerminalInsert}
+                onConnectionChange={handlePreviewConnectionChange}
+              />
+            ) : null}
           </TabsContent>
 
           <TabsContent value="diff" className="min-h-0 h-full overflow-auto">

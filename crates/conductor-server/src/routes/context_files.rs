@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 use crate::state::{resolve_board_file, AppState};
+use crate::task_context::task_brief_root;
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -68,6 +69,7 @@ async fn list_context_files(
         .workspace_path
         .join("attachments")
         .join(&query.project_id);
+    let brief_root = task_brief_root(&project_root);
     let board_parent = board_absolute.parent().map(Path::to_path_buf);
     let markdown_editor = config.preferences.markdown_editor.trim();
     let markdown_root = resolve_markdown_root(
@@ -82,6 +84,7 @@ async fn list_context_files(
         files.push(file_descriptor(
             &board_absolute,
             &state.workspace_path,
+            None,
             Some("board"),
         ));
     }
@@ -90,6 +93,7 @@ async fn list_context_files(
             collect_project_files(
                 root,
                 &state.workspace_path,
+                Some(root),
                 markdown_source,
                 &mut files,
                 1200,
@@ -100,6 +104,7 @@ async fn list_context_files(
                 collect_project_files(
                     root,
                     &state.workspace_path,
+                    None,
                     markdown_source,
                     &mut files,
                     600,
@@ -110,6 +115,7 @@ async fn list_context_files(
                 collect_project_files(
                     &state.workspace_path,
                     &state.workspace_path,
+                    None,
                     markdown_source,
                     &mut files,
                     600,
@@ -123,12 +129,21 @@ async fn list_context_files(
             && root != state.workspace_path.as_path()
             && board_parent.as_deref() != Some(root)
         {
-            collect_project_files(root, &state.workspace_path, "workspace", &mut files, 250, 4);
+            collect_project_files(
+                root,
+                &state.workspace_path,
+                None,
+                "workspace",
+                &mut files,
+                250,
+                4,
+            );
         }
     }
     collect_project_files(
         &project_root,
         &state.workspace_path,
+        None,
         "project",
         &mut files,
         250,
@@ -137,12 +152,34 @@ async fn list_context_files(
     collect_project_files(
         &attachments_root,
         &state.workspace_path,
+        None,
         "attachment",
         &mut files,
         250,
         4,
     );
+    collect_project_files(
+        &brief_root,
+        &state.workspace_path,
+        None,
+        "brief",
+        &mut files,
+        250,
+        4,
+    );
 
+    files.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+            .then_with(|| {
+                source_sort_rank(left["source"].as_str().unwrap_or_default()).cmp(&source_sort_rank(
+                    right["source"].as_str().unwrap_or_default(),
+                ))
+            })
+    });
+    files.dedup_by(|left, right| left["path"] == right["path"]);
     files.sort_by(|left, right| {
         source_sort_rank(left["source"].as_str().unwrap_or_default())
             .cmp(&source_sort_rank(
@@ -155,7 +192,6 @@ async fn list_context_files(
                     .cmp(right["path"].as_str().unwrap_or_default())
             })
     });
-    files.dedup_by(|left, right| left["path"] == right["path"]);
     ok(json!({ "files": files }))
 }
 
@@ -191,6 +227,7 @@ async fn open_context_file(
         .workspace_path
         .join("attachments")
         .join(&body.project_id);
+    let brief_root = task_brief_root(&project_root);
     let markdown_editor = config.preferences.markdown_editor.trim();
     let markdown_root = resolve_markdown_root(
         &state.workspace_path,
@@ -205,7 +242,7 @@ async fn open_context_file(
         );
     }
 
-    let mut allowed_roots = vec![project_root, attachments_root];
+    let mut allowed_roots = vec![project_root, attachments_root, brief_root];
     if let Some(root) = project_workspace_root {
         allowed_roots.push(root);
     }
@@ -234,6 +271,7 @@ async fn open_context_file(
 fn collect_project_files(
     root: &Path,
     workspace_root: &Path,
+    display_root: Option<&Path>,
     source: &str,
     out: &mut Vec<Value>,
     max_files: usize,
@@ -271,7 +309,12 @@ fn collect_project_files(
             if !is_candidate_file(&path) {
                 continue;
             }
-            out.push(file_descriptor(&path, workspace_root, Some(source)));
+            out.push(file_descriptor(
+                &path,
+                workspace_root,
+                display_root,
+                Some(source),
+            ));
             if out.len().saturating_sub(initial_len) >= max_files {
                 break;
             }
@@ -279,11 +322,16 @@ fn collect_project_files(
     }
 }
 
-fn file_descriptor(path: &Path, workspace_root: &Path, source: Option<&str>) -> Value {
-    let display_path = path
-        .strip_prefix(workspace_root)
-        .map(|value| value.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| path.to_string_lossy().to_string());
+fn file_descriptor(
+    path: &Path,
+    workspace_root: &Path,
+    display_root: Option<&Path>,
+    source: Option<&str>,
+) -> Value {
+    let actual_path = display_path_for_root(workspace_root, path);
+    let display_path = display_root
+        .map(|root| display_path_for_root(root, path))
+        .unwrap_or_else(|| actual_path.clone());
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -291,12 +339,19 @@ fn file_descriptor(path: &Path, workspace_root: &Path, source: Option<&str>) -> 
         .to_string();
     let size_bytes = std::fs::metadata(path).ok().map(|value| value.len());
     json!({
-        "path": display_path,
+        "path": actual_path,
+        "displayPath": display_path,
         "name": name,
         "kind": if is_image(path) { "image" } else { "file" },
         "source": source,
         "sizeBytes": size_bytes,
     })
+}
+
+fn display_path_for_root(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| path.to_string_lossy().to_string())
 }
 
 fn resolve_project_path(workspace_root: &Path, configured: &str) -> PathBuf {
@@ -345,10 +400,11 @@ fn source_sort_rank(source: &str) -> usize {
     match source {
         "board" => 0,
         "vault" | "graph" | "notes" => 1,
-        "workspace" => 2,
-        "project" => 3,
-        "attachment" => 4,
-        _ => 5,
+        "brief" => 2,
+        "workspace" => 3,
+        "project" => 4,
+        "attachment" => 5,
+        _ => 6,
     }
 }
 
@@ -511,4 +567,44 @@ fn is_image(path: &Path) -> bool {
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_path_for_root, file_descriptor};
+    use std::env;
+
+    #[test]
+    fn display_path_for_root_prefers_relative_path_when_root_matches() {
+        let root = env::temp_dir().join("obsidian-vault");
+        let path = root.join("projects").join("careai").join("CONDUCTOR.md");
+
+        assert_eq!(
+            display_path_for_root(&root, &path),
+            "projects/careai/CONDUCTOR.md"
+        );
+    }
+
+    #[test]
+    fn file_descriptor_keeps_actual_path_and_separate_display_path() {
+        let workspace_root = env::temp_dir().join("conductor");
+        let vault_root = env::temp_dir().join("obsidian-vault");
+        let path = vault_root.join("projects").join("careai").join("CONDUCTOR.md");
+
+        let descriptor = file_descriptor(
+            &path,
+            &workspace_root,
+            Some(&vault_root),
+            Some("vault"),
+        );
+
+        assert_eq!(
+            descriptor["path"].as_str(),
+            Some(path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            descriptor["displayPath"].as_str(),
+            Some("projects/careai/CONDUCTOR.md")
+        );
+    }
 }

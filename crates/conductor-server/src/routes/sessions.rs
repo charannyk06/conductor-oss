@@ -10,12 +10,14 @@ use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
+use crate::routes::boards::update_board_task_attempt_ref;
 use crate::state::{
-    build_normalized_chat_feed, build_session_runtime_status, session_to_dashboard_value,
-    trim_lines_tail, AppState, SessionRecord, SessionStatus, SpawnRequest,
+    build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState,
+    SessionRecord, SessionStatus, SpawnRequest,
 };
 use uuid::Uuid;
 
@@ -106,6 +108,88 @@ fn task_id_for_session(session: &SessionRecord) -> String {
         .unwrap_or_else(|| format!("t-{}", session.id))
 }
 
+fn session_snapshot_signature(payload: &Value, session_id: &str) -> Option<String> {
+    if payload
+        .get("removedSessionIds")
+        .and_then(Value::as_array)
+        .is_some_and(|removed| {
+            removed
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(session_id))
+        })
+    {
+        return Some("missing".to_string());
+    }
+
+    let sessions = payload.get("sessions")?.as_array()?;
+    let matching = sessions
+        .iter()
+        .find(|session| session.get("id").and_then(Value::as_str) == Some(session_id));
+
+    match matching {
+        Some(session) => Some(format!(
+            "{}:{}:{}:{}:{}",
+            session
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            session
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            session
+                .get("activity")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            session
+                .get("lastActivityAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            session
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        )),
+        None => Some("missing".to_string()),
+    }
+}
+
+fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
+    let previous_entries = previous
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let next_entries = next
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let can_append = previous_entries.len() <= next_entries.len()
+        && previous_entries
+            .iter()
+            .zip(next_entries.iter())
+            .all(|(left, right)| left == right);
+
+    if can_append {
+        return json!({
+            "type": "append",
+            "entries": next_entries.into_iter().skip(previous_entries.len()).collect::<Vec<_>>(),
+            "sessionStatus": next.get("sessionStatus").cloned().unwrap_or(Value::Null),
+            "parserState": next.get("parserState").cloned().unwrap_or(Value::Null),
+            "runtimeStatus": next.get("runtimeStatus").cloned().unwrap_or(Value::Null),
+            "source": next.get("source").cloned().unwrap_or(Value::Null),
+            "error": next.get("error").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    json!({
+        "type": "replace",
+        "payload": next,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     project: Option<String>,
@@ -142,12 +226,7 @@ async fn list_sessions(
 }
 
 async fn get_session(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
-    match state
-        .snapshot_sessions()
-        .await
-        .into_iter()
-        .find(|session| session["id"] == id)
-    {
+    match state.dashboard_session(&id).await {
         Some(session) => ok(session),
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
@@ -187,10 +266,12 @@ async fn spawn_session(
             branch: body.branch,
             base_branch: body.base_branch,
             task_id: None,
+            task_ref: None,
             attempt_id: None,
             parent_task_id: None,
             retry_of_session_id: None,
             profile: None,
+            brief_path: None,
             attachments: body.attachments.unwrap_or_default(),
             source: "spawn".to_string(),
         })
@@ -213,7 +294,7 @@ async fn get_conversation(
 
 async fn get_feed(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
     match state.get_session(&id).await {
-        Some(session) => ok(session_feed_payload(&session).await),
+        Some(session) => ok(session_feed_payload(&state, &session).await),
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
 }
@@ -222,8 +303,22 @@ async fn feed_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let initial_signature = state
+        .get_session(&id)
+        .await
+        .map(|session| {
+            [
+                session.id,
+                session.status.as_str().to_string(),
+                session.activity.unwrap_or_default(),
+                session.last_activity_at,
+                session.summary.unwrap_or_default(),
+            ]
+            .join(":")
+        })
+        .unwrap_or_else(|| "missing".to_string());
     let initial_payload = match state.get_session(&id).await {
-        Some(session) => session_feed_payload(&session).await,
+        Some(session) => session_feed_payload(&state, &session).await,
         None => {
             json!({
                 "entries": [],
@@ -238,26 +333,65 @@ async fn feed_stream(
         SseEvent::default().data(initial_payload.to_string())
     )]);
 
-    let updates =
-        BroadcastStream::new(state.event_snapshots.subscribe()).filter_map(move |result| {
-            match result {
-                Ok(_) => Some(Ok(SseEvent::default()
-                    .event("refresh")
-                    .data(json!({ "type": "refresh", "sessionId": id }).to_string()))),
-                Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(count)) => {
-                    tracing::warn!("Feed SSE stream lagged by {count} messages");
-                    Some(Ok(SseEvent::default().event("refresh").data(
-                        json!({ "type": "refresh", "reason": "lagged", "missed": count })
-                            .to_string(),
-                    )))
+    let feed_state = Arc::new(Mutex::new((initial_signature, initial_payload.clone())));
+    let event_state = state.clone();
+    let event_session_id = id.clone();
+    let updates = BroadcastStream::new(state.event_snapshots.subscribe())
+        .then(move |result| {
+            let state = event_state.clone();
+            let session_id = event_session_id.clone();
+            let feed_state = feed_state.clone();
+            async move {
+                match result {
+                    Ok(snapshot_json) => {
+                        let Ok(payload) = serde_json::from_str::<Value>(&snapshot_json) else {
+                            return Some(Ok(SseEvent::default().event("refresh").data(
+                                json!({ "type": "refresh", "sessionId": session_id }).to_string(),
+                            )));
+                        };
+                        let next_signature =
+                            session_snapshot_signature(&payload, &session_id)?;
+                        let mut feed_state = feed_state.lock().await;
+                        if next_signature == feed_state.0 {
+                            return None;
+                        }
+                        feed_state.0 = next_signature;
+                        let next_payload = match state.get_session(&session_id).await {
+                            Some(session) => session_feed_payload(&state, &session).await,
+                            None => json!({
+                                "entries": [],
+                                "sessionStatus": Value::Null,
+                                "parserState": Value::Null,
+                                "runtimeStatus": Value::Null,
+                                "error": format!("Session {session_id} not found"),
+                            }),
+                        };
+                        let delta = build_feed_delta_event(&feed_state.1, &next_payload);
+                        feed_state.1 = next_payload;
+                        Some(Ok(SseEvent::default().data(delta.to_string())))
+                    }
+                    Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
+                        count,
+                    )) => {
+                        tracing::warn!("Feed SSE stream lagged by {count} messages");
+                        Some(Ok(SseEvent::default().event("refresh").data(
+                            json!({ "type": "refresh", "reason": "lagged", "missed": count })
+                                .to_string(),
+                        )))
+                    }
                 }
             }
-        });
+        })
+        .filter_map(|item| item);
 
     Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default())
 }
 
-async fn session_feed_payload(session: &SessionRecord) -> Value {
+async fn session_feed_payload(state: &AppState, session: &SessionRecord) -> Value {
+    if let Some(payload) = state.cached_feed_payload(&session.id).await {
+        return payload;
+    }
+
     let parser_state = session
         .metadata
         .get("parserState")
@@ -271,15 +405,18 @@ async fn session_feed_payload(session: &SessionRecord) -> Value {
                 "command": session.metadata.get("parserStateCommand").cloned(),
             })
         });
-    let runtime_status = build_session_runtime_status(session).await;
+    let runtime_status = state.session_runtime_status(session).await;
 
-    json!({
+    let payload = json!({
         "entries": build_normalized_chat_feed(session),
         "sessionStatus": session.status,
         "parserState": parser_state,
         "runtimeStatus": runtime_status,
         "source": if session.output.is_empty() { "conversation-only" } else { "runtime-output" },
-    })
+    });
+
+    state.store_feed_payload(&session.id, payload.clone()).await;
+    payload
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,18 +648,32 @@ async fn retry_session(
             branch: None,
             base_branch: body.base_branch.or_else(|| source.branch.clone()),
             task_id: Some(task_id_for_session(&source)),
+            task_ref: source.metadata.get("taskRef").cloned(),
             attempt_id: Some(next_attempt_id),
             parent_task_id: source.metadata.get("parentTaskId").cloned(),
             retry_of_session_id: Some(source.id.clone()),
             profile: body
                 .profile
                 .or_else(|| source.metadata.get("profile").cloned()),
+            brief_path: source.metadata.get("briefPath").cloned(),
             attachments: Vec::new(),
             source: "retry".to_string(),
         })
         .await
     {
-        Ok(session) => ok(json!({ "session": session_to_dashboard_value(&session) })),
+        Ok(session) => {
+            if let Some(task_id) = source.metadata.get("taskId") {
+                let _ = update_board_task_attempt_ref(
+                    &state,
+                    &source.project_id,
+                    task_id,
+                    &session.id,
+                    None,
+                )
+                .await;
+            }
+            ok(json!({ "session": session_to_dashboard_value(&session) }))
+        }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }

@@ -66,14 +66,8 @@ impl Executor for OpenCodeExecutor {
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
-        if options.interactive {
+        if options.interactive && !options.structured_output {
             let mut args = Vec::new();
-
-            if options.structured_output {
-                args.push("--format".to_string());
-                args.push("json".to_string());
-                args.push("--thinking".to_string());
-            }
 
             if let Some(model) = &options.model {
                 args.push("--model".to_string());
@@ -87,7 +81,13 @@ impl Executor for OpenCodeExecutor {
 
             args.extend(options.sanitized_extra_args());
 
+            if let Some(resume_target) = &options.resume_target {
+                args.push("--session".to_string());
+                args.push(resume_target.clone());
+            }
+
             if !options.prompt.trim().is_empty() {
+                args.push("--prompt".to_string());
                 args.push(options.prompt.clone());
             }
             return args;
@@ -111,6 +111,10 @@ impl Executor for OpenCodeExecutor {
         }
 
         args.extend(options.sanitized_extra_args());
+        if let Some(resume_target) = &options.resume_target {
+            args.push("--session".to_string());
+            args.push(resume_target.clone());
+        }
         args.push(options.prompt.clone());
         args
     }
@@ -401,6 +405,40 @@ mod tests {
         assert!(args.contains(&"--variant".to_string()));
         assert!(args.contains(&"max".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("Review the repo"));
+    }
+
+    #[test]
+    fn build_args_interactive_uses_prompt_flag_instead_of_project_positional() {
+        let executor = OpenCodeExecutor::new(PathBuf::from("/usr/bin/opencode"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("."),
+            prompt: "Inspect the failing tests".to_string(),
+            model: Some("openai/gpt-5".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            skip_permissions: false,
+            extra_args: vec!["--agent".to_string(), "build".to_string()],
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: false,
+            resume_target: Some("session-123".to_string()),
+        });
+
+        assert!(!args.contains(&"run".to_string()));
+        assert!(args.contains(&"--model".to_string()));
+        assert!(args.contains(&"--variant".to_string()));
+        assert!(args.contains(&"high".to_string()));
+        assert!(args.contains(&"--agent".to_string()));
+        assert!(args.contains(&"build".to_string()));
+        assert!(args.contains(&"--session".to_string()));
+        assert!(args.contains(&"session-123".to_string()));
+        assert_eq!(
+            args.windows(2)
+                .find(|pair| pair[0] == "--prompt")
+                .map(|pair| pair[1].as_str()),
+            Some("Inspect the failing tests")
+        );
     }
 
     #[test]

@@ -387,10 +387,12 @@ pub struct SpawnRequest {
     pub branch: Option<String>,
     pub base_branch: Option<String>,
     pub task_id: Option<String>,
+    pub task_ref: Option<String>,
     pub attempt_id: Option<String>,
     pub parent_task_id: Option<String>,
     pub retry_of_session_id: Option<String>,
     pub profile: Option<String>,
+    pub brief_path: Option<String>,
     pub attachments: Vec<String>,
     pub source: String,
 }

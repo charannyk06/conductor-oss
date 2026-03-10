@@ -65,6 +65,7 @@ const PREVIEW_SPECIAL_KEYS = new Map<string, string>([
 
 interface SessionPreviewProps {
   sessionId: string;
+  active: boolean;
   onQueueTerminalInsert: (request: Omit<TerminalInsertRequest, "nonce">) => void;
   onConnectionChange?: (connected: boolean) => void;
 }
@@ -191,7 +192,7 @@ function buildLogInsert(
   };
 }
 
-export function SessionPreview({ sessionId, onQueueTerminalInsert, onConnectionChange }: SessionPreviewProps) {
+export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onConnectionChange }: SessionPreviewProps) {
   const [status, setStatus] = useState<PreviewStatusResponse | null>(null);
   const [domNodes, setDomNodes] = useState<PreviewDomNode[]>([]);
   const [domLoading, setDomLoading] = useState(false);
@@ -216,6 +217,19 @@ export function SessionPreview({ sessionId, onQueueTerminalInsert, onConnectionC
   const previewCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const imageRef = useRef<HTMLImageElement | null>(null);
   const previewSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
+  const shouldRunPreview = active && pageVisible;
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setPageVisible(!document.hidden);
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
 
   const loadStatus = useCallback(async () => {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
@@ -316,6 +330,10 @@ export function SessionPreview({ sessionId, onQueueTerminalInsert, onConnectionC
   }, [interactiveOnly, sessionId, status?.connected]);
 
   useEffect(() => {
+    if (!shouldRunPreview) {
+      return;
+    }
+
     let mounted = true;
 
     (async () => {
@@ -344,17 +362,21 @@ export function SessionPreview({ sessionId, onQueueTerminalInsert, onConnectionC
       mounted = false;
       window.clearInterval(intervalId);
     };
-  }, [loadStatus]);
+  }, [loadStatus, shouldRunPreview]);
 
   useEffect(() => {
-    if (!status?.connected) {
+    if (!shouldRunPreview || !status?.connected) {
       setDomNodes([]);
       return;
     }
     void loadDom(status.activeFrameId);
-  }, [interactiveOnly, loadDom, status?.activeFrameId, status?.connected, status?.screenshotKey]);
+  }, [interactiveOnly, loadDom, shouldRunPreview, status?.activeFrameId, status?.connected, status?.screenshotKey]);
 
   useEffect(() => {
+    if (!shouldRunPreview) {
+      return;
+    }
+
     if (status?.connected) {
       autoConnectRef.current = null;
       return;
@@ -375,11 +397,11 @@ export function SessionPreview({ sessionId, onQueueTerminalInsert, onConnectionC
     void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
       setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
     });
-  }, [runCommand, status?.candidateUrls, status?.connected]);
+  }, [runCommand, shouldRunPreview, status?.candidateUrls, status?.connected]);
 
   useEffect(() => {
-    onConnectionChange?.(Boolean(status?.connected && status?.screenshotKey));
-  }, [onConnectionChange, status?.connected, status?.screenshotKey]);
+    onConnectionChange?.(Boolean(shouldRunPreview && status?.connected && status?.screenshotKey));
+  }, [onConnectionChange, shouldRunPreview, status?.connected, status?.screenshotKey]);
 
   const screenshotUrl = useMemo(() => (
     status?.connected

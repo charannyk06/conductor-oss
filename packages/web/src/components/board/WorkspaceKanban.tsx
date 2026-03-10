@@ -1,9 +1,17 @@
 "use client";
 
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  Check,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
+  FileImage,
+  FileText,
+  Folder,
+  FolderOpen,
   Loader2,
   MessageSquare,
   Pencil,
@@ -14,7 +22,6 @@ import {
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { usePreferences } from "@/hooks/usePreferences";
 import { cn } from "@/lib/cn";
-import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 
 type BoardRole =
   | "intake"
@@ -43,6 +50,8 @@ type BoardTask = {
   githubItemId: string | null;
   attachments: string[];
   notes: string | null;
+  briefPath?: string | null;
+  vaultBriefPath?: string | null;
   commentCount: number;
   comments: BoardComment[];
 };
@@ -102,6 +111,7 @@ type BoardResponse = {
   recentActions?: BoardActivity[];
   recentWebhookDeliveries?: WebhookDelivery[];
   watcherHint?: string;
+  createdTaskId?: string;
 };
 
 type GitHubProjectsResponse = {
@@ -114,6 +124,7 @@ type GitHubProjectsResponse = {
 
 type ContextFile = {
   path: string;
+  displayPath?: string;
   name: string;
   kind: "image" | "file";
   source?: string;
@@ -123,6 +134,20 @@ type ContextFile = {
 type ContextFilesResponse = {
   files: ContextFile[];
 };
+
+type ContextTreeNode =
+  | {
+      kind: "folder";
+      name: string;
+      path: string;
+      children: ContextTreeNode[];
+    }
+  | {
+      kind: "file";
+      name: string;
+      path: string;
+      file: ContextFile;
+    };
 
 type ProjectSession = {
   id: string;
@@ -138,6 +163,7 @@ interface WorkspaceKanbanProps {
   projectId: string | null;
   defaultAgent: string;
   agentOptions: string[];
+  projectSessions: ProjectSession[];
 }
 
 type BoardViewFilter = "active" | "all" | "backlog" | "cancelled";
@@ -169,8 +195,9 @@ const ROLE_LABEL: Record<BoardRole, string> = {
   done: "Done",
   cancelled: "Cancelled",
 };
-const ACTIVE_BOARD_REFRESH_MS = 10_000;
-const HIDDEN_BOARD_REFRESH_MS = 30_000;
+const ACTIVE_BOARD_REFRESH_MS = 20_000;
+const HIDDEN_BOARD_REFRESH_MS = 60_000;
+const BOARD_REFRESH_DEBOUNCE_MS = 1200;
 const MARKDOWN_EDITOR_LABELS: Record<string, string> = {
   obsidian: "Obsidian",
   vscode: "VS Code",
@@ -179,6 +206,22 @@ const MARKDOWN_EDITOR_LABELS: Record<string, string> = {
   logseq: "Logseq",
   custom: "your editor",
 };
+const TASK_TYPE_OPTIONS = [
+  { value: "feature", label: "Feature" },
+  { value: "fix", label: "Fix" },
+  { value: "review", label: "Review" },
+  { value: "chore", label: "Chore" },
+  { value: "docs", label: "Docs" },
+] as const;
+const PRIORITY_OPTIONS = [
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+] as const;
+const MENU_PANEL_CLASS =
+  "z-[120] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
+const MENU_ITEM_CLASS =
+  "flex min-h-[40px] cursor-default items-center gap-2 rounded-[4px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
 
 function toRole(value: string): BoardRole {
   const roles: BoardRole[] = [
@@ -231,6 +274,114 @@ function getContextOpenLabel(editorId: string): string {
   return "Open file";
 }
 
+function normalizePathSegments(path: string): string[] {
+  return path
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function compareContextNodes(left: ContextTreeNode, right: ContextTreeNode): number {
+  if (left.kind !== right.kind) {
+    return left.kind === "folder" ? -1 : 1;
+  }
+  return left.name.localeCompare(right.name, undefined, {
+    sensitivity: "base",
+    numeric: true,
+  });
+}
+
+function getContextFileDisplayPath(file: ContextFile): string {
+  const displayPath = file.displayPath?.trim();
+  return displayPath && displayPath.length > 0 ? displayPath : file.path;
+}
+
+function buildContextTree(files: ContextFile[]): ContextTreeNode[] {
+  const folderChildren = new Map<string, Map<string, ContextTreeNode>>();
+  folderChildren.set("", new Map());
+
+  const ensureFolder = (path: string, name: string) => {
+    if (!folderChildren.has(path)) {
+      folderChildren.set(path, new Map());
+    }
+    return {
+      kind: "folder" as const,
+      name,
+      path,
+      children: [],
+    };
+  };
+
+  for (const file of files) {
+    const displayPath = getContextFileDisplayPath(file);
+    const segments = normalizePathSegments(displayPath);
+    if (segments.length === 0) {
+      continue;
+    }
+
+    let parentPath = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const segment = segments[index]!;
+      const folderPath = parentPath ? `${parentPath}/${segment}` : segment;
+      const siblings = folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
+      folderChildren.set(parentPath, siblings);
+      if (!siblings.has(folderPath)) {
+        siblings.set(folderPath, ensureFolder(folderPath, segment));
+      }
+      if (!folderChildren.has(folderPath)) {
+        folderChildren.set(folderPath, new Map());
+      }
+      parentPath = folderPath;
+    }
+
+    const siblings = folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
+    siblings.set(file.path, {
+      kind: "file",
+      name: file.name,
+      path: file.path,
+      file: {
+        ...file,
+        displayPath,
+      },
+    });
+    folderChildren.set(parentPath, siblings);
+  }
+
+  const buildChildren = (parentPath: string): ContextTreeNode[] =>
+    [...(folderChildren.get(parentPath)?.values() ?? [])]
+      .map((node) =>
+        node.kind === "folder"
+          ? { ...node, children: buildChildren(node.path) }
+          : node
+      )
+      .sort(compareContextNodes);
+
+  return buildChildren("");
+}
+
+function collectContextFolderPaths(nodes: ContextTreeNode[], out = new Set<string>()): Set<string> {
+  for (const node of nodes) {
+    if (node.kind === "folder") {
+      out.add(node.path);
+      collectContextFolderPaths(node.children, out);
+    }
+  }
+  return out;
+}
+
+function collectContextAncestorFolders(paths: string[]): Set<string> {
+  const ancestors = new Set<string>();
+  for (const path of paths) {
+    const segments = normalizePathSegments(path);
+    let current = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      current = current ? `${current}/${segments[index]}` : segments[index]!;
+      ancestors.add(current);
+    }
+  }
+  return ancestors;
+}
+
 function ContextAttachmentChip({
   attachment,
   onOpen,
@@ -256,6 +407,196 @@ function ContextAttachmentChip({
       )}
       <span className="truncate">{attachment}</span>
     </button>
+  );
+}
+
+function ContextTreeRow({
+  node,
+  depth,
+  expandedFolders,
+  selectedPaths,
+  openingContextPath,
+  contextOpenLabel,
+  onToggleFolder,
+  onTogglePath,
+  onOpenPath,
+}: {
+  node: ContextTreeNode;
+  depth: number;
+  expandedFolders: Set<string>;
+  selectedPaths: string[];
+  openingContextPath: string | null;
+  contextOpenLabel: string;
+  onToggleFolder: (path: string) => void;
+  onTogglePath: (path: string) => void;
+  onOpenPath: (path: string) => void;
+}) {
+  const paddingLeft = 10 + depth * 16;
+
+  if (node.kind === "folder") {
+    const expanded = expandedFolders.has(node.path);
+    return (
+      <li>
+        <button
+          type="button"
+          onClick={() => onToggleFolder(node.path)}
+          className="flex w-full items-center gap-1.5 py-1 text-left text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+          style={{ paddingLeft: `${paddingLeft}px`, paddingRight: "10px" }}
+          aria-expanded={expanded}
+        >
+          {expanded ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          )}
+          {expanded ? (
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[var(--vk-orange)]" />
+          ) : (
+            <Folder className="h-3.5 w-3.5 shrink-0 text-[var(--vk-orange)]" />
+          )}
+          <span className="truncate">{node.name}</span>
+        </button>
+        {expanded ? (
+          <ul>
+            {node.children.map((child) => (
+              <ContextTreeRow
+                key={child.path}
+                node={child}
+                depth={depth + 1}
+                expandedFolders={expandedFolders}
+                selectedPaths={selectedPaths}
+                openingContextPath={openingContextPath}
+                contextOpenLabel={contextOpenLabel}
+                onToggleFolder={onToggleFolder}
+                onTogglePath={onTogglePath}
+                onOpenPath={onOpenPath}
+              />
+            ))}
+          </ul>
+        ) : null}
+      </li>
+    );
+  }
+
+  const checked = selectedPaths.includes(node.path);
+  return (
+    <li className="border-t border-[var(--vk-border)] first:border-t-0">
+      <div
+        className="flex items-start gap-2 py-1.5"
+        style={{ paddingLeft: `${paddingLeft + 22}px`, paddingRight: "10px" }}
+      >
+        <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 text-[12px] text-[var(--vk-text-normal)]">
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={() => onTogglePath(node.path)}
+            className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--vk-border)] bg-transparent"
+          />
+          {node.file.kind === "image" ? (
+            <FileImage className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          ) : (
+            <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
+          )}
+          <span className="min-w-0">
+            <span className="block truncate">{node.name}</span>
+            <span className="block truncate text-[11px] text-[var(--vk-text-muted)]">
+              {getContextFileDisplayPath(node.file)}
+            </span>
+            <span className="block text-[11px] text-[var(--vk-text-muted)]">
+              {node.file.kind}
+              {node.file.source ? ` · ${node.file.source}` : ""}
+              {node.file.sizeBytes
+                ? ` · ${formatFileSize(node.file.sizeBytes)}`
+                : ""}
+            </span>
+          </span>
+        </label>
+        <button
+          type="button"
+          onClick={() => onOpenPath(node.path)}
+          disabled={openingContextPath === node.path}
+          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60"
+          title={`${contextOpenLabel}: ${node.path}`}
+          aria-label={`${contextOpenLabel}: ${node.path}`}
+        >
+          {openingContextPath === node.path ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <ExternalLink className="h-3 w-3" />
+          )}
+          <span className="hidden sm:inline">{contextOpenLabel}</span>
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function AgentSelectMenu({
+  value,
+  options,
+  disabled = false,
+  onChange,
+  ariaLabel,
+}: {
+  value: string;
+  options: string[];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label={ariaLabel}
+          className="inline-flex h-10 w-full items-center justify-between rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 text-left text-[14px] text-[var(--vk-text-normal)] outline-none transition-colors hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <AgentTileIcon
+              seed={{ label: value }}
+              className="h-5 w-5 border-none bg-transparent"
+            />
+            <span className="truncate">{formatAgentLabel(value)}</span>
+          </span>
+          <ChevronDown className="h-4 w-4 shrink-0 text-[var(--vk-text-muted)]" />
+        </button>
+      </DropdownMenu.Trigger>
+
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="start"
+          sideOffset={6}
+          className={`${MENU_PANEL_CLASS} min-w-[280px] max-h-[min(360px,50vh)] overflow-y-auto`}
+        >
+          <p className="px-3 pb-1 text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+            Agents
+          </p>
+          {options.map((option) => {
+            const selected = option === value;
+            return (
+              <DropdownMenu.Item
+                key={option}
+                onSelect={() => onChange(option)}
+                className={MENU_ITEM_CLASS}
+              >
+                <AgentTileIcon
+                  seed={{ label: option }}
+                  className="h-5 w-5 border-none bg-transparent"
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  {formatAgentLabel(option)}
+                </span>
+                <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                  {selected ? <Check className="h-4 w-4 text-[var(--vk-orange)]" /> : null}
+                </span>
+              </DropdownMenu.Item>
+            );
+          })}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -317,6 +658,8 @@ function boardsEqual(
         leftTask.issueId !== rightTask.issueId ||
         leftTask.githubItemId !== rightTask.githubItemId ||
         leftTask.notes !== rightTask.notes ||
+        leftTask.briefPath !== rightTask.briefPath ||
+        leftTask.vaultBriefPath !== rightTask.vaultBriefPath ||
         leftTask.commentCount !== rightTask.commentCount ||
         leftTask.comments.length !== rightTask.comments.length ||
         leftTask.attachments.length !== rightTask.attachments.length
@@ -413,6 +756,8 @@ function normalizeBoardResponse(value: BoardResponse): BoardResponse {
                   ? task.attachments
                   : [],
                 notes: task.notes ?? null,
+                briefPath: task.briefPath ?? null,
+                vaultBriefPath: task.vaultBriefPath ?? null,
                 commentCount:
                   typeof task.commentCount === "number"
                     ? task.commentCount
@@ -435,6 +780,18 @@ function formatLinkedSessionLabel(session: ProjectSession): string {
 
 function getTaskLinkKey(task: BoardTask): string {
   return task.issueId?.trim() || task.taskRef?.trim() || task.id;
+}
+
+function sessionMatchesTask(session: ProjectSession, task: BoardTask): boolean {
+  if (session.id === task.attemptRef) return true;
+  if (session.metadata?.taskId === task.id) return true;
+  if (
+    task.taskRef?.trim() &&
+    session.metadata?.taskRef?.trim() === task.taskRef.trim()
+  ) {
+    return true;
+  }
+  return session.issueId?.trim() === getTaskLinkKey(task);
 }
 
 function getSessionAgent(session: ProjectSession): string | null {
@@ -565,6 +922,7 @@ export function WorkspaceKanban({
   projectId,
   defaultAgent,
   agentOptions,
+  projectSessions,
 }: WorkspaceKanbanProps) {
   const router = useRouter();
   const { preferences } = usePreferences();
@@ -580,9 +938,12 @@ export function WorkspaceKanban({
   const [description, setDescription] = useState("");
   const [agent, setAgent] = useState(defaultAgent);
   const [taskType, setTaskType] = useState("feature");
-  const [priority, setPriority] = useState("normal");
+  const [priority, setPriority] = useState("medium");
   const [contextNotes, setContextNotes] = useState("");
   const [selectedContextPaths, setSelectedContextPaths] = useState<string[]>(
+    []
+  );
+  const [expandedContextFolders, setExpandedContextFolders] = useState<string[]>(
     []
   );
   const [contextSearch, setContextSearch] = useState("");
@@ -593,7 +954,6 @@ export function WorkspaceKanban({
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [projectSessions, setProjectSessions] = useState<ProjectSession[]>([]);
   const [editingTask, setEditingTask] = useState<{
     task: BoardTask;
     role: BoardRole;
@@ -603,7 +963,7 @@ export function WorkspaceKanban({
   const [editDescription, setEditDescription] = useState("");
   const [editAgent, setEditAgent] = useState(defaultAgent);
   const [editTaskType, setEditTaskType] = useState("feature");
-  const [editPriority, setEditPriority] = useState("normal");
+  const [editPriority, setEditPriority] = useState("medium");
   const [editIssueId, setEditIssueId] = useState("");
   const [editNotes, setEditNotes] = useState("");
   const [editLinkedSession, setEditLinkedSession] = useState("");
@@ -625,8 +985,10 @@ export function WorkspaceKanban({
   const [selectedGitHubProjectId, setSelectedGitHubProjectId] = useState("");
   const hasLoadedBoardRef = useRef(false);
   const boardRequestInFlightRef = useRef(false);
+  const boardRefreshTimeoutRef = useRef<number | null>(null);
   const preferredMarkdownEditor = preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
+  const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
 
   const orderedAgentOptions = useMemo(() => {
     const normalized = [...new Set(agentOptions.filter(Boolean))];
@@ -694,42 +1056,6 @@ export function WorkspaceKanban({
   }, [composerOpen, editingTask, projectId]);
 
   useEffect(() => {
-    if (!projectId || (!composerOpen && !editingTask)) return;
-    let cancelled = false;
-
-    const loadProjectSessions = async () => {
-      try {
-        const res = await fetch(
-          `/api/sessions?project=${encodeURIComponent(projectId)}`
-        );
-        const payload = (await res.json().catch(() => null)) as
-          | { sessions?: ProjectSession[] }
-          | ProjectSession[]
-          | null;
-        if (!res.ok) {
-          throw new Error(`Failed to load sessions: ${res.status}`);
-        }
-        if (cancelled) return;
-        const sessions = Array.isArray(payload)
-          ? payload
-          : Array.isArray(payload?.sessions)
-          ? payload.sessions
-          : [];
-        setProjectSessions(sessions);
-      } catch {
-        if (!cancelled) {
-          setProjectSessions([]);
-        }
-      }
-    };
-
-    void loadProjectSessions();
-    return () => {
-      cancelled = true;
-    };
-  }, [composerOpen, editingTask, projectId]);
-
-  useEffect(() => {
     hasLoadedBoardRef.current = false;
     setProjectSyncOpen(false);
     setProjectSyncError(null);
@@ -791,6 +1117,19 @@ export function WorkspaceKanban({
     [projectId]
   );
 
+  const scheduleBoardRefresh = useCallback((options?: { silent?: boolean }) => {
+    if (!projectId) {
+      return;
+    }
+    if (boardRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(boardRefreshTimeoutRef.current);
+    }
+    boardRefreshTimeoutRef.current = window.setTimeout(() => {
+      boardRefreshTimeoutRef.current = null;
+      void loadBoard(options);
+    }, BOARD_REFRESH_DEBOUNCE_MS);
+  }, [loadBoard, projectId]);
+
   useEffect(() => {
     void loadBoard({ silent: false });
   }, [loadBoard]);
@@ -844,10 +1183,7 @@ export function WorkspaceKanban({
     if (!projectId) return;
 
     const refresh = () => {
-      if (
-        typeof document !== "undefined" &&
-        document.visibilityState === "hidden"
-      ) {
+      if (!pageVisible) {
         return;
       }
       void loadBoard({ silent: true });
@@ -855,10 +1191,9 @@ export function WorkspaceKanban({
 
     let timeoutId: number | null = null;
     const scheduleRefresh = () => {
-      const delay =
-        document.visibilityState === "visible"
-          ? ACTIVE_BOARD_REFRESH_MS
-          : HIDDEN_BOARD_REFRESH_MS;
+      const delay = pageVisible
+        ? ACTIVE_BOARD_REFRESH_MS
+        : HIDDEN_BOARD_REFRESH_MS;
       timeoutId = window.setTimeout(() => {
         refresh();
         scheduleRefresh();
@@ -868,7 +1203,9 @@ export function WorkspaceKanban({
 
     window.addEventListener("focus", refresh);
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
+      const visible = document.visibilityState === "visible";
+      setPageVisible(visible);
+      if (visible) {
         refresh();
       }
     };
@@ -881,14 +1218,18 @@ export function WorkspaceKanban({
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [loadBoard, projectId]);
+  }, [loadBoard, pageVisible, projectId]);
 
   useEffect(() => {
-    if (!projectId) return;
-    return subscribeToSnapshotEvents(() => {
-      void loadBoard({ silent: true });
-    });
-  }, [loadBoard, projectId]);
+    if (!projectId || !hasLoadedBoardRef.current) return;
+    scheduleBoardRefresh({ silent: true });
+  }, [projectId, projectSessions, scheduleBoardRefresh]);
+
+  useEffect(() => () => {
+    if (boardRefreshTimeoutRef.current !== null) {
+      window.clearTimeout(boardRefreshTimeoutRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!projectSyncOpen || !projectId) return;
@@ -931,7 +1272,7 @@ export function WorkspaceKanban({
               task.type ?? ""
             } ${task.priority ?? ""} ${task.issueId ?? ""} ${
               task.notes ?? ""
-            } ${task.attachments.join(" ")} ${commentText}`.toLowerCase();
+            } ${task.briefPath ?? ""} ${task.attachments.join(" ")} ${commentText}`.toLowerCase();
             return haystack.includes(query);
           }),
         };
@@ -940,14 +1281,76 @@ export function WorkspaceKanban({
 
   const filteredContextFiles = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
-    if (!query) return contextFiles;
-    return contextFiles.filter((file) => {
-      const haystack = `${file.path} ${file.name} ${
-        file.source ?? ""
-      }`.toLowerCase();
-      return haystack.includes(query);
-    });
+    const matchingFiles = !query
+      ? contextFiles
+      : contextFiles.filter((file) => {
+          const haystack = `${file.path} ${getContextFileDisplayPath(file)} ${file.name} ${
+            file.source ?? ""
+          }`.toLowerCase();
+          return haystack.includes(query);
+        });
+
+    const uniqueFiles = new Map<string, ContextFile>();
+    for (const file of matchingFiles) {
+      if (!uniqueFiles.has(file.path)) {
+        uniqueFiles.set(file.path, file);
+      }
+    }
+    return [...uniqueFiles.values()];
   }, [contextFiles, contextSearch]);
+  const filteredContextTree = useMemo(
+    () => buildContextTree(filteredContextFiles),
+    [filteredContextFiles]
+  );
+  const contextFilesByPath = useMemo(
+    () => new Map(contextFiles.map((file) => [file.path, file])),
+    [contextFiles]
+  );
+  const selectedContextFiles = useMemo(
+    () =>
+      selectedContextPaths
+        .map((path) => contextFilesByPath.get(path))
+        .filter((file): file is ContextFile => Boolean(file)),
+    [contextFilesByPath, selectedContextPaths]
+  );
+  const defaultExpandedContextFolders = useMemo(
+    () =>
+      new Set(
+        filteredContextTree
+          .filter((node) => node.kind === "folder")
+          .map((node) => node.path)
+      ),
+    [filteredContextTree]
+  );
+  const autoExpandedContextFolders = useMemo(() => {
+    if (contextSearch.trim().length > 0) {
+      return collectContextFolderPaths(filteredContextTree);
+    }
+    return collectContextAncestorFolders(
+      selectedContextPaths.map((path) => {
+        const file = contextFilesByPath.get(path);
+        return file ? getContextFileDisplayPath(file) : path;
+      })
+    );
+  }, [contextFilesByPath, contextSearch, filteredContextTree, selectedContextPaths]);
+  const effectiveExpandedContextFolders = useMemo(() => {
+    const expanded = new Set(defaultExpandedContextFolders);
+    for (const path of expandedContextFolders) {
+      expanded.add(path);
+    }
+    for (const path of autoExpandedContextFolders) {
+      expanded.add(path);
+    }
+    return expanded;
+  }, [
+    autoExpandedContextFolders,
+    defaultExpandedContextFolders,
+    expandedContextFolders,
+  ]);
+  const composerRoleLabel = useMemo(() => {
+    const matchingColumn = visibleColumns.find((column) => column.role === composerRole);
+    return matchingColumn?.heading || ROLE_LABEL[composerRole];
+  }, [composerRole, visibleColumns]);
   const editLinkedSessionOptions = useMemo(() => {
     if (!editingTask) return projectSessions;
     const activeTask = findBoardTask(board, editingTask.task.id) ?? editingTask;
@@ -972,10 +1375,16 @@ export function WorkspaceKanban({
   function openComposer(role: BoardRole) {
     setComposerRole(role);
     setComposerOpen(true);
+    setTitle("");
+    setDescription("");
+    setAgent(orderedAgentOptions[0] ?? defaultAgent);
+    setTaskType("feature");
+    setPriority("medium");
     setSubmitError(null);
     setContextNotes("");
     setContextSearch("");
     setSelectedContextPaths([]);
+    setExpandedContextFolders([]);
     setUploadFiles([]);
   }
 
@@ -1043,6 +1452,14 @@ export function WorkspaceKanban({
     );
   }
 
+  function toggleContextFolder(path: string) {
+    setExpandedContextFolders((current) =>
+      current.includes(path)
+        ? current.filter((item) => item !== path)
+        : [...current, path]
+    );
+  }
+
   function removeUploadFile(file: File) {
     setUploadFiles((current) =>
       current.filter(
@@ -1060,10 +1477,44 @@ export function WorkspaceKanban({
     setSubmitError(null);
 
     try {
-      let uploadedPaths: string[] = [];
-      if (uploadFiles.length > 0) {
+      const res = await fetch("/api/boards", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          title: title.trim(),
+          description: description.trim() || undefined,
+          contextNotes: contextNotes.trim() || undefined,
+          attachments:
+            selectedContextPaths.length > 0 ? selectedContextPaths : undefined,
+          agent,
+          role: composerRole,
+          type: taskType.trim() || undefined,
+          priority: priority.trim() || undefined,
+        }),
+      });
+
+      const payload = (await res.json().catch(() => null)) as
+        | BoardResponse
+        | { error?: string }
+        | null;
+
+      if (!res.ok || !payload || !("columns" in payload)) {
+        throw new Error(
+          (payload as { error?: string } | null)?.error ??
+            `Failed to create task: ${res.status}`
+        );
+      }
+
+      let nextBoard = normalizeBoardResponse(payload as BoardResponse);
+      const createdTask = nextBoard.columns
+        .flatMap((column) => column.tasks)
+        .find((task) => task.id === payload.createdTaskId);
+
+      if (uploadFiles.length > 0 && createdTask) {
         const formData = new FormData();
         formData.append("projectId", projectId);
+        formData.append("taskRef", createdTask.taskRef?.trim() || createdTask.id);
         for (const file of uploadFiles) {
           formData.append("files", file);
         }
@@ -1080,55 +1531,46 @@ export function WorkspaceKanban({
             uploadPayload?.error ?? `Upload failed: ${uploadRes.status}`
           );
         }
-        uploadedPaths = (uploadPayload?.files ?? [])
+
+        const uploadedPaths = (uploadPayload?.files ?? [])
           .map((entry) => entry.path?.trim())
           .filter((value): value is string => Boolean(value));
+
+        if (uploadedPaths.length > 0) {
+          const patchRes = await fetch("/api/boards", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              projectId,
+              taskId: createdTask.id,
+              attachments: [
+                ...new Set([...createdTask.attachments, ...uploadedPaths]),
+              ],
+            }),
+          });
+          const patchPayload = (await patchRes.json().catch(() => null)) as
+            | BoardResponse
+            | { error?: string }
+            | null;
+          if (!patchRes.ok || !patchPayload || !("columns" in patchPayload)) {
+            throw new Error(
+              (patchPayload as { error?: string } | null)?.error ??
+                `Failed to attach uploads: ${patchRes.status}`
+            );
+          }
+          nextBoard = normalizeBoardResponse(patchPayload as BoardResponse);
+        }
       }
 
-      const attachments = [
-        ...new Set([...selectedContextPaths, ...uploadedPaths]),
-      ];
-      const res = await fetch("/api/boards", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId,
-          title: title.trim(),
-          description: description.trim() || undefined,
-          contextNotes: contextNotes.trim() || undefined,
-          attachments: attachments.length > 0 ? attachments : undefined,
-          agent,
-          role: composerRole,
-          type: taskType.trim() || undefined,
-          priority: priority.trim() || undefined,
-        }),
-      });
-
-      const payload = (await res.json().catch(() => null)) as
-        | BoardResponse
-        | { error?: string }
-        | null;
-
-      if (!res.ok) {
-        throw new Error(
-          (payload as { error?: string } | null)?.error ??
-            `Failed to create task: ${res.status}`
-        );
-      }
-
-      setBoard((current) => {
-        if (!payload || !("columns" in payload)) return current;
-        const next = normalizeBoardResponse(payload as BoardResponse);
-        return {
-          ...(current ?? next),
-          ...next,
-        };
-      });
+      setBoard((current) => ({
+        ...(current ?? nextBoard),
+        ...nextBoard,
+      }));
 
       setTitle("");
       setDescription("");
       setTaskType("feature");
-      setPriority("normal");
+      setPriority("medium");
       setContextNotes("");
       setSelectedContextPaths([]);
       setContextSearch("");
@@ -1268,7 +1710,7 @@ export function WorkspaceKanban({
     setEditDescription(nextDescription);
     setEditAgent(task.agent ?? orderedAgentOptions[0] ?? defaultAgent);
     setEditTaskType(task.type ?? "feature");
-    setEditPriority(task.priority ?? "normal");
+    setEditPriority(task.priority ?? "medium");
     setEditIssueId(task.issueId ?? "");
     setEditNotes(task.notes ?? "");
     setEditLinkedSession(task.attemptRef ?? "");
@@ -1729,11 +2171,7 @@ export function WorkspaceKanban({
                       task.issueId
                     );
                     const linkedSessions = projectSessions
-                      .filter(
-                        (session) =>
-                          session.id === task.attemptRef ||
-                          session.issueId?.trim() === taskLinkKey
-                      )
+                      .filter((session) => sessionMatchesTask(session, task))
                       .sort((left, right) =>
                         compareProjectSessions(
                           left,
@@ -1765,7 +2203,7 @@ export function WorkspaceKanban({
                         }
                         onDragEnd={() => setDraggingTask(null)}
                         className={cn(
-                          "rounded-[3px] border border-[var(--vk-border)] bg-[color:#212121] p-2",
+                          "rounded-[3px] border border-[var(--vk-border)] bg-[color:#212121] p-2 [content-visibility:auto] [contain-intrinsic-size:220px]",
                           draggingTask?.taskId === task.id && "opacity-60"
                         )}
                       >
@@ -1813,7 +2251,9 @@ export function WorkspaceKanban({
                           </div>
                         )}
 
-                        {(task.issueId || task.attachments.length > 0) && (
+                        {(task.issueId ||
+                          task.briefPath ||
+                          task.attachments.length > 0) && (
                           <div className="mt-2 flex flex-wrap items-center gap-1.5">
                             {task.issueId ? (
                               issueUrl ? (
@@ -1831,6 +2271,16 @@ export function WorkspaceKanban({
                                   Issue {task.issueId}
                                 </span>
                               )
+                            ) : null}
+
+                            {task.briefPath ? (
+                              <ContextAttachmentChip
+                                attachment={task.briefPath}
+                                opening={openingContextPath === task.briefPath}
+                                onOpen={() =>
+                                  void openContextAttachment(task.briefPath as string)
+                                }
+                              />
                             ) : null}
 
                             {task.attachments.map((attachment) => (
@@ -2097,21 +2547,13 @@ export function WorkspaceKanban({
                   <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
                     Agent
                   </span>
-                  <select
+                  <AgentSelectMenu
                     value={editAgent}
-                    onChange={(event) => setEditAgent(event.target.value)}
-                    className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                  >
-                    {orderedAgentOptions.map((item) => (
-                      <option
-                        key={item}
-                        value={item}
-                        className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
-                      >
-                        {formatAgentLabel(item)}
-                      </option>
-                    ))}
-                  </select>
+                    options={orderedAgentOptions}
+                    disabled={editingBusy}
+                    onChange={setEditAgent}
+                    ariaLabel="Select agent for task"
+                  />
                 </label>
               </div>
 
@@ -2320,284 +2762,366 @@ export function WorkspaceKanban({
           onClick={() => !submitting && setComposerOpen(false)}
         >
           <div
-            className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[560px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]"
+            className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[980px] flex-col overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_80px_rgba(0,0,0,0.45)]"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"
           >
-            <header className="border-b border-[var(--vk-border)] px-4 py-3">
-              <h2 className="text-[18px] text-[var(--vk-text-strong)]">
-                Create Board Task
-              </h2>
-              <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">
-                Add a task card with project and agent tags for Obsidian +
-                conductor watcher.
-              </p>
+            <header className="border-b border-[var(--vk-border)] px-4 py-4 sm:px-5">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div>
+                  <h2 className="text-[20px] font-medium text-[var(--vk-text-strong)]">
+                    Create Board Task
+                  </h2>
+                  <p className="pt-1 text-[13px] leading-5 text-[var(--vk-text-muted)]">
+                    Capture the task, route it to the right board column, and
+                    attach the notes or files the agent should treat as source
+                    of truth.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2 text-[11px]">
+                  <span className="rounded-full border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[var(--vk-text-normal)]">
+                    Column · {composerRoleLabel}
+                  </span>
+                  <span className="rounded-full border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[var(--vk-text-normal)]">
+                    Agent · {formatAgentLabel(agent)}
+                  </span>
+                  <span className="rounded-full border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[var(--vk-text-normal)]">
+                    {selectedContextPaths.length + uploadFiles.length} attachment
+                    {selectedContextPaths.length + uploadFiles.length === 1
+                      ? ""
+                      : "s"}
+                  </span>
+                </div>
+              </div>
             </header>
 
-            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4">
-              <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                  Title
-                </span>
-                <input
-                  value={title}
-                  onChange={(event) => setTitle(event.target.value)}
-                  placeholder="Review payment flow regression"
-                  className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                />
-              </label>
-
-              <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                  Description (optional)
-                </span>
-                <textarea
-                  value={description}
-                  onChange={(event) => setDescription(event.target.value)}
-                  rows={3}
-                  placeholder="Investigate failing specs and propose a safe fix."
-                  className="w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                />
-              </label>
-
-              <label className="block">
-                <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                  Context notes (optional)
-                </span>
-                <textarea
-                  value={contextNotes}
-                  onChange={(event) => setContextNotes(event.target.value)}
-                  rows={2}
-                  placeholder="Anything the agent should prioritize or avoid for this task."
-                  className="w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 py-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                />
-              </label>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                    Agent
-                  </span>
-                  <select
-                    value={agent}
-                    onChange={(event) => setAgent(event.target.value)}
-                    className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                  >
-                    {orderedAgentOptions.map((item) => (
-                      <option
-                        key={item}
-                        value={item}
-                        className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
-                      >
-                        {formatAgentLabel(item)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                    Column
-                  </span>
-                  <select
-                    value={composerRole}
-                    onChange={(event) =>
-                      setComposerRole(toRole(event.target.value))
-                    }
-                    className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                  >
-                    {visibleColumns.map((column) => (
-                      <option
-                        key={column.role}
-                        value={column.role}
-                        className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
-                      >
-                        {column.heading || ROLE_LABEL[column.role]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                    Type
-                  </span>
-                  <input
-                    value={taskType}
-                    onChange={(event) => setTaskType(event.target.value)}
-                    placeholder="feature"
-                    className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                  />
-                </label>
-
-                <label className="block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                    Priority
-                  </span>
-                  <input
-                    value={priority}
-                    onChange={(event) => setPriority(event.target.value)}
-                    placeholder="normal"
-                    className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                  />
-                </label>
-              </div>
-
-              <div className="rounded-[4px] border border-[var(--vk-border)] p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[12px] text-[var(--vk-text-muted)]">
-                    Context attachments
-                  </p>
-                  <p className="text-[12px] text-[var(--vk-text-muted)]">
-                    {selectedContextPaths.length} selected
-                    {uploadFiles.length > 0
-                      ? ` · ${uploadFiles.length} upload(s)`
-                      : ""}
-                  </p>
-                </div>
-
-                <div className="mt-2">
-                  <label className="inline-flex cursor-pointer items-center rounded-[3px] border border-[var(--vk-border)] px-2 py-1 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]">
-                    <input
-                      type="file"
-                      multiple
-                      className="hidden"
-                      onChange={(event) => {
-                        const next = Array.from(event.target.files ?? []);
-                        if (next.length === 0) return;
-                        setUploadFiles((current) => {
-                          const merged = [...current];
-                          for (const file of next) {
-                            const exists = merged.some(
-                              (entry) =>
-                                entry.name === file.name &&
-                                entry.size === file.size &&
-                                entry.lastModified === file.lastModified
-                            );
-                            if (!exists) merged.push(file);
-                          }
-                          return merged;
-                        });
-                        event.currentTarget.value = "";
-                      }}
-                    />
-                    Upload files/images
-                  </label>
-                </div>
-
-                {uploadFiles.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {uploadFiles.map((file) => (
-                      <button
-                        key={`${file.name}-${file.size}-${file.lastModified}`}
-                        type="button"
-                        onClick={() => removeUploadFile(file)}
-                        className="inline-flex items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-hover)] px-2 py-1 text-[11px] text-[var(--vk-text-normal)]"
-                        title="Remove upload"
-                      >
-                        <span className="truncate max-w-[220px]">
-                          {file.name}
-                        </span>
-                        <span className="text-[var(--vk-text-muted)]">×</span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                <label className="mt-3 block">
-                  <span className="mb-1 block text-[12px] text-[var(--vk-text-muted)]">
-                    Select existing context
-                  </span>
-                  <input
-                    value={contextSearch}
-                    onChange={(event) => setContextSearch(event.target.value)}
-                    placeholder="Search context files..."
-                    className="h-8 w-full rounded-[3px] border border-[var(--vk-border)] bg-transparent px-2 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
-                  />
-                </label>
-
-                <div className="mt-2 max-h-[180px] overflow-auto rounded-[3px] border border-[var(--vk-border)]">
-                  {contextLoading ? (
-                    <div className="flex items-center gap-2 px-2 py-2 text-[12px] text-[var(--vk-text-muted)]">
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      <span>Loading context files...</span>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5">
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(290px,0.95fr)]">
+                <div className="space-y-4">
+                  <section className="rounded-[8px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-4">
+                    <div className="mb-3">
+                      <h3 className="text-[15px] font-medium text-[var(--vk-text-strong)]">
+                        Task brief
+                      </h3>
+                      <p className="pt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                        Write the task the way you want it to appear on the board
+                        and in the agent prompt.
+                      </p>
                     </div>
-                  ) : contextError ? (
-                    <p className="px-2 py-2 text-[12px] text-[var(--vk-red)]">
-                      {contextError}
-                    </p>
-                  ) : filteredContextFiles.length === 0 ? (
-                    <p className="px-2 py-2 text-[12px] text-[var(--vk-text-muted)]">
-                      No context files found.
-                    </p>
-                  ) : (
-                    <ul className="divide-y divide-[var(--vk-border)]">
-                      {filteredContextFiles.map((file) => {
-                        const checked = selectedContextPaths.includes(
-                          file.path
-                        );
-                        return (
-                          <li key={file.path} className="px-2 py-1.5">
-                            <div className="flex items-start gap-2">
-                              <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 text-[12px] text-[var(--vk-text-normal)]">
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={() => toggleContextPath(file.path)}
-                                  className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--vk-border)] bg-transparent"
-                                />
-                                <span className="min-w-0">
-                                  <span className="block truncate">
-                                    {file.path}
-                                  </span>
-                                  <span className="block text-[11px] text-[var(--vk-text-muted)]">
-                                    {file.kind}
-                                    {file.source ? ` · ${file.source}` : ""}
-                                    {file.sizeBytes
-                                      ? ` · ${formatFileSize(file.sizeBytes)}`
-                                      : ""}
-                                  </span>
-                                </span>
-                              </label>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void openContextAttachment(file.path)
-                                }
-                                disabled={openingContextPath === file.path}
-                                className="inline-flex h-7 shrink-0 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:opacity-60"
-                                title={`${contextOpenLabel}: ${file.path}`}
-                                aria-label={`${contextOpenLabel}: ${file.path}`}
-                              >
-                                {openingContextPath === file.path ? (
-                                  <Loader2 className="h-3 w-3 animate-spin" />
-                                ) : (
-                                  <ExternalLink className="h-3 w-3" />
-                                )}
-                                <span className="hidden sm:inline">
-                                  {contextOpenLabel}
-                                </span>
-                              </button>
-                            </div>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
+
+                    <label className="block">
+                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                        Title
+                      </span>
+                      <input
+                        value={title}
+                        onChange={(event) => setTitle(event.target.value)}
+                        placeholder="Review payment flow regression"
+                        className="h-11 w-full rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 text-[15px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                      />
+                      <p className="mt-1.5 text-[11px] text-[var(--vk-text-muted)]">
+                        Keep it short and outcome-focused so the card stays scannable.
+                      </p>
+                    </label>
+
+                    <label className="mt-4 block">
+                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                        Description
+                      </span>
+                      <textarea
+                        value={description}
+                        onChange={(event) => setDescription(event.target.value)}
+                        rows={5}
+                        placeholder="Investigate failing specs, confirm the root cause, and propose a safe fix."
+                        className="w-full rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 py-2.5 text-[14px] leading-6 text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                      />
+                    </label>
+
+                    <label className="mt-4 block">
+                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                        Context notes
+                      </span>
+                      <textarea
+                        value={contextNotes}
+                        onChange={(event) => setContextNotes(event.target.value)}
+                        rows={4}
+                        placeholder="Add constraints, pitfalls, or review expectations the agent should keep in mind."
+                        className="w-full rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 py-2.5 text-[14px] leading-6 text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                      />
+                    </label>
+                  </section>
+                </div>
+
+                <div className="space-y-4">
+                  <section className="rounded-[8px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-4">
+                    <div className="mb-3">
+                      <h3 className="text-[15px] font-medium text-[var(--vk-text-strong)]">
+                        Routing
+                      </h3>
+                      <p className="pt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                        Choose where the card lands and how it should be tagged.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                          Column
+                        </span>
+                        <select
+                          value={composerRole}
+                          onChange={(event) =>
+                            setComposerRole(toRole(event.target.value))
+                          }
+                          className="h-10 w-full rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                        >
+                          {visibleColumns.map((column) => (
+                            <option
+                              key={column.role}
+                              value={column.role}
+                              className="bg-[var(--vk-bg-panel)] text-[var(--vk-text-normal)]"
+                            >
+                              {column.heading || ROLE_LABEL[column.role]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="block">
+                        <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                          Agent
+                        </span>
+                        <AgentSelectMenu
+                          value={agent}
+                          options={orderedAgentOptions}
+                          disabled={submitting}
+                          onChange={setAgent}
+                          ariaLabel="Select agent for new task"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="mt-4">
+                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                        Task type
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {TASK_TYPE_OPTIONS.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setTaskType(option.value)}
+                            className={cn(
+                              "inline-flex h-8 items-center rounded-full border px-3 text-[12px] transition-colors",
+                              taskType === option.value
+                                ? "border-[var(--vk-orange)] bg-[var(--vk-orange)]/10 text-[var(--vk-text-strong)]"
+                                : "border-[var(--vk-border)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+                            )}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                        Priority
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {PRIORITY_OPTIONS.map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setPriority(option.value)}
+                            className={cn(
+                              "inline-flex h-8 items-center rounded-full border px-3 text-[12px] transition-colors",
+                              priority === option.value
+                                ? option.value === "high"
+                                  ? "border-[var(--vk-red)] bg-[var(--vk-red)]/10 text-[var(--vk-text-strong)]"
+                                  : option.value === "medium"
+                                  ? "border-[var(--vk-orange)] bg-[var(--vk-orange)]/10 text-[var(--vk-text-strong)]"
+                                  : "border-[var(--vk-border)] bg-[rgba(255,255,255,0.05)] text-[var(--vk-text-strong)]"
+                                : "border-[var(--vk-border)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+                            )}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="rounded-[8px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-[15px] font-medium text-[var(--vk-text-strong)]">
+                          Context
+                        </h3>
+                        <p className="pt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                          Attach notes, screenshots, or files the agent should
+                          inspect before making changes.
+                        </p>
+                      </div>
+                      <label className="inline-flex h-9 cursor-pointer items-center rounded-[6px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]">
+                        <input
+                          type="file"
+                          multiple
+                          className="hidden"
+                          onChange={(event) => {
+                            const next = Array.from(event.target.files ?? []);
+                            if (next.length === 0) return;
+                            setUploadFiles((current) => {
+                              const merged = [...current];
+                              for (const file of next) {
+                                const exists = merged.some(
+                                  (entry) =>
+                                    entry.name === file.name &&
+                                    entry.size === file.size &&
+                                    entry.lastModified === file.lastModified
+                                );
+                                if (!exists) merged.push(file);
+                              }
+                              return merged;
+                            });
+                            event.currentTarget.value = "";
+                          }}
+                        />
+                        Upload files/images
+                      </label>
+                    </div>
+
+                    <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                      {selectedContextPaths.length} existing file
+                      {selectedContextPaths.length === 1 ? "" : "s"} selected
+                      {uploadFiles.length > 0
+                        ? ` · ${uploadFiles.length} upload${uploadFiles.length === 1 ? "" : "s"} ready`
+                        : ""}
+                    </div>
+
+                    {selectedContextFiles.length > 0 && (
+                      <div className="mt-3">
+                        <span className="mb-1.5 block text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                          Selected files
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {selectedContextFiles.map((file) => (
+                            <button
+                              key={file.path}
+                              type="button"
+                              onClick={() => toggleContextPath(file.path)}
+                              className="inline-flex max-w-full items-center gap-1 rounded-[999px] border border-[var(--vk-border)] bg-[var(--vk-bg-hover)] px-2.5 py-1 text-[11px] text-[var(--vk-text-normal)]"
+                              title={`Remove ${getContextFileDisplayPath(file)}`}
+                            >
+                              <span className="truncate max-w-[220px]">
+                                {file.name}
+                              </span>
+                              <span className="text-[var(--vk-text-muted)]">
+                                ×
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {uploadFiles.length > 0 && (
+                      <div className="mt-3">
+                        <span className="mb-1.5 block text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                          Pending uploads
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {uploadFiles.map((file) => (
+                            <button
+                              key={`${file.name}-${file.size}-${file.lastModified}`}
+                              type="button"
+                              onClick={() => removeUploadFile(file)}
+                              className="inline-flex max-w-full items-center gap-1 rounded-[999px] border border-[var(--vk-border)] bg-[var(--vk-bg-hover)] px-2.5 py-1 text-[11px] text-[var(--vk-text-normal)]"
+                              title="Remove upload"
+                            >
+                              <span className="truncate max-w-[220px]">
+                                {file.name}
+                              </span>
+                              <span className="text-[var(--vk-text-muted)]">
+                                ×
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <label className="mt-4 block">
+                      <span className="mb-1.5 block text-[12px] font-medium text-[var(--vk-text-normal)]">
+                        Browse existing context
+                      </span>
+                      <div className="flex h-9 items-center rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3">
+                        <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
+                        <input
+                          value={contextSearch}
+                          onChange={(event) => setContextSearch(event.target.value)}
+                          placeholder="Search context files..."
+                          className="ml-2 w-full bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                        />
+                      </div>
+                    </label>
+
+                    <div className="mt-3 max-h-[320px] overflow-auto rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.08)]">
+                      {contextLoading ? (
+                        <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          <span>Loading context files...</span>
+                        </div>
+                      ) : contextError ? (
+                        <p className="px-3 py-3 text-[12px] text-[var(--vk-red)]">
+                          {contextError}
+                        </p>
+                      ) : filteredContextFiles.length === 0 ? (
+                        <p className="px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                          No context files found.
+                        </p>
+                      ) : (
+                        <ul className="py-1">
+                          {filteredContextTree.map((node) => (
+                            <ContextTreeRow
+                              key={node.path}
+                              node={node}
+                              depth={0}
+                              expandedFolders={effectiveExpandedContextFolders}
+                              selectedPaths={selectedContextPaths}
+                              openingContextPath={openingContextPath}
+                              contextOpenLabel={contextOpenLabel}
+                              onToggleFolder={toggleContextFolder}
+                              onTogglePath={toggleContextPath}
+                              onOpenPath={(path) =>
+                                void openContextAttachment(path)
+                              }
+                            />
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </section>
                 </div>
               </div>
+            </div>
 
-              {submitError && (
+            {submitError && (
+              <div className="border-t border-[var(--vk-border)] px-4 py-3 sm:px-5">
                 <p className="text-[12px] text-[var(--vk-red)]">
                   {submitError}
                 </p>
-              )}
-            </div>
+              </div>
+            )}
 
-            <footer className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
+            <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--vk-border)] px-4 py-3 sm:px-5">
+              <div className="text-[12px] text-[var(--vk-text-muted)]">
+                {title.trim()
+                  ? "Task is ready to add to the board."
+                  : "Add a clear title to enable task creation."}
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setComposerOpen(false)}
@@ -2618,6 +3142,7 @@ export function WorkspaceKanban({
                   "Create Task"
                 )}
               </button>
+              </div>
             </footer>
           </div>
         </div>

@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result as AnyhowResult};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
@@ -6,12 +7,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::routes::config::resolve_access_identity;
 use crate::state::{resolve_board_file, AppState};
+use crate::task_context::ensure_task_brief;
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -190,7 +192,10 @@ async fn add_board_task(
     state.publish_snapshot().await;
 
     match load_board_response(&state, &body.project_id).await {
-        Ok(payload) => created(payload),
+        Ok(mut payload) => {
+            payload["createdTaskId"] = Value::String(task.id.clone());
+            created(payload)
+        }
         Err((status, message)) => error(status, message),
     }
 }
@@ -438,58 +443,57 @@ pub(crate) async fn load_board_response(
             .collect();
     }
 
-    let columns = ordered_columns
-        .iter()
-        .map(|(role, heading)| {
-            let tasks = grouped
-                .get(role)
+    let mut columns = Vec::with_capacity(ordered_columns.len());
+    for (role, heading) in &ordered_columns {
+        let mut tasks = Vec::new();
+        for task in grouped.get(role).cloned().unwrap_or_default() {
+            let comments = task_comments
+                .get(&task.id)
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .map(|task| {
-                    let comments = task_comments
-                        .get(&task.id)
-                        .cloned()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|comment| {
-                            json!({
-                                "id": comment.id,
-                                "taskId": comment.task_id,
-                                "author": comment.author,
-                                "authorEmail": comment.author_email,
-                                "provider": comment.provider,
-                                "body": comment.body,
-                                "timestamp": comment.timestamp,
-                            })
-                        })
-                        .collect::<Vec<_>>();
+                .map(|comment| {
                     json!({
-                        "id": task.id,
-                        "text": task.text,
-                        "checked": task.checked,
-                        "agent": task.agent,
-                        "project": task.project,
-                        "type": task.task_type,
-                        "priority": task.priority,
-                        "taskRef": task.task_ref,
-                        "attemptRef": task.attempt_ref,
-                        "issueId": task.issue_id,
-                        "githubItemId": task.github_item_id,
-                        "attachments": task.attachments,
-                        "notes": task.notes,
-                        "commentCount": comments.len(),
-                        "comments": comments,
+                        "id": comment.id,
+                        "taskId": comment.task_id,
+                        "author": comment.author,
+                        "authorEmail": comment.author_email,
+                        "provider": comment.provider,
+                        "body": comment.body,
+                        "timestamp": comment.timestamp,
                     })
                 })
                 .collect::<Vec<_>>();
-            json!({
-                "role": role,
-                "heading": heading,
-                "tasks": tasks,
-            })
-        })
-        .collect::<Vec<_>>();
+            let brief = ensure_task_brief(state, project_id, project, &task)
+                .await
+                .ok();
+
+            tasks.push(json!({
+                "id": task.id,
+                "text": task.text,
+                "checked": task.checked,
+                "agent": task.agent,
+                "project": task.project,
+                "type": task.task_type,
+                "priority": task.priority,
+                "taskRef": task.task_ref,
+                "attemptRef": task.attempt_ref,
+                "issueId": task.issue_id,
+                "githubItemId": task.github_item_id,
+                "attachments": task.attachments,
+                "notes": task.notes,
+                "briefPath": brief.as_ref().map(|value| value.repo_display.clone()),
+                "vaultBriefPath": brief.and_then(|value| value.vault_display),
+                "commentCount": comments.len(),
+                "comments": comments,
+            }));
+        }
+        columns.push(json!({
+            "role": role,
+            "heading": heading,
+            "tasks": tasks,
+        }));
+    }
 
     let recent_actions = state
         .recent_board_activity(project_id)
@@ -898,6 +902,89 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
     {
         task.project = Some(project_id.to_string());
     }
+}
+
+pub(crate) async fn resolve_board_path_for_project(
+    state: &Arc<AppState>,
+    project_id: &str,
+) -> AnyhowResult<PathBuf> {
+    let config = state.config.read().await.clone();
+    let project = config
+        .projects
+        .get(project_id)
+        .ok_or_else(|| anyhow!("Unknown project: {project_id}"))?;
+    let board_dir = project
+        .board_dir
+        .clone()
+        .unwrap_or_else(|| project_id.to_string());
+    let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
+    Ok(state.workspace_path.join(board_relative))
+}
+
+pub(crate) fn update_task_dispatch_state(
+    board: &mut ParsedBoard,
+    task_id: &str,
+    target_role: &str,
+    attempt_ref: Option<&str>,
+) -> bool {
+    let mut located: Option<(usize, usize, BoardTaskRecord)> = None;
+    for (column_index, column) in board.columns.iter_mut().enumerate() {
+        if let Some(task_index) = column.tasks.iter().position(|task| task.id == task_id) {
+            let task = column.tasks.remove(task_index);
+            located = Some((column_index, task_index, task));
+            break;
+        }
+    }
+
+    let Some((source_column_index, source_task_index, mut task)) = located else {
+        return false;
+    };
+
+    if let Some(attempt_ref) = attempt_ref.map(str::trim).filter(|value| !value.is_empty()) {
+        task.attempt_ref = Some(attempt_ref.to_string());
+    }
+
+    let source_role = board.columns[source_column_index].role.clone();
+    if target_role == source_role {
+        let insert_at = source_task_index.min(board.columns[source_column_index].tasks.len());
+        board.columns[source_column_index]
+            .tasks
+            .insert(insert_at, task);
+        return true;
+    }
+
+    if let Some(target_column) = board
+        .columns
+        .iter_mut()
+        .find(|column| column.role == target_role)
+    {
+        target_column.tasks.push(task);
+    } else {
+        board.columns.push(ParsedBoardColumn {
+            role: target_role.to_string(),
+            heading: default_heading_for_role(target_role).to_string(),
+            tasks: vec![task],
+        });
+    }
+
+    true
+}
+
+pub(crate) async fn update_board_task_attempt_ref(
+    state: &Arc<AppState>,
+    project_id: &str,
+    task_id: &str,
+    attempt_ref: &str,
+    target_role: Option<&str>,
+) -> AnyhowResult<()> {
+    let board_path = resolve_board_path_for_project(state, project_id).await?;
+    let mut board = parse_board(&board_path, project_id);
+    let role = target_role.unwrap_or("dispatching");
+    if update_task_dispatch_state(&mut board, task_id, role, Some(attempt_ref)) {
+        write_parsed_board(&board_path, &board, project_id)?;
+        state.publish_snapshot().await;
+    }
+    Ok(())
 }
 
 pub(crate) fn write_parsed_board(

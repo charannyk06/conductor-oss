@@ -26,10 +26,12 @@ type HmacSha256 = Hmac<sha2::Sha256>;
 
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
-const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 200000;
-const LIVE_TERMINAL_RESTORE_LINES: usize = 12000;
-const MAX_TERMINAL_SNAPSHOT_LINES: usize = 200000;
+const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 1200;
+const LIVE_TERMINAL_RESTORE_LINES: usize = 1200;
+const MAX_TERMINAL_SNAPSHOT_LINES: usize = 12000;
 const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
+const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
+const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 384 * 1024;
 const ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
@@ -39,6 +41,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
+        .route(
+            "/api/sessions/{id}/terminal/resize",
+            axum::routing::post(terminal_resize),
+        )
         .route(
             "/api/sessions/{id}/terminal/snapshot",
             get(terminal_snapshot),
@@ -59,6 +65,13 @@ struct TerminalQuery {
 #[derive(Debug, Deserialize)]
 struct TerminalSnapshotQuery {
     lines: Option<usize>,
+    live: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalResizeBody {
+    cols: u16,
+    rows: u16,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -128,11 +141,34 @@ async fn terminal_snapshot(
     let lines = query
         .lines
         .unwrap_or(DEFAULT_TERMINAL_SNAPSHOT_LINES)
-        .clamp(50, MAX_TERMINAL_SNAPSHOT_LINES);
+        .clamp(25, MAX_TERMINAL_SNAPSHOT_LINES);
+    let max_bytes = if query.live.unwrap_or(false) {
+        LIVE_TERMINAL_SNAPSHOT_MAX_BYTES
+    } else {
+        READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES
+    };
 
-    match build_terminal_snapshot(&state, &session, lines).await {
+    match build_terminal_snapshot(&state, &session, lines, max_bytes).await {
         Ok(snapshot) => Json(snapshot).into_response(),
         Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    }
+}
+
+async fn terminal_resize(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<TerminalResizeBody>,
+) -> Response {
+    if state.get_session(&id).await.is_none() {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    }
+
+    match state
+        .resize_live_terminal(&id, body.cols.max(1), body.rows.max(1))
+        .await
+    {
+        Ok(()) => Json(json!({ "ok": true, "sessionId": id })).into_response(),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     }
 }
 
@@ -140,8 +176,11 @@ async fn build_terminal_snapshot(
     state: &AppState,
     session: &SessionRecord,
     lines: usize,
+    max_bytes: usize,
 ) -> Result<Value> {
-    if let Some(snapshot) = build_terminal_restore_snapshot(state, session, lines).await? {
+    if let Some(snapshot) =
+        build_terminal_restore_snapshot(state, session, lines, max_bytes).await?
+    {
         let live = state.terminal_runtime_attached(&session.id).await;
         return Ok(json!({
             "snapshot": String::from_utf8_lossy(&snapshot),
@@ -154,6 +193,7 @@ async fn build_terminal_snapshot(
     if let Some(snapshot) = state.current_terminal_snapshot(&session.id).await {
         if !snapshot.is_empty() {
             let live = state.terminal_runtime_attached(&session.id).await;
+            let snapshot = trim_utf8_tail_bytes(snapshot, max_bytes);
             return Ok(json!({
                 "snapshot": String::from_utf8_lossy(&snapshot),
                 "source": "terminal_store",
@@ -181,12 +221,23 @@ async fn build_terminal_snapshot(
         }
     }
 
+    let terminal_capture_path = state.session_terminal_capture_path(&session.id);
+    if let Some(snapshot) = read_terminal_log_tail(&terminal_capture_path, lines, max_bytes).await? {
+        let live = state.terminal_runtime_attached(&session.id).await;
+        return Ok(json!({
+            "snapshot": snapshot,
+            "source": "terminal_capture",
+            "live": live,
+            "restored": true,
+        }));
+    }
+
     if let Some(log_path) = session
         .metadata
         .get(TMUX_LOG_PATH_METADATA_KEY)
         .map(PathBuf::from)
     {
-        if let Some(snapshot) = read_terminal_log_tail(&log_path, lines).await? {
+        if let Some(snapshot) = read_terminal_log_tail(&log_path, lines, max_bytes).await? {
             return Ok(json!({
                 "snapshot": snapshot,
                 "source": "tmux_log",
@@ -196,7 +247,7 @@ async fn build_terminal_snapshot(
         }
     }
 
-    let snapshot = trim_lines_tail(&session.output, lines);
+    let snapshot = trim_utf8_tail_string(trim_lines_tail(&session.output, lines), max_bytes);
     Ok(json!({
         "snapshot": snapshot,
         "source": if session.output.trim().is_empty() { "empty" } else { "session_output" },
@@ -209,6 +260,7 @@ async fn build_terminal_restore_snapshot(
     state: &AppState,
     session: &SessionRecord,
     lines: usize,
+    max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
     let Some(state_snapshot) = state.current_terminal_snapshot(&session.id).await else {
         return Ok(None);
@@ -217,14 +269,16 @@ async fn build_terminal_restore_snapshot(
         return Ok(None);
     }
 
-    let history = if let Some(log_path) = session
+    let history = if let Some(history) = state.current_terminal_history(&session.id).await {
+        Some(history)
+    } else if let Some(log_path) = session
         .metadata
         .get(TMUX_LOG_PATH_METADATA_KEY)
         .map(PathBuf::from)
     {
-        read_terminal_log_tail_bytes(&log_path, lines).await?
+        read_terminal_log_tail_bytes(&log_path, lines, max_bytes).await?
     } else {
-        let snapshot = trim_lines_tail(&session.output, lines);
+        let snapshot = trim_utf8_tail_string(trim_lines_tail(&session.output, lines), max_bytes);
         if snapshot.trim().is_empty() {
             None
         } else {
@@ -233,18 +287,33 @@ async fn build_terminal_restore_snapshot(
     };
 
     let Some(mut history) = history else {
-        return Ok(Some(state_snapshot));
+        return Ok(Some(trim_utf8_tail_bytes(state_snapshot, max_bytes)));
     };
 
-    if !history.ends_with(b"\n") && !history.ends_with(b"\r") {
+    let separator_len = if history.ends_with(b"\n") || history.ends_with(b"\r") {
+        0
+    } else {
+        2
+    };
+    let reserved = state_snapshot.len().saturating_add(separator_len);
+    if reserved >= max_bytes {
+        return Ok(Some(state_snapshot));
+    }
+
+    history = trim_utf8_tail_bytes(history, max_bytes.saturating_sub(reserved));
+    if separator_len != 0 {
         history.extend_from_slice(b"\r\n");
     }
     history.extend_from_slice(&state_snapshot);
     Ok(Some(history))
 }
 
-async fn read_terminal_log_tail(path: &StdPath, lines: usize) -> Result<Option<String>> {
-    let Some(bytes) = read_terminal_log_tail_bytes(path, lines).await? else {
+async fn read_terminal_log_tail(
+    path: &StdPath,
+    lines: usize,
+    max_bytes: usize,
+) -> Result<Option<String>> {
+    let Some(bytes) = read_terminal_log_tail_bytes(path, lines, max_bytes).await? else {
         return Ok(None);
     };
     let snapshot = String::from_utf8_lossy(&bytes).to_string();
@@ -255,7 +324,11 @@ async fn read_terminal_log_tail(path: &StdPath, lines: usize) -> Result<Option<S
     }
 }
 
-async fn read_terminal_log_tail_bytes(path: &StdPath, lines: usize) -> Result<Option<Vec<u8>>> {
+async fn read_terminal_log_tail_bytes(
+    path: &StdPath,
+    lines: usize,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
     let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -268,12 +341,37 @@ async fn read_terminal_log_tail_bytes(path: &StdPath, lines: usize) -> Result<Op
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
-    let snapshot = trim_lines_tail(String::from_utf8_lossy(&bytes).as_ref(), lines).into_bytes();
+    let snapshot = trim_utf8_tail_string(
+        trim_lines_tail(String::from_utf8_lossy(&bytes).as_ref(), lines),
+        max_bytes,
+    )
+    .into_bytes();
     if String::from_utf8_lossy(&snapshot).trim().is_empty() {
         Ok(None)
     } else {
         Ok(Some(snapshot))
     }
+}
+
+fn trim_utf8_tail_string(value: String, max_bytes: usize) -> String {
+    String::from_utf8_lossy(&trim_utf8_tail_bytes(value.into_bytes(), max_bytes)).into_owned()
+}
+
+fn trim_utf8_tail_bytes(bytes: Vec<u8>, max_bytes: usize) -> Vec<u8> {
+    if max_bytes == 0 || bytes.len() <= max_bytes {
+        return bytes;
+    }
+
+    let start = utf8_safe_tail_start(&bytes, bytes.len().saturating_sub(max_bytes));
+    bytes[start..].to_vec()
+}
+
+fn utf8_safe_tail_start(bytes: &[u8], preferred_start: usize) -> usize {
+    let mut start = preferred_start.min(bytes.len());
+    while start < bytes.len() && std::str::from_utf8(&bytes[start..]).is_err() {
+        start += 1;
+    }
+    start.min(bytes.len())
 }
 
 async fn handle_terminal_socket(
@@ -294,8 +392,13 @@ async fn handle_terminal_socket(
     let _ = state.ensure_session_live(&session_id).await;
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
     if let Some(session) = state.get_session(&session_id).await {
-        if let Ok(Some(snapshot)) =
-            build_terminal_restore_snapshot(&state, &session, LIVE_TERMINAL_RESTORE_LINES).await
+        if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(
+            &state,
+            &session,
+            LIVE_TERMINAL_RESTORE_LINES,
+            LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
+        )
+        .await
         {
             if socket.send(Message::Binary(snapshot.into())).await.is_err() {
                 return;
@@ -343,7 +446,13 @@ async fn handle_terminal_socket(
                     Some(Err(broadcast::error::RecvError::Lagged(skipped))) => {
                         if let Some(session) = state.get_session(&session_id).await {
                             if let Ok(Some(snapshot)) =
-                                build_terminal_restore_snapshot(&state, &session, LIVE_TERMINAL_RESTORE_LINES).await
+                                build_terminal_restore_snapshot(
+                                    &state,
+                                    &session,
+                                    LIVE_TERMINAL_RESTORE_LINES,
+                                    LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
+                                )
+                                .await
                             {
                                 if socket.send(Message::Binary(snapshot.into())).await.is_err() {
                                     break;

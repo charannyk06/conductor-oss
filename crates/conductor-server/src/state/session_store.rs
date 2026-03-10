@@ -2,6 +2,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 
 use super::helpers::normalize_loaded_session;
 use super::types::SessionRecord;
@@ -29,6 +31,10 @@ impl AppState {
 
     pub(crate) fn session_snapshot_path(&self, session_id: &str) -> PathBuf {
         self.session_store_dir().join(format!("{session_id}.json"))
+    }
+
+    pub(crate) fn session_terminal_capture_path(&self, session_id: &str) -> PathBuf {
+        self.session_store_dir().join(format!("{session_id}.terminal"))
     }
 
     pub(crate) async fn load_sessions_from_disk(&self) {
@@ -60,12 +66,45 @@ impl AppState {
             let mut guard = self.sessions.write().await;
             guard.extend(loaded);
         }
+        self.dashboard_snapshot_cache
+            .lock()
+            .await
+            .ordered_ids
+            .clear();
+        self.dashboard_snapshot_cache
+            .lock()
+            .await
+            .sessions_by_id
+            .clear();
+        self.feed_payload_cache.lock().await.clear();
+        self.runtime_status_cache.lock().await.clear();
     }
 
     pub(crate) async fn persist_session(&self, session: &SessionRecord) -> Result<()> {
         let path = self.session_snapshot_path(&session.id);
         let content = serde_json::to_string_pretty(session)?;
         tokio::fs::write(path, content).await?;
+        self.invalidate_session_caches(&session.id).await;
+        Ok(())
+    }
+
+    pub(crate) async fn append_terminal_capture(
+        &self,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.session_terminal_capture_path(session_id);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        file.write_all(bytes).await?;
+        file.flush().await?;
         Ok(())
     }
 

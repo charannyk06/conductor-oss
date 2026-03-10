@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
-use conductor_core::board::Board;
 use conductor_core::config::{ConductorConfig, ProjectConfig};
 use conductor_core::event::{Event, EventBus};
 use conductor_core::support::{
     resolve_project_path, startup_config_sync, sync_workspace_support_files,
 };
-use conductor_core::task::TaskState;
 use conductor_core::types::AgentKind;
 use conductor_watcher::BoardWatcher;
 use std::collections::HashMap;
@@ -13,8 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
+use uuid::Uuid;
 
+use crate::routes::boards::{parse_board, update_task_dispatch_state, write_parsed_board};
 use crate::state::{AppState, SessionStatus, SpawnRequest};
+use crate::task_context::compile_task_context;
 
 const MAX_GLOBAL_AUTODISPATCH_SESSIONS: usize = 5;
 const MAX_PROJECT_AUTODISPATCH_SESSIONS: usize = 2;
@@ -216,10 +217,14 @@ async fn process_board_change(
         return Ok(());
     }
 
-    let board = Board::from_file(&board_path)
-        .with_context(|| format!("Failed to parse board {}", board_path.display()))?;
-    let ready_cards = board.dispatchable_cards();
-    if ready_cards.is_empty() {
+    let mut board = parse_board(&board_path, &project_id);
+    let ready_tasks = board
+        .columns
+        .iter()
+        .find(|column| column.role == "ready")
+        .map(|column| column.tasks.clone())
+        .unwrap_or_default();
+    if ready_tasks.is_empty() {
         return Ok(());
     }
 
@@ -234,28 +239,37 @@ async fn process_board_change(
     }
 
     let config = state.config.read().await.clone();
-    let project_default_agent = config
+    let project = config
         .projects
         .get(&project_id)
-        .and_then(|project| project.agent.clone())
+        .cloned()
+        .with_context(|| format!("Unknown project: {project_id}"))?;
+    let project_default_agent = project
+        .agent
+        .clone()
         .unwrap_or_else(|| config.preferences.coding_agent.clone());
 
-    let mut moved_cards = Vec::new();
-    for card in ready_cards {
+    let mut dispatched_tasks = Vec::new();
+    for task in ready_tasks {
         if available_global == 0 || available_project == 0 {
             break;
         }
 
-        let agent = resolve_card_agent(&card.tags)
+        let agent = task
+            .agent
+            .as_deref()
+            .map(AgentKind::parse)
             .unwrap_or_else(|| AgentKind::parse(&project_default_agent))
             .to_string();
-        let model = card.metadata.get("model").cloned();
-        let reasoning_effort = card.metadata.get("reasoningEffort").cloned();
+        let context = compile_task_context(&state, &project_id, &project, &task).await?;
+        let model = None;
+        let reasoning_effort = None;
+        let attempt_id = format!("a-{}", Uuid::new_v4().simple());
 
         let spawn_result = state
             .enqueue_session_spawn_deferred(SpawnRequest {
                 project_id: project_id.clone(),
-                prompt: card.title.clone(),
+                prompt: context.prompt,
                 issue_id: None,
                 agent: Some(agent),
                 use_worktree: Some(true),
@@ -264,12 +278,14 @@ async fn process_board_change(
                 reasoning_effort,
                 branch: None,
                 base_branch: None,
-                task_id: None,
-                attempt_id: None,
+                task_id: Some(task.id.clone()),
+                task_ref: task.task_ref.clone(),
+                attempt_id: Some(attempt_id),
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
-                attachments: Vec::new(),
+                brief_path: Some(context.repo_brief_path.clone()),
+                attachments: context.attachments,
                 source: "board_dispatch".to_string(),
             })
             .await;
@@ -279,17 +295,19 @@ async fn process_board_change(
                 tracing::info!(
                     project_id,
                     session_id = session.id,
-                    title = card.title,
+                    task_id = task.id,
+                    task_ref = task.task_ref.clone().unwrap_or_default(),
                     "Queued session from Rust board automation"
                 );
-                moved_cards.push(card.title.clone());
+                dispatched_tasks.push((task.id.clone(), session.id.clone()));
                 available_global = available_global.saturating_sub(1);
                 available_project = available_project.saturating_sub(1);
             }
             Err(err) => {
                 tracing::warn!(
                     project_id,
-                    title = card.title,
+                    task_id = task.id,
+                    task_ref = task.task_ref.clone().unwrap_or_default(),
                     error = %err,
                     "Failed to spawn session from board"
                 );
@@ -297,21 +315,19 @@ async fn process_board_change(
         }
     }
 
-    if moved_cards.is_empty() {
+    if dispatched_tasks.is_empty() {
         return Ok(());
     }
 
+    for (task_id, session_id) in &dispatched_tasks {
+        update_task_dispatch_state(&mut board, task_id, "dispatching", Some(session_id));
+    }
+    write_parsed_board(&board_path, &board, &project_id)
+        .with_context(|| format!("Failed to update board {}", board_path.display()))?;
+
     drop(_spawn_guard);
     state.kick_spawn_supervisor().await;
-
-    let mut updated_board = Board::from_file(&board_path)
-        .with_context(|| format!("Failed to reload board {}", board_path.display()))?;
-    for title in moved_cards {
-        updated_board.move_card(&title, TaskState::Dispatching);
-    }
-    updated_board
-        .write_to_file(&board_path)
-        .with_context(|| format!("Failed to update board {}", board_path.display()))?;
+    state.publish_snapshot().await;
 
     Ok(())
 }
@@ -349,30 +365,13 @@ async fn active_session_counts(state: &Arc<AppState>, project_id: &str) -> (usiz
     (global, project)
 }
 
-fn resolve_card_agent(tags: &[String]) -> Option<AgentKind> {
-    for tag in tags {
-        let normalized = tag.trim().trim_start_matches('@').trim_start_matches('#');
-        let candidate = normalized
-            .strip_prefix("agent/")
-            .unwrap_or(normalized)
-            .trim();
-        if candidate.is_empty() {
-            continue;
-        }
-        let parsed = AgentKind::parse(candidate);
-        if !matches!(parsed, AgentKind::Custom(_)) {
-            return Some(parsed);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use anyhow::Result;
     use async_trait::async_trait;
     use conductor_core::config::ConductorConfig;
+    use conductor_core::{Board, TaskState};
     use conductor_db::Database;
     use conductor_executors::executor::{
         Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
