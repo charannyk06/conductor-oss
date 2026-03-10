@@ -357,7 +357,7 @@ export function createCliReleaseStage({
     optionalDependencies: publishedOptionalDependencies,
     publishConfig,
   });
-  stagedManifest.files = ["dist/", "web/", "README.md", "LICENSE"];
+  stagedManifest.files = ["dist/", "web/package.json", "web/", "README.md", "LICENSE"];
   stagedManifest.bundleDependencies = internalDependencyNames;
   writeJson(join(outputDir, "package.json"), stagedManifest);
 
@@ -431,7 +431,7 @@ export function createCliReleaseStage({
     optionalDependencies: publishedOptionalDependencies,
     publishConfig,
   });
-  publishedManifest.files = ["dist/", "web/", "README.md", "LICENSE"];
+  publishedManifest.files = ["dist/", "web/package.json", "web/", "README.md", "LICENSE"];
   publishedManifest.bundleDependencies = internalDependencyNames;
   writeJson(join(outputDir, "package.json"), publishedManifest);
   rmSync(join(outputDir, "node_modules", ".package-lock.json"), { force: true });
