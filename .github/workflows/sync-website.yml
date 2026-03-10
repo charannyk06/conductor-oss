@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout conductor-oss
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install jq
         run: sudo apt-get install -y jq
