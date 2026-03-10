@@ -87,6 +87,32 @@ npx conductor-oss@latest
 
 The npm launcher defaults to `co start --open`, which starts the local stack and opens the dashboard.
 
+### Native Launch Experience
+
+Conductor launches agents into their native terminal UIs instead of replacing them with a synthetic chat shell.
+
+- Claude Code launches into the full Claude Code terminal workspace.
+- Codex launches into the full Codex terminal app and keeps the native review and tool flow intact.
+- Gemini launches into the full Gemini CLI terminal UI, including its native multi-step workflow.
+
+The dashboard terminal is a live viewer and input surface over the backend-owned session, so reconnecting or switching sessions preserves the real agent experience instead of rebuilding a frontend-only shell.
+
+Agent launch surface:
+
+![Conductor agent picker](docs/screenshots/launch-agent-picker.png)
+
+Claude Code session:
+
+![Claude Code native terminal in Conductor](docs/screenshots/launch-claude-native.png)
+
+Codex session:
+
+![Codex native terminal in Conductor](docs/screenshots/launch-codex-native.png)
+
+Gemini session:
+
+![Gemini native terminal in Conductor](docs/screenshots/launch-gemini-native.png)
+
 Launcher defaults:
 
 - dashboard: `http://127.0.0.1:4747`
