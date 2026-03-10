@@ -9,8 +9,8 @@ function parseArgs(argv) {
     packageName: "",
     version: "",
     requireFiles: [],
-    timeoutMs: 120_000,
-    pollIntervalMs: 5_000,
+    timeoutMs: 600_000,
+    pollIntervalMs: 10_000,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
