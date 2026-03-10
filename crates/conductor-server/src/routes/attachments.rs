@@ -91,12 +91,22 @@ async fn upload_attachments(
             format!("Unknown project: {project_id}"),
         );
     }
+    let task_ref_component = match task_ref.as_deref().map(normalize_token) {
+        Some(value) if value == "." || value == ".." => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "taskRef must not resolve to . or ..",
+            );
+        }
+        Some(value) => value,
+        None => String::new(),
+    };
 
     let target_dir = state
         .workspace_path
         .join("attachments")
         .join(normalize_token(&project_id))
-        .join(task_ref.as_deref().map(normalize_token).unwrap_or_default());
+        .join(task_ref_component);
     if let Err(err) = std::fs::create_dir_all(&target_dir) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
@@ -177,4 +187,20 @@ fn is_image_path(path: &Path) -> bool {
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_token;
+
+    #[test]
+    fn normalize_token_preserves_regular_task_refs() {
+        assert_eq!(normalize_token("task_123"), "task_123");
+    }
+
+    #[test]
+    fn normalize_token_keeps_dot_segments_which_callers_must_reject() {
+        assert_eq!(normalize_token("."), ".");
+        assert_eq!(normalize_token(".."), "..");
+    }
 }

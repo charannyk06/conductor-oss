@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task;
 
-use crate::routes::boards::{split_task_text, BoardTaskRecord};
+use crate::routes::boards::{BoardTaskRecord, split_task_text};
 use crate::state::AppState;
 
 const MAX_BRIEF_BYTES: usize = 16 * 1024;
@@ -136,6 +136,7 @@ pub(crate) async fn compile_task_context(
     task: &BoardTaskRecord,
 ) -> Result<TaskContextBundle> {
     let brief_paths = ensure_task_brief(state, project_id, project, task).await?;
+    let config = state.config.read().await.clone();
     let (title, description) = split_task_text(&task.text);
     let comments_by_task = state.task_comments(project_id).await;
     let comments = comments_by_task
@@ -242,7 +243,15 @@ pub(crate) async fn compile_task_context(
         prompt.push('\n');
     }
 
-    let attachment_sections = attachment_context_sections(state, &attachments);
+    let attachment_allowed_roots = attachment_allowed_roots(
+        state,
+        project_id,
+        project,
+        &config.preferences.markdown_editor,
+        &config.preferences.markdown_editor_path,
+    );
+    let attachment_sections =
+        attachment_context_sections(state, &attachments, &attachment_allowed_roots);
     if !attachment_sections.is_empty() {
         prompt.push_str("\nAttached context:\n");
         for section in attachment_sections {
@@ -273,19 +282,14 @@ pub(crate) fn resolve_task_brief_paths(
     markdown_editor_path: &str,
 ) -> TaskBriefPaths {
     let project_root = resolve_project_path(workspace_path, &project.path);
-    let repo_absolute = project_root
-        .join(".conductor")
-        .join("tasks")
-        .join(format!("{task_ref}.md"));
+    let sanitized_ref = sanitize_task_ref_component(task_ref);
+    let file_name = format!("{sanitized_ref}.md");
+    let repo_absolute = task_brief_root(&project_root).join(&file_name);
     let repo_display = display_path(workspace_path, &repo_absolute);
 
     let vault_root = resolve_markdown_root(workspace_path, markdown_editor, markdown_editor_path);
-    let vault_absolute = vault_root.map(|root| {
-        root.join("Conductor")
-            .join(project_id)
-            .join("tasks")
-            .join(format!("{task_ref}.md"))
-    });
+    let vault_absolute =
+        vault_root.map(|root| task_brief_vault_root(&root, project_id).join(&file_name));
     let vault_display = vault_absolute
         .as_ref()
         .map(|path| display_path(workspace_path, path));
@@ -302,13 +306,47 @@ pub(crate) fn task_brief_root(project_root: &Path) -> PathBuf {
     project_root.join(".conductor").join("tasks")
 }
 
+fn task_brief_vault_root(vault_root: &Path, project_id: &str) -> PathBuf {
+    vault_root.join("Conductor").join(project_id).join("tasks")
+}
+
 fn task_ref_for_storage(task: &BoardTaskRecord) -> String {
-    task.task_ref
+    let candidate = task
+        .task_ref
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(task.id.as_str())
-        .to_string()
+        .unwrap_or(task.id.as_str());
+    sanitize_task_ref_component(candidate)
+}
+
+fn sanitize_task_ref_component(value: &str) -> String {
+    let mut sanitized = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .chars()
+        .fold(String::new(), |mut acc, ch| {
+            if ch == '-' && acc.ends_with('-') {
+                return acc;
+            }
+            acc.push(ch);
+            acc
+        });
+    sanitized = sanitized.trim_matches('-').to_string();
+
+    if sanitized.is_empty() {
+        "task".to_string()
+    } else {
+        sanitized
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -400,7 +438,11 @@ fn read_text_preview(path: &Path, limit: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(truncated).to_string())
 }
 
-fn attachment_context_sections(state: &AppState, attachments: &[String]) -> Vec<String> {
+fn attachment_context_sections(
+    state: &AppState,
+    attachments: &[String],
+    allowed_roots: &[PathBuf],
+) -> Vec<String> {
     let mut sections = Vec::new();
     let mut seen = HashSet::new();
     let mut snippets = 0usize;
@@ -411,9 +453,13 @@ fn attachment_context_sections(state: &AppState, attachments: &[String]) -> Vec<
             continue;
         }
 
-        let absolute = resolve_attachment_path(&state.workspace_path, trimmed);
-        if !absolute.exists() {
+        let Some(absolute) = resolve_attachment_path(&state.workspace_path, trimmed) else {
             sections.push(format!("- Missing attachment: {trimmed}"));
+            continue;
+        };
+
+        if !path_is_within_roots(&absolute, allowed_roots) {
+            sections.push(format!("- File attachment: {trimmed}"));
             continue;
         }
 
@@ -441,13 +487,56 @@ fn attachment_context_sections(state: &AppState, attachments: &[String]) -> Vec<
     sections
 }
 
-fn resolve_attachment_path(workspace_root: &Path, value: &str) -> PathBuf {
+fn resolve_attachment_path(workspace_root: &Path, value: &str) -> Option<PathBuf> {
     let candidate = PathBuf::from(value);
-    if candidate.is_absolute() {
+    let resolved = if candidate.is_absolute() {
         candidate
     } else {
         workspace_root.join(candidate)
+    };
+    std::fs::canonicalize(resolved).ok()
+}
+
+fn attachment_allowed_roots(
+    state: &AppState,
+    project_id: &str,
+    project: &ProjectConfig,
+    markdown_editor: &str,
+    markdown_editor_path: &str,
+) -> Vec<PathBuf> {
+    let project_root = resolve_project_path(&state.workspace_path, &project.path);
+    let attachments_root = state.workspace_path.join("attachments").join(project_id);
+    let brief_root = task_brief_root(&project_root);
+    let project_workspace_root = project
+        .workspace
+        .as_deref()
+        .map(|configured| resolve_project_path(&state.workspace_path, configured));
+    let markdown_root =
+        resolve_markdown_root(&state.workspace_path, markdown_editor, markdown_editor_path);
+
+    let mut roots = vec![
+        state.workspace_path.clone(),
+        project_root,
+        attachments_root,
+        brief_root,
+    ];
+    if let Some(root) = project_workspace_root {
+        roots.push(root);
     }
+    if let Some(root) = markdown_root {
+        roots.push(root);
+    }
+
+    roots
+        .into_iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect()
+}
+
+fn path_is_within_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| path == root || path.starts_with(root))
 }
 
 fn resolve_markdown_root(
@@ -513,4 +602,94 @@ fn is_image(path: &Path) -> bool {
         ext.as_str(),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        path_is_within_roots, resolve_attachment_path, resolve_task_brief_paths,
+        sanitize_task_ref_component,
+    };
+    use conductor_core::config::ProjectConfig;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    #[test]
+    fn sanitize_task_ref_component_strips_path_segments_and_dot_runs() {
+        assert_eq!(
+            sanitize_task_ref_component("../nested\\\\task.ref"),
+            "nested-task-ref"
+        );
+        assert_eq!(sanitize_task_ref_component(".."), "task");
+    }
+
+    #[test]
+    fn resolve_task_brief_paths_uses_sanitized_file_name() {
+        let workspace = Path::new("/workspace");
+        let project = ProjectConfig {
+            path: "repo".to_string(),
+            ..ProjectConfig::default()
+        };
+
+        let paths = resolve_task_brief_paths(
+            workspace,
+            "demo",
+            &project,
+            "../nested\\\\task.ref",
+            "obsidian",
+            "/vault",
+        );
+
+        assert_eq!(
+            paths.repo_absolute,
+            Path::new("/workspace/repo/.conductor/tasks/nested-task-ref.md")
+        );
+        assert_eq!(
+            paths.vault_absolute.as_deref(),
+            Some(Path::new("/vault/Conductor/demo/tasks/nested-task-ref.md"))
+        );
+    }
+
+    #[test]
+    fn resolve_attachment_path_canonicalizes_workspace_relative_paths() {
+        let root = temp_root();
+        let workspace = root.join("workspace");
+        let nested = workspace.join("docs");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("note.txt");
+        fs::write(&file, "hello").unwrap();
+
+        let resolved = resolve_attachment_path(&workspace, "docs/../docs/note.txt");
+        assert_eq!(resolved, Some(fs::canonicalize(&file).unwrap()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn path_is_within_roots_rejects_canonicalized_paths_outside_allowlist() {
+        let root = temp_root();
+        let workspace = root.join("workspace");
+        let project = root.join("project");
+        let outside = root.join("outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let allowed = vec![
+            fs::canonicalize(&workspace).unwrap(),
+            fs::canonicalize(&project).unwrap(),
+        ];
+        let outside_file = outside.join("secret.txt");
+        fs::write(&outside_file, "nope").unwrap();
+        let canonical_outside = fs::canonicalize(&outside_file).unwrap();
+
+        assert!(!path_is_within_roots(&canonical_outside, &allowed));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn temp_root() -> PathBuf {
+        std::env::temp_dir().join(format!("conductor-task-context-{}", Uuid::new_v4()))
+    }
 }
