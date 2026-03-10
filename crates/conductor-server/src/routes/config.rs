@@ -1468,52 +1468,136 @@ mod tests {
         CloudflareJwk, CloudflareJwksCacheEntry, CLOUDFLARE_JWKS_CACHE,
     };
     use axum::http::HeaderMap;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
     use conductor_core::config::{DashboardAccessConfig, TrustedHeaderAccessConfig};
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use serde::Serialize;
+    use std::fs;
+    use std::process::Command as StdCommand;
+    use std::sync::LazyLock;
     use std::time::Instant;
+    use uuid::Uuid;
 
     const TEST_TEAM_DOMAIN: &str = "acme.cloudflareaccess.com";
     const TEST_AUDIENCE: &str = "cf-access-audience";
 
     struct TestCloudflareKeyMaterial {
-        private_pem: &'static str,
-        modulus: &'static str,
-        exponent: &'static str,
+        private_pem: String,
+        modulus: String,
+        exponent: String,
     }
 
-    static TEST_CLOUDFLARE_KEY: TestCloudflareKeyMaterial = TestCloudflareKeyMaterial {
-        private_pem: "-----BEGIN PRIVATE KEY-----\n\
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDPo2gXPB4/iYCE\n\
-I/KTv7k3x+xC+CsejXQV6JnSB8LEt+Zo7A8STW6bgEqsU1KkmPyw83GdbQwwy/05\n\
-EEcal7a7GqwW1FhLtzXYAKAHhXIg5+Os3OENlqoHPtJVfq/7XZdE4oNnVo1x/H+X\n\
-b3P8oY2eEVcLt/fKQY3o/MEYJjR09fOWLpKAGT5bYkcbtf/S6zcezmykrN3g+RYx\n\
-Yoz9fOG7Ce1qgZ4sEUv6BZZ8CYouJleH+lcyxTD/d3sfYf+CWBPagWKEy8mnr0WA\n\
-F/KD70mJMBeNcmXxpX8whV9idRvIhTasNDwoHe8mK7qp8P4wPmkv+0zAKKVchTHd\n\
-QxXrNQP/AgMBAAECggEALvO48HQYNO7fYEIOsulKNTpgiv46JeT/qIqZ6dv2Z2xc\n\
-TkJ+3/khd0lJ2XDYAb9UeKD8AoirlocyIgqzwWgoGmQcIOdwdeKeatMtXLYIyjcV\n\
-jTu/Kkb0+MF0Z3/HxJPzxlBgPWhdgLaDlZdOx4QylVk/cTdu8U3kjJhHA7Jz7zRb\n\
-0uk2W2jMr8+3LMFxzHiz511wuEHm2+/KYRWz5qEMo0BoqIYMu55+hfSQTUI69bjf\n\
-/xxt8gLcCdntXtcngiF3fRvlmJx2LMkJRH/DABa8GuAPJWzeszqdueNFVwNFSHXB\n\
-NpPWbDgbVrouU2gywiJRXcBXx+CDGmMLr/vQhkwLCQKBgQD+eRyerXE5x8U9dmNQ\n\
-IsbdAU6QtpYrjUs6lHJBFWzGjZkjD1YC4zQ0yc8TnZaXBSUVWwLh/JLali/rpVPm\n\
-jxdg5NkpUfR057YzEejnqHNBeMih1msmVP0WsbryEnGuu7mjS5hNvMyXstzFwhp7\n\
-U3MCyE39/Mi9MCOsRc3BJ8IjaQKBgQDQ4lp1KfNTFmRZ/XtFmRJjfn+osvBEckLY\n\
-ZLwKkYboPQNFfX3ChVRITPtvvY7Isz9L1RVtnt3NwePOCCni29QyFOQ24AI8boUU\n\
-yatQwLI+iZUJz1DnqmK5NeIzk36UZbuGT+UmQhdvtOznzSX61kfc8RD/m4IyfXt5\n\
-vaTGhePHJwKBgQCPjO6yLJFU0PbZRzGbASNBhP028WkhRGGNuDQDtvxXvYUHnB0f\n\
-H+BRbw6buCg9JS/YLjEgHoURPevmeKstwsajaDWA87R9RkEn6hCCrinmYyZ69SQY\n\
-yZTD+prE99adhVShY4GVSM35PXMBNBAQRfD5PtmQT8tFviRBiFcbgTwpEQKBgQDM\n\
-uLvdTtMq4KxTwmpZyO9L0gP96/otqyq2eOwPE5f77yhQp/BkgFYdUk2vs0HIlFz5\n\
-zopk2KocaeYB3OBodfkfaHhPC/dFETCfMhQUXfeT8TW/2o85rjV5vkTHNcx+VsKW\n\
-naFBgM8FbXYurVKG6BKgiSeWzOuq3m7w3xwqcbjPSwKBgDxZ9nW16fCMVNMDBYaU\n\
-9HO8qUrbUOlM7JNzqU+LL7jD1GRZiT2xHI9JXYowZ/OZ0/nl7zZHq+y3ewz3mc1D\n\
-Bk6a+sNnax10s5q9MoAEgGsrNY20wOdhAkSrt34yhB72Q/p4lpCdHBmIktw2SxCY\n\
-6kMu98TsAtL5r+KV5+71wYBv\n\
------END PRIVATE KEY-----\n",
-        modulus: "z6NoFzweP4mAhCPyk7-5N8fsQvgrHo10FeiZ0gfCxLfmaOwPEk1um4BKrFNSpJj8sPNxnW0MMMv9ORBHGpe2uxqsFtRYS7c12ACgB4VyIOfjrNzhDZaqBz7SVX6v-12XROKDZ1aNcfx_l29z_KGNnhFXC7f3ykGN6PzBGCY0dPXzli6SgBk-W2JHG7X_0us3Hs5spKzd4PkWMWKM_XzhuwntaoGeLBFL-gWWfAmKLiZXh_pXMsUw_3d7H2H_glgT2oFihMvJp69FgBfyg-9JiTAXjXJl8aV_MIVfYnUbyIU2rDQ8KB3vJiu6qfD-MD5pL_tMwCilXIUx3UMV6zUD_w",
-        exponent: "AQAB",
-    };
+    static TEST_CLOUDFLARE_KEY: LazyLock<TestCloudflareKeyMaterial> =
+        LazyLock::new(generate_test_cloudflare_key);
+
+    fn generate_test_cloudflare_key() -> TestCloudflareKeyMaterial {
+        // Generate an ephemeral key per test process so secret scanners never see
+        // committed private key material in the repository.
+        let temp_dir =
+            std::env::temp_dir().join(format!("conductor-cf-test-key-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let private_key_path = temp_dir.join("private.pem");
+
+        let generate = StdCommand::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                private_key_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            generate.status.success(),
+            "openssl genpkey failed: {}",
+            String::from_utf8_lossy(&generate.stderr)
+        );
+
+        let public_text = StdCommand::new("openssl")
+            .args([
+                "pkey",
+                "-in",
+                private_key_path.to_string_lossy().as_ref(),
+                "-pubout",
+                "-text_pub",
+                "-noout",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            public_text.status.success(),
+            "openssl pkey -pubout failed: {}",
+            String::from_utf8_lossy(&public_text.stderr)
+        );
+
+        let private_pem = fs::read_to_string(&private_key_path).unwrap();
+        let public_text = String::from_utf8(public_text.stdout).unwrap();
+        let (modulus, exponent) = parse_rsa_public_components(&public_text);
+
+        let _ = fs::remove_file(&private_key_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        TestCloudflareKeyMaterial {
+            private_pem,
+            modulus,
+            exponent,
+        }
+    }
+
+    fn parse_rsa_public_components(public_text: &str) -> (String, String) {
+        let modulus_section = public_text
+            .split("Modulus:\n")
+            .nth(1)
+            .and_then(|value| value.split("Exponent:").next())
+            .or_else(|| {
+                public_text
+                    .split("modulus:\n")
+                    .nth(1)
+                    .and_then(|value| value.split("publicExponent:").next())
+            })
+            .expect("openssl output should contain modulus");
+        let exponent_line = public_text
+            .lines()
+            .find(|line| {
+                let line = line.trim_start();
+                line.starts_with("Exponent:") || line.starts_with("publicExponent:")
+            })
+            .expect("openssl output should contain exponent");
+
+        let mut modulus_hex = modulus_section
+            .chars()
+            .filter(|ch| ch.is_ascii_hexdigit())
+            .collect::<String>();
+        while modulus_hex.starts_with("00") {
+            modulus_hex.drain(..2);
+        }
+
+        let modulus_bytes = hex::decode(modulus_hex).expect("valid modulus hex");
+        let exponent_value = exponent_line
+            .trim()
+            .trim_start_matches("Exponent:")
+            .trim_start_matches("publicExponent:")
+            .trim()
+            .split(' ')
+            .next()
+            .expect("exponent value")
+            .parse::<u64>()
+            .expect("numeric exponent");
+        let exponent_bytes = exponent_value
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|byte| *byte == 0)
+            .collect::<Vec<_>>();
+
+        (
+            URL_SAFE_NO_PAD.encode(modulus_bytes),
+            URL_SAFE_NO_PAD.encode(exponent_bytes),
+        )
+    }
 
     #[derive(Debug, Serialize)]
     struct TestCloudflareClaims<'a> {
@@ -1526,7 +1610,7 @@ Bk6a+sNnax10s5q9MoAEgGsrNY20wOdhAkSrt34yhB72Q/p4lpCdHBmIktw2SxCY\n\
     }
 
     fn cache_cloudflare_test_key(team_domain: &str) {
-        let key = &TEST_CLOUDFLARE_KEY;
+        let key = &*TEST_CLOUDFLARE_KEY;
         CLOUDFLARE_JWKS_CACHE.lock().unwrap().insert(
             team_domain.to_string(),
             CloudflareJwksCacheEntry {
@@ -1546,7 +1630,7 @@ Bk6a+sNnax10s5q9MoAEgGsrNY20wOdhAkSrt34yhB72Q/p4lpCdHBmIktw2SxCY\n\
     }
 
     fn build_cloudflare_assertion(email: &str) -> String {
-        let key = &TEST_CLOUDFLARE_KEY;
+        let key = &*TEST_CLOUDFLARE_KEY;
         let now = chrono::Utc::now().timestamp() as usize;
         let claims = TestCloudflareClaims {
             email,
