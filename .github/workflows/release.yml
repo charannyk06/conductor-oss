@@ -109,7 +109,7 @@ jobs:
             commits_since_last_tag=$(git rev-list --max-count=1 "$last_tag"..HEAD)
           fi
 
-          if [ -n "$last_tag" ] && [ -z "$commits_since_last_tag" ]; then
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -n "$last_tag" ] && [ -z "$commits_since_last_tag" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "⚠️ No commits since $last_tag — skipping"
           elif git rev-parse "$tag" >/dev/null 2>&1; then
