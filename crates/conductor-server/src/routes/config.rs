@@ -1472,13 +1472,12 @@ mod tests {
     use base64::Engine;
     use conductor_core::config::{DashboardAccessConfig, TrustedHeaderAccessConfig};
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    use rand::rngs::OsRng;
-    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
-    use rsa::traits::PublicKeyParts;
-    use rsa::RsaPrivateKey;
     use serde::Serialize;
+    use std::fs;
+    use std::process::Command as StdCommand;
     use std::sync::LazyLock;
     use std::time::Instant;
+    use uuid::Uuid;
 
     const TEST_TEAM_DOMAIN: &str = "acme.cloudflareaccess.com";
     const TEST_AUDIENCE: &str = "cf-access-audience";
@@ -1489,19 +1488,116 @@ mod tests {
         exponent: String,
     }
 
-    static TEST_CLOUDFLARE_KEY: LazyLock<TestCloudflareKeyMaterial> = LazyLock::new(|| {
-        let mut rng = OsRng;
-        let private_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let public_key = private_key.to_public_key();
+    static TEST_CLOUDFLARE_KEY: LazyLock<TestCloudflareKeyMaterial> =
+        LazyLock::new(generate_test_cloudflare_key);
+
+    fn generate_test_cloudflare_key() -> TestCloudflareKeyMaterial {
+        // Generate an ephemeral key per test process so secret scanners never see
+        // committed private key material in the repository.
+        let temp_dir =
+            std::env::temp_dir().join(format!("conductor-cf-test-key-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let private_key_path = temp_dir.join("private.pem");
+
+        let generate = StdCommand::new("openssl")
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                private_key_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            generate.status.success(),
+            "openssl genpkey failed: {}",
+            String::from_utf8_lossy(&generate.stderr)
+        );
+
+        let public_text = StdCommand::new("openssl")
+            .args([
+                "pkey",
+                "-in",
+                private_key_path.to_string_lossy().as_ref(),
+                "-pubout",
+                "-text_pub",
+                "-noout",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            public_text.status.success(),
+            "openssl pkey -pubout failed: {}",
+            String::from_utf8_lossy(&public_text.stderr)
+        );
+
+        let private_pem = fs::read_to_string(&private_key_path).unwrap();
+        let public_text = String::from_utf8(public_text.stdout).unwrap();
+        let (modulus, exponent) = parse_rsa_public_components(&public_text);
+
+        let _ = fs::remove_file(&private_key_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+
         TestCloudflareKeyMaterial {
-            private_pem: private_key
-                .to_pkcs8_pem(LineEnding::LF)
-                .unwrap()
-                .to_string(),
-            modulus: URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
-            exponent: URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+            private_pem,
+            modulus,
+            exponent,
         }
-    });
+    }
+
+    fn parse_rsa_public_components(public_text: &str) -> (String, String) {
+        let modulus_section = public_text
+            .split("Modulus:\n")
+            .nth(1)
+            .and_then(|value| value.split("Exponent:").next())
+            .or_else(|| {
+                public_text
+                    .split("modulus:\n")
+                    .nth(1)
+                    .and_then(|value| value.split("publicExponent:").next())
+            })
+            .expect("openssl output should contain modulus");
+        let exponent_line = public_text
+            .lines()
+            .find(|line| {
+                let line = line.trim_start();
+                line.starts_with("Exponent:") || line.starts_with("publicExponent:")
+            })
+            .expect("openssl output should contain exponent");
+
+        let mut modulus_hex = modulus_section
+            .chars()
+            .filter(|ch| ch.is_ascii_hexdigit())
+            .collect::<String>();
+        while modulus_hex.starts_with("00") {
+            modulus_hex.drain(..2);
+        }
+
+        let modulus_bytes = hex::decode(modulus_hex).expect("valid modulus hex");
+        let exponent_value = exponent_line
+            .trim()
+            .trim_start_matches("Exponent:")
+            .trim_start_matches("publicExponent:")
+            .trim()
+            .split(' ')
+            .next()
+            .expect("exponent value")
+            .parse::<u64>()
+            .expect("numeric exponent");
+        let exponent_bytes = exponent_value
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|byte| *byte == 0)
+            .collect::<Vec<_>>();
+
+        (
+            URL_SAFE_NO_PAD.encode(modulus_bytes),
+            URL_SAFE_NO_PAD.encode(exponent_bytes),
+        )
+    }
 
     #[derive(Debug, Serialize)]
     struct TestCloudflareClaims<'a> {
@@ -1521,8 +1617,8 @@ mod tests {
                 keys: vec![CloudflareJwk {
                     kid: Some("rust-edge-auth-test".to_string()),
                     kty: "RSA".to_string(),
-                    n: Some(key.modulus.clone()),
-                    e: Some(key.exponent.clone()),
+                    n: Some(key.modulus.to_string()),
+                    e: Some(key.exponent.to_string()),
                 }],
                 fetched_at: Instant::now(),
             },

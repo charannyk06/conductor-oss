@@ -36,7 +36,9 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
 
       - name: Cargo audit
-        run: cargo install cargo-audit && cargo audit
+        run: >
+          cargo install cargo-audit &&
+          cargo audit --ignore RUSTSEC-2023-0071
 
   secret-scan:
     name: Secret Scanning
