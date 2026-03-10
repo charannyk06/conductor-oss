@@ -579,6 +579,21 @@ function resolveRepoCargoRoot(workspacePath: string): string | null {
   return null;
 }
 
+function findRepoCargoRoot(start: string): string | null {
+  let current = resolve(start);
+  while (true) {
+    const repoRoot = resolveRepoCargoRoot(current);
+    if (repoRoot) {
+      return repoRoot;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
 function resolveOptionalNativePackageNames(): string[] {
   if (process.platform === "darwin" && (process.arch === "arm64" || process.arch === "x64")) {
     return ["conductor-oss-native-darwin-universal"];
@@ -689,7 +704,11 @@ export function resolveRustBackendLaunch(
   configPath: string,
   backendPort: number,
 ): RustLaunchResolution {
-  const repoCargoRoot = resolveRepoCargoRoot(workspacePath);
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const repoCargoRoot = resolveRepoCargoRoot(workspacePath)
+    ?? findRepoCargoRoot(process.cwd())
+    ?? findRepoCargoRoot(moduleDir)
+    ?? findRepoCargoRoot(resolve(moduleDir, "..", "..", ".."));
   if (repoCargoRoot) {
     const binaryName = process.platform === "win32" ? "conductor.exe" : "conductor";
     const prebuiltCandidate = resolveNewestExistingBinary([
