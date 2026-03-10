@@ -212,7 +212,6 @@ a:hover {
   }
 
   .xterm .xterm-viewport {
-    -webkit-overflow-scrolling: touch;
     touch-action: pan-y pinch-zoom;
   }
 
