@@ -36,7 +36,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid
 git2 = { version = "0.19", default-features = false }
 
 # File watching
-notify = "7.0"
+notify = "8.2"
 
 # Process management
 portable-pty = "0.9"
