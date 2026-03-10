@@ -208,11 +208,19 @@ a:hover {
 
 @media (pointer: coarse) {
   .xterm {
-    touch-action: manipulation;
+    touch-action: pan-y pinch-zoom;
+  }
+
+  .xterm .xterm-viewport {
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y pinch-zoom;
   }
 
   .xterm .xterm-screen,
-  .xterm .xterm-screen canvas,
+  .xterm .xterm-screen canvas {
+    pointer-events: none !important;
+  }
+
   .xterm textarea.xterm-helper-textarea {
     pointer-events: auto !important;
   }
