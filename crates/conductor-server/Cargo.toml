@@ -36,7 +36,7 @@ vt100 = "0.16"
 [dev-dependencies]
 tower = "0.5"
 base64 = "0.22"
-rand = "0.8"
+rand = "0.9"
 rsa = { version = "0.9", features = ["pem"] }
 
 [target.'cfg(windows)'.dependencies]
