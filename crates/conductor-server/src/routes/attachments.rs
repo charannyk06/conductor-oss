@@ -27,6 +27,7 @@ async fn upload_attachments(
     mut multipart: Multipart,
 ) -> ApiResponse {
     let mut project_id: Option<String> = None;
+    let mut task_ref: Option<String> = None;
     let mut files = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -38,6 +39,16 @@ async fn upload_attachments(
             };
             if !value.is_empty() {
                 project_id = Some(value);
+            }
+            continue;
+        }
+        if name == "taskRef" {
+            let value = match field.text().await {
+                Ok(value) => value.trim().to_string(),
+                Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+            };
+            if !value.is_empty() {
+                task_ref = Some(value);
             }
             continue;
         }
@@ -84,7 +95,8 @@ async fn upload_attachments(
     let target_dir = state
         .workspace_path
         .join("attachments")
-        .join(normalize_token(&project_id));
+        .join(normalize_token(&project_id))
+        .join(task_ref.as_deref().map(normalize_token).unwrap_or_default());
     if let Err(err) = std::fs::create_dir_all(&target_dir) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }

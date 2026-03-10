@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 use crate::state::{resolve_board_file, AppState};
+use crate::task_context::task_brief_root;
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -68,6 +69,7 @@ async fn list_context_files(
         .workspace_path
         .join("attachments")
         .join(&query.project_id);
+    let brief_root = task_brief_root(&project_root);
     let board_parent = board_absolute.parent().map(Path::to_path_buf);
     let markdown_editor = config.preferences.markdown_editor.trim();
     let markdown_root = resolve_markdown_root(
@@ -142,7 +144,27 @@ async fn list_context_files(
         250,
         4,
     );
+    collect_project_files(
+        &brief_root,
+        &state.workspace_path,
+        "brief",
+        &mut files,
+        250,
+        4,
+    );
 
+    files.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+            .then_with(|| {
+                source_sort_rank(left["source"].as_str().unwrap_or_default()).cmp(&source_sort_rank(
+                    right["source"].as_str().unwrap_or_default(),
+                ))
+            })
+    });
+    files.dedup_by(|left, right| left["path"] == right["path"]);
     files.sort_by(|left, right| {
         source_sort_rank(left["source"].as_str().unwrap_or_default())
             .cmp(&source_sort_rank(
@@ -155,7 +177,6 @@ async fn list_context_files(
                     .cmp(right["path"].as_str().unwrap_or_default())
             })
     });
-    files.dedup_by(|left, right| left["path"] == right["path"]);
     ok(json!({ "files": files }))
 }
 
@@ -191,6 +212,7 @@ async fn open_context_file(
         .workspace_path
         .join("attachments")
         .join(&body.project_id);
+    let brief_root = task_brief_root(&project_root);
     let markdown_editor = config.preferences.markdown_editor.trim();
     let markdown_root = resolve_markdown_root(
         &state.workspace_path,
@@ -205,7 +227,7 @@ async fn open_context_file(
         );
     }
 
-    let mut allowed_roots = vec![project_root, attachments_root];
+    let mut allowed_roots = vec![project_root, attachments_root, brief_root];
     if let Some(root) = project_workspace_root {
         allowed_roots.push(root);
     }
@@ -345,10 +367,11 @@ fn source_sort_rank(source: &str) -> usize {
     match source {
         "board" => 0,
         "vault" | "graph" | "notes" => 1,
-        "workspace" => 2,
-        "project" => 3,
-        "attachment" => 4,
-        _ => 5,
+        "brief" => 2,
+        "workspace" => 3,
+        "project" => 4,
+        "attachment" => 5,
+        _ => 6,
     }
 }
 

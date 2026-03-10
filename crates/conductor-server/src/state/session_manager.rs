@@ -751,6 +751,9 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| format!("a-{session_id}")),
         );
+        if let Some(task_ref) = request.task_ref.clone() {
+            record.metadata.insert("taskRef".to_string(), task_ref);
+        }
         if let Some(parent_task_id) = request.parent_task_id.clone() {
             record
                 .metadata
@@ -763,6 +766,9 @@ impl AppState {
         }
         if let Some(profile) = request.profile.clone() {
             record.metadata.insert("profile".to_string(), profile);
+        }
+        if let Some(brief_path) = request.brief_path.clone() {
+            record.metadata.insert("briefPath".to_string(), brief_path);
         }
 
         if let Some(existing_record) = existing_record {
@@ -1675,10 +1681,12 @@ impl AppState {
             branch: session.branch.clone(),
             base_branch: None,
             task_id: session.metadata.get("taskId").cloned(),
+            task_ref: session.metadata.get("taskRef").cloned(),
             attempt_id: None,
             parent_task_id: session.metadata.get("parentTaskId").cloned(),
             retry_of_session_id: None,
             profile: session.metadata.get("profile").cloned(),
+            brief_path: session.metadata.get("briefPath").cloned(),
             attachments: Vec::new(),
             source: "restore".to_string(),
         })
@@ -1983,10 +1991,12 @@ mod tests {
                     branch: None,
                     base_branch: None,
                     task_id: None,
+                    task_ref: None,
                     attempt_id: None,
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },
@@ -2052,10 +2062,12 @@ mod tests {
                     branch: None,
                     base_branch: None,
                     task_id: None,
+                    task_ref: None,
                     attempt_id: None,
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },
@@ -2160,10 +2172,12 @@ mod tests {
                     branch: None,
                     base_branch: None,
                     task_id: None,
+                    task_ref: None,
                     attempt_id: None,
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },
@@ -2212,10 +2226,12 @@ mod tests {
                 branch: None,
                 base_branch: None,
                 task_id: None,
+                task_ref: None,
                 attempt_id: None,
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                brief_path: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
             })
@@ -2297,10 +2313,12 @@ mod tests {
                 branch: None,
                 base_branch: None,
                 task_id: None,
+                task_ref: None,
                 attempt_id: None,
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                brief_path: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
             })
@@ -2360,10 +2378,12 @@ mod tests {
                     branch: None,
                     base_branch: None,
                     task_id: None,
+                    task_ref: None,
                     attempt_id: None,
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
                 },

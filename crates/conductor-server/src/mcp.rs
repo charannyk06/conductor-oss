@@ -82,10 +82,12 @@ impl McpBackend for AppStateMcpBackend {
                 branch: args.branch.clone(),
                 base_branch: args.base_branch.clone(),
                 task_id: None,
+                task_ref: None,
                 attempt_id: None,
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                brief_path: None,
                 attachments: Vec::new(),
                 source: "mcp".to_string(),
             })
