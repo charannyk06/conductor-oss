@@ -927,6 +927,7 @@ pub(crate) fn update_task_dispatch_state(
     target_role: &str,
     attempt_ref: Option<&str>,
 ) -> bool {
+    let canonical_target_role = normalize_role(target_role);
     let mut located: Option<(usize, usize, BoardTaskRecord)> = None;
     for (column_index, column) in board.columns.iter_mut().enumerate() {
         if let Some(task_index) = column.tasks.iter().position(|task| task.id == task_id) {
@@ -945,7 +946,7 @@ pub(crate) fn update_task_dispatch_state(
     }
 
     let source_role = board.columns[source_column_index].role.clone();
-    if target_role == source_role {
+    if source_role == canonical_target_role {
         let insert_at = source_task_index.min(board.columns[source_column_index].tasks.len());
         board.columns[source_column_index]
             .tasks
@@ -956,13 +957,13 @@ pub(crate) fn update_task_dispatch_state(
     if let Some(target_column) = board
         .columns
         .iter_mut()
-        .find(|column| column.role == target_role)
+        .find(|column| column.role == canonical_target_role)
     {
         target_column.tasks.push(task);
     } else {
         board.columns.push(ParsedBoardColumn {
-            role: target_role.to_string(),
-            heading: default_heading_for_role(target_role).to_string(),
+            role: canonical_target_role.to_string(),
+            heading: default_heading_for_role(canonical_target_role).to_string(),
             tasks: vec![task],
         });
     }
@@ -1293,4 +1294,105 @@ fn sanitize_string_list(values: Option<Vec<String>>) -> Vec<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{update_task_dispatch_state, BoardTaskRecord, ParsedBoard, ParsedBoardColumn};
+
+    fn task(id: &str) -> BoardTaskRecord {
+        BoardTaskRecord {
+            id: id.to_string(),
+            text: format!("Task {id}"),
+            checked: false,
+            agent: None,
+            project: None,
+            task_type: None,
+            priority: None,
+            task_ref: None,
+            attempt_ref: None,
+            issue_id: None,
+            github_item_id: None,
+            attachments: Vec::new(),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn update_task_dispatch_state_normalizes_same_role_variants() {
+        let mut board = ParsedBoard {
+            prefix_lines: Vec::new(),
+            columns: vec![ParsedBoardColumn {
+                role: "inProgress".to_string(),
+                heading: "In progress".to_string(),
+                tasks: vec![task("task-1"), task("task-2")],
+            }],
+            settings_block: Vec::new(),
+        };
+
+        let updated = update_task_dispatch_state(&mut board, "task-1", "In progress", Some("a-1"));
+
+        assert!(updated);
+        assert_eq!(board.columns.len(), 1);
+        assert_eq!(board.columns[0].role, "inProgress");
+        assert_eq!(board.columns[0].tasks.len(), 2);
+        assert_eq!(board.columns[0].tasks[0].id, "task-1");
+        assert_eq!(
+            board.columns[0].tasks[0].attempt_ref.as_deref(),
+            Some("a-1")
+        );
+        assert_eq!(board.columns[0].tasks[1].id, "task-2");
+    }
+
+    #[test]
+    fn update_task_dispatch_state_reuses_existing_canonical_target_column() {
+        let mut board = ParsedBoard {
+            prefix_lines: Vec::new(),
+            columns: vec![
+                ParsedBoardColumn {
+                    role: "intake".to_string(),
+                    heading: "To do".to_string(),
+                    tasks: vec![task("task-1")],
+                },
+                ParsedBoardColumn {
+                    role: "inProgress".to_string(),
+                    heading: "In progress".to_string(),
+                    tasks: vec![task("task-2")],
+                },
+            ],
+            settings_block: Vec::new(),
+        };
+
+        let updated = update_task_dispatch_state(&mut board, "task-1", "in_progress", None);
+
+        assert!(updated);
+        assert_eq!(board.columns.len(), 2);
+        assert!(board.columns[0].tasks.is_empty());
+        assert_eq!(board.columns[1].role, "inProgress");
+        assert_eq!(board.columns[1].tasks.len(), 2);
+        assert_eq!(board.columns[1].tasks[1].id, "task-1");
+    }
+
+    #[test]
+    fn update_task_dispatch_state_creates_columns_with_canonical_role_and_heading() {
+        let mut board = ParsedBoard {
+            prefix_lines: Vec::new(),
+            columns: vec![ParsedBoardColumn {
+                role: "intake".to_string(),
+                heading: "To do".to_string(),
+                tasks: vec![task("task-1")],
+            }],
+            settings_block: Vec::new(),
+        };
+
+        let updated = update_task_dispatch_state(&mut board, "task-1", "In progress", None);
+
+        assert!(updated);
+        assert_eq!(board.columns.len(), 2);
+        assert!(board.columns[0].tasks.is_empty());
+        assert_eq!(board.columns[1].role, "inProgress");
+        assert_eq!(board.columns[1].heading, "In progress");
+        assert_eq!(board.columns[1].tasks.len(), 1);
+        assert_eq!(board.columns[1].tasks[0].id, "task-1");
+    }
 }

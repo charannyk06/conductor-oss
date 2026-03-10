@@ -128,7 +128,7 @@ fn session_snapshot_signature(payload: &Value, session_id: &str) -> Option<Strin
 
     match matching {
         Some(session) => Some(format!(
-            "{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{}",
             session
                 .get("id")
                 .and_then(Value::as_str)
@@ -147,6 +147,18 @@ fn session_snapshot_signature(payload: &Value, session_id: &str) -> Option<Strin
                 .unwrap_or_default(),
             session
                 .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            session
+                .get("parserState")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            session
+                .get("runtimeStatus")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            session
+                .get("source")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         )),
@@ -349,8 +361,7 @@ async fn feed_stream(
                                 json!({ "type": "refresh", "sessionId": session_id }).to_string(),
                             )));
                         };
-                        let next_signature =
-                            session_snapshot_signature(&payload, &session_id)?;
+                        let next_signature = session_snapshot_signature(&payload, &session_id)?;
                         let mut feed_state = feed_state.lock().await;
                         if next_signature == feed_state.0 {
                             return None;

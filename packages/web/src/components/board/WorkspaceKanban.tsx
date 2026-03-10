@@ -1123,6 +1123,7 @@ export function WorkspaceKanban({
     }
     if (boardRefreshTimeoutRef.current !== null) {
       window.clearTimeout(boardRefreshTimeoutRef.current);
+      boardRefreshTimeoutRef.current = null;
     }
     boardRefreshTimeoutRef.current = window.setTimeout(() => {
       boardRefreshTimeoutRef.current = null;
@@ -1225,20 +1226,24 @@ export function WorkspaceKanban({
     scheduleBoardRefresh({ silent: true });
   }, [projectId, projectSessions, scheduleBoardRefresh]);
 
-  useEffect(() => () => {
-    if (boardRefreshTimeoutRef.current !== null) {
-      window.clearTimeout(boardRefreshTimeoutRef.current);
-    }
-  }, []);
+  useEffect(() => {
+    return () => {
+      if (boardRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(boardRefreshTimeoutRef.current);
+        boardRefreshTimeoutRef.current = null;
+      }
+    };
+  }, [loadBoard, projectId]);
 
   useEffect(() => {
     if (!projectSyncOpen || !projectId) return;
     void loadGitHubProjects();
   }, [loadGitHubProjects, projectId, projectSyncOpen]);
 
+  const allColumns = board?.columns ?? [];
+
   const visibleColumns = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const source = board?.columns ?? [];
     const allowedRoles =
       viewFilter === "all"
         ? null
@@ -1258,7 +1263,7 @@ export function WorkspaceKanban({
             "merge",
           ]);
 
-    return source
+    return allColumns
       .filter((column) => !allowedRoles || allowedRoles.has(column.role))
       .map((column) => {
         if (!query) return column;
@@ -1277,7 +1282,7 @@ export function WorkspaceKanban({
           }),
         };
       });
-  }, [board?.columns, search, viewFilter]);
+  }, [allColumns, search, viewFilter]);
 
   const filteredContextFiles = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
@@ -1348,9 +1353,9 @@ export function WorkspaceKanban({
     expandedContextFolders,
   ]);
   const composerRoleLabel = useMemo(() => {
-    const matchingColumn = visibleColumns.find((column) => column.role === composerRole);
+    const matchingColumn = allColumns.find((column) => column.role === composerRole);
     return matchingColumn?.heading || ROLE_LABEL[composerRole];
-  }, [composerRole, visibleColumns]);
+  }, [allColumns, composerRole]);
   const editLinkedSessionOptions = useMemo(() => {
     if (!editingTask) return projectSessions;
     const activeTask = findBoardTask(board, editingTask.task.id) ?? editingTask;
@@ -2876,7 +2881,7 @@ export function WorkspaceKanban({
                           }
                           className="h-10 w-full rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                         >
-                          {visibleColumns.map((column) => (
+                          {allColumns.map((column) => (
                             <option
                               key={column.role}
                               value={column.role}
