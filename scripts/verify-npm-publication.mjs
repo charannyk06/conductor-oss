@@ -1,10 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-
-const NPM_EXECUTABLE = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function parseArgs(argv) {
   const options = {
@@ -124,15 +122,19 @@ async function waitForPublication({ packageName, version, timeoutMs, pollInterva
   throw new Error(`Timed out waiting for ${packageName}@${version} to become downloadable: ${lastProblem}`);
 }
 
-function packPublishedTarball({ packageName, version, destinationDir }) {
-  return execFileSync(
-    NPM_EXECUTABLE,
-    ["pack", "--silent", "--pack-destination", destinationDir, `${packageName}@${version}`],
-    {
-      cwd: destinationDir,
-      encoding: "utf8",
-    },
-  ).trim();
+async function downloadPublishedTarball({ packageName, version, tarballUrl, destinationDir }) {
+  const response = await fetch(tarballUrl, {
+    method: "GET",
+    redirect: "follow",
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download tarball for ${packageName}@${version}: ${response.status} ${response.statusText}`);
+  }
+
+  const tarballPath = join(destinationDir, `${packageName.replaceAll("/", "-")}-${version}.tgz`);
+  writeFileSync(tarballPath, Buffer.from(await response.arrayBuffer()));
+  return tarballPath;
 }
 
 function unpackTarball(tarballPath, destinationDir) {
@@ -175,12 +177,12 @@ async function main() {
 
   try {
     const metadata = await waitForPublication(options);
-    const tarballName = packPublishedTarball({
+    const tarballPath = await downloadPublishedTarball({
       packageName: options.packageName,
       version: options.version,
+      tarballUrl: metadata.dist.tarball,
       destinationDir: tempDir,
     });
-    const tarballPath = join(tempDir, tarballName);
     unpackTarball(tarballPath, tempDir);
     verifyExtractedPackage({
       packageName: options.packageName,

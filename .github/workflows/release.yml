@@ -101,15 +101,20 @@ jobs:
         id: check
         shell: bash
         run: |
+          last_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           tag="${{ steps.version.outputs.tag_name }}"
-          ver="${{ steps.version.outputs.new_version }}"
+          commits_since_last_tag=""
 
-          if git rev-parse "$tag" >/dev/null 2>&1; then
+          if [ -n "$last_tag" ]; then
+            commits_since_last_tag=$(git rev-list --max-count=1 "$last_tag"..HEAD)
+          fi
+
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ] && [ -n "$last_tag" ] && [ -z "$commits_since_last_tag" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "⚠️ No commits since $last_tag — skipping"
+          elif git rev-parse "$tag" >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "⚠️ Tag $tag already exists — skipping"
-          elif npm view "conductor-oss@$ver" version >/dev/null 2>&1; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "⚠️ conductor-oss@$ver already on npm — skipping"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -365,6 +370,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          version="${{ needs.version.outputs.new_version }}"
+          if npm view "conductor-oss@$version" version >/dev/null 2>&1; then
+            echo "Skipping conductor-oss@$version; already published."
+            exit 0
+          fi
+
           npm publish "${{ steps.pack.outputs.tarball_path }}" --access public --provenance --tag release-candidate
 
       - name: Verify published npm packages
@@ -418,11 +429,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          version="${{ needs.version.outputs.new_version }}"
+          if npm view "@charannyk06/conductor-oss@$version" version --registry https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "Skipping @charannyk06/conductor-oss@$version; already published."
+            exit 0
+          fi
+
           npm publish "${{ steps.pack_github.outputs.tarball_path }}" --access public
 
       - name: Tag release
         shell: bash
         run: |
+          if git rev-parse "${{ needs.version.outputs.tag_name }}" >/dev/null 2>&1; then
+            echo "Tag ${{ needs.version.outputs.tag_name }} already exists."
+            exit 0
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "${{ needs.version.outputs.tag_name }}" \
@@ -454,6 +476,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          if gh release view "${{ needs.version.outputs.tag_name }}" >/dev/null 2>&1; then
+            echo "GitHub release ${{ needs.version.outputs.tag_name }} already exists."
+            exit 0
+          fi
+
           gh release create "${{ needs.version.outputs.tag_name }}" \
             "${{ steps.pack.outputs.tarball_path }}" \
             .release-native/*.tgz \
