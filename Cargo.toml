@@ -33,7 +33,7 @@ serde_yaml = "0.9"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
 
 # Git
-git2 = { version = "0.19", default-features = false }
+git2 = { version = "0.20", default-features = false }
 
 # File watching
 notify = "7.0"
