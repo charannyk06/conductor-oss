@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SUPERSET_TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
+import { TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
 import {
   buildTerminalSocketUrl,
   detectMobileTerminalInputRail,
@@ -52,7 +52,7 @@ test("getSessionTerminalViewportOptions keeps compact fonts for phones and large
     lineHeight: 1.08,
   });
   assert.deepEqual(getSessionTerminalViewportOptions(1280), {
-    fontFamily: SUPERSET_TERMINAL_FONT_FAMILY,
+    fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 17,
     lineHeight: 1.06,
   });

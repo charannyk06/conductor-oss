@@ -6,7 +6,7 @@ import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
 import type { ITerminalOptions, Terminal as XTerminal } from "@xterm/xterm";
 import { AlertCircle, ChevronDown, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { SUPERSET_TERMINAL_FONT_FAMILY, getSupersetLikeTerminalTheme } from "@/components/terminal/xtermTheme";
+import { TERMINAL_FONT_FAMILY, getTerminalTheme } from "@/components/terminal/xtermTheme";
 
 interface TerminalViewProps {
   sessionId: string;
@@ -163,7 +163,7 @@ function getTerminalViewportOptions(width: number): Pick<ITerminalOptions, "font
   }
 
   return {
-    fontFamily: SUPERSET_TERMINAL_FONT_FAMILY,
+    fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 16,
     lineHeight: 1.1,
   };
@@ -338,7 +338,7 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
         fontFamily: viewportOptions.fontFamily,
         lineHeight: viewportOptions.lineHeight,
         convertEol: true,
-        theme: getSupersetLikeTerminalTheme(isLight),
+        theme: getTerminalTheme(isLight),
         scrollbar: {
           showScrollbar: false,
         },

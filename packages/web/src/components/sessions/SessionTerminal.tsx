@@ -7,7 +7,7 @@ import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
 import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xterm/xterm";
 import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { getSupersetLikeTerminalTheme } from "@/components/terminal/xtermTheme";
+import { getTerminalTheme } from "@/components/terminal/xtermTheme";
 import { extractLocalFileTransferPath, uploadProjectAttachments } from "./attachmentUploads";
 import { captureTerminalViewport, restoreTerminalViewport } from "./terminalViewport";
 import {
@@ -917,7 +917,7 @@ export function SessionTerminal({
         lineHeight: viewportOptions.lineHeight,
         scrollSensitivity: 1.1,
         scrollback: LIVE_TERMINAL_SCROLLBACK,
-        theme: getSupersetLikeTerminalTheme(isLight),
+        theme: getTerminalTheme(isLight),
         scrollbar: {
           showScrollbar: false,
         },

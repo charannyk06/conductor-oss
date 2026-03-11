@@ -1,6 +1,6 @@
 import type { ITerminalOptions } from "@xterm/xterm";
 
-export const SUPERSET_TERMINAL_FONT_FAMILY = [
+export const TERMINAL_FONT_FAMILY = [
   "MesloLGM Nerd Font",
   "MesloLGM NF",
   "MesloLGS NF",
@@ -17,7 +17,7 @@ export const SUPERSET_TERMINAL_FONT_FAMILY = [
   "monospace",
 ].join(", ");
 
-const SUPERSET_TERMINAL_THEME_DARK: NonNullable<ITerminalOptions["theme"]> = {
+const TERMINAL_THEME_DARK: NonNullable<ITerminalOptions["theme"]> = {
   background: "#000000",
   foreground: "#ffffff",
   cursor: "#ffffff",
@@ -41,7 +41,7 @@ const SUPERSET_TERMINAL_THEME_DARK: NonNullable<ITerminalOptions["theme"]> = {
   brightWhite: "#eeeeec",
 };
 
-const SUPERSET_TERMINAL_THEME_LIGHT: NonNullable<ITerminalOptions["theme"]> = {
+const TERMINAL_THEME_LIGHT: NonNullable<ITerminalOptions["theme"]> = {
   background: "#ffffff",
   foreground: "#000000",
   cursor: "#000000",
@@ -65,6 +65,6 @@ const SUPERSET_TERMINAL_THEME_LIGHT: NonNullable<ITerminalOptions["theme"]> = {
   brightWhite: "#eeeeec",
 };
 
-export function getSupersetLikeTerminalTheme(isLight: boolean): NonNullable<ITerminalOptions["theme"]> {
-  return isLight ? SUPERSET_TERMINAL_THEME_LIGHT : SUPERSET_TERMINAL_THEME_DARK;
+export function getTerminalTheme(isLight: boolean): NonNullable<ITerminalOptions["theme"]> {
+  return isLight ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
 }

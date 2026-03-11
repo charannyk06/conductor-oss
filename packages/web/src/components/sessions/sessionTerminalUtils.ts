@@ -1,4 +1,4 @@
-import { SUPERSET_TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
+import { TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
 
 export type SessionTerminalViewportOptions = {
   fontFamily: string;
@@ -60,7 +60,7 @@ export function getSessionTerminalViewportOptions(width: number): SessionTermina
   }
 
   return {
-    fontFamily: SUPERSET_TERMINAL_FONT_FAMILY,
+    fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 17,
     lineHeight: 1.06,
   };
