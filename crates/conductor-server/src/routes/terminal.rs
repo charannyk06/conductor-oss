@@ -38,6 +38,21 @@ const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
+#[derive(Copy, Clone)]
+enum TerminalSnapshotReason {
+    Attach,
+    Lagged,
+}
+
+impl TerminalSnapshotReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attach => "attach",
+            Self::Lagged => "lagged",
+        }
+    }
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
@@ -349,6 +364,17 @@ async fn handle_terminal_socket(
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
     if let Some(session) = state.get_session(&session_id).await {
         if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
+            if socket
+                .send(
+                    Message::Text(
+                        server_snapshot_event(&session_id, TerminalSnapshotReason::Attach).into(),
+                    ),
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
             let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
             if !restore_bytes.is_empty()
                 && socket
@@ -402,6 +428,21 @@ async fn handle_terminal_socket(
                         if let Some(session) = state.get_session(&session_id).await {
                             if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await
                             {
+                                if socket
+                                    .send(
+                                        Message::Text(
+                                            server_snapshot_event(
+                                                &session_id,
+                                                TerminalSnapshotReason::Lagged,
+                                            )
+                                            .into(),
+                                        ),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
                                 let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
                                 if !restore_bytes.is_empty()
                                     && socket
@@ -675,6 +716,15 @@ fn server_ready_event(session_id: &str) -> String {
     .to_string()
 }
 
+fn server_snapshot_event(session_id: &str, reason: TerminalSnapshotReason) -> String {
+    json!({
+        "type": "snapshot",
+        "sessionId": session_id,
+        "reason": reason.as_str(),
+    })
+    .to_string()
+}
+
 fn server_ack_event(session_id: &str, action: &str) -> String {
     json!({
         "type": "ack",
@@ -730,6 +780,17 @@ mod tests {
         assert_eq!(enter, "\r");
         assert_eq!(ctrl_c, "\u{3}");
         assert_eq!(arrow_up, "\u{1b}[A");
+    }
+
+    #[test]
+    fn server_snapshot_event_includes_reason() {
+        let payload = server_snapshot_event("session-123", TerminalSnapshotReason::Attach);
+        let parsed: Value =
+            serde_json::from_str(&payload).expect("snapshot payload should be valid json");
+
+        assert_eq!(parsed["type"], "snapshot");
+        assert_eq!(parsed["sessionId"], "session-123");
+        assert_eq!(parsed["reason"], "attach");
     }
 
     #[test]
