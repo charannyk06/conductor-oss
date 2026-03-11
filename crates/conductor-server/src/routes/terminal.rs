@@ -34,6 +34,7 @@ const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
 const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 384 * 1024;
 const ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
+const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
@@ -120,13 +121,19 @@ async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     }
 
     let access = state.config.read().await.access.clone();
-    let token = if should_issue_terminal_token(&access) {
+    let token_required = should_issue_terminal_token(&access);
+    let token = if token_required {
         create_terminal_token(&id).ok()
     } else {
         None
     };
 
-    Json(json!({ "token": token })).into_response()
+    Json(json!({
+        "token": token,
+        "required": token_required,
+        "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
+    }))
+    .into_response()
 }
 
 async fn terminal_snapshot(
@@ -628,7 +635,7 @@ fn verify_terminal_token(session_id: &str, token: &str) -> Result<bool> {
 
 fn create_terminal_token(session_id: &str) -> Result<String> {
     let secret = terminal_token_secret();
-    let expires_at = chrono::Utc::now().timestamp() + 60;
+    let expires_at = chrono::Utc::now().timestamp() + TERMINAL_TOKEN_TTL_SECONDS;
     let payload = format!("{session_id}:{expires_at}");
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())?;
     mac.update(payload.as_bytes());

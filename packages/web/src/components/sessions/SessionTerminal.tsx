@@ -23,9 +23,13 @@ interface SessionTerminalProps {
 }
 
 type TerminalConnectionInfo = {
-  transport: "websocket" | "http-poll";
+  transport: "websocket" | "snapshot";
   wsUrl: string | null;
   pollIntervalMs: number;
+  interactive: boolean;
+  requiresToken: boolean;
+  tokenExpiresInSeconds: number | null;
+  fallbackReason: string | null;
 };
 
 type TerminalSnapshot = {
@@ -59,7 +63,6 @@ const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
   /\x1b\[(?:[?>])[\d;]*c/g,
   /\x1b\](?:10|11|12|4;\d+);[\s\S]*?(?:\x07|\x1b\\)/g,
 ];
-const ANSI_ESCAPE_PATTERN = /\u001b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\u0007|\u001b\\))/g;
 
 function shellEscapePath(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
@@ -75,19 +78,31 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
   });
   const data = (await response.json().catch(() => null)) as
     | {
-        transport?: "websocket" | "http-poll";
+        transport?: "websocket" | "snapshot";
         wsUrl?: string | null;
         pollIntervalMs?: number;
+        interactive?: boolean;
+        requiresToken?: boolean;
+        tokenExpiresInSeconds?: number | null;
+        fallbackReason?: string | null;
         error?: string;
       }
     | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal connection: ${response.status}`);
   }
-  const transport = data?.transport === "http-poll" ? "http-poll" : "websocket";
+  const transport = data?.transport === "snapshot" ? "snapshot" : "websocket";
   const pollIntervalMs = typeof data?.pollIntervalMs === "number" && Number.isFinite(data.pollIntervalMs) && data.pollIntervalMs >= 100
     ? Math.round(data.pollIntervalMs)
     : DEFAULT_REMOTE_POLL_INTERVAL_MS;
+  const interactive = data?.interactive === true;
+  const requiresToken = data?.requiresToken === true;
+  const tokenExpiresInSeconds = typeof data?.tokenExpiresInSeconds === "number" && Number.isFinite(data.tokenExpiresInSeconds)
+    ? Math.round(data.tokenExpiresInSeconds)
+    : null;
+  const fallbackReason = typeof data?.fallbackReason === "string" && data.fallbackReason.trim().length > 0
+    ? data.fallbackReason.trim()
+    : null;
 
   if (transport === "websocket") {
     if (typeof data?.wsUrl !== "string" || data.wsUrl.trim().length === 0) {
@@ -97,6 +112,10 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
       transport,
       wsUrl: data.wsUrl.trim(),
       pollIntervalMs,
+      interactive,
+      requiresToken,
+      tokenExpiresInSeconds,
+      fallbackReason,
     };
   }
 
@@ -104,6 +123,10 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
     transport,
     wsUrl: null,
     pollIntervalMs,
+    interactive,
+    requiresToken,
+    tokenExpiresInSeconds,
+    fallbackReason,
   };
 }
 
@@ -217,14 +240,6 @@ function stripBrowserTerminalResponses(data: string): string {
   return sanitized;
 }
 
-function sanitizeRemoteTerminalSnapshot(snapshot: string): string {
-  return snapshot
-    .replace(ANSI_ESCAPE_PATTERN, "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\u0000/g, "");
-}
-
 function localFileTransferError(path: string): string {
   const normalized = path.toLowerCase();
   if (normalized.includes("/temporaryitems/") || normalized.includes("nsird_screencaptureui")) {
@@ -299,7 +314,6 @@ export function SessionTerminal({
 }: SessionTerminalProps) {
   const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
-  const remoteConsoleRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerminal | null>(null);
   const fitRef = useRef<XFitAddon | null>(null);
   const searchRef = useRef<XSearchAddon | null>(null);
@@ -330,11 +344,13 @@ export function SessionTerminal({
   const lastAppliedInsertNonceRef = useRef<number>(0);
 
   const [terminalReady, setTerminalReady] = useState(false);
-  const [transportMode, setTransportMode] = useState<"websocket" | "http-poll">("websocket");
+  const [transportMode, setTransportMode] = useState<"websocket" | "snapshot">("websocket");
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [transportError, setTransportError] = useState<string | null>(null);
   const [pollIntervalMs, setPollIntervalMs] = useState(DEFAULT_REMOTE_POLL_INTERVAL_MS);
+  const [interactiveTerminal, setInteractiveTerminal] = useState(true);
+  const [transportNotice, setTransportNotice] = useState<string | null>(null);
   const [reconnectToken, setReconnectToken] = useState(0);
   const [message, setMessage] = useState("");
   const [liveInputDraft, setLiveInputDraft] = useState("");
@@ -366,19 +382,15 @@ export function SessionTerminal({
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
   const shouldStreamLiveTerminal = expectsLiveTerminal && active && pageVisible;
   const showResumeRail = RESUMABLE_STATUSES.has(normalizedSessionStatus) && !expectsLiveTerminal;
-  const showRemoteInputRail = expectsLiveTerminal && transportMode === "http-poll";
-  const showMobileInputRail = expectsLiveTerminal && useMobileInputRail;
-  const showLiveInputRail = showRemoteInputRail || showMobileInputRail;
-  const isRemoteLiveConsole = showRemoteInputRail;
-  const remoteConsoleText = useMemo(
-    () => sanitizeRemoteTerminalSnapshot(snapshotAnsi),
-    [snapshotAnsi],
-  );
+  const showSnapshotFallbackRail = expectsLiveTerminal && interactiveTerminal && transportMode === "snapshot";
+  const showMobileInputRail = expectsLiveTerminal && interactiveTerminal && useMobileInputRail && transportMode === "websocket";
+  const showLiveInputRail = showSnapshotFallbackRail || showMobileInputRail;
   const railPlaceholder = normalizedSessionStatus === "done"
     ? "Continue the session..."
     : normalizedSessionStatus === "needs_input" || normalizedSessionStatus === "stuck"
       ? "Answer the agent and resume..."
       : "Restart this session with a follow-up...";
+  const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && connectionState === "live";
 
   const normalizeWhitespaceOnlyDraft = useCallback(() => {
     setMessage((current) => (current.trim().length === 0 ? "" : current));
@@ -406,6 +418,7 @@ export function SessionTerminal({
   const requestReconnect = useCallback(() => {
     clearReconnectTimer();
     setTransportError(null);
+    setTransportNotice(null);
     setConnectionState("connecting");
     setTransportMode("websocket");
     setSocketBaseUrl(null);
@@ -424,7 +437,7 @@ export function SessionTerminal({
     const term = termRef.current;
     if (!term) return;
 
-    if (transportMode === "http-poll") {
+    if (transportMode === "snapshot") {
       await enqueueTerminalHttpOperation(() => postTerminalResize(sessionId, term.cols, term.rows));
       return;
     }
@@ -439,12 +452,15 @@ export function SessionTerminal({
   }, [enqueueTerminalHttpOperation, sessionId, transportMode]);
 
   const sendTerminalKeys = useCallback(async (data: string) => {
+    if (!interactiveTerminal) {
+      throw new Error("Operator access is required for live terminal input");
+    }
     const keys = stripBrowserTerminalResponses(data);
     if (keys.length === 0) {
       return;
     }
 
-    if (transportMode === "http-poll") {
+    if (transportMode === "snapshot") {
       await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { keys }));
       return;
     }
@@ -454,10 +470,14 @@ export function SessionTerminal({
       throw new Error("Terminal is not connected");
     }
     socket.send(JSON.stringify({ type: "keys", keys }));
-  }, [enqueueTerminalHttpOperation, sessionId, transportMode]);
+  }, [enqueueTerminalHttpOperation, interactiveTerminal, sessionId, transportMode]);
 
   const sendTerminalSpecial = useCallback(async (special: string) => {
-    if (transportMode === "http-poll") {
+    if (!interactiveTerminal) {
+      throw new Error("Operator access is required for live terminal input");
+    }
+
+    if (transportMode === "snapshot") {
       await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { special }));
       return;
     }
@@ -467,7 +487,7 @@ export function SessionTerminal({
       throw new Error("Terminal is not connected");
     }
     socket.send(JSON.stringify({ type: "keys", special }));
-  }, [enqueueTerminalHttpOperation, sessionId, transportMode]);
+  }, [enqueueTerminalHttpOperation, interactiveTerminal, sessionId, transportMode]);
 
   const updateScrollState = useCallback(() => {
     const term = termRef.current;
@@ -598,7 +618,10 @@ export function SessionTerminal({
     if (!files.length) return;
     setSendError(null);
     try {
-      if (expectsLiveTerminal && connectionState === "live") {
+      if (expectsLiveTerminal && !interactiveTerminal) {
+        throw new Error(transportNotice ?? "Operator access is required for live terminal input");
+      }
+      if (canSendLiveInput) {
         await injectFilesIntoTerminal(files);
         return;
       }
@@ -606,7 +629,7 @@ export function SessionTerminal({
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to process files");
     }
-  }, [connectionState, expectsLiveTerminal, injectFilesIntoTerminal, queueResumeAttachments]);
+  }, [canSendLiveInput, expectsLiveTerminal, injectFilesIntoTerminal, interactiveTerminal, queueResumeAttachments, transportNotice]);
 
   const applyFetchedSnapshot = useCallback((snapshot: TerminalSnapshot) => {
     snapshotAppliedRef.current = null;
@@ -669,6 +692,8 @@ export function SessionTerminal({
     setConnectionState("connecting");
     setTransportError(null);
     setPollIntervalMs(DEFAULT_REMOTE_POLL_INTERVAL_MS);
+    setInteractiveTerminal(true);
+    setTransportNotice(null);
     setMessage("");
     setLiveInputDraft("");
     setAttachments([]);
@@ -770,11 +795,14 @@ export function SessionTerminal({
         setTransportMode(connection.transport);
         setPollIntervalMs(connection.pollIntervalMs);
         setSocketBaseUrl(connection.wsUrl);
+        setInteractiveTerminal(connection.interactive);
+        setTransportNotice(connection.fallbackReason);
         setTransportError(null);
         setConnectionState("connecting");
       } catch (err) {
         if (!mounted) return;
         setTransportError(err instanceof Error ? err.message : "Failed to resolve terminal connection");
+        setTransportNotice(null);
         setConnectionState("error");
       }
     })();
@@ -785,15 +813,6 @@ export function SessionTerminal({
   }, [expectsLiveTerminal, reconnectToken, sessionId, shouldStreamLiveTerminal]);
 
   useEffect(() => {
-    if (isRemoteLiveConsole) {
-      termRef.current?.dispose();
-      termRef.current = null;
-      fitRef.current = null;
-      searchRef.current = null;
-      setTerminalReady(false);
-      return;
-    }
-
     let term: XTerminal | null = null;
     let fit: XFitAddon | null = null;
     let mounted = true;
@@ -874,7 +893,7 @@ export function SessionTerminal({
       termRef.current = term;
       fitRef.current = fit;
       searchRef.current = searchAddon;
-      term.options.disableStdin = showLiveInputRail;
+      term.options.disableStdin = !interactiveTerminal || showLiveInputRail || transportMode === "snapshot";
       setTerminalReady(true);
       updateScrollState();
 
@@ -920,15 +939,15 @@ export function SessionTerminal({
       searchRef.current = null;
       setTerminalReady(false);
     };
-  }, [isRemoteLiveConsole, scheduleRendererRecovery, sendTerminalKeys, updateScrollState]);
+  }, [scheduleRendererRecovery, sendTerminalKeys, updateScrollState]);
 
   useEffect(() => {
     const term = termRef.current;
     if (!term) {
       return;
     }
-    term.options.disableStdin = showLiveInputRail;
-  }, [showLiveInputRail]);
+    term.options.disableStdin = !interactiveTerminal || showLiveInputRail || transportMode === "snapshot";
+  }, [interactiveTerminal, showLiveInputRail, transportMode]);
 
   useEffect(() => {
     if (!active) {
@@ -962,7 +981,7 @@ export function SessionTerminal({
       return;
     }
 
-    if (transportMode === "http-poll" && expectsLiveTerminal) {
+    if (transportMode === "snapshot" && expectsLiveTerminal) {
       const previousBaseY = term.buffer.active.baseY;
       const previousViewportY = term.buffer.active.viewportY;
       const scrollGap = Math.max(0, previousBaseY - previousViewportY);
@@ -1040,39 +1059,6 @@ export function SessionTerminal({
   }, [active, expectsLiveTerminal, sessionId, snapshotAnsi, snapshotReady, terminalReady, transportMode, updateScrollState]);
 
   useEffect(() => {
-    if (!isRemoteLiveConsole) {
-      return;
-    }
-
-    const container = remoteConsoleRef.current;
-    if (!container) {
-      return;
-    }
-
-    const previousScrollHeight = container.scrollHeight;
-    const previousScrollTop = container.scrollTop;
-    const previousClientHeight = container.clientHeight;
-    const scrollGap = Math.max(0, previousScrollHeight - previousClientHeight - previousScrollTop);
-    const shouldFollow = scrollGap <= 24;
-
-    requestAnimationFrame(() => {
-      const current = remoteConsoleRef.current;
-      if (!current) {
-        return;
-      }
-
-      if (shouldFollow) {
-        current.scrollTop = current.scrollHeight;
-      } else {
-        const nextTop = Math.max(0, current.scrollHeight - current.clientHeight - scrollGap);
-        current.scrollTop = nextTop;
-      }
-
-      setShowScrollToBottom(current.scrollTop + current.clientHeight < current.scrollHeight - 8);
-    });
-  }, [isRemoteLiveConsole, remoteConsoleText]);
-
-  useEffect(() => {
     const handleVisibilityChange = () => {
       const visible = !document.hidden;
       setPageVisible(visible);
@@ -1115,7 +1101,7 @@ export function SessionTerminal({
     if (
       !snapshotReady
       || !shouldStreamLiveTerminal
-      || transportMode !== "http-poll"
+      || transportMode !== "snapshot"
     ) {
       return;
     }
@@ -1405,7 +1391,7 @@ export function SessionTerminal({
     lastAppliedInsertNonceRef.current = pendingInsert.nonce;
     setSendError(null);
 
-    if (expectsLiveTerminal && connectionState === "live") {
+    if (canSendLiveInput) {
       const inlineText = pendingInsert.inlineText.trim();
       if (inlineText.length > 0) {
         void sendTerminalKeys(`${inlineText} `).catch((err: unknown) => {
@@ -1415,13 +1401,18 @@ export function SessionTerminal({
       return;
     }
 
+    if (expectsLiveTerminal && !interactiveTerminal) {
+      setSendError(transportNotice ?? "Operator access is required for live terminal input");
+      return;
+    }
+
     const draftText = pendingInsert.draftText.trim();
     if (draftText.length === 0) {
       return;
     }
 
     setMessage((current) => (current.trim().length > 0 ? `${current}\n\n${draftText}` : draftText));
-  }, [connectionState, expectsLiveTerminal, pendingInsert, sendTerminalKeys]);
+  }, [canSendLiveInput, expectsLiveTerminal, interactiveTerminal, pendingInsert, sendTerminalKeys, transportNotice]);
 
   const runSearch = useCallback((direction: "next" | "prev") => {
     const addon = searchRef.current;
@@ -1436,16 +1427,6 @@ export function SessionTerminal({
   }, [searchQuery]);
 
   const scrollToBottom = useCallback(() => {
-    if (isRemoteLiveConsole) {
-      const container = remoteConsoleRef.current;
-      if (!container) {
-        return;
-      }
-      container.scrollTop = container.scrollHeight;
-      setShowScrollToBottom(false);
-      return;
-    }
-
     const term = termRef.current;
     if (!term) {
       return;
@@ -1459,7 +1440,7 @@ export function SessionTerminal({
         term.focus();
       }
     }
-  }, [isRemoteLiveConsole, showLiveInputRail, updateScrollState]);
+  }, [showLiveInputRail, updateScrollState]);
 
   const focusTerminal = useCallback(() => {
     if (showLiveInputRail) {
@@ -1496,13 +1477,6 @@ export function SessionTerminal({
       }
     }
   }, [showLiveInputRail]);
-
-  useEffect(() => {
-    if (isRemoteLiveConsole && searchOpen) {
-      setSearchOpen(false);
-      setSearchQuery("");
-    }
-  }, [isRemoteLiveConsole, searchOpen]);
 
   const handleRemoteInputSubmit = useCallback(async (withEnter: boolean) => {
     const value = liveInputDraft;
@@ -1560,9 +1534,13 @@ export function SessionTerminal({
         }
         if (!plainText) return;
         try {
-          if (expectsLiveTerminal && connectionState === "live") {
+          if (canSendLiveInput) {
             const payload = plainText.startsWith("/") ? shellEscapePath(plainText) : plainText;
             await sendTerminalKeys(payload);
+            return;
+          }
+          if (expectsLiveTerminal && !interactiveTerminal) {
+            setSendError(transportNotice ?? "Operator access is required for live terminal input");
             return;
           }
           setMessage((current) => current.length > 0 ? `${current}\n${plainText}` : plainText);
@@ -1571,7 +1549,7 @@ export function SessionTerminal({
         }
       }}
     >
-      {!isRemoteLiveConsole && searchOpen ? (
+      {searchOpen ? (
         <div className="absolute right-2 top-2 z-10 flex max-w-[calc(100%-1rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur sm:right-3 sm:top-3 sm:max-w-[calc(100%-1.5rem)]">
           <Search className="h-3.5 w-3.5 text-[#8e847d]" />
           <input
@@ -1599,11 +1577,13 @@ export function SessionTerminal({
             <X className="h-3.5 w-3.5" />
           </Button>
         </div>
-      ) : !isRemoteLiveConsole ? (
+      ) : (
         <div className={`absolute right-2 top-2 z-10 flex items-center gap-1.5 transition-opacity sm:right-3 sm:top-3 sm:gap-2 ${
-          connectionState === "live" ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100" : "opacity-100"
+          connectionState === "live" && transportMode === "websocket"
+            ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
+            : "opacity-100"
         }`}>
-          {connectionState !== "live" ? (
+          {connectionState !== "live" || transportMode === "snapshot" ? (
             <Button
               type="button"
               size="icon"
@@ -1634,28 +1614,15 @@ export function SessionTerminal({
             <Search className="h-3.5 w-3.5" />
           </Button>
         </div>
-      ) : null}
+      )}
 
       <div className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3">
-        {isRemoteLiveConsole ? (
-          <div
-            ref={remoteConsoleRef}
-            className="h-full w-full overflow-auto rounded-[10px] border border-white/6 bg-[#050303] px-3 py-2 font-mono text-[12px] leading-5 text-[#efe8e1] touch-pan-y"
-            onScroll={(event) => {
-              const target = event.currentTarget;
-              setShowScrollToBottom(target.scrollTop + target.clientHeight < target.scrollHeight - 8);
-            }}
-          >
-            <pre className="min-h-full whitespace-pre-wrap break-words">{remoteConsoleText || (connectionState === "connecting" ? "Connecting remote terminal..." : "")}</pre>
-          </div>
-        ) : (
-          <div
-            ref={containerRef}
-            className="h-full w-full overflow-hidden touch-pan-y"
-            onClick={focusTerminal}
-            onPointerDown={handleTerminalPointerDown}
-          />
-        )}
+        <div
+          ref={containerRef}
+          className="h-full w-full overflow-hidden touch-pan-y"
+          onClick={focusTerminal}
+          onPointerDown={handleTerminalPointerDown}
+        />
       </div>
 
       {showScrollToBottom ? (
@@ -1677,10 +1644,20 @@ export function SessionTerminal({
       {dragActive ? (
         <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center rounded-[18px] border border-dashed border-white/20 bg-black/55">
           <span className="rounded-full border border-white/10 bg-white/6 px-4 py-2 text-[12px] text-[#efe8e1]">
-            {expectsLiveTerminal
+            {expectsLiveTerminal && interactiveTerminal
               ? "Drop files or screenshots to insert uploaded paths into the terminal"
+              : expectsLiveTerminal
+                ? "Live terminal input is read-only in snapshot recovery mode"
               : "Drop files or screenshots to attach them before resuming"}
           </span>
+        </div>
+      ) : null}
+
+      {transportNotice && !showLiveInputRail ? (
+        <div className={`pointer-events-none absolute left-3 right-3 z-10 ${showResumeRail ? "bottom-24" : "bottom-4"}`}>
+          <div className="rounded-[12px] border border-white/8 bg-[#0f0a0a]/92 px-3 py-2 text-[12px] text-[#b8aea6] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur-sm">
+            {transportNotice}
+          </div>
         </div>
       ) : null}
 
@@ -1750,8 +1727,8 @@ export function SessionTerminal({
           </div>
 
           <p className="mt-2 text-[11px] text-[#8e847d]">
-            {showRemoteInputRail
-              ? "Remote/mobile terminal uses a synchronized input rail so typing stays reliable while the terminal view updates."
+            {showSnapshotFallbackRail
+              ? (transportNotice ?? "Live terminal websocket unavailable. Recovery mode keeps the terminal refreshed from server snapshots.")
               : "Mobile terminal uses a synchronized input rail so your draft stays visible while the live console keeps its place."}
           </p>
 

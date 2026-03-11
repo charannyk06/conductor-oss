@@ -1,6 +1,6 @@
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
-import { isLoopbackHost } from "@/lib/accessControl";
-import { guardApiAccess } from "@/lib/auth";
+import { roleMeetsRequirement, isLoopbackHost } from "@/lib/accessControl";
+import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
 import { readRemoteAccessRuntimeState } from "@/lib/remoteAccessRuntime";
 import { NextResponse } from "next/server";
 
@@ -8,8 +8,9 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
+const TERMINAL_TOKEN_TTL_SECONDS = 60;
 
-type TerminalConnectionTransport = "websocket" | "http-poll";
+type TerminalConnectionTransport = "websocket" | "snapshot";
 
 function toWebSocketUrl(baseUrl: string, pathname: string): string {
   const url = new URL(pathname, baseUrl);
@@ -37,15 +38,7 @@ function resolveRequestHostname(request: Request): string {
   }
 }
 
-function resolveTransport(request: Request, backendUrl: string): TerminalConnectionTransport {
-  const requestHost = resolveRequestHostname(request);
-  const backendHost = new URL(backendUrl).hostname.toLowerCase();
-  return isLoopbackHost(requestHost) && isLoopbackHost(backendHost)
-    ? "websocket"
-    : "http-poll";
-}
-
-function resolveRemoteBackendBaseUrl(backendUrl: string): string | null {
+function resolveManagedRemoteBackendBaseUrl(backendUrl: string): string | null {
   const runtimeState = readRemoteAccessRuntimeState();
   if (runtimeState?.provider !== "tailscale" || runtimeState.status !== "ready" || !runtimeState.publicUrl) {
     return null;
@@ -65,6 +58,42 @@ function resolveRemoteBackendBaseUrl(backendUrl: string): string | null {
   }
 }
 
+function resolveWebSocketBaseUrl(request: Request, backendUrl: string): string | null {
+  let backend: URL;
+  try {
+    backend = new URL(backendUrl);
+  } catch {
+    return null;
+  }
+
+  const backendHost = backend.hostname.toLowerCase();
+  if (!isLoopbackHost(backendHost)) {
+    return backend.toString();
+  }
+
+  const requestHost = resolveRequestHostname(request);
+  if (isLoopbackHost(requestHost)) {
+    return backend.toString();
+  }
+
+  return resolveManagedRemoteBackendBaseUrl(backendUrl);
+}
+
+function buildSnapshotFallback(
+  interactive: boolean,
+  reason: string,
+): Response {
+  return NextResponse.json({
+    transport: "snapshot" satisfies TerminalConnectionTransport,
+    wsUrl: null,
+    pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
+    interactive,
+    requiresToken: false,
+    tokenExpiresInSeconds: null,
+    fallbackReason: reason,
+  });
+}
+
 export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> },
@@ -80,20 +109,21 @@ export async function GET(
     );
   }
 
-  const transport = resolveTransport(request, backendUrl);
-  let remoteBackendBaseUrl: string | null = null;
-  if (transport === "http-poll") {
-    remoteBackendBaseUrl = resolveRemoteBackendBaseUrl(backendUrl);
+  const access = await getDashboardAccess(request);
+  const interactive = access.role ? roleMeetsRequirement(access.role, "operator") : false;
+  if (!interactive) {
+    return buildSnapshotFallback(
+      false,
+      "Live terminal control requires operator access. Showing snapshot recovery mode.",
+    );
   }
-  const effectiveTransport: TerminalConnectionTransport = transport === "http-poll" && remoteBackendBaseUrl
-    ? "websocket"
-    : transport;
-  if (effectiveTransport === "http-poll") {
-    return NextResponse.json({
-      transport: effectiveTransport,
-      wsUrl: null,
-      pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
-    });
+
+  const webSocketBaseUrl = resolveWebSocketBaseUrl(request, backendUrl);
+  if (!webSocketBaseUrl) {
+    return buildSnapshotFallback(
+      true,
+      "A browser-connectable terminal websocket is not available for this dashboard URL. Enable the managed private link or expose the backend websocket safely.",
+    );
   }
 
   const { id } = await context.params;
@@ -107,7 +137,12 @@ export async function GET(
   );
 
   const tokenPayload = (await tokenResponse.json().catch(() => null)) as
-    | { token?: string | null; error?: string }
+    | {
+        token?: string | null;
+        required?: boolean;
+        expiresInSeconds?: number | null;
+        error?: string;
+      }
     | null;
 
   if (!tokenResponse.ok) {
@@ -119,7 +154,7 @@ export async function GET(
 
   const wsUrl = new URL(
     toWebSocketUrl(
-      remoteBackendBaseUrl ?? backendUrl,
+      webSocketBaseUrl,
       `/api/sessions/${encodeURIComponent(id)}/terminal/ws`,
     ),
   );
@@ -129,8 +164,14 @@ export async function GET(
   }
 
   return NextResponse.json({
-    transport: effectiveTransport,
+    transport: "websocket" satisfies TerminalConnectionTransport,
     wsUrl: wsUrl.toString(),
     pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
+    interactive: true,
+    requiresToken: tokenPayload?.required === true || typeof tokenPayload?.token === "string",
+    tokenExpiresInSeconds: typeof tokenPayload?.expiresInSeconds === "number"
+      ? tokenPayload.expiresInSeconds
+      : (typeof tokenPayload?.token === "string" ? TERMINAL_TOKEN_TTL_SECONDS : null),
+    fallbackReason: null,
   });
 }
