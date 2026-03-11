@@ -213,7 +213,7 @@ mod tests {
 
         let _ = restored.ensure_terminal_host("session-1").await;
         restored
-            .process_terminal_bytes("session-1", b"\r\nagain")
+            .emit_terminal_bytes("session-1", b"\r\nagain")
             .await;
 
         let appended = restored

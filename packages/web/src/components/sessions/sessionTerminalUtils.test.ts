@@ -6,6 +6,7 @@ import {
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
   normalizeTerminalSnapshot,
+  parseTerminalBinaryFrame,
   sanitizeRemoteTerminalSnapshot,
   stripBrowserTerminalResponses,
 } from "./sessionTerminalUtils";
@@ -38,6 +39,46 @@ test("sanitizeRemoteTerminalSnapshot strips ANSI control sequences and normalize
 test("normalizeTerminalSnapshot converts LF-only snapshots to CRLF for xterm replay", () => {
   assert.equal(normalizeTerminalSnapshot("one\ntwo"), "one\r\ntwo");
   assert.equal(normalizeTerminalSnapshot("one\r\ntwo"), "one\r\ntwo");
+});
+
+test("parseTerminalBinaryFrame decodes restore frames without websocket-side ambiguity", () => {
+  const payload = new TextEncoder().encode("prompt> ");
+  const frame = new Uint8Array(20 + payload.length);
+  frame.set([0x43, 0x54, 0x50, 0x32, 1, 1], 0);
+  const view = new DataView(frame.buffer);
+  view.setBigUint64(6, 42n, false);
+  view.setUint8(14, 1);
+  view.setUint8(15, 2);
+  view.setUint16(16, 120, false);
+  view.setUint16(18, 32, false);
+  frame.set(payload, 20);
+
+  const parsed = parseTerminalBinaryFrame(frame.buffer);
+  assert.deepEqual(parsed, {
+    kind: "restore",
+    sequence: 42,
+    snapshotVersion: 1,
+    reason: "lagged",
+    cols: 120,
+    rows: 32,
+    payload,
+  });
+});
+
+test("parseTerminalBinaryFrame decodes stream frames", () => {
+  const payload = new TextEncoder().encode("line\r\n");
+  const frame = new Uint8Array(14 + payload.length);
+  frame.set([0x43, 0x54, 0x50, 0x32, 1, 2], 0);
+  const view = new DataView(frame.buffer);
+  view.setBigUint64(6, 7n, false);
+  frame.set(payload, 14);
+
+  const parsed = parseTerminalBinaryFrame(frame.buffer);
+  assert.deepEqual(parsed, {
+    kind: "stream",
+    sequence: 7,
+    payload,
+  });
 });
 
 test("getSessionTerminalViewportOptions keeps compact fonts for phones and larger fonts for desktop", () => {

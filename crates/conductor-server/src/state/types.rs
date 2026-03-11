@@ -14,9 +14,21 @@ pub use conductor_core::types::{
 
 #[derive(Clone, Debug)]
 pub enum TerminalStreamEvent {
-    Output(Vec<u8>),
+    Stream(TerminalStreamChunk),
     Exit(i32),
     Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalStreamChunk {
+    pub sequence: u64,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalStateUpdate {
+    pub sequence: u64,
+    pub restore_snapshot: TerminalRestoreSnapshot,
 }
 
 const DEFAULT_TERMINAL_STORE_COLS: u16 = 120;
@@ -132,9 +144,9 @@ impl TerminalStateStore {
         }
     }
 
-    pub fn process(&mut self, bytes: &[u8]) {
+    pub fn apply_output(&mut self, bytes: &[u8]) -> Option<TerminalStateUpdate> {
         if bytes.is_empty() {
-            return;
+            return None;
         }
         self.parser.process(bytes);
         self.history.extend(bytes.iter().copied());
@@ -143,12 +155,17 @@ impl TerminalStateStore {
         }
         self.sequence = self.sequence.saturating_add(1);
         self.has_output = true;
+        Some(TerminalStateUpdate {
+            sequence: self.sequence,
+            restore_snapshot: self.restore_snapshot(),
+        })
     }
 
-    pub fn resize(&mut self, cols: u16, rows: u16) {
+    pub fn resize(&mut self, cols: u16, rows: u16) -> TerminalRestoreSnapshot {
         self.cols = cols.max(1);
         self.rows = rows.max(1);
         self.parser.screen_mut().set_size(self.rows, self.cols);
+        self.restore_snapshot()
     }
 
     pub fn snapshot(&self) -> Vec<u8> {
@@ -224,22 +241,28 @@ mod tests {
     fn terminal_state_store_history_tail_is_bounded() {
         let mut store = TerminalStateStore::new();
         let payload = vec![b'x'; DEFAULT_TERMINAL_HISTORY_BYTES + 4096];
-        store.process(&payload);
+        let update = store
+            .apply_output(&payload)
+            .expect("non-empty output should produce a store update");
 
         let history = store.history_tail();
         assert_eq!(history.len(), DEFAULT_TERMINAL_HISTORY_BYTES);
         assert!(history.iter().all(|byte| *byte == b'x'));
+        assert_eq!(update.sequence, 1);
     }
 
     #[test]
     fn terminal_state_store_resize_preserves_rendered_content() {
         let mut store = TerminalStateStore::new();
-        store.resize(4, 8);
-        store.process(b"abcdef");
+        let resized = store.resize(4, 8);
+        store.apply_output(b"abcdef");
 
-        let snapshot = String::from_utf8(store.snapshot()).expect("snapshot should stay valid utf-8");
+        let snapshot =
+            String::from_utf8(store.snapshot()).expect("snapshot should stay valid utf-8");
         assert!(snapshot.contains("abcd"));
         assert!(snapshot.contains("ef"));
+        assert_eq!(resized.cols, 4);
+        assert_eq!(resized.rows, 8);
     }
 
     #[test]
@@ -265,8 +288,8 @@ mod tests {
     #[test]
     fn terminal_restore_snapshot_round_trip_preserves_rendered_state() {
         let mut store = TerminalStateStore::new();
-        store.process(b"hello\r\n");
-        store.process(b"\x1b[32mworld\x1b[0m");
+        store.apply_output(b"hello\r\n");
+        store.apply_output(b"\x1b[32mworld\x1b[0m");
         store.resize(132, 40);
 
         let snapshot = store.restore_snapshot();

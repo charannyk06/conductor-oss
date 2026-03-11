@@ -18,8 +18,8 @@ use tokio::sync::broadcast;
 use crate::routes::config::access_control_enabled;
 use crate::state::{
     capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
-    SessionRecord, TerminalRestoreSnapshot, TerminalStreamEvent, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TMUX_LOG_PATH_METADATA_KEY,
+    SessionRecord, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
+    TERMINAL_RESTORE_SNAPSHOT_FORMAT, TMUX_LOG_PATH_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -35,6 +35,10 @@ const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 384 * 1024;
 const ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
+const TERMINAL_FRAME_PROTOCOL_VERSION: u8 = 1;
+const TERMINAL_FRAME_MAGIC: [u8; 4] = *b"CTP2";
+const TERMINAL_FRAME_KIND_RESTORE: u8 = 1;
+const TERMINAL_FRAME_KIND_STREAM: u8 = 2;
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
@@ -49,6 +53,13 @@ impl TerminalSnapshotReason {
         match self {
             Self::Attach => "attach",
             Self::Lagged => "lagged",
+        }
+    }
+
+    fn as_code(self) -> u8 {
+        match self {
+            Self::Attach => 1,
+            Self::Lagged => 2,
         }
     }
 }
@@ -332,7 +343,12 @@ fn terminal_snapshot_live_requested(value: Option<&str>) -> bool {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -351,6 +367,35 @@ fn utf8_safe_tail_start(bytes: &[u8], preferred_start: usize) -> usize {
         start += 1;
     }
     start.min(bytes.len())
+}
+
+fn encode_terminal_restore_frame(
+    snapshot: &TerminalRestoreSnapshot,
+    reason: TerminalSnapshotReason,
+    max_bytes: usize,
+) -> Vec<u8> {
+    let payload = snapshot.render_bytes(max_bytes);
+    let mut frame = Vec::with_capacity(20 + payload.len());
+    frame.extend_from_slice(&TERMINAL_FRAME_MAGIC);
+    frame.push(TERMINAL_FRAME_PROTOCOL_VERSION);
+    frame.push(TERMINAL_FRAME_KIND_RESTORE);
+    frame.extend_from_slice(&snapshot.sequence.to_be_bytes());
+    frame.push(snapshot.version);
+    frame.push(reason.as_code());
+    frame.extend_from_slice(&snapshot.cols.to_be_bytes());
+    frame.extend_from_slice(&snapshot.rows.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    frame
+}
+
+fn encode_terminal_stream_frame(chunk: &TerminalStreamChunk) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(14 + chunk.bytes.len());
+    frame.extend_from_slice(&TERMINAL_FRAME_MAGIC);
+    frame.push(TERMINAL_FRAME_PROTOCOL_VERSION);
+    frame.push(TERMINAL_FRAME_KIND_STREAM);
+    frame.extend_from_slice(&chunk.sequence.to_be_bytes());
+    frame.extend_from_slice(&chunk.bytes);
+    frame
 }
 
 async fn handle_terminal_socket(
@@ -372,23 +417,15 @@ async fn handle_terminal_socket(
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
     if let Some(session) = state.get_session(&session_id).await {
         if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
+            let restore_frame = encode_terminal_restore_frame(
+                &snapshot,
+                TerminalSnapshotReason::Attach,
+                LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
+            );
             if socket
-                .send(
-                    Message::Text(
-                        server_snapshot_event(&session_id, TerminalSnapshotReason::Attach).into(),
-                    ),
-                )
+                .send(Message::Binary(restore_frame.into()))
                 .await
                 .is_err()
-            {
-                return;
-            }
-            let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
-            if !restore_bytes.is_empty()
-                && socket
-                    .send(Message::Binary(restore_bytes.into()))
-                    .await
-                    .is_err()
             {
                 return;
             }
@@ -417,8 +454,12 @@ async fn handle_terminal_socket(
                 }
             } => {
                 match attach_event {
-                    Some(Ok(TerminalStreamEvent::Output(bytes))) => {
-                        if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                    Some(Ok(TerminalStreamEvent::Stream(chunk))) => {
+                        if socket
+                            .send(Message::Binary(encode_terminal_stream_frame(&chunk).into()))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -439,11 +480,7 @@ async fn handle_terminal_socket(
                                 if socket
                                     .send(
                                         Message::Text(
-                                            server_snapshot_event(
-                                                &session_id,
-                                                TerminalSnapshotReason::Lagged,
-                                            )
-                                            .into(),
+                                            server_recovery_event(&session_id, skipped, &snapshot).into(),
                                         ),
                                     )
                                     .await
@@ -451,12 +488,15 @@ async fn handle_terminal_socket(
                                 {
                                     break;
                                 }
-                                let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
-                                if !restore_bytes.is_empty()
-                                    && socket
-                                        .send(Message::Binary(restore_bytes.into()))
-                                        .await
-                                        .is_err()
+                                let restore_frame = encode_terminal_restore_frame(
+                                    &snapshot,
+                                    TerminalSnapshotReason::Lagged,
+                                    LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
+                                );
+                                if socket
+                                    .send(Message::Binary(restore_frame.into()))
+                                    .await
+                                    .is_err()
                                 {
                                     break;
                                 }
@@ -716,26 +756,41 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     mismatch == 0
 }
 
-fn server_ready_event(session_id: &str) -> String {
+fn server_control_event(session_id: &str, event: &str) -> String {
     json!({
-        "type": "ready",
+        "type": "control",
+        "event": event,
         "sessionId": session_id,
     })
     .to_string()
 }
 
-fn server_snapshot_event(session_id: &str, reason: TerminalSnapshotReason) -> String {
+fn server_ready_event(session_id: &str) -> String {
+    server_control_event(session_id, "ready")
+}
+
+fn server_recovery_event(
+    session_id: &str,
+    skipped: u64,
+    snapshot: &TerminalRestoreSnapshot,
+) -> String {
     json!({
-        "type": "snapshot",
+        "type": "recovery",
         "sessionId": session_id,
-        "reason": reason.as_str(),
+        "reason": TerminalSnapshotReason::Lagged.as_str(),
+        "skipped": skipped,
+        "sequence": snapshot.sequence,
+        "snapshotVersion": snapshot.version,
+        "cols": snapshot.cols,
+        "rows": snapshot.rows,
     })
     .to_string()
 }
 
 fn server_ack_event(session_id: &str, action: &str) -> String {
     json!({
-        "type": "ack",
+        "type": "control",
+        "event": "ack",
         "sessionId": session_id,
         "action": action,
     })
@@ -744,7 +799,8 @@ fn server_ack_event(session_id: &str, action: &str) -> String {
 
 fn server_exit_event(session_id: &str, exit_code: i32) -> String {
     json!({
-        "type": "exit",
+        "type": "control",
+        "event": "exit",
         "sessionId": session_id,
         "exitCode": exit_code,
     })
@@ -752,11 +808,7 @@ fn server_exit_event(session_id: &str, exit_code: i32) -> String {
 }
 
 fn server_pong_event(session_id: &str) -> String {
-    json!({
-        "type": "pong",
-        "sessionId": session_id,
-    })
-    .to_string()
+    server_control_event(session_id, "pong")
 }
 
 fn server_error_event(session_id: &str, error: impl Into<String>) -> String {
@@ -779,12 +831,15 @@ mod tests {
     use uuid::Uuid;
 
     async fn build_test_state() -> (Arc<AppState>, std::path::PathBuf) {
-        let root = std::env::temp_dir().join(format!("conductor-terminal-route-test-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("conductor-terminal-route-test-{}", Uuid::new_v4()));
         let config = ConductorConfig {
             workspace: root.clone(),
             ..ConductorConfig::default()
         };
-        let db = Database::in_memory().await.expect("in-memory db should initialize");
+        let db = Database::in_memory()
+            .await
+            .expect("in-memory db should initialize");
         let state = AppState::new(root.join("conductor.yaml"), config, db).await;
         (state, root)
     }
@@ -834,14 +889,80 @@ mod tests {
     }
 
     #[test]
-    fn server_snapshot_event_includes_reason() {
-        let payload = server_snapshot_event("session-123", TerminalSnapshotReason::Attach);
+    fn server_control_event_includes_event_name() {
+        let payload = server_ready_event("session-123");
         let parsed: serde_json::Value =
-            serde_json::from_str(&payload).expect("snapshot payload should be valid json");
+            serde_json::from_str(&payload).expect("control payload should be valid json");
 
-        assert_eq!(parsed["type"], "snapshot");
+        assert_eq!(parsed["type"], "control");
         assert_eq!(parsed["sessionId"], "session-123");
-        assert_eq!(parsed["reason"], "attach");
+        assert_eq!(parsed["event"], "ready");
+    }
+
+    #[test]
+    fn server_recovery_event_includes_snapshot_metadata() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: 1,
+            sequence: 17,
+            cols: 132,
+            rows: 40,
+            has_output: true,
+            history: b"hello".to_vec(),
+            screen: b"prompt> ".to_vec(),
+        };
+
+        let payload = server_recovery_event("session-123", 9, &snapshot);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("recovery payload should be valid json");
+
+        assert_eq!(parsed["type"], "recovery");
+        assert_eq!(parsed["sessionId"], "session-123");
+        assert_eq!(parsed["reason"], "lagged");
+        assert_eq!(parsed["skipped"], 9);
+        assert_eq!(parsed["sequence"], 17);
+        assert_eq!(parsed["cols"], 132);
+        assert_eq!(parsed["rows"], 40);
+    }
+
+    #[test]
+    fn encode_terminal_restore_frame_prefixes_snapshot_metadata() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: 1,
+            sequence: 42,
+            cols: 100,
+            rows: 28,
+            has_output: true,
+            history: b"hello\r\n".to_vec(),
+            screen: b"prompt> ".to_vec(),
+        };
+
+        let frame = encode_terminal_restore_frame(&snapshot, TerminalSnapshotReason::Lagged, 4096);
+
+        assert_eq!(&frame[..4], &TERMINAL_FRAME_MAGIC);
+        assert_eq!(frame[4], TERMINAL_FRAME_PROTOCOL_VERSION);
+        assert_eq!(frame[5], TERMINAL_FRAME_KIND_RESTORE);
+        assert_eq!(u64::from_be_bytes(frame[6..14].try_into().unwrap()), 42);
+        assert_eq!(frame[14], 1);
+        assert_eq!(frame[15], TerminalSnapshotReason::Lagged.as_code());
+        assert_eq!(u16::from_be_bytes(frame[16..18].try_into().unwrap()), 100);
+        assert_eq!(u16::from_be_bytes(frame[18..20].try_into().unwrap()), 28);
+        assert_eq!(&frame[20..], &snapshot.render_bytes(4096));
+    }
+
+    #[test]
+    fn encode_terminal_stream_frame_prefixes_sequence() {
+        let chunk = TerminalStreamChunk {
+            sequence: 7,
+            bytes: b"hello".to_vec(),
+        };
+
+        let frame = encode_terminal_stream_frame(&chunk);
+
+        assert_eq!(&frame[..4], &TERMINAL_FRAME_MAGIC);
+        assert_eq!(frame[4], TERMINAL_FRAME_PROTOCOL_VERSION);
+        assert_eq!(frame[5], TERMINAL_FRAME_KIND_STREAM);
+        assert_eq!(u64::from_be_bytes(frame[6..14].try_into().unwrap()), 7);
+        assert_eq!(&frame[14..], b"hello");
     }
 
     #[test]
@@ -914,12 +1035,10 @@ mod tests {
         assert_eq!(payload["source"], "terminal_state");
         assert_eq!(payload["live"], true);
         assert_eq!(payload["restored"], true);
-        assert!(
-            payload["snapshot"]
-                .as_str()
-                .expect("snapshot should be a string")
-                .contains("prompt> ")
-        );
+        assert!(payload["snapshot"]
+            .as_str()
+            .expect("snapshot should be a string")
+            .contains("prompt> "));
 
         let _ = std::fs::remove_dir_all(root);
     }

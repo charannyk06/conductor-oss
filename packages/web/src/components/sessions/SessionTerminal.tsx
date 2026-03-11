@@ -15,6 +15,7 @@ import {
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
   normalizeTerminalSnapshot,
+  parseTerminalBinaryFrame,
   stripBrowserTerminalResponses,
 } from "./sessionTerminalUtils";
 import type { TerminalInsertRequest } from "./terminalInsert";
@@ -48,11 +49,17 @@ type TerminalSnapshot = {
 };
 
 type TerminalServerEvent =
-  | { type: "ready"; sessionId: string }
-  | { type: "snapshot"; sessionId: string; reason: "attach" | "lagged" }
-  | { type: "ack"; sessionId: string; action: string }
-  | { type: "exit"; sessionId: string; exitCode: number }
-  | { type: "pong"; sessionId: string }
+  | { type: "control"; event: "ready" | "ack" | "pong" | "exit"; sessionId: string; action?: string; exitCode?: number }
+  | {
+      type: "recovery";
+      sessionId: string;
+      reason: "lagged";
+      skipped: number;
+      sequence: number;
+      snapshotVersion: number;
+      cols: number;
+      rows: number;
+    }
   | { type: "error"; sessionId: string; error: string };
 
 const LIVE_TERMINAL_STATUSES = new Set(["queued", "spawning", "running", "working", "needs_input", "stuck"]);
@@ -319,7 +326,6 @@ export function SessionTerminal({
   const pendingResizeSyncRef = useRef(true);
   const preferredFocusTargetRef = useRef<PreferredFocusTarget>("none");
   const restoreFocusOnRecoveryRef = useRef(false);
-  const pendingSocketBinaryModeRef = useRef<"stream" | "snapshot">("stream");
 
   const [terminalReady, setTerminalReady] = useState(false);
   const [transportMode, setTransportMode] = useState<"websocket" | "snapshot">("websocket");
@@ -396,7 +402,6 @@ export function SessionTerminal({
   const requestReconnect = useCallback(() => {
     clearReconnectTimer();
     pendingResizeSyncRef.current = true;
-    pendingSocketBinaryModeRef.current = "stream";
     setTransportError(null);
     setTransportNotice(null);
     setConnectionState("connecting");
@@ -757,7 +762,6 @@ export function SessionTerminal({
     pendingResizeSyncRef.current = true;
     preferredFocusTargetRef.current = "none";
     restoreFocusOnRecoveryRef.current = false;
-    pendingSocketBinaryModeRef.current = "stream";
     clearReconnectTimer();
     clearScheduledRecovery();
     socketRef.current?.close();
@@ -1249,7 +1253,6 @@ export function SessionTerminal({
       if (connectAttemptRef.current !== attemptId) return;
       reconnectCountRef.current = 0;
       pendingResizeSyncRef.current = true;
-      pendingSocketBinaryModeRef.current = "stream";
       setTransportError(null);
       setConnectionState("live");
       const wasReconnect = hasConnectedOnceRef.current;
@@ -1268,13 +1271,19 @@ export function SessionTerminal({
       if (typeof event.data === "string") {
         try {
           const payload = JSON.parse(event.data) as TerminalServerEvent;
-          if (payload.type === "snapshot") {
-            pendingSocketBinaryModeRef.current = "snapshot";
-          } else if (payload.type === "error") {
+          if (payload.type === "error") {
             setTransportError(payload.error);
             setConnectionState("error");
-          } else if (payload.type === "exit") {
-            setConnectionState("closed");
+          } else if (payload.type === "control") {
+            if (payload.event === "exit") {
+              setConnectionState("closed");
+            } else {
+              setTransportError(null);
+              setConnectionState("live");
+            }
+          } else if (payload.type === "recovery") {
+            setTransportError(null);
+            setConnectionState("live");
           }
         } catch {
           setTransportError("Received an invalid terminal event");
@@ -1284,31 +1293,36 @@ export function SessionTerminal({
       }
 
       if (event.data instanceof ArrayBuffer) {
-        const nextMode = pendingSocketBinaryModeRef.current;
-        pendingSocketBinaryModeRef.current = "stream";
-        liveOutputStartedRef.current = true;
-        const viewport = captureTerminalViewport(term);
-        if (nextMode === "snapshot") {
-          snapshotAppliedRef.current = sessionId;
-          term.reset();
+        try {
+          const frame = parseTerminalBinaryFrame(event.data);
+          liveOutputStartedRef.current = true;
+          setTransportError(null);
+          setConnectionState("live");
+          const viewport = captureTerminalViewport(term);
+          if (frame.kind === "restore") {
+            snapshotAppliedRef.current = sessionId;
+            term.reset();
+          }
+          term.write(frame.payload, () => {
+            if (termRef.current !== term) {
+              return;
+            }
+            restoreTerminalViewport(term, viewport);
+            if (frame.kind === "restore") {
+              restorePreferredFocus();
+            }
+            updateScrollState();
+          });
+        } catch {
+          setTransportError("Received an invalid terminal frame");
+          setConnectionState("error");
         }
-        term.write(new Uint8Array(event.data), () => {
-          if (termRef.current !== term) {
-            return;
-          }
-          restoreTerminalViewport(term, viewport);
-          if (nextMode === "snapshot") {
-            restorePreferredFocus();
-          }
-          updateScrollState();
-        });
       }
     };
 
     socket.onclose = () => {
       if (connectAttemptRef.current !== attemptId) return;
       socketRef.current = null;
-      pendingSocketBinaryModeRef.current = "stream";
       const shouldRetry = LIVE_TERMINAL_STATUSES.has(latestStatusRef.current);
       if (shouldRetry) {
         pendingResizeSyncRef.current = true;
@@ -1336,7 +1350,6 @@ export function SessionTerminal({
       if (socketRef.current === socket) {
         socketRef.current = null;
       }
-      pendingSocketBinaryModeRef.current = "stream";
       socket.close();
     };
   }, [

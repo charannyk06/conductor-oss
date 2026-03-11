@@ -32,7 +32,10 @@ async fn terminal_snapshot_and_resize_routes_cover_live_session_validation_paths
         .app()
         .oneshot(
             Request::builder()
-                .uri(format!("/api/sessions/{}/terminal/snapshot?lines=1200&live=1", session.id))
+                .uri(format!(
+                    "/api/sessions/{}/terminal/snapshot?lines=1200&live=1",
+                    session.id
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )

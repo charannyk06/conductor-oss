@@ -398,13 +398,7 @@ impl AppState {
                             } else {
                                 format!("{line}\r\n").into_bytes()
                             };
-                            state.process_terminal_bytes(&session_id, &raw_output).await;
-                            state
-                                .emit_terminal_stream_event(
-                                    &session_id,
-                                    TerminalStreamEvent::Output(raw_output),
-                                )
-                                .await;
+                            state.emit_terminal_bytes(&session_id, &raw_output).await;
                         }
                         let sanitized = sanitize_terminal_text(&line);
                         let mapped = if output_is_parsed {
@@ -421,13 +415,7 @@ impl AppState {
                             } else {
                                 format!("{line}\r\n").into_bytes()
                             };
-                            state.process_terminal_bytes(&session_id, &raw_output).await;
-                            state
-                                .emit_terminal_stream_event(
-                                    &session_id,
-                                    TerminalStreamEvent::Output(raw_output),
-                                )
-                                .await;
+                            state.emit_terminal_bytes(&session_id, &raw_output).await;
                         }
                         let sanitized = sanitize_terminal_text(&line);
                         let prefixed = format!("[stderr] {sanitized}");
@@ -2738,8 +2726,9 @@ mod tests {
             .expect("terminal event should arrive")
             .expect("broadcast event should be readable");
         match event {
-            TerminalStreamEvent::Output(bytes) => {
-                assert_eq!(String::from_utf8_lossy(&bytes), "hello\r\n");
+            TerminalStreamEvent::Stream(chunk) => {
+                assert_eq!(chunk.sequence, 1);
+                assert_eq!(String::from_utf8_lossy(&chunk.bytes), "hello\r\n");
             }
             other => panic!("unexpected terminal event: {other:?}"),
         }
