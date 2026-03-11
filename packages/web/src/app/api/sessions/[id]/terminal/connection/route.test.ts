@@ -317,7 +317,7 @@ test("GET falls back to snapshot mode for viewers without operator access", asyn
   }
 });
 
-test("GET keeps remote requests in explicit HTTP polling fallback until the private remote runtime is ready", async () => {
+test("GET rejects remote requests without operator access while remote runtime is not ready", async () => {
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
 
@@ -349,16 +349,7 @@ test("GET keeps remote requests in explicit HTTP polling fallback until the priv
       { params: Promise.resolve({ id: "session-1" }) },
     );
 
-    assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      transport: string;
-      wsUrl: string | null;
-      pollIntervalMs: number;
-    };
-
-    assert.equal(payload.transport, "http-poll");
-    assert.equal(payload.wsUrl, null);
-    assert.equal(typeof payload.pollIntervalMs, "number");
+    assert.equal(response.status, 403);
   } finally {
     global.fetch = originalFetch;
   }

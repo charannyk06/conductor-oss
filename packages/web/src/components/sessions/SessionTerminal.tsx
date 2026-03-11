@@ -299,6 +299,7 @@ export function SessionTerminal({
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const scrollDisposableRef = useRef<IDisposable | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const liveInputRef = useRef<HTMLInputElement>(null);
   const resumeTextareaRef = useRef<HTMLTextAreaElement>(null);
   const latestStatusRef = useRef(sessionState);
   const activeRef = useRef(active);
@@ -333,6 +334,7 @@ export function SessionTerminal({
   const [attachments, setAttachments] = useState<Array<{ file: File }>>([]);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [liveInputDraft, setLiveInputDraft] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");

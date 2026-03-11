@@ -911,7 +911,7 @@ mod tests {
             .await
             .expect("snapshot should build");
 
-        assert_eq!(payload["source"], "terminal_store");
+        assert_eq!(payload["source"], "terminal_state");
         assert_eq!(payload["live"], true);
         assert_eq!(payload["restored"], true);
         assert!(
@@ -932,18 +932,27 @@ mod tests {
             .emit_terminal_text(&session.id, "emoji: 🙂🙂🙂🙂🙂")
             .await;
 
-        let restored = build_terminal_restore_snapshot(&state, &session, 200, 96)
+        let restored = build_terminal_restore_snapshot(&state, &session)
             .await
             .expect("restore snapshot should build")
             .expect("restore snapshot should exist");
 
-        assert!(restored.len() <= 96);
-        assert!(std::str::from_utf8(&restored).is_ok());
+        let rendered = restored.render_bytes(96);
+        assert!(rendered.len() <= 96);
+        let rendered_text = String::from_utf8_lossy(&rendered);
+        assert!(rendered_text.contains("emoji:"));
+
         let current = state
-            .current_terminal_snapshot(&session.id)
+            .current_terminal_restore_snapshot(&session.id)
             .await
-            .expect("live snapshot should exist");
-        assert!(restored.ends_with(&current));
+            .expect("live restore snapshot should exist");
+
+        assert_eq!(restored.sequence, current.sequence);
+        assert_eq!(restored.cols, current.cols);
+        assert_eq!(restored.rows, current.rows);
+        assert_eq!(restored.has_output, current.has_output);
+        assert_eq!(restored.history, current.history);
+        assert_eq!(restored.screen, current.screen);
 
         let _ = std::fs::remove_dir_all(root);
     }
