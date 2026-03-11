@@ -6,6 +6,16 @@ export type SessionTerminalViewportOptions = {
   lineHeight: number;
 };
 
+export type TerminalWriteChunk = {
+  kind: "snapshot" | "stream";
+  payload: Uint8Array;
+};
+
+export type TerminalWriteBatch = {
+  replace: boolean;
+  payload: Uint8Array | null;
+};
+
 const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
 const TERMINAL_FRAME_MAGIC = [0x43, 0x54, 0x50, 0x32] as const;
 const TERMINAL_FRAME_PROTOCOL_VERSION = 1;
@@ -45,6 +55,56 @@ function decodeTerminalRestoreReason(code: number): "attach" | "lagged" | "unkno
     return "lagged";
   }
   return "unknown";
+}
+
+function concatTerminalWritePayloads(chunks: readonly Uint8Array[]): Uint8Array | null {
+  if (chunks.length === 0) {
+    return null;
+  }
+
+  if (chunks.length === 1) {
+    return chunks[0] ?? null;
+  }
+
+  let totalLength = 0;
+  for (const chunk of chunks) {
+    totalLength += chunk.byteLength;
+  }
+
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return combined;
+}
+
+export function buildTerminalWriteBatch(chunks: readonly TerminalWriteChunk[]): TerminalWriteBatch {
+  if (chunks.length === 0) {
+    return {
+      replace: false,
+      payload: null,
+    };
+  }
+
+  let replace = false;
+  const payloadChunks: Uint8Array[] = [];
+  for (const chunk of chunks) {
+    if (chunk.kind === "snapshot") {
+      replace = true;
+      payloadChunks.length = 0;
+    }
+    if (chunk.payload.byteLength > 0) {
+      payloadChunks.push(chunk.payload);
+    }
+  }
+
+  return {
+    replace,
+    payload: concatTerminalWritePayloads(payloadChunks),
+  };
 }
 
 export function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): string {

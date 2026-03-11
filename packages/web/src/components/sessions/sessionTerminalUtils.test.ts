@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
 import {
+  buildTerminalWriteBatch,
   buildTerminalSocketUrl,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
@@ -17,6 +18,38 @@ test("buildTerminalSocketUrl clamps terminal dimensions to positive values", () 
     url,
     "wss://example.com/api/sessions/session-1/terminal/ws?cols=1&rows=1",
   );
+});
+
+test("buildTerminalWriteBatch coalesces stream chunks without forcing a reset", () => {
+  const batch = buildTerminalWriteBatch([
+    { kind: "stream", payload: new Uint8Array([0x61, 0x62]) },
+    { kind: "stream", payload: new Uint8Array([0x63]) },
+  ]);
+
+  assert.equal(batch.replace, false);
+  assert.deepEqual(Array.from(batch.payload ?? []), [0x61, 0x62, 0x63]);
+});
+
+test("buildTerminalWriteBatch drops stale pre-snapshot output and keeps trailing live bytes", () => {
+  const batch = buildTerminalWriteBatch([
+    { kind: "stream", payload: new Uint8Array([0x61, 0x62]) },
+    { kind: "snapshot", payload: new Uint8Array([0x73, 0x6e, 0x61, 0x70]) },
+    { kind: "stream", payload: new Uint8Array([0x21]) },
+  ]);
+
+  assert.equal(batch.replace, true);
+  assert.deepEqual(Array.from(batch.payload ?? []), [0x73, 0x6e, 0x61, 0x70, 0x21]);
+});
+
+test("buildTerminalWriteBatch keeps only the latest snapshot batch when multiple restores arrive", () => {
+  const batch = buildTerminalWriteBatch([
+    { kind: "snapshot", payload: new Uint8Array([0x6f, 0x6c, 0x64]) },
+    { kind: "stream", payload: new Uint8Array([0x2e]) },
+    { kind: "snapshot", payload: new Uint8Array([0x6e, 0x65, 0x77]) },
+  ]);
+
+  assert.equal(batch.replace, true);
+  assert.deepEqual(Array.from(batch.payload ?? []), [0x6e, 0x65, 0x77]);
 });
 
 test("detectMobileTerminalInputRail only enables compact touch layouts on narrow viewports", () => {
