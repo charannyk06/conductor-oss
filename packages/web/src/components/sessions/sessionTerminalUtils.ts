@@ -16,7 +16,14 @@ export type TerminalWriteBatch = {
   payload: Uint8Array | null;
 };
 
+export type MobileTerminalViewportMetrics = {
+  usableHeight: number;
+  keyboardInset: number;
+  keyboardVisible: boolean;
+};
+
 const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
+const COMPACT_TERMINAL_CHROME_MAX_EDGE_PX = 700;
 const TERMINAL_FRAME_MAGIC = [0x43, 0x54, 0x50, 0x32] as const;
 const TERMINAL_FRAME_PROTOCOL_VERSION = 1;
 const TERMINAL_FRAME_KIND_RESTORE = 1;
@@ -215,4 +222,35 @@ export function detectMobileTerminalInputRail(
   maxTouchPoints: number,
 ): boolean {
   return viewportWidth < MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX && (coarsePointer || maxTouchPoints > 0);
+}
+
+export function detectCompactTerminalChrome(
+  viewportWidth: number,
+  viewportHeight: number,
+  coarsePointer: boolean,
+  maxTouchPoints: number,
+): boolean {
+  return Math.min(viewportWidth, viewportHeight) <= COMPACT_TERMINAL_CHROME_MAX_EDGE_PX
+    && (coarsePointer || maxTouchPoints > 0);
+}
+
+export function calculateMobileTerminalViewportMetrics(
+  layoutViewportHeight: number,
+  visualViewportHeight: number,
+  visualViewportOffsetTop: number,
+  surfaceTop: number,
+): MobileTerminalViewportMetrics {
+  const safeLayoutHeight = Number.isFinite(layoutViewportHeight) ? Math.max(0, layoutViewportHeight) : 0;
+  const safeVisualHeight = Number.isFinite(visualViewportHeight) ? Math.max(0, visualViewportHeight) : safeLayoutHeight;
+  const safeOffsetTop = Number.isFinite(visualViewportOffsetTop) ? Math.max(0, visualViewportOffsetTop) : 0;
+  const safeSurfaceTop = Number.isFinite(surfaceTop) ? Math.max(0, surfaceTop) : 0;
+  const keyboardInset = Math.max(0, safeLayoutHeight - (safeVisualHeight + safeOffsetTop));
+  const topOffset = Math.max(0, safeSurfaceTop - safeOffsetTop);
+  const usableHeight = Math.max(0, safeVisualHeight - topOffset);
+
+  return {
+    usableHeight: Math.round(usableHeight),
+    keyboardInset: Math.round(keyboardInset),
+    keyboardVisible: keyboardInset >= 80,
+  };
 }

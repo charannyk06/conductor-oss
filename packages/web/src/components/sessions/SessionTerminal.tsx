@@ -1,6 +1,6 @@
 "use client";
 
-import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
 import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
@@ -13,6 +13,7 @@ import { captureTerminalViewport, restoreTerminalViewport } from "./terminalView
 import {
   buildTerminalWriteBatch,
   buildTerminalSocketUrl,
+  calculateMobileTerminalViewportMetrics,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
   normalizeTerminalSnapshot,
@@ -31,6 +32,7 @@ interface SessionTerminalProps {
   sessionState: string;
   active: boolean;
   pendingInsert: TerminalInsertRequest | null;
+  immersiveMobileMode?: boolean;
 }
 
 type TerminalConnectionInfo = {
@@ -335,8 +337,10 @@ export function SessionTerminal({
   sessionState,
   active,
   pendingInsert,
+  immersiveMobileMode = false,
 }: SessionTerminalProps) {
   const router = useRouter();
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerminal | null>(null);
   const fitRef = useRef<XFitAddon | null>(null);
@@ -409,6 +413,9 @@ export function SessionTerminal({
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
   const [showTerminalAccessoryBar, setShowTerminalAccessoryBar] = useState(() => shouldShowTerminalAccessoryBar());
+  const [helperPanelOpen, setHelperPanelOpen] = useState(false);
+  const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
+  const [mobileKeyboardVisible, setMobileKeyboardVisible] = useState(false);
 
   const normalizedSessionStatus = useMemo(
     () => {
@@ -428,6 +435,7 @@ export function SessionTerminal({
   const showSnapshotFallbackRail = expectsLiveTerminal && interactiveTerminal && transportMode === "snapshot";
   const showLiveInputRail = showSnapshotFallbackRail;
   const showLiveHelperBar = expectsLiveTerminal && interactiveTerminal && showTerminalAccessoryBar && transportMode === "websocket";
+  const showPersistentTopControls = immersiveMobileMode || showTerminalAccessoryBar;
   const railPlaceholder = normalizedSessionStatus === "done"
     ? "Continue the session..."
     : normalizedSessionStatus === "needs_input" || normalizedSessionStatus === "stuck"
@@ -437,6 +445,22 @@ export function SessionTerminal({
   expectsLiveTerminalRef.current = expectsLiveTerminal;
   interactiveTerminalRef.current = interactiveTerminal;
   transportModeRef.current = transportMode;
+
+  const floatingOverlayBottomPx = showResumeRail || showSnapshotFallbackRail
+    ? 96
+    : showLiveHelperBar
+      ? helperPanelOpen ? 112 : 64
+      : 12;
+  const terminalSurfaceStyle = useMemo<CSSProperties | undefined>(() => {
+    if (!immersiveMobileMode || !mobileViewportHeight || mobileViewportHeight <= 0) {
+      return undefined;
+    }
+
+    return {
+      height: `${mobileViewportHeight}px`,
+      minHeight: `${mobileViewportHeight}px`,
+    };
+  }, [immersiveMobileMode, mobileViewportHeight]);
 
   const normalizeWhitespaceOnlyDraft = useCallback(() => {
     setMessage((current) => (current.trim().length === 0 ? "" : current));
@@ -936,6 +960,68 @@ export function SessionTerminal({
   }, []);
 
   useEffect(() => {
+    if (showLiveHelperBar) {
+      return;
+    }
+    setHelperPanelOpen(false);
+  }, [showLiveHelperBar]);
+
+  useEffect(() => {
+    if (!immersiveMobileMode || typeof window === "undefined" || !window.visualViewport) {
+      setMobileViewportHeight(null);
+      setMobileKeyboardVisible(false);
+      return;
+    }
+
+    const visualViewport = window.visualViewport;
+    let frameHandle: number | null = null;
+    const syncMobileViewport = () => {
+      if (frameHandle !== null) {
+        window.cancelAnimationFrame(frameHandle);
+      }
+      frameHandle = window.requestAnimationFrame(() => {
+        frameHandle = null;
+        const surface = surfaceRef.current;
+        if (!surface) {
+          return;
+        }
+        const metrics = calculateMobileTerminalViewportMetrics(
+          window.innerHeight,
+          visualViewport.height,
+          visualViewport.offsetTop,
+          surface.getBoundingClientRect().top,
+        );
+        setMobileViewportHeight((current) => (current === metrics.usableHeight ? current : metrics.usableHeight));
+        setMobileKeyboardVisible((current) => (current === metrics.keyboardVisible ? current : metrics.keyboardVisible));
+        if (activeRef.current) {
+          scheduleRendererRecovery(true);
+        }
+      });
+    };
+
+    syncMobileViewport();
+    visualViewport.addEventListener("resize", syncMobileViewport);
+    visualViewport.addEventListener("scroll", syncMobileViewport);
+    window.addEventListener("resize", syncMobileViewport);
+
+    return () => {
+      if (frameHandle !== null) {
+        window.cancelAnimationFrame(frameHandle);
+      }
+      visualViewport.removeEventListener("resize", syncMobileViewport);
+      visualViewport.removeEventListener("scroll", syncMobileViewport);
+      window.removeEventListener("resize", syncMobileViewport);
+    };
+  }, [immersiveMobileMode, scheduleRendererRecovery]);
+
+  useEffect(() => {
+    if (!mobileKeyboardVisible) {
+      return;
+    }
+    setHelperPanelOpen(false);
+  }, [mobileKeyboardVisible]);
+
+  useEffect(() => {
     hasConnectedOnceRef.current = false;
     reconnectNoticeWrittenRef.current = false;
     snapshotAppliedRef.current = null;
@@ -982,10 +1068,13 @@ export function SessionTerminal({
     setDragActive(false);
     setSearchOpen(false);
     setSearchQuery("");
+    setHelperPanelOpen(false);
     setShowScrollToBottom(false);
     setSnapshotReady(false);
     setSnapshotAnsi("");
     setSessionStatusOverride(null);
+    setMobileViewportHeight(null);
+    setMobileKeyboardVisible(false);
     termRef.current?.reset();
     updateScrollState();
   }, [clearReconnectTimer, clearScheduledRecovery, clearScheduledTerminalFlush, sessionId, updateScrollState]);
@@ -1975,7 +2064,11 @@ export function SessionTerminal({
 
   return (
     <div
-      className="group/terminal relative flex h-full min-h-0 flex-col overflow-hidden rounded-[14px] border border-white/10 bg-[#060404] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+      ref={surfaceRef}
+      style={terminalSurfaceStyle}
+      className={immersiveMobileMode
+        ? "group/terminal relative flex h-full min-h-0 flex-col overflow-hidden bg-[#060404]"
+        : "group/terminal relative flex h-full min-h-0 flex-col overflow-hidden rounded-[14px] border border-white/10 bg-[#060404] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
       onDragOver={(event) => {
         event.preventDefault();
         setDragActive(true);
@@ -2018,7 +2111,10 @@ export function SessionTerminal({
       }}
     >
       {searchOpen ? (
-        <div className="absolute right-2 top-2 z-10 flex max-w-[calc(100%-1rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur sm:right-3 sm:top-3 sm:max-w-[calc(100%-1.5rem)]">
+        <div className={immersiveMobileMode
+          ? "absolute right-3 top-14 z-10 flex max-w-[calc(100%-1.5rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur"
+          : "absolute right-2 top-2 z-10 flex max-w-[calc(100%-1rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur sm:right-3 sm:top-3 sm:max-w-[calc(100%-1.5rem)]"}
+        >
           <Search className="h-3.5 w-3.5 text-[#8e847d]" />
           <input
             value={searchQuery}
@@ -2046,8 +2142,8 @@ export function SessionTerminal({
           </Button>
         </div>
       ) : (
-        <div className={`absolute right-2 top-2 z-10 flex items-center gap-1.5 transition-opacity sm:right-3 sm:top-3 sm:gap-2 ${
-          connectionState === "live" && transportMode === "websocket"
+        <div className={`${immersiveMobileMode ? "absolute right-3 top-14" : "absolute right-2 top-2 sm:right-3 sm:top-3"} z-10 flex items-center gap-1.5 transition-opacity sm:gap-2 ${
+          connectionState === "live" && transportMode === "websocket" && !showPersistentTopControls
             ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
             : "opacity-100"
         }`}>
@@ -2084,7 +2180,7 @@ export function SessionTerminal({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3">
+      <div className={immersiveMobileMode ? "min-h-0 flex-1 overflow-hidden px-0 pb-0 pt-0" : "min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3"}>
         <div
           ref={containerRef}
           className="h-full w-full overflow-hidden touch-pan-y"
@@ -2094,7 +2190,10 @@ export function SessionTerminal({
       </div>
 
       {showScrollToBottom ? (
-        <div className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 ${showResumeRail ? "bottom-24" : showLiveHelperBar ? "bottom-20" : "bottom-4"}`}>
+        <div
+          className="pointer-events-none absolute left-1/2 z-10 -translate-x-1/2"
+          style={{ bottom: `${floatingOverlayBottomPx}px` }}
+        >
           <Button
             type="button"
             size="sm"
@@ -2133,7 +2232,10 @@ export function SessionTerminal({
       />
 
       {transportNotice && !showSnapshotFallbackRail ? (
-        <div className={`pointer-events-none absolute left-3 right-3 z-10 ${showResumeRail ? "bottom-24" : "bottom-4"}`}>
+        <div
+          className="pointer-events-none absolute left-3 right-3 z-10"
+          style={{ bottom: `${floatingOverlayBottomPx}px` }}
+        >
           <div className="rounded-[12px] border border-white/8 bg-[#0f0a0a]/92 px-3 py-2 text-[12px] text-[#b8aea6] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur-sm">
             {transportNotice}
           </div>
@@ -2187,14 +2289,23 @@ export function SessionTerminal({
 
       {showLiveHelperBar ? (
         <div className="border-t border-white/8 bg-[#0b0808]/96 px-3 py-2">
-          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               className="shrink-0 rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] px-3 py-2 text-[11px] font-medium text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
               onClick={focusTerminal}
               disabled={connectionState !== "live"}
             >
-              Type in terminal
+              Focus terminal
+            </button>
+            <button
+              type="button"
+              className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => setHelperPanelOpen((current) => !current)}
+              disabled={connectionState !== "live"}
+              aria-expanded={helperPanelOpen}
+            >
+              {helperPanelOpen ? "Hide keys" : "Helper keys"}
             </button>
             <button
               type="button"
@@ -2204,20 +2315,24 @@ export function SessionTerminal({
             >
               Attach
             </button>
-            {LIVE_TERMINAL_HELPER_KEYS.map(({ label, special }) => (
-              <button
-                key={special}
-                type="button"
-                className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={connectionState !== "live"}
-                onClick={() => handleLiveHelperKey(special)}
-              >
-                {label}
-              </button>
-            ))}
           </div>
+          {helperPanelOpen ? (
+            <div className="mt-2 flex items-center gap-2 overflow-x-auto pb-1">
+              {LIVE_TERMINAL_HELPER_KEYS.map(({ label, special }) => (
+                <button
+                  key={special}
+                  type="button"
+                  className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={connectionState !== "live"}
+                  onClick={() => handleLiveHelperKey(special)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {sendError ? (
-            <p className="mt-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
+            <p className="mt-2 text-[12px] text-[#ff8f7a]">{sendError}</p>
           ) : null}
         </div>
       ) : null}

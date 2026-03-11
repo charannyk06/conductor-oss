@@ -1,20 +1,31 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { SessionDetail } from "@/components/sessions/SessionDetail";
+import { detectCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { useConfig } from "@/hooks/useConfig";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
 import type { DashboardSession } from "@/lib/types";
 
+function shouldUseCompactTerminalChrome(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  return detectCompactTerminalChrome(window.innerWidth, window.innerHeight, coarsePointer, navigator.maxTouchPoints);
+}
+
 export default function SessionPageClient() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { projects } = useConfig();
   const { session: currentSession } = useSession(params.id);
   const {
@@ -27,6 +38,12 @@ export default function SessionPageClient() {
   const { sessions, refresh } = useSessions(undefined, { enabled: sidebarVisible });
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [compactTerminalChrome, setCompactTerminalChrome] = useState(() => shouldUseCompactTerminalChrome());
+  const terminalTabActive = useMemo(() => {
+    const tab = searchParams.get("tab");
+    return tab !== "overview" && tab !== "preview" && tab !== "diff";
+  }, [searchParams]);
+  const immersiveTerminalMode = terminalTabActive && compactTerminalChrome;
 
   const topBarTitle = useMemo(() => {
     if (currentSession) {
@@ -49,6 +66,28 @@ export default function SessionPageClient() {
       setSelectedProjectId(projects[0]?.id ?? null);
     }
   }, [currentSession?.projectId, projects, selectedProjectId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = typeof window.matchMedia === "function"
+      ? window.matchMedia("(pointer: coarse)")
+      : null;
+    const syncCompactTerminalChrome = () => {
+      setCompactTerminalChrome(shouldUseCompactTerminalChrome());
+    };
+
+    syncCompactTerminalChrome();
+    window.addEventListener("resize", syncCompactTerminalChrome);
+    mediaQuery?.addEventListener?.("change", syncCompactTerminalChrome);
+
+    return () => {
+      window.removeEventListener("resize", syncCompactTerminalChrome);
+      mediaQuery?.removeEventListener?.("change", syncCompactTerminalChrome);
+    };
+  }, []);
 
   async function handleArchiveSession(sessionId: string) {
     let res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
@@ -118,11 +157,18 @@ export default function SessionPageClient() {
         />
       ) : null}
     >
-      <TopBar
-        title={topBarTitle}
-      />
-      <div className="min-h-0 flex-1 overflow-hidden">
-        <SessionDetail key={params.id} sessionId={params.id} initialSession={currentSession} />
+      {immersiveTerminalMode ? null : (
+        <TopBar
+          title={topBarTitle}
+        />
+      )}
+      <div className={`min-h-0 flex-1 overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
+        <SessionDetail
+          key={params.id}
+          sessionId={params.id}
+          initialSession={currentSession}
+          immersiveMobileMode={immersiveTerminalMode}
+        />
       </div>
     </AppShell>
   );

@@ -4,6 +4,8 @@ import { TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
 import {
   buildTerminalWriteBatch,
   buildTerminalSocketUrl,
+  calculateMobileTerminalViewportMetrics,
+  detectCompactTerminalChrome,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
   normalizeTerminalSnapshot,
@@ -57,6 +59,13 @@ test("detectMobileTerminalInputRail only enables compact touch layouts on narrow
   assert.equal(detectMobileTerminalInputRail(390, false, 1), true);
   assert.equal(detectMobileTerminalInputRail(1280, true, 5), false);
   assert.equal(detectMobileTerminalInputRail(700, false, 0), false);
+});
+
+test("detectCompactTerminalChrome keeps immersive session chrome for phone-sized touch viewports only", () => {
+  assert.equal(detectCompactTerminalChrome(390, 844, true, 1), true);
+  assert.equal(detectCompactTerminalChrome(844, 390, false, 1), true);
+  assert.equal(detectCompactTerminalChrome(834, 1194, true, 5), false);
+  assert.equal(detectCompactTerminalChrome(640, 960, false, 0), false);
 });
 
 test("stripBrowserTerminalResponses removes browser-generated device status chatter", () => {
@@ -129,5 +138,18 @@ test("getSessionTerminalViewportOptions keeps compact fonts for phones and large
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 17,
     lineHeight: 1.06,
+  });
+});
+
+test("calculateMobileTerminalViewportMetrics returns keyboard inset and visible terminal height", () => {
+  assert.deepEqual(calculateMobileTerminalViewportMetrics(844, 512, 0, 96), {
+    usableHeight: 416,
+    keyboardInset: 332,
+    keyboardVisible: true,
+  });
+  assert.deepEqual(calculateMobileTerminalViewportMetrics(844, 844, 0, 96), {
+    usableHeight: 748,
+    keyboardInset: 0,
+    keyboardVisible: false,
   });
 });
