@@ -18,7 +18,8 @@ use tokio::sync::broadcast;
 use crate::routes::config::access_control_enabled;
 use crate::state::{
     capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
-    SessionRecord, TerminalStreamEvent, TMUX_LOG_PATH_METADATA_KEY,
+    SessionRecord, TerminalRestoreSnapshot, TerminalStreamEvent, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    TMUX_LOG_PATH_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -27,7 +28,6 @@ type HmacSha256 = Hmac<sha2::Sha256>;
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
 const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 1200;
-const LIVE_TERMINAL_RESTORE_LINES: usize = 1200;
 const MAX_TERMINAL_SNAPSHOT_LINES: usize = 12000;
 const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
@@ -178,29 +178,22 @@ async fn build_terminal_snapshot(
     lines: usize,
     max_bytes: usize,
 ) -> Result<Value> {
-    if let Some(snapshot) =
-        build_terminal_restore_snapshot(state, session, lines, max_bytes).await?
-    {
+    if let Some(snapshot) = build_terminal_restore_snapshot(state, session).await? {
         let live = state.terminal_runtime_attached(&session.id).await;
+        let restore_bytes = snapshot.render_bytes(max_bytes);
         return Ok(json!({
-            "snapshot": String::from_utf8_lossy(&snapshot),
-            "source": "terminal_store",
+            "snapshot": String::from_utf8_lossy(&restore_bytes),
+            "source": "terminal_state",
+            "format": TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+            "snapshotVersion": snapshot.version,
+            "sequence": snapshot.sequence,
+            "cols": snapshot.cols,
+            "rows": snapshot.rows,
+            "historyBytes": snapshot.history_len(),
+            "screenBytes": snapshot.screen_len(),
             "live": live,
             "restored": true,
         }));
-    }
-
-    if let Some(snapshot) = state.current_terminal_snapshot(&session.id).await {
-        if !snapshot.is_empty() {
-            let live = state.terminal_runtime_attached(&session.id).await;
-            let snapshot = trim_utf8_tail_bytes(snapshot, max_bytes);
-            return Ok(json!({
-                "snapshot": String::from_utf8_lossy(&snapshot),
-                "source": "terminal_store",
-                "live": live,
-                "restored": true,
-            }));
-        }
     }
 
     if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(session) {
@@ -222,7 +215,8 @@ async fn build_terminal_snapshot(
     }
 
     let terminal_capture_path = state.session_terminal_capture_path(&session.id);
-    if let Some(snapshot) = read_terminal_log_tail(&terminal_capture_path, lines, max_bytes).await? {
+    if let Some(snapshot) = read_terminal_log_tail(&terminal_capture_path, lines, max_bytes).await?
+    {
         let live = state.terminal_runtime_attached(&session.id).await;
         return Ok(json!({
             "snapshot": snapshot,
@@ -259,53 +253,8 @@ async fn build_terminal_snapshot(
 async fn build_terminal_restore_snapshot(
     state: &AppState,
     session: &SessionRecord,
-    lines: usize,
-    max_bytes: usize,
-) -> Result<Option<Vec<u8>>> {
-    let Some(state_snapshot) = state.current_terminal_snapshot(&session.id).await else {
-        return Ok(None);
-    };
-    if state_snapshot.is_empty() {
-        return Ok(None);
-    }
-
-    let history = if let Some(history) = state.current_terminal_history(&session.id).await {
-        Some(history)
-    } else if let Some(log_path) = session
-        .metadata
-        .get(TMUX_LOG_PATH_METADATA_KEY)
-        .map(PathBuf::from)
-    {
-        read_terminal_log_tail_bytes(&log_path, lines, max_bytes).await?
-    } else {
-        let snapshot = trim_utf8_tail_string(trim_lines_tail(&session.output, lines), max_bytes);
-        if snapshot.trim().is_empty() {
-            None
-        } else {
-            Some(snapshot.into_bytes())
-        }
-    };
-
-    let Some(mut history) = history else {
-        return Ok(Some(trim_utf8_tail_bytes(state_snapshot, max_bytes)));
-    };
-
-    let separator_len = if history.ends_with(b"\n") || history.ends_with(b"\r") {
-        0
-    } else {
-        2
-    };
-    let reserved = state_snapshot.len().saturating_add(separator_len);
-    if reserved >= max_bytes {
-        return Ok(Some(state_snapshot));
-    }
-
-    history = trim_utf8_tail_bytes(history, max_bytes.saturating_sub(reserved));
-    if separator_len != 0 {
-        history.extend_from_slice(b"\r\n");
-    }
-    history.extend_from_slice(&state_snapshot);
-    Ok(Some(history))
+) -> Result<Option<TerminalRestoreSnapshot>> {
+    Ok(state.current_terminal_restore_snapshot(&session.id).await)
 }
 
 async fn read_terminal_log_tail(
@@ -392,15 +341,14 @@ async fn handle_terminal_socket(
     let _ = state.ensure_session_live(&session_id).await;
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
     if let Some(session) = state.get_session(&session_id).await {
-        if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(
-            &state,
-            &session,
-            LIVE_TERMINAL_RESTORE_LINES,
-            LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
-        )
-        .await
-        {
-            if socket.send(Message::Binary(snapshot.into())).await.is_err() {
+        if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
+            let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
+            if !restore_bytes.is_empty()
+                && socket
+                    .send(Message::Binary(restore_bytes.into()))
+                    .await
+                    .is_err()
+            {
                 return;
             }
         }
@@ -445,16 +393,15 @@ async fn handle_terminal_socket(
                     }
                     Some(Err(broadcast::error::RecvError::Lagged(skipped))) => {
                         if let Some(session) = state.get_session(&session_id).await {
-                            if let Ok(Some(snapshot)) =
-                                build_terminal_restore_snapshot(
-                                    &state,
-                                    &session,
-                                    LIVE_TERMINAL_RESTORE_LINES,
-                                    LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
-                                )
-                                .await
+                            if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await
                             {
-                                if socket.send(Message::Binary(snapshot.into())).await.is_err() {
+                                let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
+                                if !restore_bytes.is_empty()
+                                    && socket
+                                        .send(Message::Binary(restore_bytes.into()))
+                                        .await
+                                        .is_err()
+                                {
                                     break;
                                 }
                             } else if socket
