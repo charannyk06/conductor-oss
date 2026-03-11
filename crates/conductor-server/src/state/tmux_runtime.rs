@@ -818,12 +818,7 @@ impl AppState {
 
         loop {
             if let Some((next_offset, chunk)) = read_tmux_log_chunk(&log_path, offset).await? {
-                self.process_terminal_bytes(&session_id, &chunk).await;
-                self.emit_terminal_stream_event(
-                    &session_id,
-                    super::types::TerminalStreamEvent::Output(chunk.clone()),
-                )
-                .await;
+                self.emit_terminal_bytes(&session_id, &chunk).await;
                 let lines = split_tmux_log_lines(&mut partial, &chunk);
                 for line in lines {
                     if output_tx.send(ExecutorOutput::Stdout(line)).await.is_err() {

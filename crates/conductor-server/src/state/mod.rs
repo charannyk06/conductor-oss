@@ -20,8 +20,8 @@ pub(crate) use tmux_runtime::{
 };
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
-    SpawnRequest, TerminalRestoreSnapshot, TerminalStreamEvent, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TERMINAL_RESTORE_SNAPSHOT_VERSION,
+    SpawnRequest, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
+    TERMINAL_RESTORE_SNAPSHOT_FORMAT, TERMINAL_RESTORE_SNAPSHOT_VERSION,
 };
 pub use workspace::{expand_path, resolve_workspace_path};
 
@@ -448,45 +448,13 @@ impl AppState {
         }
     }
 
-    pub(crate) async fn emit_terminal_text(&self, session_id: &str, text: impl AsRef<str>) {
-        let bytes = text.as_ref().as_bytes().to_vec();
+    async fn apply_terminal_output(
+        &self,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> Option<(Arc<LiveSessionHandle>, types::TerminalStateUpdate)> {
         if bytes.is_empty() {
-            return;
-        }
-
-        if let Err(err) = self.append_terminal_capture(session_id, &bytes).await {
-            tracing::debug!(
-                session_id,
-                error = %err,
-                "Failed to persist terminal capture bytes"
-            );
-        }
-
-        let handle = self.ensure_terminal_host(session_id).await;
-        let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
-            store.process(&bytes);
-            Some(store.restore_snapshot())
-        } else {
-            None
-        };
-        if let Some(snapshot) = snapshot.as_ref() {
-            if let Err(err) = self
-                .persist_terminal_restore_snapshot(session_id, snapshot)
-                .await
-            {
-                tracing::debug!(
-                    session_id,
-                    error = %err,
-                    "Failed to persist terminal restore snapshot"
-                );
-            }
-        }
-        let _ = handle.terminal_tx.send(TerminalStreamEvent::Output(bytes));
-    }
-
-    pub(crate) async fn process_terminal_bytes(&self, session_id: &str, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
+            return None;
         }
 
         if let Err(err) = self.append_terminal_capture(session_id, bytes).await {
@@ -498,15 +466,14 @@ impl AppState {
         }
 
         let handle = self.ensure_terminal_host(session_id).await;
-        let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
-            store.process(bytes);
-            Some(store.restore_snapshot())
+        let update = if let Ok(mut store) = handle.terminal_store.lock() {
+            store.apply_output(bytes)
         } else {
             None
         };
-        if let Some(snapshot) = snapshot.as_ref() {
+        if let Some(update) = update.as_ref() {
             if let Err(err) = self
-                .persist_terminal_restore_snapshot(session_id, snapshot)
+                .persist_terminal_restore_snapshot(session_id, &update.restore_snapshot)
                 .await
             {
                 tracing::debug!(
@@ -516,13 +483,31 @@ impl AppState {
                 );
             }
         }
+        update.map(|update| (handle, update))
+    }
+
+    pub(crate) async fn emit_terminal_bytes(&self, session_id: &str, bytes: &[u8]) {
+        let Some((handle, update)) = self.apply_terminal_output(session_id, bytes).await else {
+            return;
+        };
+
+        let _ = handle
+            .terminal_tx
+            .send(TerminalStreamEvent::Stream(TerminalStreamChunk {
+                sequence: update.sequence,
+                bytes: bytes.to_vec(),
+            }));
+    }
+
+    pub(crate) async fn emit_terminal_text(&self, session_id: &str, text: impl AsRef<str>) {
+        self.emit_terminal_bytes(session_id, text.as_ref().as_bytes())
+            .await;
     }
 
     pub(crate) async fn resize_terminal_store(&self, session_id: &str, cols: u16, rows: u16) {
         if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
             let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
-                store.resize(cols, rows);
-                Some(store.restore_snapshot())
+                Some(store.resize(cols, rows))
             } else {
                 None
             };

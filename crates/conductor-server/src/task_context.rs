@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task;
 
-use crate::routes::boards::{BoardTaskRecord, split_task_text};
+use crate::routes::boards::{split_task_text, BoardTaskRecord};
 use crate::state::AppState;
 
 const MAX_BRIEF_BYTES: usize = 16 * 1024;

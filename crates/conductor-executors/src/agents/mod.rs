@@ -96,7 +96,10 @@ fn legacy_wrapper_compat_root_name() -> String {
 }
 
 fn legacy_wrapper_root_names() -> Vec<String> {
-    vec![legacy_wrapper_root_name().to_string(), legacy_wrapper_compat_root_name()]
+    vec![
+        legacy_wrapper_root_name().to_string(),
+        legacy_wrapper_compat_root_name(),
+    ]
 }
 
 fn legacy_wrapper_root_prefixes() -> Vec<String> {

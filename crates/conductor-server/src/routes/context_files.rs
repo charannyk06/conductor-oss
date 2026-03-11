@@ -174,9 +174,9 @@ async fn list_context_files(
             .unwrap_or_default()
             .cmp(right["path"].as_str().unwrap_or_default())
             .then_with(|| {
-                source_sort_rank(left["source"].as_str().unwrap_or_default()).cmp(&source_sort_rank(
-                    right["source"].as_str().unwrap_or_default(),
-                ))
+                source_sort_rank(left["source"].as_str().unwrap_or_default()).cmp(
+                    &source_sort_rank(right["source"].as_str().unwrap_or_default()),
+                )
             })
     });
     files.dedup_by(|left, right| left["path"] == right["path"]);
@@ -589,14 +589,12 @@ mod tests {
     fn file_descriptor_keeps_actual_path_and_separate_display_path() {
         let workspace_root = env::temp_dir().join("conductor");
         let vault_root = env::temp_dir().join("obsidian-vault");
-        let path = vault_root.join("projects").join("careai").join("CONDUCTOR.md");
+        let path = vault_root
+            .join("projects")
+            .join("careai")
+            .join("CONDUCTOR.md");
 
-        let descriptor = file_descriptor(
-            &path,
-            &workspace_root,
-            Some(&vault_root),
-            Some("vault"),
-        );
+        let descriptor = file_descriptor(&path, &workspace_root, Some(&vault_root), Some("vault"));
 
         assert_eq!(
             descriptor["path"].as_str(),
