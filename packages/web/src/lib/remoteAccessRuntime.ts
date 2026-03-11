@@ -19,7 +19,17 @@ export type RemoteAccessRuntimeState = {
   updatedAt: string | null;
 };
 
+function resolveRemoteAccessRuntimePathOverride(): string | null {
+  const overridePath = process.env.CONDUCTOR_REMOTE_ACCESS_RUNTIME_PATH?.trim();
+  return overridePath && overridePath.length > 0 ? overridePath : null;
+}
+
 export function getRemoteAccessRuntimeStatePath(): string | null {
+  const overridePath = resolveRemoteAccessRuntimePathOverride();
+  if (overridePath) {
+    return overridePath;
+  }
+
   const workspaceHint = process.env.CONDUCTOR_WORKSPACE?.trim() || process.env.CO_CONFIG_PATH?.trim();
   if (!workspaceHint) return null;
 

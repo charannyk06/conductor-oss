@@ -9,9 +9,18 @@ export const runtime = "nodejs";
 
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
 const TERMINAL_TOKEN_TTL_SECONDS = 60;
+const TERMINAL_TRANSPORT_HEADER = "x-conductor-terminal-transport";
+const TERMINAL_INTERACTIVE_HEADER = "x-conductor-terminal-interactive";
+const TERMINAL_CONNECTION_PATH_HEADER = "x-conductor-terminal-connection-path";
 
 type TerminalConnectionTransport = "websocket" | "snapshot";
 type TerminalControlTransport = "websocket" | "http";
+type TerminalConnectionPath = "direct" | "managed_remote" | "auth_limited" | "unavailable";
+
+type ResolvedWebSocketBaseUrl = {
+  baseUrl: string | null;
+  connectionPath: Exclude<TerminalConnectionPath, "auth_limited">;
+};
 
 function buildControlPaths(id: string): {
   sendPath: string;
@@ -71,34 +80,75 @@ function resolveManagedRemoteBackendBaseUrl(backendUrl: string): string | null {
   }
 }
 
-function resolveWebSocketBaseUrl(request: Request, backendUrl: string): string | null {
+function resolveWebSocketBaseUrl(request: Request, backendUrl: string): ResolvedWebSocketBaseUrl {
   let backend: URL;
   try {
     backend = new URL(backendUrl);
   } catch {
-    return null;
+    return { baseUrl: null, connectionPath: "unavailable" };
   }
 
   const backendHost = backend.hostname.toLowerCase();
   if (!isLoopbackHost(backendHost)) {
-    return backend.toString();
+    return { baseUrl: backend.toString(), connectionPath: "direct" };
   }
 
   const requestHost = resolveRequestHostname(request);
   if (isLoopbackHost(requestHost)) {
-    return backend.toString();
+    return { baseUrl: backend.toString(), connectionPath: "direct" };
   }
 
-  return resolveManagedRemoteBackendBaseUrl(backendUrl);
+  const managedRemoteBaseUrl = resolveManagedRemoteBackendBaseUrl(backendUrl);
+  return managedRemoteBaseUrl
+    ? { baseUrl: managedRemoteBaseUrl, connectionPath: "managed_remote" }
+    : { baseUrl: null, connectionPath: "unavailable" };
+}
+
+function formatDurationMs(startedAt: number): number {
+  return Number((performance.now() - startedAt).toFixed(1));
+}
+
+function formatServerTiming(metrics: Array<{ name: string; durationMs: number | null }>): string | null {
+  const headerValue = metrics
+    .filter((metric) => metric.durationMs !== null && Number.isFinite(metric.durationMs))
+    .map((metric) => `${metric.name};dur=${metric.durationMs?.toFixed(1)}`)
+    .join(", ");
+
+  return headerValue.length > 0 ? headerValue : null;
+}
+
+function applyTerminalConnectionHeaders(
+  response: NextResponse,
+  options: {
+    startedAt: number;
+    transport: TerminalConnectionTransport;
+    interactive: boolean;
+    connectionPath: TerminalConnectionPath;
+    tokenFetchMs?: number | null;
+  },
+): NextResponse {
+  const serverTiming = formatServerTiming([
+    { name: "terminal_connection", durationMs: formatDurationMs(options.startedAt) },
+    { name: "terminal_token", durationMs: options.tokenFetchMs ?? null },
+  ]);
+  if (serverTiming) {
+    response.headers.set("server-timing", serverTiming);
+  }
+  response.headers.set(TERMINAL_TRANSPORT_HEADER, options.transport);
+  response.headers.set(TERMINAL_INTERACTIVE_HEADER, options.interactive ? "true" : "false");
+  response.headers.set(TERMINAL_CONNECTION_PATH_HEADER, options.connectionPath);
+  return response;
 }
 
 function buildSnapshotFallback(
   id: string,
   interactive: boolean,
   reason: string,
+  startedAt: number,
+  connectionPath: TerminalConnectionPath,
 ): Response {
   const controlPaths = buildControlPaths(id);
-  return NextResponse.json({
+  return applyTerminalConnectionHeaders(NextResponse.json({
     transport: "snapshot" satisfies TerminalConnectionTransport,
     wsUrl: null,
     pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
@@ -120,6 +170,11 @@ function buildSnapshotFallback(
       fallbackReason: reason,
       ...controlPaths,
     },
+  }), {
+    startedAt,
+    transport: "snapshot",
+    interactive,
+    connectionPath,
   });
 }
 
@@ -127,6 +182,7 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> },
 ): Promise<Response> {
+  const startedAt = performance.now();
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
@@ -146,18 +202,23 @@ export async function GET(
       id,
       false,
       "Live terminal control requires operator access. Showing snapshot recovery mode.",
+      startedAt,
+      "auth_limited",
     );
   }
 
-  const webSocketBaseUrl = resolveWebSocketBaseUrl(request, backendUrl);
-  if (!webSocketBaseUrl) {
+  const resolvedWebSocket = resolveWebSocketBaseUrl(request, backendUrl);
+  if (!resolvedWebSocket.baseUrl) {
     return buildSnapshotFallback(
       id,
       true,
       "A browser-connectable terminal websocket is not available for this dashboard URL. Enable the managed private link or expose the backend websocket safely.",
+      startedAt,
+      resolvedWebSocket.connectionPath,
     );
   }
 
+  const tokenStartedAt = performance.now();
   const tokenResponse = await fetch(
     new URL(`/api/sessions/${encodeURIComponent(id)}/terminal/token`, backendUrl),
     {
@@ -166,6 +227,7 @@ export async function GET(
       headers: await buildForwardedAccessHeaders(request),
     },
   );
+  const tokenFetchMs = formatDurationMs(tokenStartedAt);
 
   const tokenPayload = (await tokenResponse.json().catch(() => null)) as
     | {
@@ -185,7 +247,7 @@ export async function GET(
 
   const wsUrl = new URL(
     toWebSocketUrl(
-      webSocketBaseUrl,
+      resolvedWebSocket.baseUrl,
       `/api/sessions/${encodeURIComponent(id)}/terminal/ws`,
     ),
   );
@@ -195,7 +257,7 @@ export async function GET(
   }
   const controlWsUrl = new URL(
     toWebSocketUrl(
-      webSocketBaseUrl,
+      resolvedWebSocket.baseUrl,
       `/api/sessions/${encodeURIComponent(id)}/terminal/control/ws`,
     ),
   );
@@ -205,7 +267,7 @@ export async function GET(
   }
 
   const controlPaths = buildControlPaths(id);
-  return NextResponse.json({
+  return applyTerminalConnectionHeaders(NextResponse.json({
     transport: "websocket" satisfies TerminalConnectionTransport,
     wsUrl: wsUrl.toString(),
     pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
@@ -231,5 +293,11 @@ export async function GET(
       fallbackReason: null,
       ...controlPaths,
     },
+  }), {
+    startedAt,
+    transport: "websocket",
+    interactive: true,
+    connectionPath: resolvedWebSocket.connectionPath,
+    tokenFetchMs,
   });
 }

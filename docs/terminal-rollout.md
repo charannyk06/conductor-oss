@@ -1,73 +1,88 @@
-# Terminal Rollout Notes
+# Terminal Phase 2 Rollout Notes
 
-This document is the Stage 5 rollout companion for the clean-room terminal rewrite work. It is meant for operators validating the new terminal architecture before and during rollout.
+This document is the Workstream E rollout companion for the Phase 2 terminal architecture merge. Use it to prove desktop, mobile, and private-remote terminal performance before merge and during rollout.
 
-## What To Measure
+## Benchmark Hooks
 
-- Websocket bootstrap time:
-  Measure how long `/api/sessions/:id/terminal/connection` takes to return a websocket URL and how long the browser needs to transition the terminal from `connecting` to `live`.
-- Snapshot restore time:
-  Measure `/api/sessions/:id/terminal/snapshot?lines=1200&live=1` on refresh and reconnect flows.
-- Reconnect recovery:
-  Confirm the terminal redraws and accepts input again after a tab refresh, browser reconnect, or transient network drop.
-- Explicit fallback rate:
-  Track how often remote sessions return `transport: "http-poll"`. That path should be explicit and rare, not a normal remote default.
+The terminal HTTP surfaces now expose benchmark-friendly headers.
 
-## Lightweight Benchmark Recipes
+- `/api/sessions/:id/terminal/connection`
+  - `Server-Timing: terminal_connection;dur=..., terminal_token;dur=...`
+  - `x-conductor-terminal-transport`
+  - `x-conductor-terminal-interactive`
+  - `x-conductor-terminal-connection-path` with `direct`, `managed_remote`, `auth_limited`, or `unavailable`
+- `/api/sessions/:id/terminal/snapshot`
+  - `Server-Timing: terminal_snapshot;dur=...`
+  - `x-conductor-terminal-snapshot-source`
+  - `x-conductor-terminal-snapshot-live`
+  - `x-conductor-terminal-snapshot-restored`
+  - `x-conductor-terminal-snapshot-format` when the backend served a restore frame
+- `/api/sessions/:id/terminal/resize`
+  - `Server-Timing: terminal_resize;dur=...`
+  - `x-conductor-terminal-resize-cols`
+  - `x-conductor-terminal-resize-rows`
 
-Use a live session id while the backend is running locally.
+These headers are visible in browser DevTools and in `curl -D -` output, which keeps benchmarking out of the hot path and out of the UI.
 
-Snapshot restore timing:
+## Quick Benchmark Pass
+
+Use a live session id while the dashboard is running locally.
 
 ```bash
-curl -sS -o /dev/null \
-  -w 'snapshot status=%{http_code} total=%{time_total}s size=%{size_download}B\n' \
-  "http://127.0.0.1:4749/api/sessions/<session-id>/terminal/snapshot?lines=1200&live=1"
+bun run bench:terminal -- <session-id>
 ```
 
-Connection contract timing through the dashboard:
+The script hits connection, live snapshot, resize, and read-only snapshot endpoints through the dashboard and prints status, total request time, response size, `Server-Timing`, transport mode, and snapshot source metadata.
 
-```bash
-curl -sS \
-  -w '\nconnection status=%{http_code} total=%{time_total}s\n' \
-  "http://127.0.0.1:3000/api/sessions/<session-id>/terminal/connection"
-```
+If dashboard auth is enabled, run the benchmark from a local operator environment or reproduce the same requests with equivalent auth headers or cookies.
 
-Browser-side websocket bootstrap:
+## What To Track
 
-1. Open DevTools Network on the session detail page.
-2. Reload the page with the terminal tab active.
-3. Record:
-   - terminal connection route duration
-   - websocket handshake timing
-   - time until the terminal accepts direct input again
-
-## Rollout Guardrails
-
-- Local desktop sessions should resolve websocket transport by default.
-- Approved private remote paths such as Tailscale should resolve websocket transport once the remote runtime reports `ready`.
-- `http-poll` is acceptable only when the remote websocket endpoint is not available yet or a real failure path is being exercised deliberately.
-- Snapshot restore should keep the visible prompt and recent scrollback after refresh or reconnect.
-- Resize should not corrupt the prompt or force an unwanted jump to the bottom when the user was reading older output.
+- Attach latency
+  - `terminal_connection` header timing
+  - browser websocket handshake timing
+  - time from page load to usable prompt
+- Restore latency
+  - `terminal_snapshot` header timing
+  - total snapshot request time
+  - whether the active prompt and recent scrollback survive refresh
+- Resize control latency
+  - `terminal_resize` header timing
+  - visible prompt stability after viewport or orientation changes
+- Reconnect success
+  - whether the terminal returns to `websocket` instead of degrading into snapshot mode during nominal flows
+  - time from disconnect notice to usable prompt
+- Mobile input reliability
+  - direct typing, Enter, Backspace, paste, accessory keys, and keyboard open or close stability
 
 ## Recommended Acceptance Targets
 
-- Local snapshot restore: typically under 200 ms on a warm backend.
-- Remote snapshot restore: typically under 500 ms on a healthy private-network path.
-- Reconnect notice to usable terminal: under 2 seconds on local or private-network connections.
-- Unexpected `http-poll` transport rate: zero during nominal desktop and private-remote validation.
+- Local desktop connection route: typically under 150 ms on a warm backend
+- Local desktop live snapshot: typically under 200 ms on a warm backend
+- Private-remote live snapshot: typically under 500 ms on a healthy network path
+- Reconnect notice to usable prompt: under 2 seconds on local or private-remote paths
+- Unexpected snapshot fallback rate: zero during nominal desktop and approved private-remote validation
 
-These are rollout guardrails, not protocol guarantees. If the environment is slower, capture the concrete numbers and compare them against previous runs before shipping.
+These are merge targets, not protocol guarantees. Capture the observed numbers and compare them against the integration branch before shipping.
 
-## Operator Notes
+## Merge Readiness Gate
 
-- If a remote browser lands in `http-poll`, capture the response from `/api/sessions/:id/terminal/connection` before retrying.
-- If restore output looks incomplete, capture the snapshot payload metadata:
-  - `source`
-  - `live`
-  - `restored`
-- If resize looks wrong, note device class, browser, window orientation, and whether the user was tailing output or scrolled up.
-- Persistent websocket failures should include:
-  - browser console errors
-  - network handshake status
-  - whether direct tmux attach still works via `co attach <session-id>`
+1. Run `cargo test --workspace` on a tmux-capable machine that allows tmux socket creation.
+2. Run `cargo test -p conductor-server routes::terminal::tests -- --nocapture`.
+3. Run `bun run typecheck`.
+4. Run `bun run --cwd packages/web build`.
+5. Run `bun test packages/web/src/components/sessions/sessionTerminalUtils.test.ts 'packages/web/src/app/api/sessions/[id]/terminal/connection/route.test.ts'`.
+6. Complete the manual checklist in [docs/terminal-qa-checklist.md](docs/terminal-qa-checklist.md).
+7. Record observed numbers in [docs/terminal-qa-matrix.md](docs/terminal-qa-matrix.md).
+
+## Failure Capture
+
+When a run fails, capture:
+
+- session id
+- device, browser, and local vs remote path
+- response headers from the failing terminal endpoint
+- terminal connection payload (`transport`, `interactive`, `fallbackReason`)
+- terminal snapshot payload (`source`, `live`, `restored`, `format`, `sequence`)
+- browser console and network errors
+- whether `co attach <session-id>` still reaches the same tmux session

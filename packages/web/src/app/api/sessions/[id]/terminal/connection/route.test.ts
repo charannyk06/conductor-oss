@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { NextRequest } from "next/server";
 import {
   clearRemoteAccessRuntimeState,
@@ -12,6 +14,7 @@ const originalConfigPath = process.env.CO_CONFIG_PATH;
 const originalWorkspace = process.env.CONDUCTOR_WORKSPACE;
 const originalRequireAuth = process.env.CONDUCTOR_REQUIRE_AUTH;
 const originalDefaultRole = process.env.CONDUCTOR_ACCESS_DEFAULT_ROLE;
+const originalRemoteAccessRuntimePath = process.env.CONDUCTOR_REMOTE_ACCESS_RUNTIME_PATH;
 const originalFetch = global.fetch;
 
 type TerminalConnectionPayload = {
@@ -46,6 +49,10 @@ function resetEnv(): void {
   process.env.CONDUCTOR_WORKSPACE = "terminal-connection-route-test-workspace";
   process.env.CONDUCTOR_REQUIRE_AUTH = "";
   delete process.env.CONDUCTOR_ACCESS_DEFAULT_ROLE;
+  process.env.CONDUCTOR_REMOTE_ACCESS_RUNTIME_PATH = join(
+    tmpdir(),
+    "conductor-terminal-connection-route-runtime.json",
+  );
   clearRemoteAccessRuntimeState();
 }
 
@@ -84,6 +91,12 @@ test.after(() => {
     process.env.CONDUCTOR_ACCESS_DEFAULT_ROLE = originalDefaultRole;
   }
 
+  if (originalRemoteAccessRuntimePath === undefined) {
+    delete process.env.CONDUCTOR_REMOTE_ACCESS_RUNTIME_PATH;
+  } else {
+    process.env.CONDUCTOR_REMOTE_ACCESS_RUNTIME_PATH = originalRemoteAccessRuntimePath;
+  }
+
   global.fetch = originalFetch;
   clearRemoteAccessRuntimeState();
 });
@@ -104,6 +117,11 @@ test("GET returns a websocket transport for loopback dashboard requests", async 
     );
 
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-conductor-terminal-transport"), "websocket");
+    assert.equal(response.headers.get("x-conductor-terminal-interactive"), "true");
+    assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "direct");
+    assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
+    assert.match(response.headers.get("server-timing") ?? "", /terminal_token;dur=/);
     const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "websocket");
@@ -268,6 +286,10 @@ test("GET falls back to snapshot mode when no browser-reachable websocket endpoi
     );
 
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-conductor-terminal-transport"), "snapshot");
+    assert.equal(response.headers.get("x-conductor-terminal-interactive"), "true");
+    assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "unavailable");
+    assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
     const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "snapshot");
@@ -332,6 +354,10 @@ test("GET falls back to snapshot mode for viewers without operator access", asyn
     );
 
     assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-conductor-terminal-transport"), "snapshot");
+    assert.equal(response.headers.get("x-conductor-terminal-interactive"), "false");
+    assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "auth_limited");
+    assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
     const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "snapshot");

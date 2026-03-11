@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::future::pending;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::broadcast;
 
@@ -39,6 +39,13 @@ const TERMINAL_FRAME_PROTOCOL_VERSION: u8 = 1;
 const TERMINAL_FRAME_MAGIC: [u8; 4] = *b"CTP2";
 const TERMINAL_FRAME_KIND_RESTORE: u8 = 1;
 const TERMINAL_FRAME_KIND_STREAM: u8 = 2;
+const SERVER_TIMING_HEADER: &str = "server-timing";
+const TERMINAL_SNAPSHOT_SOURCE_HEADER: &str = "x-conductor-terminal-snapshot-source";
+const TERMINAL_SNAPSHOT_LIVE_HEADER: &str = "x-conductor-terminal-snapshot-live";
+const TERMINAL_SNAPSHOT_RESTORED_HEADER: &str = "x-conductor-terminal-snapshot-restored";
+const TERMINAL_SNAPSHOT_FORMAT_HEADER: &str = "x-conductor-terminal-snapshot-format";
+const TERMINAL_RESIZE_COLS_HEADER: &str = "x-conductor-terminal-resize-cols";
+const TERMINAL_RESIZE_ROWS_HEADER: &str = "x-conductor-terminal-resize-rows";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
@@ -84,6 +91,76 @@ pub fn router() -> Router<Arc<AppState>> {
 
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
     (status, Json(json!({ "error": message.into() })))
+}
+
+fn elapsed_duration_ms(started_at: Instant) -> f64 {
+    started_at.elapsed().as_secs_f64() * 1000.0
+}
+
+fn append_server_timing_metric(headers: &mut HeaderMap, metric_name: &str, duration_ms: f64) {
+    let value = format!("{metric_name};dur={duration_ms:.1}");
+    if let Ok(header_value) = HeaderValue::from_str(&value) {
+        headers.append(HeaderName::from_static(SERVER_TIMING_HEADER), header_value);
+    }
+}
+
+fn set_terminal_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
+    if let Ok(header_value) = HeaderValue::from_str(value) {
+        headers.insert(HeaderName::from_static(name), header_value);
+    }
+}
+
+fn set_terminal_bool_header(headers: &mut HeaderMap, name: &'static str, value: bool) {
+    set_terminal_header(headers, name, if value { "true" } else { "false" });
+}
+
+fn timed_error_response(
+    status: StatusCode,
+    message: impl Into<String>,
+    metric_name: &str,
+    started_at: Instant,
+) -> Response {
+    let mut response = error(status, message).into_response();
+    append_server_timing_metric(
+        response.headers_mut(),
+        metric_name,
+        elapsed_duration_ms(started_at),
+    );
+    response
+}
+
+fn build_terminal_snapshot_response(payload: Value, started_at: Instant) -> Response {
+    let source = payload
+        .get("source")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let live = payload.get("live").and_then(Value::as_bool);
+    let restored = payload.get("restored").and_then(Value::as_bool);
+    let format = payload
+        .get("format")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let mut response = Json(payload).into_response();
+    let headers = response.headers_mut();
+    append_server_timing_metric(
+        headers,
+        "terminal_snapshot",
+        elapsed_duration_ms(started_at),
+    );
+    if let Some(source) = source.as_deref() {
+        set_terminal_header(headers, TERMINAL_SNAPSHOT_SOURCE_HEADER, source);
+    }
+    if let Some(live) = live {
+        set_terminal_bool_header(headers, TERMINAL_SNAPSHOT_LIVE_HEADER, live);
+    }
+    if let Some(restored) = restored {
+        set_terminal_bool_header(headers, TERMINAL_SNAPSHOT_RESTORED_HEADER, restored);
+    }
+    if let Some(format) = format.as_deref() {
+        set_terminal_header(headers, TERMINAL_SNAPSHOT_FORMAT_HEADER, format);
+    }
+    response
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,6 +260,7 @@ async fn terminal_snapshot(
     Path(id): Path<String>,
     Query(query): Query<TerminalSnapshotQuery>,
 ) -> Response {
+    let started_at = Instant::now();
     let Some(session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
@@ -198,8 +276,13 @@ async fn terminal_snapshot(
     };
 
     match build_terminal_snapshot(&state, &session, lines, max_bytes).await {
-        Ok(snapshot) => Json(snapshot).into_response(),
-        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        Ok(snapshot) => build_terminal_snapshot_response(snapshot, started_at),
+        Err(err) => timed_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            err.to_string(),
+            "terminal_snapshot",
+            started_at,
+        ),
     }
 }
 
@@ -208,16 +291,38 @@ async fn terminal_resize(
     Path(id): Path<String>,
     Json(body): Json<TerminalResizeBody>,
 ) -> Response {
+    let started_at = Instant::now();
     if state.get_session(&id).await.is_none() {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     }
 
-    match state
-        .resize_live_terminal(&id, body.cols.max(1), body.rows.max(1))
-        .await
-    {
-        Ok(()) => Json(json!({ "ok": true, "sessionId": id })).into_response(),
-        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    let cols = body.cols.max(1);
+    let rows = body.rows.max(1);
+    match state.resize_live_terminal(&id, cols, rows).await {
+        Ok(()) => {
+            let mut response = Json(json!({
+                "ok": true,
+                "sessionId": id,
+                "cols": cols,
+                "rows": rows,
+            }))
+            .into_response();
+            let headers = response.headers_mut();
+            append_server_timing_metric(
+                headers,
+                "terminal_resize",
+                elapsed_duration_ms(started_at),
+            );
+            set_terminal_header(headers, TERMINAL_RESIZE_COLS_HEADER, &cols.to_string());
+            set_terminal_header(headers, TERMINAL_RESIZE_ROWS_HEADER, &rows.to_string());
+            response
+        }
+        Err(err) => timed_error_response(
+            StatusCode::BAD_REQUEST,
+            err.to_string(),
+            "terminal_resize",
+            started_at,
+        ),
     }
 }
 
@@ -847,11 +952,14 @@ fn server_error_event(session_id: &str, error: impl Into<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
     use conductor_core::config::ConductorConfig;
     use conductor_db::Database;
     use conductor_executors::executor::ExecutorInput;
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
+    use tower::util::ServiceExt;
     use uuid::Uuid;
 
     async fn build_test_state() -> (Arc<AppState>, std::path::PathBuf) {
@@ -1096,6 +1204,57 @@ mod tests {
         assert_eq!(restored.has_output, current.has_output);
         assert_eq!(restored.history, current.history);
         assert_eq!(restored.screen, current.screen);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn terminal_snapshot_route_exposes_benchmark_headers() {
+        let (state, root) = build_test_state().await;
+        let session = seed_live_terminal_session(&state, "session-http").await;
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/sessions/{}/terminal/snapshot?lines=200&live=1",
+                        session.id
+                    ))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(TERMINAL_SNAPSHOT_SOURCE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("terminal_state")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(TERMINAL_SNAPSHOT_LIVE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(TERMINAL_SNAPSHOT_RESTORED_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert!(response
+            .headers()
+            .get(HeaderName::from_static(SERVER_TIMING_HEADER))
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .contains("terminal_snapshot;dur="));
 
         let _ = std::fs::remove_dir_all(root);
     }
