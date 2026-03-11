@@ -15,6 +15,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
 use crate::routes::boards::update_board_task_attempt_ref;
+use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
     build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState,
     SessionRecord, SessionStatus, SpawnRequest,
@@ -844,24 +845,9 @@ async fn send_keys(
     Path(id): Path<String>,
     Json(body): Json<KeysBody>,
 ) -> ApiResponse {
-    let message = if let Some(keys) = body.keys {
-        keys
-    } else if let Some(special) = body.special {
-        match special.as_str() {
-            "Enter" => "\r".to_string(),
-            "Tab" => "\t".to_string(),
-            "Backspace" => "\u{7f}".to_string(),
-            "Escape" => "\u{1b}".to_string(),
-            "ArrowUp" => "\u{1b}[A".to_string(),
-            "ArrowDown" => "\u{1b}[B".to_string(),
-            "ArrowRight" => "\u{1b}[C".to_string(),
-            "ArrowLeft" => "\u{1b}[D".to_string(),
-            "C-c" => "\u{3}".to_string(),
-            "C-d" => "\u{4}".to_string(),
-            other => other.to_string(),
-        }
-    } else {
-        return error(StatusCode::BAD_REQUEST, "keys or special is required");
+    let message = match resolve_terminal_keys(body.keys, body.special) {
+        Ok(message) => message,
+        Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
     };
 
     match state.send_raw_to_session(&id, message).await {

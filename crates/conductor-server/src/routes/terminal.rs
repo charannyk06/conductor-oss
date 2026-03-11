@@ -67,6 +67,10 @@ impl TerminalSnapshotReason {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
+        .route(
+            "/api/sessions/{id}/terminal/control/ws",
+            get(terminal_control_websocket),
+        )
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
         .route(
             "/api/sessions/{id}/terminal/resize",
@@ -103,15 +107,8 @@ struct TerminalResizeBody {
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum TerminalClientMessage {
+enum TerminalControlMessage {
     Ping,
-    Send {
-        message: String,
-        #[serde(default)]
-        attachments: Vec<String>,
-        model: Option<String>,
-        reasoning_effort: Option<String>,
-    },
     Keys {
         keys: Option<String>,
         special: Option<String>,
@@ -139,6 +136,25 @@ async fn terminal_websocket(
     let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
     let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
     ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, id, cols, rows))
+}
+
+async fn terminal_control_websocket(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<TerminalQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if state.get_session(&id).await.is_none() {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    }
+
+    if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
+        return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
+    }
+
+    let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
+    let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
+    ws.on_upgrade(move |socket| handle_terminal_control_socket(socket, state, id, cols, rows))
 }
 
 async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
@@ -402,8 +418,8 @@ async fn handle_terminal_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
     session_id: String,
-    mut cols: u16,
-    mut rows: u16,
+    cols: u16,
+    rows: u16,
 ) {
     if socket
         .send(Message::Text(server_ready_event(&session_id).into()))
@@ -525,37 +541,21 @@ async fn handle_terminal_socket(
             }
             message = socket.recv() => {
                 match message {
-                    Some(Ok(Message::Text(payload))) => {
-                        match serde_json::from_str::<TerminalClientMessage>(&payload) {
-                            Ok(command) => {
-                                let response = match handle_client_message(
-                                    &state,
-                                    &session_id,
-                                    &mut cols,
-                                    &mut rows,
-                                    command,
-                                )
-                                .await
-                                {
-                                    Ok(Some(value)) => Some(value),
-                                    Ok(None) => None,
-                                    Err(err) => Some(server_error_event(&session_id, err.to_string())),
-                                };
-                                if let Some(response) = response {
-                                    if socket.send(Message::Text(response.into())).await.is_err() {
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                if socket
-                                    .send(Message::Text(server_error_event(&session_id, format!("Invalid terminal message: {err}")).into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
+                    Some(Ok(Message::Text(_))) | Some(Ok(Message::Binary(_))) => {
+                        if socket
+                            .send(
+                                Message::Text(
+                                    server_error_event(
+                                        &session_id,
+                                        "Terminal stream is output-only; use HTTP control routes for input and resize",
+                                    )
+                                    .into(),
+                                ),
+                            )
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                     Some(Ok(Message::Close(_))) => break,
@@ -565,15 +565,6 @@ async fn handle_terminal_socket(
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
-                    Some(Ok(Message::Binary(_))) => {
-                        if socket
-                            .send(Message::Text(server_error_event(&session_id, "Binary terminal messages are not supported").into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
                     Some(Err(_)) | None => break,
                 }
             }
@@ -581,72 +572,112 @@ async fn handle_terminal_socket(
     }
 }
 
-async fn handle_client_message(
+async fn handle_terminal_control_socket(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    session_id: String,
+    mut cols: u16,
+    mut rows: u16,
+) {
+    if socket
+        .send(Message::Text(server_ready_event(&session_id).into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let _ = state.ensure_session_live(&session_id).await;
+    let _ = state.resize_live_terminal(&session_id, cols, rows).await;
+
+    while let Some(message) = socket.recv().await {
+        match message {
+            Ok(Message::Text(payload)) => {
+                match serde_json::from_str::<TerminalControlMessage>(&payload) {
+                    Ok(command) => {
+                        let response = match handle_control_message(
+                            &state,
+                            &session_id,
+                            &mut cols,
+                            &mut rows,
+                            command,
+                        )
+                        .await
+                        {
+                            Ok(Some(value)) => Some(value),
+                            Ok(None) => None,
+                            Err(err) => Some(server_error_event(&session_id, err.to_string())),
+                        };
+
+                        if let Some(response) = response {
+                            if socket.send(Message::Text(response.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        if socket
+                            .send(Message::Text(
+                                server_error_event(
+                                    &session_id,
+                                    format!("Invalid terminal control message: {err}"),
+                                )
+                                .into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(payload)) => {
+                if socket.send(Message::Pong(payload)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(Message::Pong(_)) => {}
+            Ok(Message::Binary(_)) => {
+                if socket
+                    .send(Message::Text(
+                        server_error_event(
+                            &session_id,
+                            "Binary terminal control messages are not supported",
+                        )
+                        .into(),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+async fn handle_control_message(
     state: &Arc<AppState>,
     session_id: &str,
     cols: &mut u16,
     rows: &mut u16,
-    message: TerminalClientMessage,
+    message: TerminalControlMessage,
 ) -> Result<Option<String>> {
     match message {
-        TerminalClientMessage::Ping => Ok(Some(server_pong_event(session_id))),
-        TerminalClientMessage::Send {
-            message,
-            attachments,
-            model,
-            reasoning_effort,
-        } => {
-            if message.trim().is_empty() && attachments.is_empty() {
-                return Err(anyhow!("Message or attachments are required"));
-            }
-
-            let is_live = state.ensure_session_live(session_id).await?;
-            if is_live {
-                state
-                    .send_to_session(
-                        session_id,
-                        message,
-                        attachments,
-                        model,
-                        reasoning_effort,
-                        "terminal_ws",
-                    )
-                    .await?;
-            } else {
-                let session = state
-                    .get_session(session_id)
-                    .await
-                    .ok_or_else(|| anyhow!("Session {session_id} not found"))?;
-                let resumable = matches!(session.status.as_str(), "needs_input" | "stuck" | "done");
-                if !resumable {
-                    return Err(anyhow!(
-                        "Session {session_id} is not accepting follow-up input"
-                    ));
-                }
-                state
-                    .resume_session_with_prompt(
-                        session_id,
-                        message,
-                        attachments,
-                        model,
-                        reasoning_effort,
-                        "terminal_ws",
-                    )
-                    .await?;
-            }
-
-            Ok(Some(server_ack_event(session_id, "send")))
-        }
-        TerminalClientMessage::Keys { keys, special } => {
+        TerminalControlMessage::Ping => Ok(Some(server_pong_event(session_id))),
+        TerminalControlMessage::Keys { keys, special } => {
             let chunk = resolve_terminal_keys(keys, special)?;
             if state.ensure_session_live(session_id).await? {
                 state.send_raw_to_session(session_id, chunk).await?;
             } else {
                 return Err(anyhow!("Terminal is not currently attached"));
             }
-            Ok(Some(server_ack_event(session_id, "keys")))
+            Ok(None)
         }
-        TerminalClientMessage::Resize {
+        TerminalControlMessage::Resize {
             cols: next_cols,
             rows: next_rows,
         } => {
@@ -658,7 +689,10 @@ async fn handle_client_message(
     }
 }
 
-fn resolve_terminal_keys(keys: Option<String>, special: Option<String>) -> Result<String> {
+pub(crate) fn resolve_terminal_keys(
+    keys: Option<String>,
+    special: Option<String>,
+) -> Result<String> {
     if let Some(keys) = keys {
         return Ok(keys);
     }
@@ -783,16 +817,6 @@ fn server_recovery_event(
         "snapshotVersion": snapshot.version,
         "cols": snapshot.cols,
         "rows": snapshot.rows,
-    })
-    .to_string()
-}
-
-fn server_ack_event(session_id: &str, action: &str) -> String {
-    json!({
-        "type": "control",
-        "event": "ack",
-        "sessionId": session_id,
-        "action": action,
     })
     .to_string()
 }

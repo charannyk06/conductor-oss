@@ -14,6 +14,32 @@ const originalRequireAuth = process.env.CONDUCTOR_REQUIRE_AUTH;
 const originalDefaultRole = process.env.CONDUCTOR_ACCESS_DEFAULT_ROLE;
 const originalFetch = global.fetch;
 
+type TerminalConnectionPayload = {
+  transport: string;
+  wsUrl: string | null;
+  pollIntervalMs: number;
+  interactive: boolean;
+  requiresToken: boolean;
+  tokenExpiresInSeconds: number | null;
+  fallbackReason: string | null;
+  stream: {
+    transport: string;
+    wsUrl: string | null;
+    pollIntervalMs: number;
+  };
+  control: {
+    transport: string;
+    wsUrl: string | null;
+    interactive: boolean;
+    requiresToken: boolean;
+    tokenExpiresInSeconds: number | null;
+    fallbackReason: string | null;
+    sendPath: string;
+    keysPath: string;
+    resizePath: string;
+  };
+};
+
 function resetEnv(): void {
   delete process.env.CONDUCTOR_BACKEND_URL;
   process.env.CO_CONFIG_PATH = "/tmp/conductor-terminal-connection-route-test-config-does-not-exist.yaml";
@@ -78,15 +104,7 @@ test("GET returns a websocket transport for loopback dashboard requests", async 
     );
 
     assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      transport: string;
-      wsUrl: string | null;
-      pollIntervalMs: number;
-      interactive: boolean;
-      requiresToken: boolean;
-      tokenExpiresInSeconds: number | null;
-      fallbackReason: string | null;
-    };
+    const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "websocket");
     assert.equal(payload.wsUrl, "ws://127.0.0.1:4749/api/sessions/session-1/terminal/ws?token=signed-token");
@@ -95,6 +113,22 @@ test("GET returns a websocket transport for loopback dashboard requests", async 
     assert.equal(payload.tokenExpiresInSeconds, 60);
     assert.equal(payload.fallbackReason, null);
     assert.equal(typeof payload.pollIntervalMs, "number");
+    assert.deepEqual(payload.stream, {
+      transport: "websocket",
+      wsUrl: "ws://127.0.0.1:4749/api/sessions/session-1/terminal/ws?token=signed-token",
+      pollIntervalMs: payload.pollIntervalMs,
+    });
+    assert.deepEqual(payload.control, {
+      transport: "websocket",
+      wsUrl: "ws://127.0.0.1:4749/api/sessions/session-1/terminal/control/ws?token=signed-token",
+      interactive: true,
+      requiresToken: true,
+      tokenExpiresInSeconds: 60,
+      fallbackReason: null,
+      sendPath: "/api/sessions/session-1/send",
+      keysPath: "/api/sessions/session-1/keys",
+      resizePath: "/api/sessions/session-1/terminal/resize",
+    });
   } finally {
     global.fetch = originalFetch;
   }
@@ -138,15 +172,7 @@ test("GET returns a tailscale websocket transport for authenticated remote reque
     );
 
     assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      transport: string;
-      wsUrl: string | null;
-      pollIntervalMs: number;
-      interactive: boolean;
-      requiresToken: boolean;
-      tokenExpiresInSeconds: number | null;
-      fallbackReason: string | null;
-    };
+    const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "websocket");
     assert.equal(payload.wsUrl, "wss://laptop.tailnet.ts.net:4749/api/sessions/session-1/terminal/ws?token=signed-token");
@@ -155,6 +181,13 @@ test("GET returns a tailscale websocket transport for authenticated remote reque
     assert.equal(payload.tokenExpiresInSeconds, 60);
     assert.equal(payload.fallbackReason, null);
     assert.equal(typeof payload.pollIntervalMs, "number");
+    assert.equal(payload.stream.transport, "websocket");
+    assert.equal(payload.stream.wsUrl, "wss://laptop.tailnet.ts.net:4749/api/sessions/session-1/terminal/ws?token=signed-token");
+    assert.equal(payload.control.transport, "websocket");
+    assert.equal(payload.control.wsUrl, "wss://laptop.tailnet.ts.net:4749/api/sessions/session-1/terminal/control/ws?token=signed-token");
+    assert.equal(payload.control.sendPath, "/api/sessions/session-1/send");
+    assert.equal(payload.control.keysPath, "/api/sessions/session-1/keys");
+    assert.equal(payload.control.resizePath, "/api/sessions/session-1/terminal/resize");
   } finally {
     global.fetch = originalFetch;
   }
@@ -197,15 +230,7 @@ test("GET uses a direct websocket when the backend URL is already browser-reacha
     );
 
     assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      transport: string;
-      wsUrl: string | null;
-      pollIntervalMs: number;
-      interactive: boolean;
-      requiresToken: boolean;
-      tokenExpiresInSeconds: number | null;
-      fallbackReason: string | null;
-    };
+    const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "websocket");
     assert.equal(payload.wsUrl, "wss://backend.example.com:4749/api/sessions/session-1/terminal/ws?token=signed-token");
@@ -214,6 +239,10 @@ test("GET uses a direct websocket when the backend URL is already browser-reacha
     assert.equal(payload.tokenExpiresInSeconds, 60);
     assert.equal(payload.fallbackReason, null);
     assert.equal(typeof payload.pollIntervalMs, "number");
+    assert.equal(payload.stream.transport, "websocket");
+    assert.equal(payload.stream.wsUrl, "wss://backend.example.com:4749/api/sessions/session-1/terminal/ws?token=signed-token");
+    assert.equal(payload.control.transport, "websocket");
+    assert.equal(payload.control.wsUrl, "wss://backend.example.com:4749/api/sessions/session-1/terminal/control/ws?token=signed-token");
   } finally {
     global.fetch = originalFetch;
   }
@@ -239,15 +268,7 @@ test("GET falls back to snapshot mode when no browser-reachable websocket endpoi
     );
 
     assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      transport: string;
-      wsUrl: string | null;
-      pollIntervalMs: number;
-      interactive: boolean;
-      requiresToken: boolean;
-      tokenExpiresInSeconds: number | null;
-      fallbackReason: string | null;
-    };
+    const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "snapshot");
     assert.equal(payload.wsUrl, null);
@@ -256,6 +277,22 @@ test("GET falls back to snapshot mode when no browser-reachable websocket endpoi
     assert.equal(payload.tokenExpiresInSeconds, null);
     assert.match(payload.fallbackReason ?? "", /browser-connectable terminal websocket/i);
     assert.equal(typeof payload.pollIntervalMs, "number");
+    assert.deepEqual(payload.stream, {
+      transport: "snapshot",
+      wsUrl: null,
+      pollIntervalMs: payload.pollIntervalMs,
+    });
+    assert.deepEqual(payload.control, {
+      transport: "http",
+      wsUrl: null,
+      interactive: true,
+      requiresToken: false,
+      tokenExpiresInSeconds: null,
+      fallbackReason: payload.fallbackReason,
+      sendPath: "/api/sessions/session-1/send",
+      keysPath: "/api/sessions/session-1/keys",
+      resizePath: "/api/sessions/session-1/terminal/resize",
+    });
   } finally {
     global.fetch = originalFetch;
   }
@@ -295,15 +332,7 @@ test("GET falls back to snapshot mode for viewers without operator access", asyn
     );
 
     assert.equal(response.status, 200);
-    const payload = await response.json() as {
-      transport: string;
-      wsUrl: string | null;
-      pollIntervalMs: number;
-      interactive: boolean;
-      requiresToken: boolean;
-      tokenExpiresInSeconds: number | null;
-      fallbackReason: string | null;
-    };
+    const payload = await response.json() as TerminalConnectionPayload;
 
     assert.equal(payload.transport, "snapshot");
     assert.equal(payload.wsUrl, null);
@@ -312,6 +341,10 @@ test("GET falls back to snapshot mode for viewers without operator access", asyn
     assert.equal(payload.tokenExpiresInSeconds, null);
     assert.match(payload.fallbackReason ?? "", /operator access/i);
     assert.equal(typeof payload.pollIntervalMs, "number");
+    assert.equal(payload.stream.transport, "snapshot");
+    assert.equal(payload.control.transport, "http");
+    assert.equal(payload.control.wsUrl, null);
+    assert.equal(payload.control.interactive, false);
   } finally {
     global.fetch = originalFetch;
   }

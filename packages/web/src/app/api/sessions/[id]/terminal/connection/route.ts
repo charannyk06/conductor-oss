@@ -11,6 +11,19 @@ const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
 const TERMINAL_TOKEN_TTL_SECONDS = 60;
 
 type TerminalConnectionTransport = "websocket" | "snapshot";
+type TerminalControlTransport = "websocket" | "http";
+
+function buildControlPaths(id: string): {
+  sendPath: string;
+  keysPath: string;
+  resizePath: string;
+} {
+  return {
+    sendPath: `/api/sessions/${encodeURIComponent(id)}/send`,
+    keysPath: `/api/sessions/${encodeURIComponent(id)}/keys`,
+    resizePath: `/api/sessions/${encodeURIComponent(id)}/terminal/resize`,
+  };
+}
 
 function toWebSocketUrl(baseUrl: string, pathname: string): string {
   const url = new URL(pathname, baseUrl);
@@ -80,9 +93,11 @@ function resolveWebSocketBaseUrl(request: Request, backendUrl: string): string |
 }
 
 function buildSnapshotFallback(
+  id: string,
   interactive: boolean,
   reason: string,
 ): Response {
+  const controlPaths = buildControlPaths(id);
   return NextResponse.json({
     transport: "snapshot" satisfies TerminalConnectionTransport,
     wsUrl: null,
@@ -91,6 +106,20 @@ function buildSnapshotFallback(
     requiresToken: false,
     tokenExpiresInSeconds: null,
     fallbackReason: reason,
+    stream: {
+      transport: "snapshot" satisfies TerminalConnectionTransport,
+      wsUrl: null,
+      pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
+    },
+    control: {
+      transport: "http" satisfies TerminalControlTransport,
+      wsUrl: null,
+      interactive,
+      requiresToken: false,
+      tokenExpiresInSeconds: null,
+      fallbackReason: reason,
+      ...controlPaths,
+    },
   });
 }
 
@@ -109,10 +138,12 @@ export async function GET(
     );
   }
 
+  const { id } = await context.params;
   const access = await getDashboardAccess(request);
   const interactive = access.role ? roleMeetsRequirement(access.role, "operator") : false;
   if (!interactive) {
     return buildSnapshotFallback(
+      id,
       false,
       "Live terminal control requires operator access. Showing snapshot recovery mode.",
     );
@@ -121,12 +152,12 @@ export async function GET(
   const webSocketBaseUrl = resolveWebSocketBaseUrl(request, backendUrl);
   if (!webSocketBaseUrl) {
     return buildSnapshotFallback(
+      id,
       true,
       "A browser-connectable terminal websocket is not available for this dashboard URL. Enable the managed private link or expose the backend websocket safely.",
     );
   }
 
-  const { id } = await context.params;
   const tokenResponse = await fetch(
     new URL(`/api/sessions/${encodeURIComponent(id)}/terminal/token`, backendUrl),
     {
@@ -162,7 +193,18 @@ export async function GET(
   if (typeof tokenPayload?.token === "string" && tokenPayload.token.trim().length > 0) {
     wsUrl.searchParams.set("token", tokenPayload.token.trim());
   }
+  const controlWsUrl = new URL(
+    toWebSocketUrl(
+      webSocketBaseUrl,
+      `/api/sessions/${encodeURIComponent(id)}/terminal/control/ws`,
+    ),
+  );
 
+  if (typeof tokenPayload?.token === "string" && tokenPayload.token.trim().length > 0) {
+    controlWsUrl.searchParams.set("token", tokenPayload.token.trim());
+  }
+
+  const controlPaths = buildControlPaths(id);
   return NextResponse.json({
     transport: "websocket" satisfies TerminalConnectionTransport,
     wsUrl: wsUrl.toString(),
@@ -173,5 +215,21 @@ export async function GET(
       ? tokenPayload.expiresInSeconds
       : (typeof tokenPayload?.token === "string" ? TERMINAL_TOKEN_TTL_SECONDS : null),
     fallbackReason: null,
+    stream: {
+      transport: "websocket" satisfies TerminalConnectionTransport,
+      wsUrl: wsUrl.toString(),
+      pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
+    },
+    control: {
+      transport: "websocket" satisfies TerminalControlTransport,
+      wsUrl: controlWsUrl.toString(),
+      interactive: true,
+      requiresToken: tokenPayload?.required === true || typeof tokenPayload?.token === "string",
+      tokenExpiresInSeconds: typeof tokenPayload?.expiresInSeconds === "number"
+        ? tokenPayload.expiresInSeconds
+        : (typeof tokenPayload?.token === "string" ? TERMINAL_TOKEN_TTL_SECONDS : null),
+      fallbackReason: null,
+      ...controlPaths,
+    },
   });
 }

@@ -32,13 +32,19 @@ interface SessionTerminalProps {
 }
 
 type TerminalConnectionInfo = {
-  transport: "websocket" | "snapshot";
-  wsUrl: string | null;
-  pollIntervalMs: number;
-  interactive: boolean;
-  requiresToken: boolean;
-  tokenExpiresInSeconds: number | null;
-  fallbackReason: string | null;
+  stream: {
+    transport: "websocket" | "snapshot";
+    wsUrl: string | null;
+    pollIntervalMs: number;
+  };
+  control: {
+    transport: "websocket" | "http";
+    wsUrl: string | null;
+    interactive: boolean;
+    requiresToken: boolean;
+    tokenExpiresInSeconds: number | null;
+    fallbackReason: string | null;
+  };
 };
 
 type TerminalSnapshot = {
@@ -108,48 +114,82 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
         requiresToken?: boolean;
         tokenExpiresInSeconds?: number | null;
         fallbackReason?: string | null;
+        stream?: {
+          transport?: "websocket" | "snapshot";
+          wsUrl?: string | null;
+          pollIntervalMs?: number;
+        } | null;
+        control?: {
+          transport?: "websocket" | "http";
+          wsUrl?: string | null;
+          interactive?: boolean;
+          requiresToken?: boolean;
+          tokenExpiresInSeconds?: number | null;
+          fallbackReason?: string | null;
+        } | null;
         error?: string;
       }
     | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal connection: ${response.status}`);
   }
-  const transport = data?.transport === "snapshot" ? "snapshot" : "websocket";
-  const pollIntervalMs = typeof data?.pollIntervalMs === "number" && Number.isFinite(data.pollIntervalMs) && data.pollIntervalMs >= 100
-    ? Math.round(data.pollIntervalMs)
-    : DEFAULT_REMOTE_POLL_INTERVAL_MS;
-  const interactive = data?.interactive === true;
-  const requiresToken = data?.requiresToken === true;
-  const tokenExpiresInSeconds = typeof data?.tokenExpiresInSeconds === "number" && Number.isFinite(data.tokenExpiresInSeconds)
-    ? Math.round(data.tokenExpiresInSeconds)
-    : null;
-  const fallbackReason = typeof data?.fallbackReason === "string" && data.fallbackReason.trim().length > 0
-    ? data.fallbackReason.trim()
+  const rawStreamPollIntervalMs = data?.stream?.pollIntervalMs;
+  const rawControlTokenExpiresInSeconds = data?.control?.tokenExpiresInSeconds;
+  const rawControlFallbackReason = data?.control?.fallbackReason;
+  const rawStreamWsUrl = data?.stream?.wsUrl;
+  const rawControlWsUrl = data?.control?.wsUrl;
+  const streamTransport = data?.stream?.transport === "snapshot" || data?.transport === "snapshot"
+    ? "snapshot"
+    : "websocket";
+  const pollIntervalMs = typeof rawStreamPollIntervalMs === "number" && Number.isFinite(rawStreamPollIntervalMs) && rawStreamPollIntervalMs >= 100
+    ? Math.round(rawStreamPollIntervalMs)
+    : (typeof data?.pollIntervalMs === "number" && Number.isFinite(data.pollIntervalMs) && data.pollIntervalMs >= 100
+      ? Math.round(data.pollIntervalMs)
+      : DEFAULT_REMOTE_POLL_INTERVAL_MS);
+  const controlTransport = data?.control?.transport === "http"
+    ? "http"
+    : "websocket";
+  const interactive = data?.control?.interactive === true || data?.interactive === true;
+  const requiresToken = data?.control?.requiresToken === true || data?.requiresToken === true;
+  const tokenExpiresInSeconds = typeof rawControlTokenExpiresInSeconds === "number" && Number.isFinite(rawControlTokenExpiresInSeconds)
+    ? Math.round(rawControlTokenExpiresInSeconds)
+    : (typeof data?.tokenExpiresInSeconds === "number" && Number.isFinite(data.tokenExpiresInSeconds)
+      ? Math.round(data.tokenExpiresInSeconds)
+      : null);
+  const fallbackReason = typeof rawControlFallbackReason === "string" && rawControlFallbackReason.trim().length > 0
+    ? rawControlFallbackReason.trim()
+    : (typeof data?.fallbackReason === "string" && data.fallbackReason.trim().length > 0
+      ? data.fallbackReason.trim()
+      : null);
+
+  const streamWsUrl = typeof rawStreamWsUrl === "string" && rawStreamWsUrl.trim().length > 0
+    ? rawStreamWsUrl.trim()
+    : (typeof data?.wsUrl === "string" && data.wsUrl.trim().length > 0 ? data.wsUrl.trim() : null);
+  const controlWsUrl = typeof rawControlWsUrl === "string" && rawControlWsUrl.trim().length > 0
+    ? rawControlWsUrl.trim()
     : null;
 
-  if (transport === "websocket") {
-    if (typeof data?.wsUrl !== "string" || data.wsUrl.trim().length === 0) {
-      throw new Error("Terminal connection did not include a websocket URL");
-    }
-    return {
-      transport,
-      wsUrl: data.wsUrl.trim(),
+  if (streamTransport === "websocket" && streamWsUrl === null) {
+    throw new Error("Terminal connection did not include a stream websocket URL");
+  }
+  if (controlTransport === "websocket" && interactive && controlWsUrl === null) {
+    throw new Error("Terminal connection did not include a control websocket URL");
+  }
+
+  return {
+    stream: {
+      transport: streamTransport,
+      wsUrl: streamWsUrl,
       pollIntervalMs,
+    },
+    control: {
+      transport: controlTransport,
+      wsUrl: controlWsUrl,
       interactive,
       requiresToken,
       tokenExpiresInSeconds,
       fallbackReason,
-    };
-  }
-
-  return {
-    transport,
-    wsUrl: null,
-    pollIntervalMs,
-    interactive,
-    requiresToken,
-    tokenExpiresInSeconds,
-    fallbackReason,
+    },
   };
 }
 
@@ -299,10 +339,12 @@ export function SessionTerminal({
   const searchRef = useRef<XSearchAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const controlSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const terminalHttpQueueRef = useRef<Promise<void>>(Promise.resolve());
   const reconnectCountRef = useRef(0);
   const connectAttemptRef = useRef(0);
+  const controlConnectAttemptRef = useRef(0);
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const scrollDisposableRef = useRef<IDisposable | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -326,10 +368,13 @@ export function SessionTerminal({
   const pendingResizeSyncRef = useRef(true);
   const preferredFocusTargetRef = useRef<PreferredFocusTarget>("none");
   const restoreFocusOnRecoveryRef = useRef(false);
+  const ignoreControlSocketCloseRef = useRef(false);
 
   const [terminalReady, setTerminalReady] = useState(false);
   const [transportMode, setTransportMode] = useState<"websocket" | "snapshot">("websocket");
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
+  const [controlTransportMode, setControlTransportMode] = useState<"websocket" | "http">("websocket");
+  const [controlSocketBaseUrl, setControlSocketBaseUrl] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [transportError, setTransportError] = useState<string | null>(null);
   const [pollIntervalMs, setPollIntervalMs] = useState(DEFAULT_REMOTE_POLL_INTERVAL_MS);
@@ -407,6 +452,8 @@ export function SessionTerminal({
     setConnectionState("connecting");
     setTransportMode("websocket");
     setSocketBaseUrl(null);
+    setControlTransportMode("websocket");
+    setControlSocketBaseUrl(null);
     setReconnectToken((value) => value + 1);
   }, [clearReconnectTimer]);
 
@@ -419,14 +466,15 @@ export function SessionTerminal({
   }, []);
 
   const sendResize = useCallback(async (cols: number, rows: number): Promise<boolean> => {
-    if (transportMode === "snapshot") {
+    if (controlTransportMode === "http") {
       await enqueueTerminalHttpOperation(() => postTerminalResize(sessionId, cols, rows));
       return true;
     }
 
-    const socket = socketRef.current;
+    const socket = controlSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return false;
+      await enqueueTerminalHttpOperation(() => postTerminalResize(sessionId, cols, rows));
+      return true;
     }
     socket.send(JSON.stringify({
       type: "resize",
@@ -434,7 +482,7 @@ export function SessionTerminal({
       rows: Math.max(1, Math.round(rows)),
     }));
     return true;
-  }, [enqueueTerminalHttpOperation, sessionId, transportMode]);
+  }, [controlTransportMode, enqueueTerminalHttpOperation, sessionId]);
 
   const sendTerminalKeys = useCallback(async (data: string) => {
     if (!interactiveTerminal) {
@@ -445,34 +493,36 @@ export function SessionTerminal({
       return;
     }
 
-    if (transportMode === "snapshot") {
+    if (controlTransportMode === "http") {
       await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { keys }));
       return;
     }
 
-    const socket = socketRef.current;
+    const socket = controlSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error("Terminal is not connected");
+      await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { keys }));
+      return;
     }
     socket.send(JSON.stringify({ type: "keys", keys }));
-  }, [enqueueTerminalHttpOperation, interactiveTerminal, sessionId, transportMode]);
+  }, [controlTransportMode, enqueueTerminalHttpOperation, interactiveTerminal, sessionId]);
 
   const sendTerminalSpecial = useCallback(async (special: string) => {
     if (!interactiveTerminal) {
       throw new Error("Operator access is required for live terminal input");
     }
 
-    if (transportMode === "snapshot") {
+    if (controlTransportMode === "http") {
       await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { special }));
       return;
     }
 
-    const socket = socketRef.current;
+    const socket = controlSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      throw new Error("Terminal is not connected");
+      await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { special }));
+      return;
     }
     socket.send(JSON.stringify({ type: "keys", special }));
-  }, [enqueueTerminalHttpOperation, interactiveTerminal, sessionId, transportMode]);
+  }, [controlTransportMode, enqueueTerminalHttpOperation, interactiveTerminal, sessionId]);
 
   const detectFocusedSurface = useCallback((): PreferredFocusTarget => {
     if (typeof document === "undefined") {
@@ -757,6 +807,7 @@ export function SessionTerminal({
     liveOutputStartedRef.current = false;
     reconnectCountRef.current = 0;
     connectAttemptRef.current = 0;
+    controlConnectAttemptRef.current = 0;
     lastAppliedInsertNonceRef.current = 0;
     lastSyncedTerminalSizeRef.current = null;
     pendingResizeSyncRef.current = true;
@@ -765,10 +816,18 @@ export function SessionTerminal({
     clearReconnectTimer();
     clearScheduledRecovery();
     socketRef.current?.close();
+    const controlSocket = controlSocketRef.current;
+    if (controlSocket) {
+      ignoreControlSocketCloseRef.current = true;
+      controlSocket.close();
+    }
     socketRef.current = null;
+    controlSocketRef.current = null;
     terminalHttpQueueRef.current = Promise.resolve();
     setTransportMode("websocket");
     setSocketBaseUrl(null);
+    setControlTransportMode("websocket");
+    setControlSocketBaseUrl(null);
     setConnectionState("connecting");
     setTransportError(null);
     setPollIntervalMs(DEFAULT_REMOTE_POLL_INTERVAL_MS);
@@ -871,11 +930,13 @@ export function SessionTerminal({
         setSocketBaseUrl(null);
         const connection = await fetchTerminalConnection(sessionId);
         if (!mounted) return;
-        setTransportMode(connection.transport);
-        setPollIntervalMs(connection.pollIntervalMs);
-        setSocketBaseUrl(connection.wsUrl);
-        setInteractiveTerminal(connection.interactive);
-        setTransportNotice(connection.fallbackReason);
+        setTransportMode(connection.stream.transport);
+        setPollIntervalMs(connection.stream.pollIntervalMs);
+        setSocketBaseUrl(connection.stream.wsUrl);
+        setControlTransportMode(connection.control.transport);
+        setControlSocketBaseUrl(connection.control.wsUrl);
+        setInteractiveTerminal(connection.control.interactive);
+        setTransportNotice(connection.control.fallbackReason);
         setTransportError(null);
         setConnectionState("connecting");
       } catch (err) {
@@ -1166,9 +1227,15 @@ export function SessionTerminal({
 
     clearReconnectTimer();
     const socket = socketRef.current;
+    const controlSocket = controlSocketRef.current;
     socketRef.current = null;
+    controlSocketRef.current = null;
     if (socket) {
       socket.close();
+    }
+    if (controlSocket) {
+      ignoreControlSocketCloseRef.current = true;
+      controlSocket.close();
     }
   }, [clearReconnectTimer, shouldStreamLiveTerminal]);
 
@@ -1323,6 +1390,12 @@ export function SessionTerminal({
     socket.onclose = () => {
       if (connectAttemptRef.current !== attemptId) return;
       socketRef.current = null;
+      const controlSocket = controlSocketRef.current;
+      controlSocketRef.current = null;
+      if (controlSocket) {
+        ignoreControlSocketCloseRef.current = true;
+        controlSocket.close();
+      }
       const shouldRetry = LIVE_TERMINAL_STATUSES.has(latestStatusRef.current);
       if (shouldRetry) {
         pendingResizeSyncRef.current = true;
@@ -1333,6 +1406,7 @@ export function SessionTerminal({
         }
         setConnectionState("connecting");
         setSocketBaseUrl(null);
+        setControlSocketBaseUrl(null);
         scheduleReconnect();
         return;
       }
@@ -1341,8 +1415,15 @@ export function SessionTerminal({
 
     socket.onerror = () => {
       if (connectAttemptRef.current !== attemptId) return;
+      const controlSocket = controlSocketRef.current;
+      controlSocketRef.current = null;
+      if (controlSocket) {
+        ignoreControlSocketCloseRef.current = true;
+        controlSocket.close();
+      }
       pendingResizeSyncRef.current = true;
       setTransportError("Terminal connection failed");
+      setControlSocketBaseUrl(null);
       setConnectionState("error");
     };
 
@@ -1365,6 +1446,87 @@ export function SessionTerminal({
     terminalReady,
     transportMode,
     updateScrollState,
+  ]);
+
+  useEffect(() => {
+    if (
+      !terminalReady
+      || !snapshotReady
+      || !shouldStreamLiveTerminal
+      || !termRef.current
+      || transportMode !== "websocket"
+      || controlTransportMode !== "websocket"
+      || !controlSocketBaseUrl
+    ) {
+      return;
+    }
+
+    const socketUrl = buildTerminalSocketUrl(controlSocketBaseUrl, termRef.current.cols, termRef.current.rows);
+    const attemptId = controlConnectAttemptRef.current + 1;
+    controlConnectAttemptRef.current = attemptId;
+    let disposed = false;
+
+    const socket = new WebSocket(socketUrl);
+    controlSocketRef.current = socket;
+
+    socket.onmessage = (event) => {
+      if (disposed || controlConnectAttemptRef.current !== attemptId || typeof event.data !== "string") {
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(event.data) as TerminalServerEvent;
+        if (payload.type === "error") {
+          setTransportError(payload.error);
+        }
+      } catch {
+        setTransportError("Received an invalid terminal control event");
+      }
+    };
+
+    socket.onclose = () => {
+      if (disposed || controlConnectAttemptRef.current !== attemptId) return;
+      if (ignoreControlSocketCloseRef.current) {
+        ignoreControlSocketCloseRef.current = false;
+        return;
+      }
+      controlSocketRef.current = null;
+      if (LIVE_TERMINAL_STATUSES.has(latestStatusRef.current)) {
+        pendingResizeSyncRef.current = true;
+        requestReconnect();
+      }
+    };
+
+    socket.onerror = () => {
+      if (disposed || controlConnectAttemptRef.current !== attemptId) return;
+      if (ignoreControlSocketCloseRef.current) {
+        ignoreControlSocketCloseRef.current = false;
+        return;
+      }
+      controlSocketRef.current = null;
+      if (LIVE_TERMINAL_STATUSES.has(latestStatusRef.current)) {
+        pendingResizeSyncRef.current = true;
+        requestReconnect();
+        return;
+      }
+      setTransportError("Terminal control connection failed");
+    };
+
+    return () => {
+      disposed = true;
+      if (controlSocketRef.current === socket) {
+        controlSocketRef.current = null;
+      }
+      socket.close();
+    };
+  }, [
+    controlSocketBaseUrl,
+    controlTransportMode,
+    requestReconnect,
+    shouldStreamLiveTerminal,
+    snapshotReady,
+    terminalReady,
+    transportMode,
   ]);
 
   useEffect(() => {
@@ -1393,6 +1555,10 @@ export function SessionTerminal({
     clearScheduledRecovery();
     clearVisibilityRecoveryTimers();
     socketRef.current?.close();
+    if (controlSocketRef.current) {
+      ignoreControlSocketCloseRef.current = true;
+      controlSocketRef.current.close();
+    }
   }, [clearReconnectTimer, clearScheduledRecovery, clearVisibilityRecoveryTimers]);
 
   useEffect(() => {
