@@ -301,6 +301,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::notifications::router())
         .merge(routes::projects::router())
         .merge(routes::tasks::router())
+        .merge(routes::terminal::router())
         .merge(routes::auth::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),

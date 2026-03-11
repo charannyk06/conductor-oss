@@ -214,6 +214,13 @@ The Rust backend is the orchestration core. It handles:
 
 The live terminal is now the primary session workspace. The dashboard still provides a normalized feed and metadata, but interactive work is expected to happen through the terminal surface, not a synthetic chat-only shell.
 
+### Terminal Validation And Rollout
+
+Stage 5 terminal validation now has explicit operator guidance:
+
+- [Terminal rollout notes](docs/terminal-rollout.md) cover measurement recipes, rollout guardrails, and failure signals to capture.
+- [Terminal QA checklist](docs/terminal-qa-checklist.md) covers desktop, phone, and remote-browser test passes before release.
+
 ## Architecture
 
 User-facing stack:

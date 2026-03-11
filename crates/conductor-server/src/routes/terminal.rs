@@ -18,7 +18,8 @@ use tokio::sync::broadcast;
 use crate::routes::config::access_control_enabled;
 use crate::state::{
     capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
-    SessionRecord, TerminalStreamEvent, TMUX_LOG_PATH_METADATA_KEY,
+    SessionRecord, TerminalRestoreSnapshot, TerminalStreamEvent, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    TMUX_LOG_PATH_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -27,15 +28,30 @@ type HmacSha256 = Hmac<sha2::Sha256>;
 const DEFAULT_TERMINAL_COLS: u16 = 120;
 const DEFAULT_TERMINAL_ROWS: u16 = 32;
 const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 1200;
-const LIVE_TERMINAL_RESTORE_LINES: usize = 1200;
 const MAX_TERMINAL_SNAPSHOT_LINES: usize = 12000;
 const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
 const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 384 * 1024;
 const ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
+const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+#[derive(Copy, Clone)]
+enum TerminalSnapshotReason {
+    Attach,
+    Lagged,
+}
+
+impl TerminalSnapshotReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attach => "attach",
+            Self::Lagged => "lagged",
+        }
+    }
+}
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -65,7 +81,7 @@ struct TerminalQuery {
 #[derive(Debug, Deserialize)]
 struct TerminalSnapshotQuery {
     lines: Option<usize>,
-    live: Option<bool>,
+    live: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,13 +136,19 @@ async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     }
 
     let access = state.config.read().await.access.clone();
-    let token = if should_issue_terminal_token(&access) {
+    let token_required = should_issue_terminal_token(&access);
+    let token = if token_required {
         create_terminal_token(&id).ok()
     } else {
         None
     };
 
-    Json(json!({ "token": token })).into_response()
+    Json(json!({
+        "token": token,
+        "required": token_required,
+        "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
+    }))
+    .into_response()
 }
 
 async fn terminal_snapshot(
@@ -142,7 +164,7 @@ async fn terminal_snapshot(
         .lines
         .unwrap_or(DEFAULT_TERMINAL_SNAPSHOT_LINES)
         .clamp(25, MAX_TERMINAL_SNAPSHOT_LINES);
-    let max_bytes = if query.live.unwrap_or(false) {
+    let max_bytes = if terminal_snapshot_live_requested(query.live.as_deref()) {
         LIVE_TERMINAL_SNAPSHOT_MAX_BYTES
     } else {
         READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES
@@ -178,29 +200,22 @@ async fn build_terminal_snapshot(
     lines: usize,
     max_bytes: usize,
 ) -> Result<Value> {
-    if let Some(snapshot) =
-        build_terminal_restore_snapshot(state, session, lines, max_bytes).await?
-    {
+    if let Some(snapshot) = build_terminal_restore_snapshot(state, session).await? {
         let live = state.terminal_runtime_attached(&session.id).await;
+        let restore_bytes = snapshot.render_bytes(max_bytes);
         return Ok(json!({
-            "snapshot": String::from_utf8_lossy(&snapshot),
-            "source": "terminal_store",
+            "snapshot": String::from_utf8_lossy(&restore_bytes),
+            "source": "terminal_state",
+            "format": TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+            "snapshotVersion": snapshot.version,
+            "sequence": snapshot.sequence,
+            "cols": snapshot.cols,
+            "rows": snapshot.rows,
+            "historyBytes": snapshot.history_len(),
+            "screenBytes": snapshot.screen_len(),
             "live": live,
             "restored": true,
         }));
-    }
-
-    if let Some(snapshot) = state.current_terminal_snapshot(&session.id).await {
-        if !snapshot.is_empty() {
-            let live = state.terminal_runtime_attached(&session.id).await;
-            let snapshot = trim_utf8_tail_bytes(snapshot, max_bytes);
-            return Ok(json!({
-                "snapshot": String::from_utf8_lossy(&snapshot),
-                "source": "terminal_store",
-                "live": live,
-                "restored": true,
-            }));
-        }
     }
 
     if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(session) {
@@ -222,7 +237,8 @@ async fn build_terminal_snapshot(
     }
 
     let terminal_capture_path = state.session_terminal_capture_path(&session.id);
-    if let Some(snapshot) = read_terminal_log_tail(&terminal_capture_path, lines, max_bytes).await? {
+    if let Some(snapshot) = read_terminal_log_tail(&terminal_capture_path, lines, max_bytes).await?
+    {
         let live = state.terminal_runtime_attached(&session.id).await;
         return Ok(json!({
             "snapshot": snapshot,
@@ -259,53 +275,8 @@ async fn build_terminal_snapshot(
 async fn build_terminal_restore_snapshot(
     state: &AppState,
     session: &SessionRecord,
-    lines: usize,
-    max_bytes: usize,
-) -> Result<Option<Vec<u8>>> {
-    let Some(state_snapshot) = state.current_terminal_snapshot(&session.id).await else {
-        return Ok(None);
-    };
-    if state_snapshot.is_empty() {
-        return Ok(None);
-    }
-
-    let history = if let Some(history) = state.current_terminal_history(&session.id).await {
-        Some(history)
-    } else if let Some(log_path) = session
-        .metadata
-        .get(TMUX_LOG_PATH_METADATA_KEY)
-        .map(PathBuf::from)
-    {
-        read_terminal_log_tail_bytes(&log_path, lines, max_bytes).await?
-    } else {
-        let snapshot = trim_utf8_tail_string(trim_lines_tail(&session.output, lines), max_bytes);
-        if snapshot.trim().is_empty() {
-            None
-        } else {
-            Some(snapshot.into_bytes())
-        }
-    };
-
-    let Some(mut history) = history else {
-        return Ok(Some(trim_utf8_tail_bytes(state_snapshot, max_bytes)));
-    };
-
-    let separator_len = if history.ends_with(b"\n") || history.ends_with(b"\r") {
-        0
-    } else {
-        2
-    };
-    let reserved = state_snapshot.len().saturating_add(separator_len);
-    if reserved >= max_bytes {
-        return Ok(Some(state_snapshot));
-    }
-
-    history = trim_utf8_tail_bytes(history, max_bytes.saturating_sub(reserved));
-    if separator_len != 0 {
-        history.extend_from_slice(b"\r\n");
-    }
-    history.extend_from_slice(&state_snapshot);
-    Ok(Some(history))
+) -> Result<Option<TerminalRestoreSnapshot>> {
+    Ok(state.current_terminal_restore_snapshot(&session.id).await)
 }
 
 async fn read_terminal_log_tail(
@@ -357,6 +328,14 @@ fn trim_utf8_tail_string(value: String, max_bytes: usize) -> String {
     String::from_utf8_lossy(&trim_utf8_tail_bytes(value.into_bytes(), max_bytes)).into_owned()
 }
 
+fn terminal_snapshot_live_requested(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 fn trim_utf8_tail_bytes(bytes: Vec<u8>, max_bytes: usize) -> Vec<u8> {
     if max_bytes == 0 || bytes.len() <= max_bytes {
         return bytes;
@@ -392,15 +371,25 @@ async fn handle_terminal_socket(
     let _ = state.ensure_session_live(&session_id).await;
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
     if let Some(session) = state.get_session(&session_id).await {
-        if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(
-            &state,
-            &session,
-            LIVE_TERMINAL_RESTORE_LINES,
-            LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
-        )
-        .await
-        {
-            if socket.send(Message::Binary(snapshot.into())).await.is_err() {
+        if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
+            if socket
+                .send(
+                    Message::Text(
+                        server_snapshot_event(&session_id, TerminalSnapshotReason::Attach).into(),
+                    ),
+                )
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
+            if !restore_bytes.is_empty()
+                && socket
+                    .send(Message::Binary(restore_bytes.into()))
+                    .await
+                    .is_err()
+            {
                 return;
             }
         }
@@ -445,16 +434,30 @@ async fn handle_terminal_socket(
                     }
                     Some(Err(broadcast::error::RecvError::Lagged(skipped))) => {
                         if let Some(session) = state.get_session(&session_id).await {
-                            if let Ok(Some(snapshot)) =
-                                build_terminal_restore_snapshot(
-                                    &state,
-                                    &session,
-                                    LIVE_TERMINAL_RESTORE_LINES,
-                                    LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
-                                )
-                                .await
+                            if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await
                             {
-                                if socket.send(Message::Binary(snapshot.into())).await.is_err() {
+                                if socket
+                                    .send(
+                                        Message::Text(
+                                            server_snapshot_event(
+                                                &session_id,
+                                                TerminalSnapshotReason::Lagged,
+                                            )
+                                            .into(),
+                                        ),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                                let restore_bytes = snapshot.render_bytes(LIVE_TERMINAL_SNAPSHOT_MAX_BYTES);
+                                if !restore_bytes.is_empty()
+                                    && socket
+                                        .send(Message::Binary(restore_bytes.into()))
+                                        .await
+                                        .is_err()
+                                {
                                     break;
                                 }
                             } else if socket
@@ -681,7 +684,7 @@ fn verify_terminal_token(session_id: &str, token: &str) -> Result<bool> {
 
 fn create_terminal_token(session_id: &str) -> Result<String> {
     let secret = terminal_token_secret();
-    let expires_at = chrono::Utc::now().timestamp() + 60;
+    let expires_at = chrono::Utc::now().timestamp() + TERMINAL_TOKEN_TTL_SECONDS;
     let payload = format!("{session_id}:{expires_at}");
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())?;
     mac.update(payload.as_bytes());
@@ -717,6 +720,15 @@ fn server_ready_event(session_id: &str) -> String {
     json!({
         "type": "ready",
         "sessionId": session_id,
+    })
+    .to_string()
+}
+
+fn server_snapshot_event(session_id: &str, reason: TerminalSnapshotReason) -> String {
+    json!({
+        "type": "snapshot",
+        "sessionId": session_id,
+        "reason": reason.as_str(),
     })
     .to_string()
 }
@@ -759,6 +771,49 @@ fn server_error_event(session_id: &str, error: impl Into<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use conductor_core::config::ConductorConfig;
+    use conductor_db::Database;
+    use conductor_executors::executor::ExecutorInput;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot};
+    use uuid::Uuid;
+
+    async fn build_test_state() -> (Arc<AppState>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("conductor-terminal-route-test-{}", Uuid::new_v4()));
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory().await.expect("in-memory db should initialize");
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        (state, root)
+    }
+
+    async fn seed_live_terminal_session(state: &Arc<AppState>, session_id: &str) -> SessionRecord {
+        let session = SessionRecord::builder(
+            session_id.to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "Validate terminal restore".to_string(),
+        )
+        .build();
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+
+        let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        state
+            .attach_terminal_runtime(&session.id, input_tx, kill_tx)
+            .await;
+        state
+            .emit_terminal_text(&session.id, "first line\r\nprompt> ")
+            .await;
+
+        session
+    }
 
     #[test]
     fn resolve_terminal_keys_prefers_literal_keys() {
@@ -776,6 +831,27 @@ mod tests {
         assert_eq!(enter, "\r");
         assert_eq!(ctrl_c, "\u{3}");
         assert_eq!(arrow_up, "\u{1b}[A");
+    }
+
+    #[test]
+    fn server_snapshot_event_includes_reason() {
+        let payload = server_snapshot_event("session-123", TerminalSnapshotReason::Attach);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("snapshot payload should be valid json");
+
+        assert_eq!(parsed["type"], "snapshot");
+        assert_eq!(parsed["sessionId"], "session-123");
+        assert_eq!(parsed["reason"], "attach");
+    }
+
+    #[test]
+    fn terminal_snapshot_live_requested_accepts_booleanish_query_values() {
+        assert!(terminal_snapshot_live_requested(Some("1")));
+        assert!(terminal_snapshot_live_requested(Some("true")));
+        assert!(terminal_snapshot_live_requested(Some("YES")));
+        assert!(!terminal_snapshot_live_requested(Some("0")));
+        assert!(!terminal_snapshot_live_requested(Some("false")));
+        assert!(!terminal_snapshot_live_requested(None));
     }
 
     #[test]
@@ -824,5 +900,60 @@ mod tests {
 
         let token = create_terminal_token("session-123").expect("token should be created");
         assert!(verify_terminal_token("session-123", &token).expect("token should verify"));
+    }
+
+    #[tokio::test]
+    async fn build_terminal_snapshot_prefers_live_terminal_store_and_marks_session_live() {
+        let (state, root) = build_test_state().await;
+        let session = seed_live_terminal_session(&state, "session-live").await;
+
+        let payload = build_terminal_snapshot(&state, &session, 200, 4096)
+            .await
+            .expect("snapshot should build");
+
+        assert_eq!(payload["source"], "terminal_state");
+        assert_eq!(payload["live"], true);
+        assert_eq!(payload["restored"], true);
+        assert!(
+            payload["snapshot"]
+                .as_str()
+                .expect("snapshot should be a string")
+                .contains("prompt> ")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_terminal_restore_snapshot_keeps_history_and_utf8_boundaries_under_budget() {
+        let (state, root) = build_test_state().await;
+        let session = seed_live_terminal_session(&state, "session-restore").await;
+        state
+            .emit_terminal_text(&session.id, "emoji: 🙂🙂🙂🙂🙂")
+            .await;
+
+        let restored = build_terminal_restore_snapshot(&state, &session)
+            .await
+            .expect("restore snapshot should build")
+            .expect("restore snapshot should exist");
+
+        let rendered = restored.render_bytes(96);
+        assert!(rendered.len() <= 96);
+        let rendered_text = String::from_utf8_lossy(&rendered);
+        assert!(rendered_text.contains("emoji:"));
+
+        let current = state
+            .current_terminal_restore_snapshot(&session.id)
+            .await
+            .expect("live restore snapshot should exist");
+
+        assert_eq!(restored.sequence, current.sequence);
+        assert_eq!(restored.cols, current.cols);
+        assert_eq!(restored.rows, current.rows);
+        assert_eq!(restored.has_output, current.has_output);
+        assert_eq!(restored.history, current.history);
+        assert_eq!(restored.screen, current.screen);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

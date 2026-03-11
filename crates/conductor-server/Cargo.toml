@@ -32,10 +32,10 @@ glob = { workspace = true }
 async-trait = { workspace = true }
 portable-pty = { workspace = true }
 vt100 = "0.16"
+base64 = "0.22"
 
 [dev-dependencies]
 tower = "0.5"
-base64 = "0.22"
 rand = "0.8"
 
 [target.'cfg(windows)'.dependencies]

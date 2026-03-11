@@ -588,7 +588,7 @@ impl AppState {
     }
 
     async fn restore_tmux_session(self: &Arc<Self>, session_id: &str) -> Result<()> {
-        if self.live_sessions.read().await.contains_key(session_id) {
+        if self.terminal_runtime_attached(session_id).await {
             return Ok(());
         }
 

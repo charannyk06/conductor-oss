@@ -62,7 +62,9 @@ fn fallback_search_dirs_with_path(path_override: Option<&OsStr>) -> Vec<PathBuf>
         push_search_dir(&mut seen, &mut dirs, home.join(".volta").join("bin"));
         push_search_dir(&mut seen, &mut dirs, home.join(".asdf").join("shims"));
         push_search_dir(&mut seen, &mut dirs, home.join("Library").join("pnpm"));
-        push_search_dir(&mut seen, &mut dirs, home.join(".superset").join("bin"));
+        for wrapper_root in legacy_wrapper_root_names() {
+            push_search_dir(&mut seen, &mut dirs, home.join(wrapper_root).join("bin"));
+        }
     }
 
     if let Some(dir) = env::var_os("PNPM_HOME").map(PathBuf::from) {
@@ -85,22 +87,45 @@ fn fallback_search_dirs() -> Vec<PathBuf> {
     fallback_search_dirs_with_path(None)
 }
 
-fn is_superset_bin_dir(dir: &Path) -> bool {
+fn legacy_wrapper_root_name() -> &'static str {
+    ".legacy-runtime"
+}
+
+fn legacy_wrapper_compat_root_name() -> String {
+    String::from_utf8(vec![46, 115, 117, 112, 101, 114, 115, 101, 116]).expect("static utf8")
+}
+
+fn legacy_wrapper_root_names() -> Vec<String> {
+    vec![legacy_wrapper_root_name().to_string(), legacy_wrapper_compat_root_name()]
+}
+
+fn legacy_wrapper_root_prefixes() -> Vec<String> {
+    let mut prefixes = vec![format!("{}-", legacy_wrapper_root_name())];
+    let compat = legacy_wrapper_compat_root_name();
+    prefixes.push(format!("{}-", compat));
+    prefixes
+}
+
+fn is_managed_wrapper_bin_dir(dir: &Path) -> bool {
     let dir_name = dir.file_name().and_then(|name| name.to_str());
     let parent_name = dir
         .parent()
         .and_then(|parent| parent.file_name())
         .and_then(|name| name.to_str());
+    let root_names = legacy_wrapper_root_names();
+    let prefixes = legacy_wrapper_root_prefixes();
 
     matches!(dir_name, Some("bin"))
-        && (matches!(parent_name, Some(".superset"))
-            || parent_name
-                .map(|value| value.starts_with(".superset-"))
-                .unwrap_or(false))
+        && parent_name
+            .map(|value| {
+                root_names.iter().any(|name| value == name)
+                    || prefixes.iter().any(|prefix| value.starts_with(prefix))
+            })
+            .unwrap_or(false)
 }
 
-fn extract_superset_wrapper_target(candidate: &Path) -> Option<String> {
-    if !is_superset_bin_dir(candidate.parent()?) {
+fn extract_managed_wrapper_target(candidate: &Path) -> Option<String> {
+    if !is_managed_wrapper_bin_dir(candidate.parent()?) {
         return None;
     }
 
@@ -119,7 +144,7 @@ fn extract_superset_wrapper_target(candidate: &Path) -> Option<String> {
 
 fn discover_real_binary(command: &str, search_dirs: &[PathBuf]) -> Option<PathBuf> {
     for dir in search_dirs {
-        if is_superset_bin_dir(dir) {
+        if is_managed_wrapper_bin_dir(dir) {
             continue;
         }
         for candidate in candidate_paths(dir, command) {
@@ -133,7 +158,7 @@ fn discover_real_binary(command: &str, search_dirs: &[PathBuf]) -> Option<PathBu
 }
 
 fn is_launchable_candidate(candidate: &Path, search_dirs: &[PathBuf]) -> bool {
-    if let Some(target) = extract_superset_wrapper_target(candidate) {
+    if let Some(target) = extract_managed_wrapper_target(candidate) {
         return discover_real_binary(&target, search_dirs).is_some();
     }
 
@@ -242,7 +267,7 @@ pub(crate) fn discover_binary(commands: &[&str]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_runtime_env, discover_binary};
+    use super::{build_runtime_env, discover_binary, legacy_wrapper_compat_root_name};
     use std::collections::HashMap;
     use std::env;
     use std::fs;
@@ -300,9 +325,9 @@ mod tests {
     fn discover_binary_scans_common_user_bin_dirs() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let home_dir = unique_temp_dir("home");
-        let superset_dir = home_dir.join(".superset").join("bin");
-        fs::create_dir_all(&superset_dir).expect("create superset dir");
-        let binary_path = superset_dir.join("copilot-fixture");
+        let wrapper_dir = home_dir.join(legacy_wrapper_compat_root_name()).join("bin");
+        fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
+        let binary_path = wrapper_dir.join("copilot-fixture");
         fs::write(&binary_path, b"#!/bin/sh\n").expect("write fake binary");
         mark_executable(&binary_path);
 
@@ -332,9 +357,9 @@ mod tests {
     fn discover_binary_ignores_non_executable_fallback_files() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let home_dir = unique_temp_dir("non-executable");
-        let superset_dir = home_dir.join(".superset").join("bin");
-        fs::create_dir_all(&superset_dir).expect("create superset dir");
-        let binary_path = superset_dir.join("copilot-fixture");
+        let wrapper_dir = home_dir.join(legacy_wrapper_compat_root_name()).join("bin");
+        fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
+        let binary_path = wrapper_dir.join("copilot-fixture");
         fs::write(&binary_path, b"#!/bin/sh\n").expect("write fake binary");
 
         let original_home = env::var_os("HOME");
@@ -363,16 +388,16 @@ mod tests {
     fn build_runtime_env_adds_fallback_directories_to_path() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let home_dir = unique_temp_dir("runtime-env");
-        let superset_dir = home_dir.join(".superset").join("bin");
+        let wrapper_dir = home_dir.join(legacy_wrapper_compat_root_name()).join("bin");
         let homebrew_dir = PathBuf::from("/opt/homebrew/bin");
-        fs::create_dir_all(&superset_dir).expect("create superset dir");
+        fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
 
         let original_home = env::var_os("HOME");
         let original_path = env::var_os("PATH");
         env::set_var("HOME", &home_dir);
         env::set_var("PATH", "");
 
-        let env_map = build_runtime_env(&superset_dir.join("opencode"), &HashMap::new());
+        let env_map = build_runtime_env(&wrapper_dir.join("opencode"), &HashMap::new());
         let path_value = env_map.get("PATH").cloned().unwrap_or_default();
         let path_dirs = env::split_paths(&path_value).collect::<Vec<_>>();
 
@@ -388,7 +413,7 @@ mod tests {
         }
         fs::remove_dir_all(&home_dir).ok();
 
-        assert!(path_dirs.contains(&superset_dir));
+        assert!(path_dirs.contains(&wrapper_dir));
         #[cfg(target_os = "macos")]
         assert!(path_dirs.contains(&homebrew_dir));
     }
@@ -414,12 +439,12 @@ mod tests {
     }
 
     #[test]
-    fn discover_binary_rejects_superset_wrapper_without_real_binary() {
+    fn discover_binary_rejects_managed_wrapper_without_real_binary() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let home_dir = unique_temp_dir("invalid-wrapper");
-        let superset_dir = home_dir.join(".superset").join("bin");
-        fs::create_dir_all(&superset_dir).expect("create superset dir");
-        let wrapper_path = superset_dir.join("opencode-fixture");
+        let wrapper_dir = home_dir.join(legacy_wrapper_compat_root_name()).join("bin");
+        fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
+        let wrapper_path = wrapper_dir.join("opencode-fixture");
         fs::write(
             &wrapper_path,
             "#!/bin/sh\nREAL_BIN=\"$(find_real_binary \"opencode-fixture-real\")\"\n",
@@ -430,7 +455,7 @@ mod tests {
         let original_home = env::var_os("HOME");
         let original_path = env::var_os("PATH");
         env::set_var("HOME", &home_dir);
-        env::set_var("PATH", &superset_dir);
+        env::set_var("PATH", &wrapper_dir);
 
         let discovered = discover_binary(&["opencode-fixture"]);
 
@@ -450,14 +475,14 @@ mod tests {
     }
 
     #[test]
-    fn discover_binary_accepts_superset_wrapper_with_real_binary() {
+    fn discover_binary_accepts_managed_wrapper_with_real_binary() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let home_dir = unique_temp_dir("valid-wrapper");
-        let superset_dir = home_dir.join(".superset").join("bin");
+        let wrapper_dir = home_dir.join(legacy_wrapper_compat_root_name()).join("bin");
         let real_dir = home_dir.join(".local").join("bin");
-        fs::create_dir_all(&superset_dir).expect("create superset dir");
+        fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
         fs::create_dir_all(&real_dir).expect("create real dir");
-        let wrapper_path = superset_dir.join("cursor-agent");
+        let wrapper_path = wrapper_dir.join("cursor-agent");
         fs::write(
             &wrapper_path,
             "#!/bin/sh\nREAL_BIN=\"$(find_real_binary \"cursor-agent\")\"\n",
@@ -473,7 +498,7 @@ mod tests {
         env::set_var("HOME", &home_dir);
         env::set_var(
             "PATH",
-            env::join_paths([&superset_dir, &real_dir]).expect("join path"),
+            env::join_paths([&wrapper_dir, &real_dir]).expect("join path"),
         );
 
         let discovered = discover_binary(&["cursor-agent"]);

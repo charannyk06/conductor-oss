@@ -6,14 +6,17 @@ import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
 import type { ITerminalOptions, Terminal as XTerminal } from "@xterm/xterm";
 import { AlertCircle, ChevronDown, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { SUPERSET_TERMINAL_FONT_FAMILY, getSupersetLikeTerminalTheme } from "@/components/terminal/xtermTheme";
+import { TERMINAL_FONT_FAMILY, getTerminalTheme } from "@/components/terminal/xtermTheme";
 
 interface TerminalViewProps {
   sessionId: string;
 }
 
 type TerminalConnectionInfo = {
-  wsUrl: string;
+  transport: "websocket" | "snapshot";
+  wsUrl: string | null;
+  pollIntervalMs: number;
+  fallbackReason: string | null;
 };
 
 type TerminalSnapshot = {
@@ -28,17 +31,49 @@ const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
 const RECONNECT_BASE_DELAY_MS = 300;
 const RECONNECT_MAX_DELAY_MS = 1600;
+const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
 
 async function fetchTerminalConnection(sessionId: string): Promise<TerminalConnectionInfo> {
   const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/connection`, {
     cache: "no-store",
   });
-  const data = (await response.json().catch(() => null)) as { wsUrl?: string; error?: string } | null;
-  if (!response.ok || typeof data?.wsUrl !== "string" || data.wsUrl.trim().length === 0) {
+  const data = (await response.json().catch(() => null)) as {
+    transport?: "websocket" | "snapshot";
+    wsUrl?: string | null;
+    pollIntervalMs?: number;
+    fallbackReason?: string | null;
+    error?: string;
+  } | null;
+  if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal connection: ${response.status}`);
   }
-  return { wsUrl: data.wsUrl.trim() };
+  const transport = data?.transport === "snapshot" ? "snapshot" : "websocket";
+  const pollIntervalMs = typeof data?.pollIntervalMs === "number" && Number.isFinite(data.pollIntervalMs) && data.pollIntervalMs >= 100
+    ? Math.round(data.pollIntervalMs)
+    : DEFAULT_REMOTE_POLL_INTERVAL_MS;
+  const fallbackReason = typeof data?.fallbackReason === "string" && data.fallbackReason.trim().length > 0
+    ? data.fallbackReason.trim()
+    : null;
+
+  if (transport === "websocket") {
+    if (typeof data?.wsUrl !== "string" || data.wsUrl.trim().length === 0) {
+      throw new Error("Terminal connection did not include a websocket URL");
+    }
+    return {
+      transport,
+      wsUrl: data.wsUrl.trim(),
+      pollIntervalMs,
+      fallbackReason,
+    };
+  }
+
+  return {
+    transport,
+    wsUrl: null,
+    pollIntervalMs,
+    fallbackReason,
+  };
 }
 
 async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
@@ -128,7 +163,7 @@ function getTerminalViewportOptions(width: number): Pick<ITerminalOptions, "font
   }
 
   return {
-    fontFamily: SUPERSET_TERMINAL_FONT_FAMILY,
+    fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 16,
     lineHeight: 1.1,
   };
@@ -149,9 +184,11 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
   const liveOutputStartedRef = useRef(false);
 
   const [terminalReady, setTerminalReady] = useState(false);
+  const [transportMode, setTransportMode] = useState<"websocket" | "snapshot">("websocket");
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [transportError, setTransportError] = useState<string | null>(null);
+  const [pollIntervalMs, setPollIntervalMs] = useState(DEFAULT_REMOTE_POLL_INTERVAL_MS);
   const [reconnectToken, setReconnectToken] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -229,7 +266,14 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
     reconnectNoticeWrittenRef.current = false;
     snapshotAppliedRef.current = null;
     liveOutputStartedRef.current = false;
+    reconnectCountRef.current = 0;
+    connectAttemptRef.current = 0;
     termRef.current?.reset();
+    setTransportMode("websocket");
+    setSocketBaseUrl(null);
+    setConnectionState("connecting");
+    setTransportError(null);
+    setPollIntervalMs(DEFAULT_REMOTE_POLL_INTERVAL_MS);
     updateScrollState();
   }, [sessionId, updateScrollState]);
 
@@ -294,7 +338,7 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
         fontFamily: viewportOptions.fontFamily,
         lineHeight: viewportOptions.lineHeight,
         convertEol: true,
-        theme: getSupersetLikeTerminalTheme(isLight),
+        theme: getTerminalTheme(isLight),
         scrollbar: {
           showScrollbar: false,
         },
@@ -388,8 +432,10 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
         setSocketBaseUrl(null);
         const connection = await fetchTerminalConnection(sessionId);
         if (!mounted) return;
+        setTransportMode(connection.transport);
+        setPollIntervalMs(connection.pollIntervalMs);
         setSocketBaseUrl(connection.wsUrl);
-        setTransportError(null);
+        setTransportError(connection.fallbackReason);
         setConnectionState("connecting");
       } catch (err) {
         if (!mounted) return;
@@ -409,7 +455,49 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
     }
 
     const term = termRef.current;
-    if (!term || snapshotAppliedRef.current === sessionId) {
+    if (!term) {
+      return;
+    }
+
+    if (transportMode === "snapshot") {
+      const previousBaseY = term.buffer.active.baseY;
+      const previousViewportY = term.buffer.active.viewportY;
+      const scrollGap = Math.max(0, previousBaseY - previousViewportY);
+      const shouldFollow = scrollGap <= 2;
+      term.reset();
+      if (snapshotAnsi.length > 0) {
+        term.write(normalizeTerminalSnapshot(snapshotAnsi), () => {
+          if (termRef.current !== term) {
+            return;
+          }
+          if (shouldFollow) {
+            try {
+              term.scrollToBottom();
+            } catch {
+              return;
+            }
+          } else {
+            const nextBaseY = term.buffer.active.baseY;
+            const targetViewportY = Math.max(0, nextBaseY - scrollGap);
+            const delta = targetViewportY - term.buffer.active.viewportY;
+            if (delta !== 0) {
+              try {
+                term.scrollLines(delta);
+              } catch {
+                return;
+              }
+            }
+          }
+          updateScrollState();
+        });
+        return;
+      }
+
+      updateScrollState();
+      return;
+    }
+
+    if (snapshotAppliedRef.current === sessionId) {
       return;
     }
 
@@ -437,10 +525,57 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
     }
 
     updateScrollState();
-  }, [sessionId, snapshotAnsi, snapshotReady, terminalReady, updateScrollState]);
+  }, [sessionId, snapshotAnsi, snapshotReady, terminalReady, transportMode, updateScrollState]);
 
   useEffect(() => {
-    if (!terminalReady || !snapshotReady || !socketBaseUrl || !termRef.current) return;
+    if (
+      !snapshotReady
+      || !terminalReady
+      || transportMode !== "snapshot"
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | null = null;
+    let inFlight = false;
+
+    const poll = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      try {
+        const snapshot = await fetchLiveTerminalSnapshot(sessionId, LIVE_TERMINAL_SNAPSHOT_LINES);
+        if (cancelled) return;
+        setConnectionState("live");
+        if (snapshot.snapshot !== snapshotAnsi) {
+          setSnapshotAnsi(snapshot.snapshot);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setTransportError(error instanceof Error ? error.message : "Terminal polling failed");
+        setConnectionState("error");
+      } finally {
+        inFlight = false;
+        if (!cancelled) {
+          timer = window.setTimeout(() => {
+            void poll();
+          }, pollIntervalMs);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [pollIntervalMs, sessionId, snapshotAnsi, snapshotReady, terminalReady, transportMode]);
+
+  useEffect(() => {
+    if (!terminalReady || !snapshotReady || !socketBaseUrl || !termRef.current || transportMode !== "websocket") return;
 
     const term = termRef.current;
     const socketUrl = buildTerminalSocketUrl(socketBaseUrl, term.cols, term.rows);
@@ -535,7 +670,7 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
       }
       socket.close();
     };
-  }, [clearReconnectTimer, scheduleReconnect, snapshotReady, socketBaseUrl, terminalReady, updateScrollState]);
+  }, [clearReconnectTimer, scheduleReconnect, snapshotReady, socketBaseUrl, terminalReady, transportMode, updateScrollState]);
 
   useEffect(() => () => {
     clearReconnectTimer();
@@ -574,9 +709,11 @@ export function TerminalView({ sessionId }: TerminalViewProps) {
         </div>
       ) : (
         <div className={`absolute right-2 top-2 z-10 flex items-center gap-1.5 transition-opacity sm:right-3 sm:top-3 sm:gap-2 ${
-          connectionState === "live" ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100" : "opacity-100"
+          connectionState === "live" && transportMode === "websocket"
+            ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
+            : "opacity-100"
         }`}>
-          {connectionState !== "live" ? (
+          {connectionState !== "live" || transportMode === "snapshot" ? (
             <Button
               type="button"
               size="icon"

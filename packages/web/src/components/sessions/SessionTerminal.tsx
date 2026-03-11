@@ -7,8 +7,16 @@ import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
 import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xterm/xterm";
 import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { SUPERSET_TERMINAL_FONT_FAMILY, getSupersetLikeTerminalTheme } from "@/components/terminal/xtermTheme";
+import { getTerminalTheme } from "@/components/terminal/xtermTheme";
 import { extractLocalFileTransferPath, uploadProjectAttachments } from "./attachmentUploads";
+import { captureTerminalViewport, restoreTerminalViewport } from "./terminalViewport";
+import {
+  buildTerminalSocketUrl,
+  detectMobileTerminalInputRail,
+  getSessionTerminalViewportOptions,
+  normalizeTerminalSnapshot,
+  stripBrowserTerminalResponses,
+} from "./sessionTerminalUtils";
 import type { TerminalInsertRequest } from "./terminalInsert";
 
 interface SessionTerminalProps {
@@ -23,9 +31,13 @@ interface SessionTerminalProps {
 }
 
 type TerminalConnectionInfo = {
-  transport: "websocket" | "http-poll";
+  transport: "websocket" | "snapshot";
   wsUrl: string | null;
   pollIntervalMs: number;
+  interactive: boolean;
+  requiresToken: boolean;
+  tokenExpiresInSeconds: number | null;
+  fallbackReason: string | null;
 };
 
 type TerminalSnapshot = {
@@ -37,6 +49,7 @@ type TerminalSnapshot = {
 
 type TerminalServerEvent =
   | { type: "ready"; sessionId: string }
+  | { type: "snapshot"; sessionId: string; reason: "attach" | "lagged" }
   | { type: "ack"; sessionId: string; action: string }
   | { type: "exit"; sessionId: string; exitCode: number }
   | { type: "pong"; sessionId: string }
@@ -50,16 +63,22 @@ const RENDERER_RECOVERY_THROTTLE_MS = 120;
 const LIVE_TERMINAL_SCROLLBACK = 50000;
 const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
-const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
-const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
-  /\x1b\[(?:I|O)/g,
-  /\x1b\[\d+;\d+R/g,
-  /\x1b\[(?:[?>])[\d;]*c/g,
-  /\x1b\](?:10|11|12|4;\d+);[\s\S]*?(?:\x07|\x1b\\)/g,
-];
-const ANSI_ESCAPE_PATTERN = /\u001b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\u0007|\u001b\\))/g;
+const LIVE_TERMINAL_HELPER_KEYS = [
+  { label: "Enter", special: "Enter" },
+  { label: "Tab", special: "Tab" },
+  { label: "Esc", special: "Escape" },
+  { label: "Bksp", special: "Backspace" },
+  { label: "Left", special: "ArrowLeft" },
+  { label: "Right", special: "ArrowRight" },
+  { label: "Up", special: "ArrowUp" },
+  { label: "Down", special: "ArrowDown" },
+  { label: "Ctrl+C", special: "C-c" },
+  { label: "Ctrl+D", special: "C-d" },
+] as const;
+
+type PreferredFocusTarget = "none" | "terminal" | "live-input" | "resume";
 
 function shellEscapePath(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
@@ -75,19 +94,31 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
   });
   const data = (await response.json().catch(() => null)) as
     | {
-        transport?: "websocket" | "http-poll";
+        transport?: "websocket" | "snapshot";
         wsUrl?: string | null;
         pollIntervalMs?: number;
+        interactive?: boolean;
+        requiresToken?: boolean;
+        tokenExpiresInSeconds?: number | null;
+        fallbackReason?: string | null;
         error?: string;
       }
     | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal connection: ${response.status}`);
   }
-  const transport = data?.transport === "http-poll" ? "http-poll" : "websocket";
+  const transport = data?.transport === "snapshot" ? "snapshot" : "websocket";
   const pollIntervalMs = typeof data?.pollIntervalMs === "number" && Number.isFinite(data.pollIntervalMs) && data.pollIntervalMs >= 100
     ? Math.round(data.pollIntervalMs)
     : DEFAULT_REMOTE_POLL_INTERVAL_MS;
+  const interactive = data?.interactive === true;
+  const requiresToken = data?.requiresToken === true;
+  const tokenExpiresInSeconds = typeof data?.tokenExpiresInSeconds === "number" && Number.isFinite(data.tokenExpiresInSeconds)
+    ? Math.round(data.tokenExpiresInSeconds)
+    : null;
+  const fallbackReason = typeof data?.fallbackReason === "string" && data.fallbackReason.trim().length > 0
+    ? data.fallbackReason.trim()
+    : null;
 
   if (transport === "websocket") {
     if (typeof data?.wsUrl !== "string" || data.wsUrl.trim().length === 0) {
@@ -97,6 +128,10 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
       transport,
       wsUrl: data.wsUrl.trim(),
       pollIntervalMs,
+      interactive,
+      requiresToken,
+      tokenExpiresInSeconds,
+      fallbackReason,
     };
   }
 
@@ -104,6 +139,10 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
     transport,
     wsUrl: null,
     pollIntervalMs,
+    interactive,
+    requiresToken,
+    tokenExpiresInSeconds,
+    fallbackReason,
   };
 }
 
@@ -198,32 +237,6 @@ async function postTerminalResize(sessionId: string, cols: number, rows: number)
   }
 }
 
-function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): string {
-  const url = new URL(baseUrl);
-  url.searchParams.set("cols", String(Math.max(1, cols)));
-  url.searchParams.set("rows", String(Math.max(1, rows)));
-  return url.toString();
-}
-
-function normalizeTerminalSnapshot(snapshot: string): string {
-  return snapshot.replace(/\r?\n/g, "\r\n");
-}
-
-function stripBrowserTerminalResponses(data: string): string {
-  let sanitized = data;
-  for (const pattern of BROWSER_TERMINAL_RESPONSE_PATTERNS) {
-    sanitized = sanitized.replace(pattern, "");
-  }
-  return sanitized;
-}
-
-function sanitizeRemoteTerminalSnapshot(snapshot: string): string {
-  return snapshot
-    .replace(ANSI_ESCAPE_PATTERN, "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\r/g, "\n")
-    .replace(/\u0000/g, "");
-}
 
 function localFileTransferError(path: string): string {
   const normalized = path.toLowerCase();
@@ -253,38 +266,13 @@ function terminalHasRenderedContent(term: XTerminal): boolean {
   return false;
 }
 
-function getTerminalViewportOptions(width: number): Pick<ITerminalOptions, "fontFamily" | "fontSize" | "lineHeight"> {
-  if (width < 420) {
-    return {
-      fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-      fontSize: 11,
-      lineHeight: 1,
-    };
-  }
-
-  if (width < 640) {
-    return {
-      fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-      fontSize: 13,
-      lineHeight: 1.08,
-    };
-  }
-
-  return {
-    fontFamily: SUPERSET_TERMINAL_FONT_FAMILY,
-    fontSize: 17,
-    lineHeight: 1.06,
-  };
-}
-
-function shouldUseMobileTerminalInputRail(): boolean {
+function shouldShowTerminalAccessoryBar(): boolean {
   if (typeof window === "undefined") {
     return false;
   }
 
   const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-  const touchCapable = navigator.maxTouchPoints > 0;
-  return window.innerWidth < MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX && (coarsePointer || touchCapable);
+  return detectMobileTerminalInputRail(window.innerWidth, coarsePointer, navigator.maxTouchPoints);
 }
 
 export function SessionTerminal({
@@ -299,7 +287,6 @@ export function SessionTerminal({
 }: SessionTerminalProps) {
   const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
-  const remoteConsoleRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerminal | null>(null);
   const fitRef = useRef<XFitAddon | null>(null);
   const searchRef = useRef<XSearchAddon | null>(null);
@@ -328,19 +315,26 @@ export function SessionTerminal({
   const recoveryPendingResizeRef = useRef(false);
   const visibilityRecoveryTimersRef = useRef<number[]>([]);
   const lastAppliedInsertNonceRef = useRef<number>(0);
+  const lastSyncedTerminalSizeRef = useRef<string | null>(null);
+  const pendingResizeSyncRef = useRef(true);
+  const preferredFocusTargetRef = useRef<PreferredFocusTarget>("none");
+  const restoreFocusOnRecoveryRef = useRef(false);
+  const pendingSocketBinaryModeRef = useRef<"stream" | "snapshot">("stream");
 
   const [terminalReady, setTerminalReady] = useState(false);
-  const [transportMode, setTransportMode] = useState<"websocket" | "http-poll">("websocket");
+  const [transportMode, setTransportMode] = useState<"websocket" | "snapshot">("websocket");
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [transportError, setTransportError] = useState<string | null>(null);
   const [pollIntervalMs, setPollIntervalMs] = useState(DEFAULT_REMOTE_POLL_INTERVAL_MS);
+  const [interactiveTerminal, setInteractiveTerminal] = useState(true);
+  const [transportNotice, setTransportNotice] = useState<string | null>(null);
   const [reconnectToken, setReconnectToken] = useState(0);
   const [message, setMessage] = useState("");
-  const [liveInputDraft, setLiveInputDraft] = useState("");
   const [attachments, setAttachments] = useState<Array<{ file: File }>>([]);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [liveInputDraft, setLiveInputDraft] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -349,7 +343,7 @@ export function SessionTerminal({
   const [snapshotAnsi, setSnapshotAnsi] = useState("");
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
-  const [useMobileInputRail, setUseMobileInputRail] = useState(() => shouldUseMobileTerminalInputRail());
+  const [showTerminalAccessoryBar, setShowTerminalAccessoryBar] = useState(() => shouldShowTerminalAccessoryBar());
 
   const normalizedSessionStatus = useMemo(
     () => {
@@ -366,19 +360,15 @@ export function SessionTerminal({
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
   const shouldStreamLiveTerminal = expectsLiveTerminal && active && pageVisible;
   const showResumeRail = RESUMABLE_STATUSES.has(normalizedSessionStatus) && !expectsLiveTerminal;
-  const showRemoteInputRail = expectsLiveTerminal && transportMode === "http-poll";
-  const showMobileInputRail = expectsLiveTerminal && useMobileInputRail;
-  const showLiveInputRail = showRemoteInputRail || showMobileInputRail;
-  const isRemoteLiveConsole = showRemoteInputRail;
-  const remoteConsoleText = useMemo(
-    () => sanitizeRemoteTerminalSnapshot(snapshotAnsi),
-    [snapshotAnsi],
-  );
+  const showSnapshotFallbackRail = expectsLiveTerminal && interactiveTerminal && transportMode === "snapshot";
+  const showLiveInputRail = showSnapshotFallbackRail;
+  const showLiveHelperBar = expectsLiveTerminal && interactiveTerminal && showTerminalAccessoryBar && transportMode === "websocket";
   const railPlaceholder = normalizedSessionStatus === "done"
     ? "Continue the session..."
     : normalizedSessionStatus === "needs_input" || normalizedSessionStatus === "stuck"
       ? "Answer the agent and resume..."
       : "Restart this session with a follow-up...";
+  const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && connectionState === "live";
 
   const normalizeWhitespaceOnlyDraft = useCallback(() => {
     setMessage((current) => (current.trim().length === 0 ? "" : current));
@@ -405,7 +395,10 @@ export function SessionTerminal({
 
   const requestReconnect = useCallback(() => {
     clearReconnectTimer();
+    pendingResizeSyncRef.current = true;
+    pendingSocketBinaryModeRef.current = "stream";
     setTransportError(null);
+    setTransportNotice(null);
     setConnectionState("connecting");
     setTransportMode("websocket");
     setSocketBaseUrl(null);
@@ -420,31 +413,34 @@ export function SessionTerminal({
     return next;
   }, []);
 
-  const sendResize = useCallback(async () => {
-    const term = termRef.current;
-    if (!term) return;
-
-    if (transportMode === "http-poll") {
-      await enqueueTerminalHttpOperation(() => postTerminalResize(sessionId, term.cols, term.rows));
-      return;
+  const sendResize = useCallback(async (cols: number, rows: number): Promise<boolean> => {
+    if (transportMode === "snapshot") {
+      await enqueueTerminalHttpOperation(() => postTerminalResize(sessionId, cols, rows));
+      return true;
     }
 
     const socket = socketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
     socket.send(JSON.stringify({
       type: "resize",
-      cols: Math.max(1, term.cols),
-      rows: Math.max(1, term.rows),
+      cols: Math.max(1, Math.round(cols)),
+      rows: Math.max(1, Math.round(rows)),
     }));
+    return true;
   }, [enqueueTerminalHttpOperation, sessionId, transportMode]);
 
   const sendTerminalKeys = useCallback(async (data: string) => {
+    if (!interactiveTerminal) {
+      throw new Error("Operator access is required for live terminal input");
+    }
     const keys = stripBrowserTerminalResponses(data);
     if (keys.length === 0) {
       return;
     }
 
-    if (transportMode === "http-poll") {
+    if (transportMode === "snapshot") {
       await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { keys }));
       return;
     }
@@ -454,10 +450,14 @@ export function SessionTerminal({
       throw new Error("Terminal is not connected");
     }
     socket.send(JSON.stringify({ type: "keys", keys }));
-  }, [enqueueTerminalHttpOperation, sessionId, transportMode]);
+  }, [enqueueTerminalHttpOperation, interactiveTerminal, sessionId, transportMode]);
 
   const sendTerminalSpecial = useCallback(async (special: string) => {
-    if (transportMode === "http-poll") {
+    if (!interactiveTerminal) {
+      throw new Error("Operator access is required for live terminal input");
+    }
+
+    if (transportMode === "snapshot") {
       await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { special }));
       return;
     }
@@ -467,7 +467,74 @@ export function SessionTerminal({
       throw new Error("Terminal is not connected");
     }
     socket.send(JSON.stringify({ type: "keys", special }));
-  }, [enqueueTerminalHttpOperation, sessionId, transportMode]);
+  }, [enqueueTerminalHttpOperation, interactiveTerminal, sessionId, transportMode]);
+
+  const detectFocusedSurface = useCallback((): PreferredFocusTarget => {
+    if (typeof document === "undefined") {
+      return preferredFocusTargetRef.current;
+    }
+
+    const activeElement = document.activeElement;
+    if (!activeElement) {
+      return "none";
+    }
+
+    if (liveInputRef.current && activeElement === liveInputRef.current) {
+      return "live-input";
+    }
+    if (resumeTextareaRef.current && activeElement === resumeTextareaRef.current) {
+      return "resume";
+    }
+    if (containerRef.current && containerRef.current.contains(activeElement)) {
+      return "terminal";
+    }
+
+    return "none";
+  }, []);
+
+  const rememberFocusedSurface = useCallback(() => {
+    const nextTarget = detectFocusedSurface();
+    if (nextTarget === "none") {
+      restoreFocusOnRecoveryRef.current = false;
+      return nextTarget;
+    }
+
+    preferredFocusTargetRef.current = nextTarget;
+    restoreFocusOnRecoveryRef.current = true;
+    return nextTarget;
+  }, [detectFocusedSurface]);
+
+  const restorePreferredFocus = useCallback(() => {
+    if (
+      typeof document === "undefined"
+      || document.hidden
+      || !activeRef.current
+      || !restoreFocusOnRecoveryRef.current
+    ) {
+      return;
+    }
+
+    const target = preferredFocusTargetRef.current;
+    if (target === "resume") {
+      resumeTextareaRef.current?.focus();
+      return;
+    }
+
+    if (showLiveInputRail) {
+      if (target === "terminal" || target === "live-input") {
+        liveInputRef.current?.focus();
+      }
+      return;
+    }
+
+    if (target === "terminal" || target === "live-input") {
+      try {
+        termRef.current?.focus();
+      } catch {
+        // The xterm textarea can disappear during teardown or reconnect.
+      }
+    }
+  }, [showLiveInputRail]);
 
   const updateScrollState = useCallback(() => {
     const term = termRef.current;
@@ -475,9 +542,40 @@ export function SessionTerminal({
       setShowScrollToBottom(false);
       return;
     }
-    const buffer = term.buffer.active;
-    setShowScrollToBottom(buffer.viewportY < buffer.baseY);
+    setShowScrollToBottom(!captureTerminalViewport(term).followOutput);
   }, []);
+
+  const syncTerminalDimensions = useCallback((forceSync: boolean) => {
+    const term = termRef.current;
+    if (!term) {
+      return;
+    }
+
+    const cols = Math.max(1, term.cols);
+    const rows = Math.max(1, term.rows);
+    const sizeKey = `${cols}x${rows}`;
+    const previousKey = lastSyncedTerminalSizeRef.current;
+    if (!forceSync && !pendingResizeSyncRef.current && previousKey === sizeKey) {
+      return;
+    }
+
+    void sendResize(cols, rows)
+      .then((sent) => {
+        if (!sent) {
+          pendingResizeSyncRef.current = true;
+          return;
+        }
+        pendingResizeSyncRef.current = false;
+        lastSyncedTerminalSizeRef.current = sizeKey;
+      })
+      .catch((error: unknown) => {
+        pendingResizeSyncRef.current = true;
+        if (lastSyncedTerminalSizeRef.current === sizeKey) {
+          lastSyncedTerminalSizeRef.current = previousKey;
+        }
+        setTransportError(error instanceof Error ? error.message : "Failed to resize terminal");
+      });
+  }, [sendResize]);
 
   const clearScheduledRecovery = useCallback(() => {
     if (recoveryFrameRef.current !== null) {
@@ -516,9 +614,9 @@ export function SessionTerminal({
       return;
     }
 
+    const viewport = captureTerminalViewport(term);
     const previousCols = term.cols;
     const previousRows = term.rows;
-    const wasAtBottom = term.buffer.active.viewportY >= term.buffer.active.baseY;
 
     try {
       fit.fit();
@@ -530,21 +628,14 @@ export function SessionTerminal({
       term.refresh(0, Math.max(0, term.rows - 1));
     }
 
-    if (forceResize || term.cols !== previousCols || term.rows !== previousRows) {
-      void sendResize().catch((error: unknown) => {
-        setTransportError(error instanceof Error ? error.message : "Failed to resize terminal");
-      });
+    if (forceResize || term.cols !== previousCols || term.rows !== previousRows || pendingResizeSyncRef.current) {
+      syncTerminalDimensions(forceResize || pendingResizeSyncRef.current);
     }
 
-    if (wasAtBottom) {
-      term.scrollToBottom();
-    }
-
+    restoreTerminalViewport(term, viewport);
     updateScrollState();
-    if (activeRef.current) {
-      term.focus();
-    }
-  }, [sendResize, updateScrollState]);
+    restorePreferredFocus();
+  }, [restorePreferredFocus, syncTerminalDimensions, updateScrollState]);
 
   const scheduleRendererRecovery = useCallback((forceResize: boolean) => {
     recoveryPendingResizeRef.current ||= forceResize;
@@ -598,7 +689,10 @@ export function SessionTerminal({
     if (!files.length) return;
     setSendError(null);
     try {
-      if (expectsLiveTerminal && connectionState === "live") {
+      if (expectsLiveTerminal && !interactiveTerminal) {
+        throw new Error(transportNotice ?? "Operator access is required for live terminal input");
+      }
+      if (canSendLiveInput) {
         await injectFilesIntoTerminal(files);
         return;
       }
@@ -606,7 +700,7 @@ export function SessionTerminal({
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to process files");
     }
-  }, [connectionState, expectsLiveTerminal, injectFilesIntoTerminal, queueResumeAttachments]);
+  }, [canSendLiveInput, expectsLiveTerminal, injectFilesIntoTerminal, interactiveTerminal, queueResumeAttachments, transportNotice]);
 
   const applyFetchedSnapshot = useCallback((snapshot: TerminalSnapshot) => {
     snapshotAppliedRef.current = null;
@@ -636,17 +730,17 @@ export function SessionTerminal({
     const mediaQuery = typeof window.matchMedia === "function"
       ? window.matchMedia("(pointer: coarse)")
       : null;
-    const syncMobileInputRail = () => {
-      setUseMobileInputRail(shouldUseMobileTerminalInputRail());
+    const syncTerminalAccessoryBar = () => {
+      setShowTerminalAccessoryBar(shouldShowTerminalAccessoryBar());
     };
 
-    syncMobileInputRail();
-    window.addEventListener("resize", syncMobileInputRail);
-    mediaQuery?.addEventListener?.("change", syncMobileInputRail);
+    syncTerminalAccessoryBar();
+    window.addEventListener("resize", syncTerminalAccessoryBar);
+    mediaQuery?.addEventListener?.("change", syncTerminalAccessoryBar);
 
     return () => {
-      window.removeEventListener("resize", syncMobileInputRail);
-      mediaQuery?.removeEventListener?.("change", syncMobileInputRail);
+      window.removeEventListener("resize", syncTerminalAccessoryBar);
+      mediaQuery?.removeEventListener?.("change", syncTerminalAccessoryBar);
     };
   }, []);
 
@@ -659,6 +753,11 @@ export function SessionTerminal({
     reconnectCountRef.current = 0;
     connectAttemptRef.current = 0;
     lastAppliedInsertNonceRef.current = 0;
+    lastSyncedTerminalSizeRef.current = null;
+    pendingResizeSyncRef.current = true;
+    preferredFocusTargetRef.current = "none";
+    restoreFocusOnRecoveryRef.current = false;
+    pendingSocketBinaryModeRef.current = "stream";
     clearReconnectTimer();
     clearScheduledRecovery();
     socketRef.current?.close();
@@ -669,8 +768,9 @@ export function SessionTerminal({
     setConnectionState("connecting");
     setTransportError(null);
     setPollIntervalMs(DEFAULT_REMOTE_POLL_INTERVAL_MS);
+    setInteractiveTerminal(true);
+    setTransportNotice(null);
     setMessage("");
-    setLiveInputDraft("");
     setAttachments([]);
     setSending(false);
     setSendError(null);
@@ -770,11 +870,14 @@ export function SessionTerminal({
         setTransportMode(connection.transport);
         setPollIntervalMs(connection.pollIntervalMs);
         setSocketBaseUrl(connection.wsUrl);
+        setInteractiveTerminal(connection.interactive);
+        setTransportNotice(connection.fallbackReason);
         setTransportError(null);
         setConnectionState("connecting");
       } catch (err) {
         if (!mounted) return;
         setTransportError(err instanceof Error ? err.message : "Failed to resolve terminal connection");
+        setTransportNotice(null);
         setConnectionState("error");
       }
     })();
@@ -785,15 +888,6 @@ export function SessionTerminal({
   }, [expectsLiveTerminal, reconnectToken, sessionId, shouldStreamLiveTerminal]);
 
   useEffect(() => {
-    if (isRemoteLiveConsole) {
-      termRef.current?.dispose();
-      termRef.current = null;
-      fitRef.current = null;
-      searchRef.current = null;
-      setTerminalReady(false);
-      return;
-    }
-
     let term: XTerminal | null = null;
     let fit: XFitAddon | null = null;
     let mounted = true;
@@ -810,12 +904,12 @@ export function SessionTerminal({
       if (!mounted || !containerRef.current) return;
 
       const isLight = document.documentElement.classList.contains("light");
-      const viewportOptions = getTerminalViewportOptions(window.innerWidth);
+      const viewportOptions = getSessionTerminalViewportOptions(window.innerWidth);
       const terminalOptions: ITerminalOptions & { scrollbar?: { showScrollbar: boolean } } = {
         allowTransparency: false,
         cursorBlink: true,
         cursorStyle: "block",
-        disableStdin: false,
+        disableStdin: !expectsLiveTerminal,
         drawBoldTextInBrightColors: true,
         fontFamily: viewportOptions.fontFamily,
         fontSize: viewportOptions.fontSize,
@@ -823,7 +917,7 @@ export function SessionTerminal({
         lineHeight: viewportOptions.lineHeight,
         scrollSensitivity: 1.1,
         scrollback: LIVE_TERMINAL_SCROLLBACK,
-        theme: getSupersetLikeTerminalTheme(isLight),
+        theme: getTerminalTheme(isLight),
         scrollbar: {
           showScrollbar: false,
         },
@@ -874,7 +968,9 @@ export function SessionTerminal({
       termRef.current = term;
       fitRef.current = fit;
       searchRef.current = searchAddon;
-      term.options.disableStdin = showLiveInputRail;
+      lastSyncedTerminalSizeRef.current = null;
+      pendingResizeSyncRef.current = true;
+      term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal || transportMode === "snapshot";
       setTerminalReady(true);
       updateScrollState();
 
@@ -892,7 +988,7 @@ export function SessionTerminal({
           return;
         }
         try {
-          const nextViewportOptions = getTerminalViewportOptions(window.innerWidth);
+          const nextViewportOptions = getSessionTerminalViewportOptions(window.innerWidth);
           term.options.fontFamily = nextViewportOptions.fontFamily;
           term.options.fontSize = nextViewportOptions.fontSize;
           term.options.lineHeight = nextViewportOptions.lineHeight;
@@ -918,17 +1014,19 @@ export function SessionTerminal({
       termRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
+      lastSyncedTerminalSizeRef.current = null;
+      pendingResizeSyncRef.current = true;
       setTerminalReady(false);
     };
-  }, [isRemoteLiveConsole, scheduleRendererRecovery, sendTerminalKeys, updateScrollState]);
+  }, [expectsLiveTerminal, scheduleRendererRecovery, sendTerminalKeys, updateScrollState, interactiveTerminal, transportMode]);
 
   useEffect(() => {
     const term = termRef.current;
     if (!term) {
       return;
     }
-    term.options.disableStdin = showLiveInputRail;
-  }, [showLiveInputRail]);
+    term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal || transportMode === "snapshot";
+  }, [expectsLiveTerminal, interactiveTerminal, transportMode]);
 
   useEffect(() => {
     if (!active) {
@@ -962,47 +1060,22 @@ export function SessionTerminal({
       return;
     }
 
-    if (transportMode === "http-poll" && expectsLiveTerminal) {
-      const previousBaseY = term.buffer.active.baseY;
-      const previousViewportY = term.buffer.active.viewportY;
-      const scrollGap = Math.max(0, previousBaseY - previousViewportY);
-      const shouldFollow = scrollGap <= 2;
+    const viewport = captureTerminalViewport(term);
+    if (transportMode === "snapshot" && expectsLiveTerminal) {
       term.reset();
       if (snapshotAnsi.length > 0) {
         term.write(normalizeTerminalSnapshot(snapshotAnsi), () => {
           if (termRef.current !== term) {
             return;
           }
-          if (shouldFollow) {
-            try {
-              term.scrollToBottom();
-            } catch {
-              return;
-            }
-          } else {
-            const nextBaseY = term.buffer.active.baseY;
-            const targetViewportY = Math.max(0, nextBaseY - scrollGap);
-            const delta = targetViewportY - term.buffer.active.viewportY;
-            if (delta !== 0) {
-              try {
-                term.scrollLines(delta);
-              } catch {
-                return;
-              }
-            }
-          }
+          restoreTerminalViewport(term, viewport);
           updateScrollState();
-          if (activeRef.current) {
-            try {
-              term.focus();
-            } catch {
-              // Terminal may have been disposed while the write callback was queued.
-            }
-          }
+          restorePreferredFocus();
         });
         return;
       }
 
+      restoreTerminalViewport(term, viewport);
       updateScrollState();
       return;
     }
@@ -1024,59 +1097,32 @@ export function SessionTerminal({
         if (termRef.current !== term) {
           return;
         }
+        restoreTerminalViewport(term, viewport);
         updateScrollState();
-        if (activeRef.current) {
-          try {
-            term.focus();
-          } catch {
-            // Terminal may have been disposed while the write callback was queued.
-          }
-        }
+        restorePreferredFocus();
       });
       return;
     }
 
+    restoreTerminalViewport(term, viewport);
     updateScrollState();
-  }, [active, expectsLiveTerminal, sessionId, snapshotAnsi, snapshotReady, terminalReady, transportMode, updateScrollState]);
-
-  useEffect(() => {
-    if (!isRemoteLiveConsole) {
-      return;
-    }
-
-    const container = remoteConsoleRef.current;
-    if (!container) {
-      return;
-    }
-
-    const previousScrollHeight = container.scrollHeight;
-    const previousScrollTop = container.scrollTop;
-    const previousClientHeight = container.clientHeight;
-    const scrollGap = Math.max(0, previousScrollHeight - previousClientHeight - previousScrollTop);
-    const shouldFollow = scrollGap <= 24;
-
-    requestAnimationFrame(() => {
-      const current = remoteConsoleRef.current;
-      if (!current) {
-        return;
-      }
-
-      if (shouldFollow) {
-        current.scrollTop = current.scrollHeight;
-      } else {
-        const nextTop = Math.max(0, current.scrollHeight - current.clientHeight - scrollGap);
-        current.scrollTop = nextTop;
-      }
-
-      setShowScrollToBottom(current.scrollTop + current.clientHeight < current.scrollHeight - 8);
-    });
-  }, [isRemoteLiveConsole, remoteConsoleText]);
+  }, [
+    expectsLiveTerminal,
+    restorePreferredFocus,
+    sessionId,
+    snapshotAnsi,
+    snapshotReady,
+    terminalReady,
+    transportMode,
+    updateScrollState,
+  ]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
       const visible = !document.hidden;
       setPageVisible(visible);
       if (document.hidden) {
+        rememberFocusedSurface();
         return;
       }
       normalizeWhitespaceOnlyDraft();
@@ -1096,7 +1142,18 @@ export function SessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [normalizeWhitespaceOnlyDraft, scheduleRendererRecovery]);
+  }, [normalizeWhitespaceOnlyDraft, rememberFocusedSurface, scheduleRendererRecovery]);
+
+  useEffect(() => {
+    const handleDocumentFocusIn = () => {
+      rememberFocusedSurface();
+    };
+
+    document.addEventListener("focusin", handleDocumentFocusIn);
+    return () => {
+      document.removeEventListener("focusin", handleDocumentFocusIn);
+    };
+  }, [rememberFocusedSurface]);
 
   useEffect(() => {
     if (shouldStreamLiveTerminal) {
@@ -1115,7 +1172,7 @@ export function SessionTerminal({
     if (
       !snapshotReady
       || !shouldStreamLiveTerminal
-      || transportMode !== "http-poll"
+      || transportMode !== "snapshot"
     ) {
       return;
     }
@@ -1191,6 +1248,8 @@ export function SessionTerminal({
     socket.onopen = () => {
       if (connectAttemptRef.current !== attemptId) return;
       reconnectCountRef.current = 0;
+      pendingResizeSyncRef.current = true;
+      pendingSocketBinaryModeRef.current = "stream";
       setTransportError(null);
       setConnectionState("live");
       const wasReconnect = hasConnectedOnceRef.current;
@@ -1209,7 +1268,9 @@ export function SessionTerminal({
       if (typeof event.data === "string") {
         try {
           const payload = JSON.parse(event.data) as TerminalServerEvent;
-          if (payload.type === "error") {
+          if (payload.type === "snapshot") {
+            pendingSocketBinaryModeRef.current = "snapshot";
+          } else if (payload.type === "error") {
             setTransportError(payload.error);
             setConnectionState("error");
           } else if (payload.type === "exit") {
@@ -1223,18 +1284,21 @@ export function SessionTerminal({
       }
 
       if (event.data instanceof ArrayBuffer) {
+        const nextMode = pendingSocketBinaryModeRef.current;
+        pendingSocketBinaryModeRef.current = "stream";
         liveOutputStartedRef.current = true;
-        const shouldFollow = term.buffer.active.viewportY >= term.buffer.active.baseY;
+        const viewport = captureTerminalViewport(term);
+        if (nextMode === "snapshot") {
+          snapshotAppliedRef.current = sessionId;
+          term.reset();
+        }
         term.write(new Uint8Array(event.data), () => {
           if (termRef.current !== term) {
             return;
           }
-          if (shouldFollow) {
-            try {
-              term.scrollToBottom();
-            } catch {
-              return;
-            }
+          restoreTerminalViewport(term, viewport);
+          if (nextMode === "snapshot") {
+            restorePreferredFocus();
           }
           updateScrollState();
         });
@@ -1244,8 +1308,10 @@ export function SessionTerminal({
     socket.onclose = () => {
       if (connectAttemptRef.current !== attemptId) return;
       socketRef.current = null;
+      pendingSocketBinaryModeRef.current = "stream";
       const shouldRetry = LIVE_TERMINAL_STATUSES.has(latestStatusRef.current);
       if (shouldRetry) {
+        pendingResizeSyncRef.current = true;
         const currentTerm = termRef.current;
         if (currentTerm && hasConnectedOnceRef.current && !reconnectNoticeWrittenRef.current) {
           reconnectNoticeWrittenRef.current = true;
@@ -1261,6 +1327,7 @@ export function SessionTerminal({
 
     socket.onerror = () => {
       if (connectAttemptRef.current !== attemptId) return;
+      pendingResizeSyncRef.current = true;
       setTransportError("Terminal connection failed");
       setConnectionState("error");
     };
@@ -1269,13 +1336,16 @@ export function SessionTerminal({
       if (socketRef.current === socket) {
         socketRef.current = null;
       }
+      pendingSocketBinaryModeRef.current = "stream";
       socket.close();
     };
   }, [
     clearReconnectTimer,
     reconnectToken,
+    restorePreferredFocus,
     scheduleReconnect,
     scheduleRendererRecovery,
+    sessionId,
     shouldStreamLiveTerminal,
     snapshotReady,
     socketBaseUrl,
@@ -1405,7 +1475,7 @@ export function SessionTerminal({
     lastAppliedInsertNonceRef.current = pendingInsert.nonce;
     setSendError(null);
 
-    if (expectsLiveTerminal && connectionState === "live") {
+    if (canSendLiveInput) {
       const inlineText = pendingInsert.inlineText.trim();
       if (inlineText.length > 0) {
         void sendTerminalKeys(`${inlineText} `).catch((err: unknown) => {
@@ -1415,13 +1485,18 @@ export function SessionTerminal({
       return;
     }
 
+    if (expectsLiveTerminal && !interactiveTerminal) {
+      setSendError(transportNotice ?? "Operator access is required for live terminal input");
+      return;
+    }
+
     const draftText = pendingInsert.draftText.trim();
     if (draftText.length === 0) {
       return;
     }
 
     setMessage((current) => (current.trim().length > 0 ? `${current}\n\n${draftText}` : draftText));
-  }, [connectionState, expectsLiveTerminal, pendingInsert, sendTerminalKeys]);
+  }, [canSendLiveInput, expectsLiveTerminal, interactiveTerminal, pendingInsert, sendTerminalKeys, transportNotice]);
 
   const runSearch = useCallback((direction: "next" | "prev") => {
     const addon = searchRef.current;
@@ -1436,34 +1511,31 @@ export function SessionTerminal({
   }, [searchQuery]);
 
   const scrollToBottom = useCallback(() => {
-    if (isRemoteLiveConsole) {
-      const container = remoteConsoleRef.current;
-      if (!container) {
-        return;
-      }
-      container.scrollTop = container.scrollHeight;
-      setShowScrollToBottom(false);
-      return;
-    }
-
     const term = termRef.current;
     if (!term) {
       return;
     }
+    preferredFocusTargetRef.current = showLiveInputRail ? "live-input" : "terminal";
+    restoreFocusOnRecoveryRef.current = true;
     term.scrollToBottom();
     updateScrollState();
     if (activeRef.current) {
-      if (showLiveInputRail) {
-        liveInputRef.current?.focus();
-      } else {
+      try {
         term.focus();
+      } catch {
+        return;
       }
     }
-  }, [isRemoteLiveConsole, showLiveInputRail, updateScrollState]);
+  }, [updateScrollState]);
 
   const focusTerminal = useCallback(() => {
+    preferredFocusTargetRef.current = showLiveInputRail ? "live-input" : "terminal";
+    restoreFocusOnRecoveryRef.current = true;
     if (showLiveInputRail) {
       liveInputRef.current?.focus();
+      return;
+    }
+    if (!expectsLiveTerminal) {
       return;
     }
     const term = termRef.current;
@@ -1476,33 +1548,17 @@ export function SessionTerminal({
       return;
     }
     scheduleRendererRecovery(false);
-  }, [scheduleRendererRecovery, showLiveInputRail]);
+  }, [expectsLiveTerminal, scheduleRendererRecovery]);
 
-  const handleTerminalPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "touch") {
-      return;
-    }
+  const handleTerminalPointerDown = useCallback((_event: ReactPointerEvent<HTMLDivElement>) => {
     focusTerminal();
   }, [focusTerminal]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setSearchQuery("");
-    if (activeRef.current) {
-      if (showLiveInputRail) {
-        liveInputRef.current?.focus();
-      } else {
-        termRef.current?.focus();
-      }
-    }
-  }, [showLiveInputRail]);
-
-  useEffect(() => {
-    if (isRemoteLiveConsole && searchOpen) {
-      setSearchOpen(false);
-      setSearchQuery("");
-    }
-  }, [isRemoteLiveConsole, searchOpen]);
+    restorePreferredFocus();
+  }, [restorePreferredFocus]);
 
   const handleRemoteInputSubmit = useCallback(async (withEnter: boolean) => {
     const value = liveInputDraft;
@@ -1526,12 +1582,40 @@ export function SessionTerminal({
       setLiveInputDraft("");
       setSendError(null);
       requestAnimationFrame(() => {
-        liveInputRef.current?.focus();
+        focusTerminal();
       });
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to send terminal input");
     }
-  }, [liveInputDraft, sendTerminalKeys, sendTerminalSpecial]);
+  }, [focusTerminal, liveInputDraft, sendTerminalKeys, sendTerminalSpecial]);
+
+  const handleLiveHelperKey = useCallback((special: string) => {
+    void sendTerminalSpecial(special)
+      .then(() => {
+        setSendError(null);
+      })
+      .catch((err: unknown) => {
+        setSendError(err instanceof Error ? err.message : "Failed to send terminal input");
+      })
+      .finally(() => {
+        requestAnimationFrame(() => {
+          focusTerminal();
+        });
+      });
+  }, [focusTerminal, sendTerminalSpecial]);
+
+  const handleFileSelection = useCallback((files: File[]) => {
+    if (!files.length) {
+      return;
+    }
+
+    if (expectsLiveTerminal) {
+      void handleIncomingFiles(files);
+      return;
+    }
+
+    queueResumeAttachments(files);
+  }, [expectsLiveTerminal, handleIncomingFiles, queueResumeAttachments]);
 
   return (
     <div
@@ -1558,11 +1642,17 @@ export function SessionTerminal({
           setSendError(localFileTransferError(localFilePath));
           return;
         }
-        if (!plainText) return;
+        if (!plainText) {
+          return;
+        }
         try {
-          if (expectsLiveTerminal && connectionState === "live") {
+          if (canSendLiveInput) {
             const payload = plainText.startsWith("/") ? shellEscapePath(plainText) : plainText;
             await sendTerminalKeys(payload);
+            return;
+          }
+          if (expectsLiveTerminal && !interactiveTerminal) {
+            setSendError(transportNotice ?? "Operator access is required for live terminal input");
             return;
           }
           setMessage((current) => current.length > 0 ? `${current}\n${plainText}` : plainText);
@@ -1571,7 +1661,7 @@ export function SessionTerminal({
         }
       }}
     >
-      {!isRemoteLiveConsole && searchOpen ? (
+      {searchOpen ? (
         <div className="absolute right-2 top-2 z-10 flex max-w-[calc(100%-1rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur sm:right-3 sm:top-3 sm:max-w-[calc(100%-1.5rem)]">
           <Search className="h-3.5 w-3.5 text-[#8e847d]" />
           <input
@@ -1599,11 +1689,13 @@ export function SessionTerminal({
             <X className="h-3.5 w-3.5" />
           </Button>
         </div>
-      ) : !isRemoteLiveConsole ? (
+      ) : (
         <div className={`absolute right-2 top-2 z-10 flex items-center gap-1.5 transition-opacity sm:right-3 sm:top-3 sm:gap-2 ${
-          connectionState === "live" ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100" : "opacity-100"
+          connectionState === "live" && transportMode === "websocket"
+            ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
+            : "opacity-100"
         }`}>
-          {connectionState !== "live" ? (
+          {connectionState !== "live" || transportMode === "snapshot" ? (
             <Button
               type="button"
               size="icon"
@@ -1634,32 +1726,19 @@ export function SessionTerminal({
             <Search className="h-3.5 w-3.5" />
           </Button>
         </div>
-      ) : null}
+      )}
 
       <div className="min-h-0 flex-1 overflow-hidden px-0.5 pb-1 pt-2 sm:px-1.5 sm:pb-1.5 sm:pt-3">
-        {isRemoteLiveConsole ? (
-          <div
-            ref={remoteConsoleRef}
-            className="h-full w-full overflow-auto rounded-[10px] border border-white/6 bg-[#050303] px-3 py-2 font-mono text-[12px] leading-5 text-[#efe8e1] touch-pan-y"
-            onScroll={(event) => {
-              const target = event.currentTarget;
-              setShowScrollToBottom(target.scrollTop + target.clientHeight < target.scrollHeight - 8);
-            }}
-          >
-            <pre className="min-h-full whitespace-pre-wrap break-words">{remoteConsoleText || (connectionState === "connecting" ? "Connecting remote terminal..." : "")}</pre>
-          </div>
-        ) : (
-          <div
-            ref={containerRef}
-            className="h-full w-full overflow-hidden touch-pan-y"
-            onClick={focusTerminal}
-            onPointerDown={handleTerminalPointerDown}
-          />
-        )}
+        <div
+          ref={containerRef}
+          className="h-full w-full overflow-hidden touch-pan-y"
+          onClick={focusTerminal}
+          onPointerDown={handleTerminalPointerDown}
+        />
       </div>
 
       {showScrollToBottom ? (
-        <div className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 ${showResumeRail ? "bottom-24" : showLiveInputRail ? "bottom-36 sm:bottom-32" : "bottom-4"}`}>
+        <div className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 ${showResumeRail ? "bottom-24" : showLiveHelperBar ? "bottom-20" : "bottom-4"}`}>
           <Button
             type="button"
             size="sm"
@@ -1677,14 +1756,35 @@ export function SessionTerminal({
       {dragActive ? (
         <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center rounded-[18px] border border-dashed border-white/20 bg-black/55">
           <span className="rounded-full border border-white/10 bg-white/6 px-4 py-2 text-[12px] text-[#efe8e1]">
-            {expectsLiveTerminal
+            {expectsLiveTerminal && interactiveTerminal
               ? "Drop files or screenshots to insert uploaded paths into the terminal"
+              : expectsLiveTerminal
+                ? "Live terminal input is read-only in snapshot recovery mode"
               : "Drop files or screenshots to attach them before resuming"}
           </span>
         </div>
       ) : null}
 
-      {showLiveInputRail ? (
+      <input
+        ref={fileInputRef}
+        type="file"
+        className="hidden"
+        multiple
+        onChange={(event) => {
+          handleFileSelection(Array.from(event.target.files ?? []));
+          event.target.value = "";
+        }}
+      />
+
+      {transportNotice && !showSnapshotFallbackRail ? (
+        <div className={`pointer-events-none absolute left-3 right-3 z-10 ${showResumeRail ? "bottom-24" : "bottom-4"}`}>
+          <div className="rounded-[12px] border border-white/8 bg-[#0f0a0a]/92 px-3 py-2 text-[12px] text-[#b8aea6] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur-sm">
+            {transportNotice}
+          </div>
+        </div>
+      ) : null}
+
+      {showSnapshotFallbackRail ? (
         <div className="border-t border-white/8 bg-[#0b0808]/98 px-3 py-3">
           <div className="flex items-center gap-2">
             <input
@@ -1692,6 +1792,8 @@ export function SessionTerminal({
               value={liveInputDraft}
               onChange={(event) => setLiveInputDraft(event.target.value)}
               onFocus={() => {
+                preferredFocusTargetRef.current = "live-input";
+                restoreFocusOnRecoveryRef.current = true;
                 setSendError(null);
               }}
               onKeyDown={(event) => {
@@ -1711,52 +1813,55 @@ export function SessionTerminal({
             />
             <button
               type="button"
-              className="rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[12px] text-[#efe8e1] transition hover:bg-white/10"
-              onClick={() => {
-                void handleRemoteInputSubmit(false);
-              }}
-              disabled={connectionState !== "live" || liveInputDraft.length === 0}
+              className="shrink-0 rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] px-3 py-2 text-[11px] font-medium text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => void handleRemoteInputSubmit(true)}
+              disabled={connectionState !== "live"}
             >
-              Type
+              Send
+            </button>
+          </div>
+          <p className="mt-2 text-[11px] text-[#8e847d]">
+            {transportNotice ?? "Live terminal websocket unavailable. Recovery mode keeps the terminal refreshed from server snapshots."}
+          </p>
+          {sendError ? (
+            <p className="mt-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {showLiveHelperBar ? (
+        <div className="border-t border-white/8 bg-[#0b0808]/96 px-3 py-2">
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            <button
+              type="button"
+              className="shrink-0 rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] px-3 py-2 text-[11px] font-medium text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={focusTerminal}
+              disabled={connectionState !== "live"}
+            >
+              Type in terminal
             </button>
             <button
               type="button"
-              className="rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] px-3 py-2 text-[12px] font-medium text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => {
-                void handleRemoteInputSubmit(true);
-              }}
+              className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={() => fileInputRef.current?.click()}
               disabled={connectionState !== "live"}
             >
-              Enter
+              Attach
             </button>
-          </div>
-
-          <div className="mt-2 flex flex-wrap gap-2">
-            {["Tab", "Escape", "Backspace", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "C-c"].map((special) => (
+            {LIVE_TERMINAL_HELPER_KEYS.map(({ label, special }) => (
               <button
                 key={special}
                 type="button"
-                className="rounded-full border border-white/12 bg-white/6 px-3 py-1.5 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+                className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
                 disabled={connectionState !== "live"}
-                onClick={() => {
-                  void sendTerminalSpecial(special).catch((err: unknown) => {
-                    setSendError(err instanceof Error ? err.message : "Failed to send terminal input");
-                  });
-                }}
+                onClick={() => handleLiveHelperKey(special)}
               >
-                {special === "C-c" ? "Ctrl+C" : special.replace("Arrow", "")}
+                {label}
               </button>
             ))}
           </div>
-
-          <p className="mt-2 text-[11px] text-[#8e847d]">
-            {showRemoteInputRail
-              ? "Remote/mobile terminal uses a synchronized input rail so typing stays reliable while the terminal view updates."
-              : "Mobile terminal uses a synchronized input rail so your draft stays visible while the live console keeps its place."}
-          </p>
-
           {sendError ? (
-            <p className="mt-2 text-[12px] text-[#ff8f7a]">{sendError}</p>
+            <p className="mt-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
           ) : null}
         </div>
       ) : null}
@@ -1787,6 +1892,8 @@ export function SessionTerminal({
               value={message}
               onChange={(event) => setMessage(event.target.value)}
               onFocus={() => {
+                preferredFocusTargetRef.current = "resume";
+                restoreFocusOnRecoveryRef.current = true;
                 normalizeWhitespaceOnlyDraft();
               }}
               onKeyDown={(event) => {
@@ -1797,19 +1904,6 @@ export function SessionTerminal({
               }}
               placeholder={railPlaceholder}
               className="min-h-[52px] flex-1 resize-none rounded-[14px] border border-white/10 bg-black/35 px-3 py-2 text-[13px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20"
-            />
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              multiple
-              onChange={(event) => {
-                const files = Array.from(event.target.files ?? []);
-                if (files.length > 0) {
-                  queueResumeAttachments(files);
-                }
-                event.target.value = "";
-              }}
             />
             <button
               type="button"
@@ -1835,7 +1929,7 @@ export function SessionTerminal({
             <p className="mt-2 text-[12px] text-[#ff8f7a]">{sendError}</p>
           ) : null}
         </div>
-      ) : sendError ? (
+      ) : !showLiveHelperBar && sendError ? (
         <div className="absolute bottom-3 left-3 rounded-full border border-[#ff8f7a]/30 bg-[#1d1111]/90 px-3 py-1.5 text-[12px] text-[#ff8f7a] backdrop-blur-sm">
           {sendError}
         </div>

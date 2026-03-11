@@ -20,7 +20,8 @@ pub(crate) use tmux_runtime::{
 };
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
-    SpawnRequest, TerminalStreamEvent,
+    SpawnRequest, TerminalRestoreSnapshot, TerminalStreamEvent, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    TERMINAL_RESTORE_SNAPSHOT_VERSION,
 };
 pub use workspace::{expand_path, resolve_workspace_path};
 
@@ -367,15 +368,31 @@ impl AppState {
             return handle;
         }
 
+        let persisted_snapshot = match self.load_terminal_restore_snapshot(session_id).await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                tracing::debug!(
+                    session_id,
+                    error = %err,
+                    "Failed to load persisted terminal restore snapshot"
+                );
+                None
+            }
+        };
+
         let mut live_sessions = self.live_sessions.write().await;
         if let Some(handle) = live_sessions.get(session_id).cloned() {
             return handle;
         }
 
+        let mut terminal_store = types::TerminalStateStore::new();
+        if let Some(snapshot) = persisted_snapshot.as_ref() {
+            terminal_store.hydrate_from_snapshot(snapshot);
+        }
         let handle = Arc::new(LiveSessionHandle {
             input_tx: RwLock::new(None),
             terminal_tx: self.new_terminal_stream(),
-            terminal_store: Arc::new(std::sync::Mutex::new(types::TerminalStateStore::new())),
+            terminal_store: Arc::new(std::sync::Mutex::new(terminal_store)),
             kill_tx: Mutex::new(None),
         });
         live_sessions.insert(session_id.to_string(), handle.clone());
@@ -446,8 +463,23 @@ impl AppState {
         }
 
         let handle = self.ensure_terminal_host(session_id).await;
-        if let Ok(mut store) = handle.terminal_store.lock() {
+        let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
             store.process(&bytes);
+            Some(store.restore_snapshot())
+        } else {
+            None
+        };
+        if let Some(snapshot) = snapshot.as_ref() {
+            if let Err(err) = self
+                .persist_terminal_restore_snapshot(session_id, snapshot)
+                .await
+            {
+                tracing::debug!(
+                    session_id,
+                    error = %err,
+                    "Failed to persist terminal restore snapshot"
+                );
+            }
         }
         let _ = handle.terminal_tx.send(TerminalStreamEvent::Output(bytes));
     }
@@ -465,23 +497,56 @@ impl AppState {
             );
         }
 
-        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
-            if let Ok(mut store) = handle.terminal_store.lock() {
-                store.process(bytes);
+        let handle = self.ensure_terminal_host(session_id).await;
+        let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
+            store.process(bytes);
+            Some(store.restore_snapshot())
+        } else {
+            None
+        };
+        if let Some(snapshot) = snapshot.as_ref() {
+            if let Err(err) = self
+                .persist_terminal_restore_snapshot(session_id, snapshot)
+                .await
+            {
+                tracing::debug!(
+                    session_id,
+                    error = %err,
+                    "Failed to persist terminal restore snapshot"
+                );
             }
         }
     }
 
     pub(crate) async fn resize_terminal_store(&self, session_id: &str, cols: u16, rows: u16) {
         if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
-            if let Ok(mut store) = handle.terminal_store.lock() {
+            let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
                 store.resize(cols, rows);
+                Some(store.restore_snapshot())
+            } else {
+                None
+            };
+            if let Some(snapshot) = snapshot.as_ref() {
+                if let Err(err) = self
+                    .persist_terminal_restore_snapshot(session_id, snapshot)
+                    .await
+                {
+                    tracing::debug!(
+                        session_id,
+                        error = %err,
+                        "Failed to persist resized terminal restore snapshot"
+                    );
+                }
             }
         }
     }
 
-    pub(crate) async fn current_terminal_snapshot(&self, session_id: &str) -> Option<Vec<u8>> {
-        self.live_sessions
+    pub(crate) async fn current_terminal_restore_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Option<TerminalRestoreSnapshot> {
+        if let Some(snapshot) = self
+            .live_sessions
             .read()
             .await
             .get(session_id)
@@ -491,24 +556,24 @@ impl AppState {
                     .terminal_store
                     .lock()
                     .ok()
-                    .map(|store| store.snapshot())
+                    .map(|store| store.restore_snapshot())
             })
-    }
+            .filter(|snapshot| !snapshot.is_empty())
+        {
+            return Some(snapshot);
+        }
 
-    pub(crate) async fn current_terminal_history(&self, session_id: &str) -> Option<Vec<u8>> {
-        self.live_sessions
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .and_then(|handle| {
-                handle
-                    .terminal_store
-                    .lock()
-                    .ok()
-                    .map(|store| store.history_tail())
-            })
-            .filter(|history| !history.is_empty())
+        match self.load_terminal_restore_snapshot(session_id).await {
+            Ok(snapshot) => snapshot.filter(|snapshot| !snapshot.is_empty()),
+            Err(err) => {
+                tracing::debug!(
+                    session_id,
+                    error = %err,
+                    "Failed to load persisted terminal restore snapshot"
+                );
+                None
+            }
+        }
     }
 
     pub fn config_projects_payload(&self, config: &ConductorConfig) -> Value {
