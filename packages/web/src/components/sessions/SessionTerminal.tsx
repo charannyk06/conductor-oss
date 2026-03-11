@@ -744,21 +744,7 @@ export function SessionTerminal({
     scheduleTerminalFlush();
   }, [scheduleTerminalFlush]);
 
-  const requestReconnect = useCallback(() => {
-    clearReconnectTimer();
-    clearScheduledTerminalFlush();
-    terminalWriteQueueRef.current = [];
-    terminalWriteInFlightRef.current = false;
-    terminalWriteRestoreFocusRef.current = false;
-    pendingResizeSyncRef.current = true;
-    pendingSocketBinaryModeRef.current = "stream";
-    setTransportError(null);
-    setTransportNotice(null);
-    setConnectionState("connecting");
-    setTransportMode("websocket");
-    setSocketBaseUrl(null);
-    setReconnectToken((value) => value + 1);
-  }, [clearReconnectTimer, clearScheduledTerminalFlush]);
+  
 
   const syncTerminalDimensions = useCallback((forceSync: boolean) => {
     const term = termRef.current;
