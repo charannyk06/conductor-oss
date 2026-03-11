@@ -218,10 +218,29 @@ pub struct LiveSessionHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        TerminalRestoreSnapshot, TerminalStateStore, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-        TERMINAL_RESTORE_SNAPSHOT_VERSION,
-    };
+    use super::*;
+
+    #[test]
+    fn terminal_state_store_history_tail_is_bounded() {
+        let mut store = TerminalStateStore::new();
+        let payload = vec![b'x'; DEFAULT_TERMINAL_HISTORY_BYTES + 4096];
+        store.process(&payload);
+
+        let history = store.history_tail();
+        assert_eq!(history.len(), DEFAULT_TERMINAL_HISTORY_BYTES);
+        assert!(history.iter().all(|byte| *byte == b'x'));
+    }
+
+    #[test]
+    fn terminal_state_store_resize_preserves_rendered_content() {
+        let mut store = TerminalStateStore::new();
+        store.resize(4, 8);
+        store.process(b"abcdef");
+
+        let snapshot = String::from_utf8(store.snapshot()).expect("snapshot should stay valid utf-8");
+        assert!(snapshot.contains("abcd"));
+        assert!(snapshot.contains("ef"));
+    }
 
     #[test]
     fn terminal_restore_snapshot_json_round_trip_preserves_bytes() {

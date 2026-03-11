@@ -7,9 +7,16 @@ import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
 import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xterm/xterm";
 import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
-import { SUPERSET_TERMINAL_FONT_FAMILY, getSupersetLikeTerminalTheme } from "@/components/terminal/xtermTheme";
+import { getSupersetLikeTerminalTheme } from "@/components/terminal/xtermTheme";
 import { extractLocalFileTransferPath, uploadProjectAttachments } from "./attachmentUploads";
 import { captureTerminalViewport, restoreTerminalViewport } from "./terminalViewport";
+import {
+  buildTerminalSocketUrl,
+  detectMobileTerminalInputRail,
+  getSessionTerminalViewportOptions,
+  normalizeTerminalSnapshot,
+  stripBrowserTerminalResponses,
+} from "./sessionTerminalUtils";
 import type { TerminalInsertRequest } from "./terminalInsert";
 
 interface SessionTerminalProps {
@@ -56,15 +63,8 @@ const RENDERER_RECOVERY_THROTTLE_MS = 120;
 const LIVE_TERMINAL_SCROLLBACK = 50000;
 const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
-const MOBILE_TERMINAL_ACCESSORY_MAX_WIDTH_PX = 1024;
 const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
-const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
-  /\x1b\[(?:I|O)/g,
-  /\x1b\[\d+;\d+R/g,
-  /\x1b\[(?:[?>])[\d;]*c/g,
-  /\x1b\](?:10|11|12|4;\d+);[\s\S]*?(?:\x07|\x1b\\)/g,
-];
 const LIVE_TERMINAL_HELPER_KEYS = [
   { label: "Enter", special: "Enter" },
   { label: "Tab", special: "Tab" },
@@ -237,24 +237,6 @@ async function postTerminalResize(sessionId: string, cols: number, rows: number)
   }
 }
 
-function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): string {
-  const url = new URL(baseUrl);
-  url.searchParams.set("cols", String(Math.max(1, cols)));
-  url.searchParams.set("rows", String(Math.max(1, rows)));
-  return url.toString();
-}
-
-function normalizeTerminalSnapshot(snapshot: string): string {
-  return snapshot.replace(/\r?\n/g, "\r\n");
-}
-
-function stripBrowserTerminalResponses(data: string): string {
-  let sanitized = data;
-  for (const pattern of BROWSER_TERMINAL_RESPONSE_PATTERNS) {
-    sanitized = sanitized.replace(pattern, "");
-  }
-  return sanitized;
-}
 
 function localFileTransferError(path: string): string {
   const normalized = path.toLowerCase();
@@ -284,38 +266,13 @@ function terminalHasRenderedContent(term: XTerminal): boolean {
   return false;
 }
 
-function getTerminalViewportOptions(width: number): Pick<ITerminalOptions, "fontFamily" | "fontSize" | "lineHeight"> {
-  if (width < 420) {
-    return {
-      fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-      fontSize: 11,
-      lineHeight: 1,
-    };
-  }
-
-  if (width < 640) {
-    return {
-      fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-      fontSize: 13,
-      lineHeight: 1.08,
-    };
-  }
-
-  return {
-    fontFamily: SUPERSET_TERMINAL_FONT_FAMILY,
-    fontSize: 17,
-    lineHeight: 1.06,
-  };
-}
-
 function shouldShowTerminalAccessoryBar(): boolean {
   if (typeof window === "undefined") {
     return false;
   }
 
   const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-  const touchCapable = navigator.maxTouchPoints > 0;
-  return window.innerWidth < MOBILE_TERMINAL_ACCESSORY_MAX_WIDTH_PX && (coarsePointer || touchCapable);
+  return detectMobileTerminalInputRail(window.innerWidth, coarsePointer, navigator.maxTouchPoints);
 }
 
 export function SessionTerminal({
@@ -945,7 +902,7 @@ export function SessionTerminal({
       if (!mounted || !containerRef.current) return;
 
       const isLight = document.documentElement.classList.contains("light");
-      const viewportOptions = getTerminalViewportOptions(window.innerWidth);
+      const viewportOptions = getSessionTerminalViewportOptions(window.innerWidth);
       const terminalOptions: ITerminalOptions & { scrollbar?: { showScrollbar: boolean } } = {
         allowTransparency: false,
         cursorBlink: true,
@@ -1029,7 +986,7 @@ export function SessionTerminal({
           return;
         }
         try {
-          const nextViewportOptions = getTerminalViewportOptions(window.innerWidth);
+          const nextViewportOptions = getSessionTerminalViewportOptions(window.innerWidth);
           term.options.fontFamily = nextViewportOptions.fontFamily;
           term.options.fontSize = nextViewportOptions.fontSize;
           term.options.lineHeight = nextViewportOptions.lineHeight;

@@ -81,7 +81,7 @@ struct TerminalQuery {
 #[derive(Debug, Deserialize)]
 struct TerminalSnapshotQuery {
     lines: Option<usize>,
-    live: Option<bool>,
+    live: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,7 +164,7 @@ async fn terminal_snapshot(
         .lines
         .unwrap_or(DEFAULT_TERMINAL_SNAPSHOT_LINES)
         .clamp(25, MAX_TERMINAL_SNAPSHOT_LINES);
-    let max_bytes = if query.live.unwrap_or(false) {
+    let max_bytes = if terminal_snapshot_live_requested(query.live.as_deref()) {
         LIVE_TERMINAL_SNAPSHOT_MAX_BYTES
     } else {
         READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES
@@ -326,6 +326,14 @@ async fn read_terminal_log_tail_bytes(
 
 fn trim_utf8_tail_string(value: String, max_bytes: usize) -> String {
     String::from_utf8_lossy(&trim_utf8_tail_bytes(value.into_bytes(), max_bytes)).into_owned()
+}
+
+fn terminal_snapshot_live_requested(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 fn trim_utf8_tail_bytes(bytes: Vec<u8>, max_bytes: usize) -> Vec<u8> {
@@ -763,6 +771,49 @@ fn server_error_event(session_id: &str, error: impl Into<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use conductor_core::config::ConductorConfig;
+    use conductor_db::Database;
+    use conductor_executors::executor::ExecutorInput;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot};
+    use uuid::Uuid;
+
+    async fn build_test_state() -> (Arc<AppState>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("conductor-terminal-route-test-{}", Uuid::new_v4()));
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory().await.expect("in-memory db should initialize");
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        (state, root)
+    }
+
+    async fn seed_live_terminal_session(state: &Arc<AppState>, session_id: &str) -> SessionRecord {
+        let session = SessionRecord::builder(
+            session_id.to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "Validate terminal restore".to_string(),
+        )
+        .build();
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+
+        let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        state
+            .attach_terminal_runtime(&session.id, input_tx, kill_tx)
+            .await;
+        state
+            .emit_terminal_text(&session.id, "first line\r\nprompt> ")
+            .await;
+
+        session
+    }
 
     #[test]
     fn resolve_terminal_keys_prefers_literal_keys() {
@@ -785,12 +836,22 @@ mod tests {
     #[test]
     fn server_snapshot_event_includes_reason() {
         let payload = server_snapshot_event("session-123", TerminalSnapshotReason::Attach);
-        let parsed: Value =
+        let parsed: serde_json::Value =
             serde_json::from_str(&payload).expect("snapshot payload should be valid json");
 
         assert_eq!(parsed["type"], "snapshot");
         assert_eq!(parsed["sessionId"], "session-123");
         assert_eq!(parsed["reason"], "attach");
+    }
+
+    #[test]
+    fn terminal_snapshot_live_requested_accepts_booleanish_query_values() {
+        assert!(terminal_snapshot_live_requested(Some("1")));
+        assert!(terminal_snapshot_live_requested(Some("true")));
+        assert!(terminal_snapshot_live_requested(Some("YES")));
+        assert!(!terminal_snapshot_live_requested(Some("0")));
+        assert!(!terminal_snapshot_live_requested(Some("false")));
+        assert!(!terminal_snapshot_live_requested(None));
     }
 
     #[test]
@@ -839,5 +900,51 @@ mod tests {
 
         let token = create_terminal_token("session-123").expect("token should be created");
         assert!(verify_terminal_token("session-123", &token).expect("token should verify"));
+    }
+
+    #[tokio::test]
+    async fn build_terminal_snapshot_prefers_live_terminal_store_and_marks_session_live() {
+        let (state, root) = build_test_state().await;
+        let session = seed_live_terminal_session(&state, "session-live").await;
+
+        let payload = build_terminal_snapshot(&state, &session, 200, 4096)
+            .await
+            .expect("snapshot should build");
+
+        assert_eq!(payload["source"], "terminal_store");
+        assert_eq!(payload["live"], true);
+        assert_eq!(payload["restored"], true);
+        assert!(
+            payload["snapshot"]
+                .as_str()
+                .expect("snapshot should be a string")
+                .contains("prompt> ")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_terminal_restore_snapshot_keeps_history_and_utf8_boundaries_under_budget() {
+        let (state, root) = build_test_state().await;
+        let session = seed_live_terminal_session(&state, "session-restore").await;
+        state
+            .emit_terminal_text(&session.id, "emoji: 🙂🙂🙂🙂🙂")
+            .await;
+
+        let restored = build_terminal_restore_snapshot(&state, &session, 200, 96)
+            .await
+            .expect("restore snapshot should build")
+            .expect("restore snapshot should exist");
+
+        assert!(restored.len() <= 96);
+        assert!(std::str::from_utf8(&restored).is_ok());
+        let current = state
+            .current_terminal_snapshot(&session.id)
+            .await
+            .expect("live snapshot should exist");
+        assert!(restored.ends_with(&current));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

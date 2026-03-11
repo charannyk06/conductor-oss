@@ -316,3 +316,50 @@ test("GET falls back to snapshot mode for viewers without operator access", asyn
     global.fetch = originalFetch;
   }
 });
+
+test("GET keeps remote requests in explicit HTTP polling fallback until the private remote runtime is ready", async () => {
+  resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+
+  writeRemoteAccessRuntimeState({
+    status: "starting",
+    provider: "tailscale",
+    publicUrl: "https://laptop.tailnet.ts.net",
+    localUrl: "http://127.0.0.1:3000",
+    accessToken: null,
+    sessionSecret: null,
+    tunnelPid: null,
+    logPath: null,
+    lastError: null,
+    startedAt: new Date().toISOString(),
+  });
+
+  global.fetch = (async () => {
+    throw new Error("terminal token lookup should not run before the remote runtime is ready");
+  }) as typeof fetch;
+
+  try {
+    const request = new NextRequest("https://laptop.tailnet.ts.net/api/sessions/session-1/terminal/connection", {
+      headers: {
+        "Tailscale-User-Login": "dev@example.com",
+      },
+    });
+    const response = await GET(
+      request,
+      { params: Promise.resolve({ id: "session-1" }) },
+    );
+
+    assert.equal(response.status, 200);
+    const payload = await response.json() as {
+      transport: string;
+      wsUrl: string | null;
+      pollIntervalMs: number;
+    };
+
+    assert.equal(payload.transport, "http-poll");
+    assert.equal(payload.wsUrl, null);
+    assert.equal(typeof payload.pollIntervalMs, "number");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
