@@ -21,7 +21,9 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
-use crate::routes::config::{access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole};
+use crate::routes::config::{
+    access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole,
+};
 use crate::state::{
     capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
     SessionRecord, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
@@ -314,8 +316,14 @@ async fn terminal_stream(
 
     let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
     let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
-    let _ = state.ensure_session_live(&id).await;
-    let handle = state.ensure_terminal_host(&id).await;
+    let handle = match state.ensure_live_terminal_host(&id).await {
+        Ok(Some(handle)) => handle,
+        Ok(None) => state.ensure_terminal_host(&id).await,
+        Err(err) => {
+            tracing::debug!(session_id = %id, error = %err, "Failed to ensure live terminal host before streaming");
+            state.ensure_terminal_host(&id).await
+        }
+    };
     let _ = state.resize_live_terminal(&id, cols, rows).await;
 
     let terminal_events = handle.terminal_tx.subscribe();
@@ -661,8 +669,14 @@ async fn handle_terminal_socket(
         return;
     }
 
-    let _ = state.ensure_session_live(&session_id).await;
-    let handle = state.ensure_terminal_host(&session_id).await;
+    let handle = match state.ensure_live_terminal_host(&session_id).await {
+        Ok(Some(handle)) => handle,
+        Ok(None) => state.ensure_terminal_host(&session_id).await,
+        Err(err) => {
+            tracing::debug!(session_id = %session_id, error = %err, "Failed to ensure live terminal host before websocket attach");
+            state.ensure_terminal_host(&session_id).await
+        }
+    };
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
     let mut terminal_events = Some(handle.terminal_tx.subscribe());
     let mut stream_sequence_floor = None;
@@ -818,7 +832,7 @@ async fn handle_terminal_control_socket(
         return;
     }
 
-    let _ = state.ensure_session_live(&session_id).await;
+    let _ = state.ensure_live_terminal_host(&session_id).await;
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
 
     while let Some(message) = socket.recv().await {
@@ -901,11 +915,7 @@ async fn handle_control_message(
         TerminalControlMessage::Ping => Ok(Some(server_pong_event(session_id))),
         TerminalControlMessage::Keys { keys, special } => {
             let chunk = resolve_terminal_keys(keys, special)?;
-            if state.ensure_session_live(session_id).await? {
-                state.send_raw_to_session(session_id, chunk).await?;
-            } else {
-                return Err(anyhow!("Terminal is not currently attached"));
-            }
+            state.send_raw_to_session(session_id, chunk).await?;
             Ok(None)
         }
         TerminalControlMessage::Resize {

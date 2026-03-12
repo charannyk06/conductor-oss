@@ -15,9 +15,11 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{mpsc, oneshot};
 
-use super::detached_runtime::DIRECT_RUNTIME_MODE;
+use super::detached_runtime::{DETACHED_CONTROL_PORT_METADATA_KEY, DIRECT_RUNTIME_MODE};
 use super::helpers::sanitize_terminal_text;
-use crate::state::{AppState, OutputConsumerConfig, SessionRecord, SessionStatus};
+use crate::state::{
+    AppState, LiveSessionHandle, OutputConsumerConfig, SessionRecord, SessionStatus,
+};
 
 pub(crate) const TMUX_RUNTIME_MODE: &str = "tmux";
 pub(crate) const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
@@ -78,6 +80,13 @@ enum TmuxActivityState {
     Ready,
     WaitingInput,
     Blocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRuntimeKind {
+    None,
+    Direct,
+    Tmux,
 }
 
 fn pane_lines(pane: &str) -> Vec<&str> {
@@ -245,6 +254,36 @@ fn summarize_tmux_pane(agent: &str, pane: &str, activity: TmuxActivityState) -> 
     })
 }
 
+fn session_runtime_kind(session: &SessionRecord) -> SessionRuntimeKind {
+    match session
+        .metadata
+        .get(RUNTIME_MODE_METADATA_KEY)
+        .map(String::as_str)
+    {
+        Some(TMUX_RUNTIME_MODE) => SessionRuntimeKind::Tmux,
+        Some(DIRECT_RUNTIME_MODE) => SessionRuntimeKind::Direct,
+        _ => {
+            if session
+                .metadata
+                .get(TMUX_SESSION_METADATA_KEY)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                SessionRuntimeKind::Tmux
+            } else if session
+                .metadata
+                .get(DETACHED_CONTROL_PORT_METADATA_KEY)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                SessionRuntimeKind::Direct
+            } else {
+                SessionRuntimeKind::None
+            }
+        }
+    }
+}
+
 impl AppState {
     pub(crate) async fn spawn_with_runtime(
         self: &Arc<Self>,
@@ -261,9 +300,10 @@ impl AppState {
                 options.structured_output = false;
                 self.spawn_tmux_runtime(executor, session_id, options).await
             }
-            _ => self
-                .spawn_detached_runtime_or_legacy(executor, session_id, options)
-                .await,
+            _ => {
+                self.spawn_detached_runtime_or_legacy(executor, session_id, options)
+                    .await
+            }
         }
     }
 
@@ -273,37 +313,13 @@ impl AppState {
             sessions
                 .values()
                 .filter(|session| !session.status.is_terminal())
-                .filter(|session| {
-                    session
-                        .metadata
-                        .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == TMUX_RUNTIME_MODE || value == DIRECT_RUNTIME_MODE)
-                        .unwrap_or_else(|| {
-                            session
-                                .metadata
-                                .get(TMUX_SESSION_METADATA_KEY)
-                                .map(|value| !value.trim().is_empty())
-                                .unwrap_or(false)
-                        })
-                })
+                .filter(|session| session_runtime_kind(session) != SessionRuntimeKind::None)
                 .map(|session| session.id.clone())
                 .collect::<Vec<_>>()
         };
 
         for session_id in session_ids {
-            let result = match self.get_session(&session_id).await {
-                Some(session)
-                    if session
-                        .metadata
-                        .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == DIRECT_RUNTIME_MODE)
-                        .unwrap_or(false) =>
-                {
-                    self.restore_detached_runtime(&session_id).await
-                }
-                _ => self.restore_tmux_session(&session_id).await,
-            };
-            if let Err(err) = result {
+            if let Err(err) = self.ensure_live_terminal_host(&session_id).await {
                 tracing::warn!(session_id, error = %err, "Failed to restore runtime session");
             }
         }
@@ -331,49 +347,53 @@ impl AppState {
         });
     }
 
-    pub(crate) async fn ensure_session_live(self: &Arc<Self>, session_id: &str) -> Result<bool> {
-        if self.terminal_runtime_attached(session_id).await {
-            return Ok(true);
+    pub(crate) async fn ensure_live_terminal_host(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<Option<Arc<LiveSessionHandle>>> {
+        let handle = self.ensure_terminal_host(session_id).await;
+        if self.terminal_hosts.runtime_attached_handle(&handle).await {
+            return Ok(Some(handle));
         }
 
-        let Some(session) = self.get_session(session_id).await else {
-            return Ok(false);
+        let attached = {
+            let _attach_guard = handle.runtime_attach.lock().await;
+            if self.terminal_hosts.runtime_attached_handle(&handle).await {
+                true
+            } else {
+                let Some(session) = self.get_session(session_id).await else {
+                    return Ok(None);
+                };
+                if matches!(
+                    session.status,
+                    SessionStatus::Archived | SessionStatus::Killed
+                ) {
+                    return Ok(None);
+                }
+
+                match session_runtime_kind(&session) {
+                    SessionRuntimeKind::Tmux => {
+                        self.restore_tmux_session(session_id, &session).await?;
+                    }
+                    SessionRuntimeKind::Direct => {
+                        self.restore_detached_runtime(session_id, &session).await?;
+                    }
+                    SessionRuntimeKind::None => return Ok(None),
+                }
+
+                self.terminal_hosts.runtime_attached_handle(&handle).await
+            }
         };
 
-        if matches!(
-            session.status,
-            SessionStatus::Archived | SessionStatus::Killed
-        ) {
-            return Ok(false);
+        if attached {
+            Ok(Some(handle))
+        } else {
+            Ok(None)
         }
+    }
 
-        let is_tmux_runtime = session
-            .metadata
-            .get(RUNTIME_MODE_METADATA_KEY)
-            .map(|value| value == TMUX_RUNTIME_MODE)
-            .unwrap_or_else(|| {
-                session
-                    .metadata
-                    .get(TMUX_SESSION_METADATA_KEY)
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false)
-            });
-
-        if !is_tmux_runtime {
-            let is_direct_runtime = session
-                .metadata
-                .get(RUNTIME_MODE_METADATA_KEY)
-                .map(|value| value == DIRECT_RUNTIME_MODE)
-                .unwrap_or(false);
-            if !is_direct_runtime {
-                return Ok(false);
-            }
-            self.restore_detached_runtime(session_id).await?;
-            return Ok(self.terminal_runtime_attached(session_id).await);
-        }
-
-        self.restore_tmux_session(session_id).await?;
-        Ok(self.terminal_runtime_attached(session_id).await)
+    pub(crate) async fn ensure_session_live(self: &Arc<Self>, session_id: &str) -> Result<bool> {
+        Ok(self.ensure_live_terminal_host(session_id).await?.is_some())
     }
 
     async fn reconcile_tmux_session_activity(&self, session_id: &str) -> Result<()> {
@@ -598,15 +618,15 @@ impl AppState {
         Ok(RuntimeLaunch { handle, metadata })
     }
 
-    async fn restore_tmux_session(self: &Arc<Self>, session_id: &str) -> Result<()> {
+    async fn restore_tmux_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        session: &SessionRecord,
+    ) -> Result<()> {
         if self.terminal_runtime_attached(session_id).await {
             return Ok(());
         }
 
-        let session = self
-            .get_session(session_id)
-            .await
-            .with_context(|| format!("Session {session_id} not found"))?;
         let Some(tmux_session) = session.metadata.get(TMUX_SESSION_METADATA_KEY).cloned() else {
             return Ok(());
         };
@@ -766,6 +786,7 @@ impl AppState {
         } = attachment;
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
         let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(64);
+        let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(8);
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
         let input_socket = socket_path.clone();
         let input_session_name = tmux_session.clone();
@@ -784,6 +805,29 @@ impl AppState {
                 };
                 if let Err(err) = result {
                     tracing::warn!(input_session_id, error = %err, "Failed to send input to tmux runtime");
+                    break;
+                }
+            }
+        });
+
+        let resize_socket = socket_path.clone();
+        let resize_session_name = tmux_session.clone();
+        let resize_session_id = session_id.clone();
+        tokio::spawn(async move {
+            while let Some(dimensions) = resize_rx.recv().await {
+                if let Err(err) = resize_tmux_session(
+                    &resize_socket,
+                    &resize_session_name,
+                    dimensions.cols,
+                    dimensions.rows,
+                )
+                .await
+                {
+                    tracing::debug!(
+                        resize_session_id,
+                        error = %err,
+                        "Failed to resize tmux runtime"
+                    );
                     break;
                 }
             }
@@ -812,7 +856,8 @@ impl AppState {
             }
         });
 
-        Ok(ExecutorHandle::new(pid, kind, output_rx, input_tx, kill_tx))
+        Ok(ExecutorHandle::new(pid, kind, output_rx, input_tx, kill_tx)
+            .with_terminal_io(None, Some(resize_tx)))
     }
 
     async fn forward_tmux_output(
@@ -945,14 +990,16 @@ impl AppState {
         rows: u16,
     ) -> Result<()> {
         self.resize_terminal_store(session_id, cols, rows).await;
+        if let Some(handle) = self.terminal_hosts.peek(session_id).await {
+            if let Some(resize_tx) = handle.resize_tx.read().await.clone() {
+                let _ = resize_tx.send(PtyDimensions { cols, rows }).await;
+                return Ok(());
+            }
+        }
         let Some(session) = self.get_session(session_id).await else {
             return Ok(());
         };
         let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&session) else {
-            let handle = self.ensure_terminal_host(session_id).await;
-            if let Some(resize_tx) = handle.resize_tx.read().await.clone() {
-                let _ = resize_tx.send(PtyDimensions { cols, rows }).await;
-            }
             return Ok(());
         };
         if !tmux_session_exists(&socket_path, &tmux_session).await? {
@@ -1700,6 +1747,121 @@ mod tests {
         state
     }
 
+    async fn tmux_window_size(socket_path: &Path, session_name: &str) -> Result<(u16, u16)> {
+        let output = new_tmux_command()
+            .arg("-S")
+            .arg(socket_path)
+            .arg("display-message")
+            .arg("-p")
+            .arg("-t")
+            .arg(session_name)
+            .arg("#{window_width} #{window_height}")
+            .output()
+            .await
+            .with_context(|| format!("Failed to read tmux window size for {session_name}"))?;
+        if !output.status.success() {
+            return Err(anyhow!("tmux display-message failed for {session_name}"));
+        }
+
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut parts = value.split_whitespace();
+        let cols = parts
+            .next()
+            .with_context(|| format!("Missing tmux width for {session_name}"))?
+            .parse::<u16>()
+            .with_context(|| format!("Invalid tmux width '{value}' for {session_name}"))?;
+        let rows = parts
+            .next()
+            .with_context(|| format!("Missing tmux height for {session_name}"))?
+            .parse::<u16>()
+            .with_context(|| format!("Invalid tmux height '{value}' for {session_name}"))?;
+        Ok((cols, rows))
+    }
+
+    #[tokio::test]
+    async fn resize_live_terminal_uses_tmux_runtime_resize_channel() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-tmux-resize-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        let session_id = "tmux-resize-session";
+        let state = build_state(&root).await;
+        let executor = state
+            .executors
+            .read()
+            .await
+            .get(&AgentKind::Codex)
+            .cloned()
+            .unwrap();
+
+        let launch = state
+            .spawn_tmux_runtime(
+                executor,
+                session_id,
+                SpawnOptions {
+                    cwd: repo,
+                    prompt: "Inspect".to_string(),
+                    model: None,
+                    reasoning_effort: None,
+                    skip_permissions: false,
+                    extra_args: Vec::new(),
+                    env: HashMap::new(),
+                    branch: None,
+                    timeout: None,
+                    interactive: false,
+                    structured_output: false,
+                    resume_target: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let socket_path = PathBuf::from(
+            launch
+                .metadata
+                .get(TMUX_SOCKET_METADATA_KEY)
+                .cloned()
+                .expect("tmux launch should record socket path"),
+        );
+        let tmux_session = launch
+            .metadata
+            .get(TMUX_SESSION_METADATA_KEY)
+            .cloned()
+            .expect("tmux launch should record session name");
+        let (_pid, _kind, _output_rx, input_tx, _terminal_rx, resize_tx, kill_tx) =
+            launch.handle.into_parts();
+
+        state
+            .attach_terminal_runtime(
+                session_id,
+                input_tx,
+                Some(resize_tx.expect("tmux runtime should expose a resize channel")),
+                kill_tx,
+            )
+            .await;
+        state
+            .resize_live_terminal(session_id, 132, 40)
+            .await
+            .expect("tmux resize should succeed");
+
+        let size = timeout(Duration::from_secs(3), async {
+            loop {
+                let size = tmux_window_size(&socket_path, &tmux_session)
+                    .await
+                    .expect("tmux size query should succeed");
+                if size == (132, 40) {
+                    return size;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("tmux resize should flow through the host-owned resize channel");
+        assert_eq!(size, (132, 40));
+
+        let _ = kill_tmux_session(&socket_path, &tmux_session).await;
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn restore_runtime_sessions_reattaches_running_tmux_sessions() {
         let root = std::env::temp_dir().join(format!("conductor-tmux-test-{}", Uuid::new_v4()));
@@ -1806,6 +1968,129 @@ mod tests {
             SessionStatus::Working | SessionStatus::NeedsInput
         ));
         assert!(!final_session.metadata.contains_key("recoveryState"));
+
+        if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
+            let _ = kill_tmux_session(&socket_path, &tmux_session).await;
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn ensure_live_terminal_host_serializes_tmux_reattach() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-tmux-ensure-live-test-{}",
+            Uuid::new_v4()
+        ));
+        let repo = root.join("repo");
+        let session_id = "tmux-ensure-live-session";
+        let state = build_state(&root).await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TmuxInputHarnessExecutor));
+        let executor = state
+            .executors
+            .read()
+            .await
+            .get(&AgentKind::Codex)
+            .cloned()
+            .unwrap();
+
+        let launch = state
+            .spawn_tmux_runtime(
+                executor,
+                session_id,
+                SpawnOptions {
+                    cwd: repo.clone(),
+                    prompt: "Inspect".to_string(),
+                    model: None,
+                    reasoning_effort: None,
+                    skip_permissions: false,
+                    extra_args: Vec::new(),
+                    env: HashMap::new(),
+                    branch: None,
+                    timeout: None,
+                    interactive: false,
+                    structured_output: false,
+                    resume_target: None,
+                },
+            )
+            .await
+            .unwrap();
+        let pid = launch.handle.pid;
+        let metadata = launch.metadata.clone();
+        drop(launch);
+
+        let mut record = SessionRecord::new(
+            session_id.to_string(),
+            "demo".to_string(),
+            Some("session/tmux".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Inspect".to_string(),
+            Some(pid),
+        );
+        record.status = SessionStatus::NeedsInput;
+        record.activity = Some("waiting_input".to_string());
+        record.metadata.extend(metadata);
+        state.replace_session(record).await.unwrap();
+
+        drop(state);
+        let restored = build_state(&root).await;
+        restored
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TmuxInputHarnessExecutor));
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let restored_a = restored.clone();
+        let restored_b = restored.clone();
+        let restored_c = restored.clone();
+        let (first, second, third) = tokio::join!(
+            restored_a.ensure_live_terminal_host(session_id),
+            restored_b.ensure_live_terminal_host(session_id),
+            restored_c.ensure_live_terminal_host(session_id),
+        );
+
+        assert!(first.unwrap().is_some());
+        assert!(second.unwrap().is_some());
+        assert!(third.unwrap().is_some());
+
+        restored
+            .send_to_session(
+                session_id,
+                "reattach-once".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let final_session = timeout(Duration::from_secs(5), async {
+            loop {
+                let session = restored.get_session(session_id).await.unwrap();
+                if session.output.matches("echo:reattach-once").count() >= 1 {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    return restored.get_session(session_id).await.unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("reattached tmux session should accept exactly one follow-up echo");
+
+        assert_eq!(
+            final_session.output.matches("echo:reattach-once").count(),
+            1
+        );
 
         if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
             let _ = kill_tmux_session(&socket_path, &tmux_session).await;

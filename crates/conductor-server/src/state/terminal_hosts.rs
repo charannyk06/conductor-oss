@@ -106,6 +106,7 @@ impl TerminalHostRegistry {
             terminal_store: Arc::new(std::sync::Mutex::new(terminal_store)),
             terminal_persistence: tokio::sync::Mutex::new(terminal_persistence),
             terminal_capture: tokio::sync::Mutex::new(TerminalCaptureState::default()),
+            runtime_attach: tokio::sync::Mutex::new(()),
             kill_tx: tokio::sync::Mutex::new(None),
         });
         hosts.insert(session_id.to_string(), handle.clone());
@@ -141,9 +142,13 @@ impl TerminalHostRegistry {
         let Some(handle) = self.hosts.read().await.get(session_id).cloned() else {
             return false;
         };
+        self.runtime_attached_handle(&handle).await
+    }
+
+    pub(crate) async fn runtime_attached_handle(&self, handle: &Arc<LiveSessionHandle>) -> bool {
         let attached = handle.input_tx.read().await.is_some();
         if attached {
-            Self::touch(&handle).await;
+            Self::touch(handle).await;
         }
         attached
     }
@@ -254,7 +259,9 @@ mod tests {
 
         let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
-        registry.attach_runtime(&handle, input_tx, None, kill_tx).await;
+        registry
+            .attach_runtime(&handle, input_tx, None, kill_tx)
+            .await;
 
         assert_eq!(
             registry.attached_session_ids().await,

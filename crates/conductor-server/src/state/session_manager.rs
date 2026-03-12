@@ -403,8 +403,7 @@ impl AppState {
                 }
             });
         }
-        let mirror_terminal_lines =
-            config.mirror_terminal_output && !has_native_terminal_stream;
+        let mirror_terminal_lines = config.mirror_terminal_output && !has_native_terminal_stream;
         tokio::spawn(async move {
             while let Some(event) = output_rx.recv().await {
                 match event {
@@ -1151,10 +1150,10 @@ impl AppState {
         reasoning_effort: Option<String>,
         source: &str,
     ) -> Result<()> {
-        if !self.ensure_session_live(session_id).await? {
-            return Err(anyhow::anyhow!("Session {session_id} is not running"));
-        }
-        let handle = self.ensure_terminal_host(session_id).await;
+        let handle = self
+            .ensure_live_terminal_host(session_id)
+            .await?
+            .with_context(|| format!("Session {session_id} is not running"))?;
         let input_tx = handle
             .input_tx
             .read()
@@ -1474,10 +1473,10 @@ impl AppState {
         session_id: &str,
         keys: String,
     ) -> Result<()> {
-        if !self.ensure_session_live(session_id).await? {
-            return Err(anyhow::anyhow!("Session {session_id} is not running"));
-        }
-        let handle = self.ensure_terminal_host(session_id).await;
+        let handle = self
+            .ensure_live_terminal_host(session_id)
+            .await?
+            .with_context(|| format!("Session {session_id} is not running"))?;
         let input_tx = handle
             .input_tx
             .read()
@@ -2756,8 +2755,10 @@ mod tests {
 
     #[tokio::test]
     async fn start_output_consumer_uses_native_terminal_stream_when_available() {
-        let root = std::env::temp_dir()
-            .join(format!("conductor-native-terminal-stream-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "conductor-native-terminal-stream-test-{}",
+            Uuid::new_v4()
+        ));
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
@@ -2854,8 +2855,10 @@ mod tests {
 
     #[tokio::test]
     async fn resize_live_terminal_uses_direct_runtime_resize_channel() {
-        let root = std::env::temp_dir()
-            .join(format!("conductor-direct-terminal-resize-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "conductor-direct-terminal-resize-test-{}",
+            Uuid::new_v4()
+        ));
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
@@ -2887,12 +2890,7 @@ mod tests {
         let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
         state
-            .attach_terminal_runtime(
-                "direct-terminal-resize",
-                input_tx,
-                Some(resize_tx),
-                kill_tx,
-            )
+            .attach_terminal_runtime("direct-terminal-resize", input_tx, Some(resize_tx), kill_tx)
             .await;
 
         state
@@ -2904,7 +2902,13 @@ mod tests {
             .await
             .expect("resize should reach direct runtime channel")
             .expect("resize channel should stay open");
-        assert_eq!(dimensions, PtyDimensions { cols: 132, rows: 40 });
+        assert_eq!(
+            dimensions,
+            PtyDimensions {
+                cols: 132,
+                rows: 40
+            }
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

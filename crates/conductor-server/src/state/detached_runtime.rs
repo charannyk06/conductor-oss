@@ -114,7 +114,9 @@ struct DetachedHostState {
 
 pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     let spec = serde_json::from_slice::<DetachedPtyHostSpec>(&tokio::fs::read(&spec_path).await?)
-        .with_context(|| format!("Failed to parse detached PTY spec {}", spec_path.display()))?;
+        .with_context(|| {
+        format!("Failed to parse detached PTY spec {}", spec_path.display())
+    })?;
 
     if let Some(parent) = spec.log_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -307,7 +309,11 @@ impl AppState {
             session_id: session_id.to_string(),
             child_pid: ready.child_pid,
             metadata: DetachedRuntimeMetadata {
-                host_pid: if ready.host_pid > 0 { ready.host_pid } else { host_pid },
+                host_pid: if ready.host_pid > 0 {
+                    ready.host_pid
+                } else {
+                    host_pid
+                },
                 control_port: ready.control_port,
                 control_token: control_token.clone(),
                 log_path: log_path.clone(),
@@ -350,21 +356,24 @@ impl AppState {
                     DETACHED_EXIT_PATH_METADATA_KEY.to_string(),
                     exit_path.to_string_lossy().to_string(),
                 ),
-                (DETACHED_LOG_OFFSET_METADATA_KEY.to_string(), "0".to_string()),
+                (
+                    DETACHED_LOG_OFFSET_METADATA_KEY.to_string(),
+                    "0".to_string(),
+                ),
             ]),
         })
     }
 
-    pub(crate) async fn restore_detached_runtime(self: &Arc<Self>, session_id: &str) -> Result<()> {
+    pub(crate) async fn restore_detached_runtime(
+        self: &Arc<Self>,
+        session_id: &str,
+        session: &SessionRecord,
+    ) -> Result<()> {
         if self.terminal_runtime_attached(session_id).await {
             return Ok(());
         }
 
-        let session = self
-            .get_session(session_id)
-            .await
-            .with_context(|| format!("Session {session_id} not found"))?;
-        let Some(metadata) = detached_runtime_metadata(&session) else {
+        let Some(metadata) = detached_runtime_metadata(session) else {
             return Ok(());
         };
         let Some(response) = ping_detached_runtime(&metadata).await? else {
@@ -388,9 +397,10 @@ impl AppState {
                 current.summary = Some(
                     "Detached PTY runtime was not reachable after restart. Send a message to start a fresh runtime in the same workspace.".to_string(),
                 );
-                current
-                    .metadata
-                    .insert("summary".to_string(), current.summary.clone().unwrap_or_default());
+                current.metadata.insert(
+                    "summary".to_string(),
+                    current.summary.clone().unwrap_or_default(),
+                );
                 current
                     .metadata
                     .insert("recoveryState".to_string(), "resume_required".to_string());
@@ -467,7 +477,11 @@ impl AppState {
             .join("direct")
     }
 
-    pub(crate) async fn update_detached_log_offset(&self, session_id: &str, offset: u64) -> Result<()> {
+    pub(crate) async fn update_detached_log_offset(
+        &self,
+        session_id: &str,
+        offset: u64,
+    ) -> Result<()> {
         let mut sessions = self.sessions.write().await;
         let Some(session) = sessions.get_mut(session_id) else {
             return Ok(());
@@ -497,11 +511,8 @@ impl AppState {
         let Some(metadata) = detached_runtime_metadata(&session) else {
             return Ok(false);
         };
-        let response = send_detached_runtime_request(
-            &metadata,
-            DetachedPtyHostCommand::Kill,
-        )
-        .await?;
+        let response =
+            send_detached_runtime_request(&metadata, DetachedPtyHostCommand::Kill).await?;
         Ok(response.ok)
     }
 
@@ -534,7 +545,8 @@ impl AppState {
         } = attachment;
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
         let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(64);
-        let (resize_tx, mut resize_rx) = mpsc::channel::<conductor_executors::process::PtyDimensions>(8);
+        let (resize_tx, mut resize_rx) =
+            mpsc::channel::<conductor_executors::process::PtyDimensions>(8);
         let (kill_tx, mut kill_rx) = oneshot::channel::<()>();
         let metadata_for_input = metadata.clone();
         let session_id_for_input = session_id.clone();
@@ -544,7 +556,8 @@ impl AppState {
                     ExecutorInput::Text(text) => DetachedPtyHostCommand::Text { text },
                     ExecutorInput::Raw(raw) => DetachedPtyHostCommand::Raw { data: raw },
                 };
-                if let Err(err) = send_detached_runtime_request(&metadata_for_input, command).await {
+                if let Err(err) = send_detached_runtime_request(&metadata_for_input, command).await
+                {
                     tracing::warn!(session_id_for_input, error = %err, "Failed to send input to detached PTY runtime");
                     break;
                 }
@@ -576,7 +589,8 @@ impl AppState {
                 return;
             }
             let _ = kill_rx.await;
-            let _ = send_detached_runtime_request(&metadata_for_kill, DetachedPtyHostCommand::Kill).await;
+            let _ = send_detached_runtime_request(&metadata_for_kill, DetachedPtyHostCommand::Kill)
+                .await;
         });
 
         let state = self.clone();
@@ -642,7 +656,9 @@ impl AppState {
                         .trim_end_matches('\r')
                         .to_string();
                     partial.clear();
-                    if !line.is_empty() && output_tx.send(ExecutorOutput::Stdout(line)).await.is_err() {
+                    if !line.is_empty()
+                        && output_tx.send(ExecutorOutput::Stdout(line)).await.is_err()
+                    {
                         return Ok(());
                     }
                 }
@@ -855,11 +871,7 @@ async fn wait_for_detached_child(
 
 fn detached_runtime_metadata(session: &SessionRecord) -> Option<DetachedRuntimeMetadata> {
     Some(DetachedRuntimeMetadata {
-        host_pid: session
-            .metadata
-            .get("detachedPid")?
-            .parse::<u32>()
-            .ok()?,
+        host_pid: session.metadata.get("detachedPid")?.parse::<u32>().ok()?,
         control_port: session
             .metadata
             .get(DETACHED_CONTROL_PORT_METADATA_KEY)?
@@ -869,8 +881,18 @@ fn detached_runtime_metadata(session: &SessionRecord) -> Option<DetachedRuntimeM
             .metadata
             .get(DETACHED_CONTROL_TOKEN_METADATA_KEY)?
             .clone(),
-        log_path: PathBuf::from(session.metadata.get(DETACHED_LOG_PATH_METADATA_KEY)?.clone()),
-        exit_path: PathBuf::from(session.metadata.get(DETACHED_EXIT_PATH_METADATA_KEY)?.clone()),
+        log_path: PathBuf::from(
+            session
+                .metadata
+                .get(DETACHED_LOG_PATH_METADATA_KEY)?
+                .clone(),
+        ),
+        exit_path: PathBuf::from(
+            session
+                .metadata
+                .get(DETACHED_EXIT_PATH_METADATA_KEY)?
+                .clone(),
+        ),
         log_offset: session
             .metadata
             .get(DETACHED_LOG_OFFSET_METADATA_KEY)
@@ -886,10 +908,10 @@ async fn ping_detached_runtime(
         Ok(response) if response.ok => Ok(Some(response)),
         Ok(_) => Ok(None),
         Err(error) => {
-            if error
-                .to_string()
-                .contains("Connection refused")
-                || error.to_string().contains("failed to lookup address information")
+            if error.to_string().contains("Connection refused")
+                || error
+                    .to_string()
+                    .contains("failed to lookup address information")
                 || error.to_string().contains("No route to host")
             {
                 Ok(None)
@@ -904,8 +926,11 @@ async fn send_detached_runtime_request(
     metadata: &DetachedRuntimeMetadata,
     command: DetachedPtyHostCommand,
 ) -> Result<DetachedPtyHostResponse> {
-    let mut stream =
-        TcpStream::connect(SocketAddrV4::new(Ipv4Addr::LOCALHOST, metadata.control_port)).await?;
+    let mut stream = TcpStream::connect(SocketAddrV4::new(
+        Ipv4Addr::LOCALHOST,
+        metadata.control_port,
+    ))
+    .await?;
     let request = DetachedPtyHostRequest {
         token: metadata.control_token.clone(),
         command,
@@ -923,11 +948,9 @@ async fn send_detached_runtime_request(
     if response.ok {
         Ok(response)
     } else {
-        Err(anyhow!(
-            response
-                .error
-                .unwrap_or_else(|| "Detached PTY host request failed".to_string())
-        ))
+        Err(anyhow!(response.error.unwrap_or_else(|| {
+            "Detached PTY host request failed".to_string()
+        })))
     }
 }
 
@@ -1018,7 +1041,9 @@ async fn read_detached_log_chunk(log_path: &Path, offset: u64) -> Result<Option<
     Ok(Some((offset + chunk.len() as u64, chunk)))
 }
 
-fn watch_detached_log(log_path: &Path) -> Result<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
+fn watch_detached_log(
+    log_path: &Path,
+) -> Result<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
     let watch_path = log_path.parent().unwrap_or(log_path).to_path_buf();
     let target_log_path = log_path.to_path_buf();
     let callback_path = target_log_path.clone();
@@ -1083,11 +1108,9 @@ async fn read_detached_exit_code(path: &Path) -> Result<Option<i32>> {
     if trimmed.is_empty() {
         return Ok(None);
     }
-    Ok(Some(
-        trimmed
-            .parse::<i32>()
-            .with_context(|| format!("Invalid exit code '{trimmed}' in {}", path.display()))?,
-    ))
+    Ok(Some(trimmed.parse::<i32>().with_context(|| {
+        format!("Invalid exit code '{trimmed}' in {}", path.display())
+    })?))
 }
 
 #[cfg(test)]
@@ -1156,7 +1179,10 @@ mod tests {
 
         send_detached_runtime_request(
             &metadata,
-            DetachedPtyHostCommand::Resize { cols: 132, rows: 40 },
+            DetachedPtyHostCommand::Resize {
+                cols: 132,
+                rows: 40,
+            },
         )
         .await
         .expect("resize should be accepted");
