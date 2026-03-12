@@ -1,29 +1,46 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
+#[cfg(unix)]
 use chrono::Utc;
-use conductor_executors::executor::{
-    Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
-};
+use conductor_executors::executor::{Executor, SpawnOptions};
+#[cfg(unix)]
+use conductor_executors::executor::{ExecutorHandle, ExecutorInput, ExecutorOutput};
+#[cfg(unix)]
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(unix)]
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Stdio;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
+#[cfg(unix)]
 use tokio::fs::OpenOptions;
+#[cfg(unix)]
 use tokio::io::{
     AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter, SeekFrom,
 };
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot, Notify};
+#[cfg(unix)]
+use tokio::sync::Notify;
+use tokio::sync::{mpsc, oneshot};
 
 use super::tmux_runtime::RuntimeLaunch;
+#[cfg(unix)]
 use super::types::TerminalStreamEvent;
-use crate::state::{AppState, OutputConsumerConfig, SessionRecord, SessionStatus};
+use crate::state::AppState;
+#[cfg(unix)]
+use crate::state::{OutputConsumerConfig, SessionRecord, SessionStatus};
 
 pub(crate) const DIRECT_RUNTIME_MODE: &str = "direct";
 pub(crate) const DETACHED_CONTROL_SOCKET_METADATA_KEY: &str = "detachedControlSocket";
@@ -170,6 +187,7 @@ struct DetachedHostState {
     log_path: PathBuf,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum DetachedPtyStreamFrameKind {
@@ -178,6 +196,7 @@ enum DetachedPtyStreamFrameKind {
     Error = 3,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DetachedPtyStreamFrame {
     kind: DetachedPtyStreamFrameKind,
@@ -185,6 +204,7 @@ struct DetachedPtyStreamFrame {
     payload: Vec<u8>,
 }
 
+#[cfg(unix)]
 struct DetachedPtyStreamFrameDecoder {
     header: [u8; DETACHED_STREAM_FRAME_HEADER_BYTES],
     header_offset: usize,
@@ -194,6 +214,7 @@ struct DetachedPtyStreamFrameDecoder {
     payload_offset: usize,
 }
 
+#[cfg(unix)]
 impl Default for DetachedPtyStreamFrameDecoder {
     fn default() -> Self {
         Self {
@@ -207,6 +228,7 @@ impl Default for DetachedPtyStreamFrameDecoder {
     }
 }
 
+#[cfg(unix)]
 impl DetachedPtyStreamFrameDecoder {
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<DetachedPtyStreamFrame>> {
         let mut frames = Vec::new();
