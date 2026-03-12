@@ -1081,7 +1081,6 @@ impl AppState {
 }
 
 #[cfg(unix)]
-#[cfg(unix)]
 async fn handle_detached_host_connection(
     stream: UnixStream,
     state: Arc<DetachedHostState>,
