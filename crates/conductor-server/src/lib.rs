@@ -27,6 +27,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .unwrap_or_else(|| config.workspace.join("conductor.yaml"));
     let state = AppState::new(config_path, config.clone(), db).await;
     state.discover_executors().await;
+    state.start_terminal_host_watchdog();
     state.restore_runtime_sessions().await;
     state.start_tmux_activity_watchdog();
     let _runtime = runtime::initialize_runtime(config, state.clone(), _event_bus.clone()).await?;

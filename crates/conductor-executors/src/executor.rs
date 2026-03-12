@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::process::PtyDimensions;
+
 /// Flags that must never be injected via extra_args because they bypass
 /// security controls or grant unrestricted filesystem/shell access.
 const BLOCKED_EXTRA_ARGS: &[&str] = &[
@@ -122,9 +124,25 @@ pub struct ExecutorHandle {
     /// Channel to send input to the agent.
     pub input_tx: mpsc::Sender<ExecutorInput>,
 
+    /// Optional raw terminal byte stream for PTY-backed sessions.
+    pub terminal_rx: Option<mpsc::Receiver<Vec<u8>>>,
+
+    /// Optional resize channel for PTY-backed sessions.
+    pub resize_tx: Option<mpsc::Sender<PtyDimensions>>,
+
     /// Kill handle.
     kill_tx: tokio::sync::oneshot::Sender<()>,
 }
+
+pub type ExecutorHandleParts = (
+    u32,
+    AgentKind,
+    mpsc::Receiver<ExecutorOutput>,
+    mpsc::Sender<ExecutorInput>,
+    Option<mpsc::Receiver<Vec<u8>>>,
+    Option<mpsc::Sender<PtyDimensions>>,
+    tokio::sync::oneshot::Sender<()>,
+);
 
 impl ExecutorHandle {
     pub fn new(
@@ -139,8 +157,20 @@ impl ExecutorHandle {
             kind,
             output_rx,
             input_tx,
+            terminal_rx: None,
+            resize_tx: None,
             kill_tx,
         }
+    }
+
+    pub fn with_terminal_io(
+        mut self,
+        terminal_rx: Option<mpsc::Receiver<Vec<u8>>>,
+        resize_tx: Option<mpsc::Sender<PtyDimensions>>,
+    ) -> Self {
+        self.terminal_rx = terminal_rx;
+        self.resize_tx = resize_tx;
+        self
     }
 
     /// Send input text to the running agent.
@@ -160,20 +190,14 @@ impl ExecutorHandle {
     }
 
     /// Break the handle into parts so the runtime can monitor output separately.
-    pub fn into_parts(
-        self,
-    ) -> (
-        u32,
-        AgentKind,
-        mpsc::Receiver<ExecutorOutput>,
-        mpsc::Sender<ExecutorInput>,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
+    pub fn into_parts(self) -> ExecutorHandleParts {
         (
             self.pid,
             self.kind,
             self.output_rx,
             self.input_tx,
+            self.terminal_rx,
+            self.resize_tx,
             self.kill_tx,
         )
     }
@@ -313,6 +337,11 @@ pub trait Executor: Send + Sync {
 
     /// Parse a line of output and classify it.
     fn parse_output(&self, line: &str) -> ExecutorOutput;
+
+    /// Whether this executor can run as a live native PTY terminal in direct runtime mode.
+    fn supports_direct_terminal_ui(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

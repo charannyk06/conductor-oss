@@ -162,11 +162,9 @@ impl AppState {
         let (queued_ids, active_launch_fingerprints) = {
             let sessions = self.sessions.read().await;
             let live_ids = self
-                .live_sessions
-                .read()
+                .attached_terminal_session_ids()
                 .await
-                .keys()
-                .cloned()
+                .into_iter()
                 .collect::<std::collections::HashSet<_>>();
 
             let mut queued = sessions
@@ -301,11 +299,9 @@ impl AppState {
 
     async fn launch_capacity_snapshot(&self) -> (usize, HashMap<String, usize>) {
         let live_session_ids = self
-            .live_sessions
-            .read()
+            .attached_terminal_session_ids()
             .await
-            .keys()
-            .cloned()
+            .into_iter()
             .collect::<std::collections::HashSet<_>>();
         let sessions = self.sessions.read().await;
         let mut global = 0usize;

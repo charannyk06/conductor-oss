@@ -2,8 +2,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
 
 use super::helpers::normalize_loaded_session;
 use super::types::{SessionRecord, TerminalRestoreSnapshot};
@@ -94,26 +92,6 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) async fn append_terminal_capture(
-        &self,
-        session_id: &str,
-        bytes: &[u8],
-    ) -> Result<()> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-
-        let path = self.session_terminal_capture_path(session_id);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await?;
-        file.write_all(bytes).await?;
-        file.flush().await?;
-        Ok(())
-    }
-
     pub(crate) async fn persist_terminal_restore_snapshot(
         &self,
         session_id: &str,
@@ -129,7 +107,7 @@ impl AppState {
             return Ok(());
         }
 
-        let content = serde_json::to_string_pretty(snapshot)?;
+        let content = serde_json::to_vec(snapshot)?;
         tokio::fs::write(path, content).await?;
         Ok(())
     }
@@ -139,13 +117,13 @@ impl AppState {
         session_id: &str,
     ) -> Result<Option<TerminalRestoreSnapshot>> {
         let path = self.session_terminal_restore_path(session_id);
-        let content = match tokio::fs::read_to_string(path).await {
+        let content = match tokio::fs::read(path).await {
             Ok(content) => content,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(err.into()),
         };
 
-        let snapshot = serde_json::from_str::<TerminalRestoreSnapshot>(&content)?;
+        let snapshot = serde_json::from_slice::<TerminalRestoreSnapshot>(&content)?;
         Ok(Some(snapshot))
     }
 
@@ -226,6 +204,29 @@ mod tests {
         assert_eq!(appended.rows, 42);
         assert!(rendered.contains("world"));
         assert!(rendered.contains("again"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn terminal_capture_writer_flushes_buffered_output() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-terminal-capture-test-{}",
+            Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let state = build_state(&root).await;
+        state
+            .emit_terminal_bytes("session-2", b"hello\r\nworld")
+            .await;
+        state.flush_terminal_capture("session-2").await;
+
+        let capture = tokio::fs::read(state.session_terminal_capture_path("session-2"))
+            .await
+            .expect("terminal capture file should flush to disk");
+
+        assert_eq!(capture, b"hello\r\nworld");
 
         let _ = tokio::fs::remove_dir_all(&root).await;
     }

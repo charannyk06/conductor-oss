@@ -5,7 +5,7 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## Desktop
 
 - [ ] Launch a fresh session from the dashboard on macOS or Linux desktop.
-- [ ] Confirm the session detail terminal resolves `transport: "websocket"` and reaches a usable prompt without degrading into snapshot mode.
+- [ ] Confirm the session detail terminal resolves a live stream transport and reaches a usable prompt without degrading into snapshot mode.
 - [ ] Type directly into the terminal and verify shell editing, Enter, Backspace, Ctrl+C, and paste all work.
 - [ ] Scroll upward while output is streaming and confirm the viewport does not jump back to the live tail until `Jump to latest` is used.
 - [ ] Resize the browser narrower and wider and confirm the prompt reflows without garbling or duplicate redraw noise.
@@ -34,11 +34,11 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## Private Remote Browser
 
 - [ ] Validate an approved private remote path such as Tailscale with the remote runtime in `ready` state.
-- [ ] Confirm `/api/sessions/:id/terminal/connection` resolves `transport: "websocket"` instead of defaulting to snapshot recovery mode.
+- [ ] Confirm `/api/sessions/:id/terminal/connection` resolves a live stream transport instead of defaulting to snapshot recovery mode.
 - [ ] Confirm `x-conductor-terminal-connection-path` reports `managed_remote` when the private link is active.
 - [ ] Refresh the remote tab and confirm reconnect restores the same session content and prompt.
 - [ ] Confirm direct typing works after reconnect without requiring page navigation.
-- [ ] Trigger an intentional failure path or disable the remote websocket endpoint temporarily and confirm any snapshot fallback is explicit, visible, and recoverable.
+- [ ] Trigger an intentional failure path or disable the remote websocket endpoint temporarily and confirm the dashboard-proxied live stream takes over cleanly before any snapshot recovery path is needed.
 
 ## Diagnostics To Capture On Failure
 

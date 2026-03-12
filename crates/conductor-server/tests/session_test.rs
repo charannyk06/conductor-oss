@@ -191,12 +191,7 @@ async fn resume_session_restores_tmux_runtime_when_live_handle_is_missing() {
     })
     .await;
 
-    harness
-        .state
-        .live_sessions
-        .write()
-        .await
-        .remove(&session.id);
+    let _ = harness.state.take_terminal_host(&session.id).await;
 
     harness
         .state

@@ -104,6 +104,118 @@ async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
 }
 
 #[tokio::test]
+async fn board_routes_reorder_cards_with_target_index() {
+    let harness = TestHarness::new("conductor-board-reorder-test", "direct").await;
+    fs::write(
+        &harness.board_path,
+        [
+            "## Ready to Dispatch",
+            "",
+            "- [ ] First ready task | id:task-1 | project:demo",
+            "- [ ] Second ready task | id:task-2 | project:demo",
+            "",
+            "## In Progress",
+            "",
+            "- [ ] Existing in progress | id:task-3 | project:demo",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let app = build_app(harness.state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/boards")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "projectId": "demo",
+                        "taskId": "task-2",
+                        "role": "inProgress",
+                        "targetIndex": 0
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let board_contents = fs::read_to_string(&harness.board_path).unwrap();
+    let in_progress_block = board_contents
+        .split("## In Progress")
+        .nth(1)
+        .expect("in progress block should exist");
+    let moved_index = in_progress_block
+        .find("task-2")
+        .expect("moved task should be present");
+    let existing_index = in_progress_block
+        .find("task-3")
+        .expect("existing task should be present");
+    assert!(moved_index < existing_index);
+}
+
+#[tokio::test]
+async fn board_routes_reorder_cards_within_same_column_with_target_index() {
+    let harness = TestHarness::new("conductor-board-same-column-reorder-test", "direct").await;
+    fs::write(
+        &harness.board_path,
+        [
+            "# Conductor Board",
+            "",
+            "## To do",
+            "",
+            "- [ ] First intake task | id:task-1 | project:demo",
+            "- [ ] Second intake task | id:task-2 | project:demo",
+            "",
+            "## Ready",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let app = build_app(harness.state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri("/api/boards")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "projectId": "demo",
+                        "taskId": "task-1",
+                        "role": "intake",
+                        "targetIndex": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let board_contents = fs::read_to_string(&harness.board_path).unwrap();
+    let intake_block = board_contents
+        .split("## To do")
+        .nth(1)
+        .expect("intake block should exist");
+    let first_index = intake_block
+        .find("task-1")
+        .expect("moved task should be present");
+    let second_index = intake_block
+        .find("task-2")
+        .expect("existing task should be present");
+    assert!(second_index < first_index);
+}
+
+#[tokio::test]
 async fn board_change_events_drive_session_spawns_with_board_metadata() {
     let harness = TestHarness::new("conductor-board-runtime-test", "direct").await;
     harness.state.executors.write().await.insert(

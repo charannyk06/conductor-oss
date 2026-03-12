@@ -95,6 +95,11 @@ enum Commands {
         #[arg(long)]
         port: Option<u16>,
     },
+    #[command(hide = true)]
+    PtyHost {
+        #[arg(long)]
+        spec: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -354,6 +359,9 @@ async fn main() -> Result<()> {
                 .await?;
             let payload: serde_json::Value = response.json().await?;
             println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
+        Commands::PtyHost { spec } => {
+            conductor_server::state::run_detached_pty_host(spec).await?;
         }
     }
 

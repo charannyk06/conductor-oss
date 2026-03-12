@@ -16,11 +16,9 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let executors = state.executors.read().await;
     let live_session_ids = state
-        .live_sessions
-        .read()
+        .attached_terminal_session_ids()
         .await
-        .keys()
-        .cloned()
+        .into_iter()
         .collect::<std::collections::HashSet<_>>();
     let sessions = state.sessions.read().await;
     let queue_depth = sessions
@@ -60,11 +58,9 @@ async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<V
 async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let sessions = state.all_sessions().await;
     let live_session_ids = state
-        .live_sessions
-        .read()
+        .attached_terminal_session_ids()
         .await
-        .keys()
-        .cloned()
+        .into_iter()
         .collect::<std::collections::HashSet<_>>();
     let now = chrono::Utc::now();
     let metrics = sessions

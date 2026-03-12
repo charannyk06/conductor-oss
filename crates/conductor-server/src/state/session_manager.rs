@@ -30,6 +30,13 @@ const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
 
+pub(crate) struct OutputConsumerConfig {
+    pub terminal_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    pub mirror_terminal_output: bool,
+    pub output_is_parsed: bool,
+    pub timeout: Option<std::time::Duration>,
+}
+
 /// Enforce a hard limit on conversation entries to prevent unbounded memory growth.
 /// Trims the oldest entries when the limit is exceeded.
 fn enforce_conversation_limit(session: &mut SessionRecord) {
@@ -374,11 +381,9 @@ impl AppState {
         session_id: String,
         executor: Arc<dyn conductor_executors::executor::Executor>,
         mut output_rx: tokio::sync::mpsc::Receiver<ExecutorOutput>,
-        mirror_terminal_output: bool,
-        output_is_parsed: bool,
-        timeout: Option<std::time::Duration>,
+        mut config: OutputConsumerConfig,
     ) {
-        if let Some(timeout_duration) = timeout {
+        if let Some(timeout_duration) = config.timeout {
             let state = Arc::clone(self);
             let session_id = session_id.clone();
             tokio::spawn(async move {
@@ -388,11 +393,23 @@ impl AppState {
             });
         }
         let state = Arc::clone(self);
+        let has_native_terminal_stream = config.terminal_rx.is_some();
+        if let Some(mut terminal_rx) = config.terminal_rx.take() {
+            let state = Arc::clone(self);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                while let Some(bytes) = terminal_rx.recv().await {
+                    state.emit_terminal_bytes(&session_id, &bytes).await;
+                }
+            });
+        }
+        let mirror_terminal_lines =
+            config.mirror_terminal_output && !has_native_terminal_stream;
         tokio::spawn(async move {
             while let Some(event) = output_rx.recv().await {
                 match event {
                     ExecutorOutput::Stdout(line) => {
-                        if mirror_terminal_output {
+                        if mirror_terminal_lines {
                             let raw_output = if line.ends_with('\n') || line.ends_with('\r') {
                                 line.clone().into_bytes()
                             } else {
@@ -401,7 +418,7 @@ impl AppState {
                             state.emit_terminal_bytes(&session_id, &raw_output).await;
                         }
                         let sanitized = sanitize_terminal_text(&line);
-                        let mapped = if output_is_parsed {
+                        let mapped = if config.output_is_parsed {
                             ExecutorOutput::Stdout(sanitized)
                         } else {
                             executor.parse_output(&sanitized)
@@ -409,7 +426,7 @@ impl AppState {
                         let _ = state.apply_parsed_output(&session_id, mapped).await;
                     }
                     ExecutorOutput::Stderr(line) => {
-                        if mirror_terminal_output {
+                        if mirror_terminal_lines {
                             let raw_output = if line.ends_with('\n') || line.ends_with('\r') {
                                 line.clone().into_bytes()
                             } else {
@@ -659,7 +676,8 @@ impl AppState {
             }
         };
 
-        let (pid, _kind, output_rx, input_tx, kill_tx) = runtime_launch.handle.into_parts();
+        let (pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
+            runtime_launch.handle.into_parts();
         if self
             .get_session(&session_id)
             .await
@@ -815,6 +833,7 @@ impl AppState {
         self.attach_terminal_runtime(
             &session_id,
             input_tx,
+            resize_tx,
             kill_tx
                 .take()
                 .expect("runtime kill channel should exist before terminal attachment"),
@@ -824,12 +843,15 @@ impl AppState {
             session_id.clone(),
             executor,
             output_rx,
-            runtime_mode(&project) != TMUX_RUNTIME_MODE,
-            true,
-            project
-                .agent_config
-                .session_timeout_secs
-                .map(std::time::Duration::from_secs),
+            OutputConsumerConfig {
+                terminal_rx,
+                mirror_terminal_output: runtime_mode(&project) != TMUX_RUNTIME_MODE,
+                output_is_parsed: true,
+                timeout: project
+                    .agent_config
+                    .session_timeout_secs
+                    .map(std::time::Duration::from_secs),
+            },
         );
 
         Ok(record)
@@ -878,9 +900,7 @@ impl AppState {
             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
         );
 
-        // IMPORTANT: Always acquire live_sessions before sessions to prevent
-        // deadlock with kill_session/archive_session which take the same order.
-        let is_live = self.live_sessions.read().await.contains_key(session_id);
+        let is_live = self.has_terminal_host(session_id).await;
         let mut sessions = self.sessions.write().await;
         let session = match sessions.get_mut(session_id) {
             Some(value) => value,
@@ -962,9 +982,7 @@ impl AppState {
             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
         );
 
-        // IMPORTANT: Always acquire live_sessions before sessions to prevent
-        // deadlock with kill_session/archive_session which take the same order.
-        let is_live = self.live_sessions.read().await.contains_key(session_id);
+        let is_live = self.has_terminal_host(session_id).await;
         let mut sessions = self.sessions.write().await;
         let session = match sessions.get_mut(session_id) {
             Some(value) => value,
@@ -1133,14 +1151,10 @@ impl AppState {
         reasoning_effort: Option<String>,
         source: &str,
     ) -> Result<()> {
-        self.ensure_session_live(session_id).await?;
-        let handle = self
-            .live_sessions
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .with_context(|| format!("Session {session_id} is not running"))?;
+        if !self.ensure_session_live(session_id).await? {
+            return Err(anyhow::anyhow!("Session {session_id} is not running"));
+        }
+        let handle = self.ensure_terminal_host(session_id).await;
         let input_tx = handle
             .input_tx
             .read()
@@ -1368,7 +1382,8 @@ impl AppState {
                 },
             )
             .await?;
-        let (pid, _kind, output_rx, input_tx, kill_tx) = runtime_launch.handle.into_parts();
+        let (pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
+            runtime_launch.handle.into_parts();
 
         let mut sessions = self.sessions.write().await;
         let session = sessions
@@ -1421,18 +1436,21 @@ impl AppState {
         drop(sessions);
 
         self.replace_session(updated).await?;
-        self.attach_terminal_runtime(session_id, input_tx, kill_tx)
+        self.attach_terminal_runtime(session_id, input_tx, resize_tx, kill_tx)
             .await;
         self.start_output_consumer(
             session_id.to_string(),
             handle,
             output_rx,
-            runtime_mode(&project) != TMUX_RUNTIME_MODE,
-            true,
-            project
-                .agent_config
-                .session_timeout_secs
-                .map(std::time::Duration::from_secs),
+            OutputConsumerConfig {
+                terminal_rx,
+                mirror_terminal_output: runtime_mode(&project) != TMUX_RUNTIME_MODE,
+                output_is_parsed: true,
+                timeout: project
+                    .agent_config
+                    .session_timeout_secs
+                    .map(std::time::Duration::from_secs),
+            },
         );
 
         if send_follow_up_after_spawn {
@@ -1456,14 +1474,10 @@ impl AppState {
         session_id: &str,
         keys: String,
     ) -> Result<()> {
-        self.ensure_session_live(session_id).await?;
-        let handle = self
-            .live_sessions
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .with_context(|| format!("Session {session_id} is not running"))?;
+        if !self.ensure_session_live(session_id).await? {
+            return Err(anyhow::anyhow!("Session {session_id} is not running"));
+        }
+        let handle = self.ensure_terminal_host(session_id).await;
         let input_tx = handle
             .input_tx
             .read()
@@ -1498,7 +1512,9 @@ impl AppState {
     }
 
     pub async fn kill_session(&self, session_id: &str) -> Result<()> {
-        let live_handle = self.live_sessions.write().await.remove(session_id);
+        self.flush_terminal_capture(session_id).await;
+        self.flush_terminal_restore_snapshot(session_id).await;
+        let live_handle = self.take_terminal_host(session_id).await;
         self.mark_termination_requested(session_id, "kill").await?;
         let had_live_handle = if let Some(handle) = live_handle {
             if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
@@ -1519,6 +1535,7 @@ impl AppState {
                     }
                 }
             }
+            let _ = self.kill_detached_runtime(session_id).await;
             if let Some(pid) = self
                 .get_session(session_id)
                 .await
@@ -1556,7 +1573,9 @@ impl AppState {
     }
 
     pub async fn archive_session(&self, session_id: &str) -> Result<()> {
-        let live_handle = self.live_sessions.write().await.remove(session_id);
+        self.flush_terminal_capture(session_id).await;
+        self.flush_terminal_restore_snapshot(session_id).await;
+        let live_handle = self.take_terminal_host(session_id).await;
         self.mark_termination_requested(session_id, "archive")
             .await?;
         let had_live_handle = if let Some(handle) = live_handle {
@@ -1578,6 +1597,7 @@ impl AppState {
                     }
                 }
             }
+            let _ = self.kill_detached_runtime(session_id).await;
             if let Some(pid) = self
                 .get_session(session_id)
                 .await
@@ -1685,13 +1705,12 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::types::{LiveSessionHandle, TerminalStateStore};
     use anyhow::Result;
     use async_trait::async_trait;
     use conductor_core::config::{ConductorConfig, ProjectConfig};
     use conductor_db::Database;
     use conductor_executors::executor::{Executor, ExecutorHandle};
-    use conductor_executors::process::spawn_process;
+    use conductor_executors::process::{spawn_process, PtyDimensions};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1890,7 +1909,7 @@ mod tests {
     async fn build_state(root: &Path, project: ProjectConfig, project_id: &str) -> Arc<AppState> {
         let mut project = project;
         if project.runtime.is_none() {
-            project.runtime = Some(crate::state::tmux_runtime::DIRECT_RUNTIME_MODE.to_string());
+            project.runtime = Some(crate::state::detached_runtime::DIRECT_RUNTIME_MODE.to_string());
         }
         let config = ConductorConfig {
             workspace: root.to_path_buf(),
@@ -2626,9 +2645,12 @@ mod tests {
             "direct-output".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
-            true,
-            true,
-            None,
+            OutputConsumerConfig {
+                terminal_rx: None,
+                mirror_terminal_output: true,
+                output_is_parsed: true,
+                timeout: None,
+            },
         );
         output_tx
             .send(ExecutorOutput::Stdout("parsed::hello".to_string()))
@@ -2695,26 +2717,22 @@ mod tests {
         let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
         tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
         let (kill_tx, _kill_rx) = oneshot::channel();
-        let terminal_tx = state.new_terminal_stream();
-        let mut terminal_rx = terminal_tx.subscribe();
-        state.live_sessions.write().await.insert(
-            "terminal-stream".to_string(),
-            Arc::new(LiveSessionHandle {
-                input_tx: tokio::sync::RwLock::new(Some(input_tx)),
-                terminal_tx,
-                terminal_store: Arc::new(std::sync::Mutex::new(TerminalStateStore::new())),
-                kill_tx: tokio::sync::Mutex::new(Some(kill_tx)),
-            }),
-        );
+        let handle = state
+            .attach_terminal_runtime("terminal-stream", input_tx, None, kill_tx)
+            .await;
+        let mut terminal_rx = handle.terminal_tx.subscribe();
 
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
         state.start_output_consumer(
             "terminal-stream".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
-            true,
-            true,
-            None,
+            OutputConsumerConfig {
+                terminal_rx: None,
+                mirror_terminal_output: true,
+                output_is_parsed: true,
+                timeout: None,
+            },
         );
         output_tx
             .send(ExecutorOutput::Stdout("hello".to_string()))
@@ -2732,6 +2750,161 @@ mod tests {
             }
             other => panic!("unexpected terminal event: {other:?}"),
         }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn start_output_consumer_uses_native_terminal_stream_when_available() {
+        let root = std::env::temp_dir()
+            .join(format!("conductor-native-terminal-stream-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let mut session = SessionRecord::new(
+            "native-terminal-stream".to_string(),
+            "demo".to_string(),
+            Some("session/native-terminal-stream".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = SessionStatus::Working;
+        state.replace_session(session).await.unwrap();
+
+        let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        let handle = state
+            .attach_terminal_runtime("native-terminal-stream", input_tx, None, kill_tx)
+            .await;
+        let mut terminal_rx = handle.terminal_tx.subscribe();
+
+        let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
+        let (terminal_bytes_tx, terminal_bytes_rx) = mpsc::channel::<Vec<u8>>(8);
+        state.start_output_consumer(
+            "native-terminal-stream".to_string(),
+            Arc::new(PrefixingExecutor),
+            output_rx,
+            OutputConsumerConfig {
+                terminal_rx: Some(terminal_bytes_rx),
+                mirror_terminal_output: true,
+                output_is_parsed: true,
+                timeout: None,
+            },
+        );
+        output_tx
+            .send(ExecutorOutput::Stdout("parsed::hello".to_string()))
+            .await
+            .unwrap();
+        terminal_bytes_tx
+            .send(b"\x1b[31mhello\x1b[0m".to_vec())
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(3), terminal_rx.recv())
+            .await
+            .expect("native terminal event should arrive")
+            .expect("broadcast event should be readable");
+        match event {
+            TerminalStreamEvent::Stream(chunk) => {
+                assert_eq!(chunk.sequence, 1);
+                assert_eq!(chunk.bytes, b"\x1b[31mhello\x1b[0m");
+            }
+            other => panic!("unexpected terminal event: {other:?}"),
+        }
+
+        let updated = timeout(Duration::from_secs(3), async {
+            loop {
+                let current = state.get_session("native-terminal-stream").await.unwrap();
+                if current
+                    .conversation
+                    .iter()
+                    .any(|entry| entry.kind == "assistant_message")
+                {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("consumer should append assistant output");
+
+        let assistant = updated
+            .conversation
+            .iter()
+            .find(|entry| entry.kind == "assistant_message")
+            .expect("assistant message");
+        assert_eq!(assistant.text, "parsed::hello");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resize_live_terminal_uses_direct_runtime_resize_channel() {
+        let root = std::env::temp_dir()
+            .join(format!("conductor-direct-terminal-resize-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let mut session = SessionRecord::new(
+            "direct-terminal-resize".to_string(),
+            "demo".to_string(),
+            Some("session/direct-terminal-resize".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = SessionStatus::Working;
+        state.replace_session(session).await.unwrap();
+
+        let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+        let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        state
+            .attach_terminal_runtime(
+                "direct-terminal-resize",
+                input_tx,
+                Some(resize_tx),
+                kill_tx,
+            )
+            .await;
+
+        state
+            .resize_live_terminal("direct-terminal-resize", 132, 40)
+            .await
+            .unwrap();
+
+        let dimensions = timeout(Duration::from_secs(3), resize_rx.recv())
+            .await
+            .expect("resize should reach direct runtime channel")
+            .expect("resize channel should stay open");
+        assert_eq!(dimensions, PtyDimensions { cols: 132, rows: 40 });
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -2771,9 +2944,12 @@ mod tests {
             "tmux-output".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
-            false,
-            false,
-            None,
+            OutputConsumerConfig {
+                terminal_rx: None,
+                mirror_terminal_output: false,
+                output_is_parsed: false,
+                timeout: None,
+            },
         );
         output_tx
             .send(ExecutorOutput::Stdout(

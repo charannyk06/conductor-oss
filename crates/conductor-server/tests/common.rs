@@ -19,12 +19,10 @@ use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
-
-pub static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 pub struct TestExecutor {
     pub kind: AgentKind,
@@ -249,6 +247,8 @@ pub async fn build_state(
     mut project: ProjectConfig,
     project_id: &str,
 ) -> Arc<AppState> {
+    std::env::set_var("CONDUCTOR_DISABLE_DETACHED_PTY_HOST", "true");
+
     if project.runtime.is_none() {
         project.runtime = Some("direct".to_string());
     }

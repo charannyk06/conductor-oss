@@ -80,6 +80,7 @@ struct UpdateTaskBody {
     project_id: String,
     task_id: String,
     role: Option<String>,
+    target_index: Option<usize>,
     title: Option<String>,
     description: Option<String>,
     context_notes: Option<String>,
@@ -250,24 +251,14 @@ async fn update_board_task(
         .unwrap_or(source_role.as_str())
         .to_string();
 
-    if target_role == source_role {
-        let insert_at = source_task_index.min(board.columns[source_column_index].tasks.len());
-        board.columns[source_column_index]
-            .tasks
-            .insert(insert_at, task);
-    } else if let Some(target_column) = board
-        .columns
-        .iter_mut()
-        .find(|column| column.role == target_role)
-    {
-        target_column.tasks.push(task);
-    } else {
-        board.columns.push(ParsedBoardColumn {
-            role: target_role.clone(),
-            heading: default_heading_for_role(&target_role).to_string(),
-            tasks: vec![task],
-        });
-    }
+    insert_task_at_position(
+        &mut board,
+        task,
+        &source_role,
+        source_task_index,
+        &target_role,
+        body.target_index,
+    );
 
     if let Err(err) = write_parsed_board(&board_path, &board, &body.project_id) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
@@ -536,7 +527,6 @@ pub(crate) async fn load_board_response(
         "githubProject": project.github_project.clone(),
         "recentActions": recent_actions,
         "recentWebhookDeliveries": recent_webhook_deliveries,
-        "watcherHint": "Rust backend board persistence is active.",
     }))
 }
 
@@ -925,6 +915,7 @@ pub(crate) fn update_task_dispatch_state(
     board: &mut ParsedBoard,
     task_id: &str,
     target_role: &str,
+    target_index: Option<usize>,
     attempt_ref: Option<&str>,
 ) -> bool {
     let canonical_target_role = normalize_role(target_role);
@@ -946,27 +937,14 @@ pub(crate) fn update_task_dispatch_state(
     }
 
     let source_role = board.columns[source_column_index].role.clone();
-    if source_role == canonical_target_role {
-        let insert_at = source_task_index.min(board.columns[source_column_index].tasks.len());
-        board.columns[source_column_index]
-            .tasks
-            .insert(insert_at, task);
-        return true;
-    }
-
-    if let Some(target_column) = board
-        .columns
-        .iter_mut()
-        .find(|column| column.role == canonical_target_role)
-    {
-        target_column.tasks.push(task);
-    } else {
-        board.columns.push(ParsedBoardColumn {
-            role: canonical_target_role.to_string(),
-            heading: default_heading_for_role(canonical_target_role).to_string(),
-            tasks: vec![task],
-        });
-    }
+    insert_task_at_position(
+        board,
+        task,
+        &source_role,
+        source_task_index,
+        canonical_target_role,
+        target_index,
+    );
 
     true
 }
@@ -981,11 +959,57 @@ pub(crate) async fn update_board_task_attempt_ref(
     let board_path = resolve_board_path_for_project(state, project_id).await?;
     let mut board = parse_board(&board_path, project_id);
     let role = target_role.unwrap_or("dispatching");
-    if update_task_dispatch_state(&mut board, task_id, role, Some(attempt_ref)) {
+    if update_task_dispatch_state(&mut board, task_id, role, None, Some(attempt_ref)) {
         write_parsed_board(&board_path, &board, project_id)?;
         state.publish_snapshot().await;
     }
     Ok(())
+}
+
+fn insert_task_at_position(
+    board: &mut ParsedBoard,
+    task: BoardTaskRecord,
+    source_role: &str,
+    source_task_index: usize,
+    target_role: &str,
+    target_index: Option<usize>,
+) {
+    if source_role == target_role {
+        if let Some(source_column) = board
+            .columns
+            .iter_mut()
+            .find(|column| column.role == source_role)
+        {
+            let insert_at = target_index
+                .unwrap_or(source_task_index)
+                .min(source_column.tasks.len());
+            source_column.tasks.insert(insert_at, task);
+        } else {
+            board.columns.push(ParsedBoardColumn {
+                role: target_role.to_string(),
+                heading: default_heading_for_role(target_role).to_string(),
+                tasks: vec![task],
+            });
+        }
+        return;
+    }
+
+    if let Some(target_column) = board
+        .columns
+        .iter_mut()
+        .find(|column| column.role == target_role)
+    {
+        let insert_at = target_index.unwrap_or(target_column.tasks.len());
+        target_column
+            .tasks
+            .insert(insert_at.min(target_column.tasks.len()), task);
+    } else {
+        board.columns.push(ParsedBoardColumn {
+            role: target_role.to_string(),
+            heading: default_heading_for_role(target_role).to_string(),
+            tasks: vec![task],
+        });
+    }
 }
 
 pub(crate) fn write_parsed_board(
@@ -1330,7 +1354,8 @@ mod tests {
             settings_block: Vec::new(),
         };
 
-        let updated = update_task_dispatch_state(&mut board, "task-1", "In progress", Some("a-1"));
+        let updated =
+            update_task_dispatch_state(&mut board, "task-1", "In progress", None, Some("a-1"));
 
         assert!(updated);
         assert_eq!(board.columns.len(), 1);
@@ -1363,7 +1388,7 @@ mod tests {
             settings_block: Vec::new(),
         };
 
-        let updated = update_task_dispatch_state(&mut board, "task-1", "in_progress", None);
+        let updated = update_task_dispatch_state(&mut board, "task-1", "in_progress", None, None);
 
         assert!(updated);
         assert_eq!(board.columns.len(), 2);
@@ -1385,7 +1410,7 @@ mod tests {
             settings_block: Vec::new(),
         };
 
-        let updated = update_task_dispatch_state(&mut board, "task-1", "In progress", None);
+        let updated = update_task_dispatch_state(&mut board, "task-1", "In progress", None, None);
 
         assert!(updated);
         assert_eq!(board.columns.len(), 2);
@@ -1394,5 +1419,55 @@ mod tests {
         assert_eq!(board.columns[1].heading, "In progress");
         assert_eq!(board.columns[1].tasks.len(), 1);
         assert_eq!(board.columns[1].tasks[0].id, "task-1");
+    }
+
+    #[test]
+    fn update_task_dispatch_state_reorders_within_same_column_when_target_index_is_provided() {
+        let mut board = ParsedBoard {
+            prefix_lines: Vec::new(),
+            columns: vec![ParsedBoardColumn {
+                role: "ready".to_string(),
+                heading: "Ready".to_string(),
+                tasks: vec![task("task-1"), task("task-2"), task("task-3")],
+            }],
+            settings_block: Vec::new(),
+        };
+
+        let updated = update_task_dispatch_state(&mut board, "task-1", "ready", Some(2), None);
+
+        assert!(updated);
+        assert_eq!(board.columns[0].tasks.len(), 3);
+        assert_eq!(board.columns[0].tasks[0].id, "task-2");
+        assert_eq!(board.columns[0].tasks[1].id, "task-3");
+        assert_eq!(board.columns[0].tasks[2].id, "task-1");
+    }
+
+    #[test]
+    fn update_task_dispatch_state_inserts_into_target_column_at_requested_index() {
+        let mut board = ParsedBoard {
+            prefix_lines: Vec::new(),
+            columns: vec![
+                ParsedBoardColumn {
+                    role: "ready".to_string(),
+                    heading: "Ready".to_string(),
+                    tasks: vec![task("task-1")],
+                },
+                ParsedBoardColumn {
+                    role: "inProgress".to_string(),
+                    heading: "In progress".to_string(),
+                    tasks: vec![task("task-2"), task("task-3")],
+                },
+            ],
+            settings_block: Vec::new(),
+        };
+
+        let updated = update_task_dispatch_state(&mut board, "task-1", "inProgress", Some(0), None);
+
+        assert!(updated);
+        assert!(board.columns[0].tasks.is_empty());
+        assert_eq!(board.columns[1].tasks.len(), 3);
+        assert_eq!(board.columns[1].tasks[0].id, "task-1");
+        assert_eq!(board.columns[1].tasks[1].id, "task-2");
+        assert_eq!(board.columns[1].tasks[2].id, "task-3");
     }
 }

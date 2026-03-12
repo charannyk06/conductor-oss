@@ -1,7 +1,7 @@
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::executor::{ExecutorInput, ExecutorOutput};
 
 /// PTY dimensions configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtyDimensions {
     pub rows: u16,
     pub cols: u16,
@@ -73,32 +74,72 @@ pub async fn spawn_process_with_pty_size(
     let child = Arc::new(Mutex::new(child));
 
     let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
+    let (terminal_tx, terminal_rx) = mpsc::channel::<Vec<u8>>(256);
     let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(64);
+    let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
     let stdout_tx = output_tx.clone();
+    let terminal_stream_tx = terminal_tx.clone();
     tokio::task::spawn_blocking(move || {
-        let reader = BufReader::new(reader);
-        let mut lines = reader.lines();
+        let mut reader = reader;
+        let mut pending = Vec::new();
+        let mut buffer = [0_u8; 4096];
         loop {
-            match lines.next() {
-                Some(Ok(line)) => {
-                    if stdout_tx
-                        .blocking_send(ExecutorOutput::Stdout(line))
-                        .is_err()
-                    {
-                        break;
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    if let Some(line) = flush_terminal_line_buffer(&mut pending) {
+                        if stdout_tx
+                            .blocking_send(ExecutorOutput::Stdout(line))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    break;
+                }
+                Ok(read) => {
+                    let chunk = buffer[..read].to_vec();
+                    let _ = terminal_stream_tx.blocking_send(chunk.clone());
+                    pending.extend_from_slice(&chunk);
+                    for line in drain_terminal_lines(&mut pending) {
+                        if stdout_tx
+                            .blocking_send(ExecutorOutput::Stdout(line))
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
-                Some(Err(error)) => {
+                Err(error) => {
                     let _ = stdout_tx.blocking_send(ExecutorOutput::Failed {
                         error: error.to_string(),
                         exit_code: None,
                     });
                     break;
                 }
-                None => break,
             }
+        }
+    });
+
+    let master_for_resize = Arc::clone(&master);
+    tokio::spawn(async move {
+        while let Some(dimensions) = resize_rx.recv().await {
+            let master = Arc::clone(&master_for_resize);
+            let _ = tokio::task::spawn_blocking(move || -> Result<()> {
+                let mut guard = master.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(master) = guard.as_mut() else {
+                    return Ok(());
+                };
+                master.resize(PtySize {
+                    rows: dimensions.rows.max(1),
+                    cols: dimensions.cols.max(1),
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })?;
+                Ok(())
+            })
+            .await;
         }
     });
 
@@ -205,6 +246,8 @@ pub async fn spawn_process_with_pty_size(
         pid,
         output_rx,
         input_tx,
+        terminal_rx: Some(terminal_rx),
+        resize_tx: Some(resize_tx),
         kill_tx,
     })
 }
@@ -317,6 +360,8 @@ pub async fn spawn_process_no_stdin(
         pid,
         output_rx,
         input_tx,
+        terminal_rx: None,
+        resize_tx: None,
         kill_tx,
     })
 }
@@ -326,5 +371,33 @@ pub struct ProcessHandle {
     pub pid: u32,
     pub output_rx: mpsc::Receiver<ExecutorOutput>,
     pub input_tx: mpsc::Sender<ExecutorInput>,
+    pub terminal_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    pub resize_tx: Option<mpsc::Sender<PtyDimensions>>,
     pub kill_tx: oneshot::Sender<()>,
+}
+
+fn drain_terminal_lines(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+        let line = buffer.drain(..=index).collect::<Vec<_>>();
+        lines.push(
+            String::from_utf8_lossy(&line)
+                .trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string(),
+        );
+    }
+    lines
+}
+
+fn flush_terminal_line_buffer(buffer: &mut Vec<u8>) -> Option<String> {
+    if buffer.is_empty() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(buffer)
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string();
+    buffer.clear();
+    Some(line)
 }

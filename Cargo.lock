@@ -444,6 +444,7 @@ dependencies = [
  "hmac",
  "jsonwebtoken",
  "libc",
+ "notify",
  "notify-rust",
  "portable-pty",
  "rand 0.8.5",

@@ -320,7 +320,7 @@ async fn process_board_change(
     }
 
     for (task_id, session_id) in &dispatched_tasks {
-        update_task_dispatch_state(&mut board, task_id, "dispatching", Some(session_id));
+        update_task_dispatch_state(&mut board, task_id, "dispatching", None, Some(session_id));
     }
     write_parsed_board(&board_path, &board, &project_id)
         .with_context(|| format!("Failed to update board {}", board_path.display()))?;
@@ -334,11 +334,9 @@ async fn process_board_change(
 
 async fn active_session_counts(state: &Arc<AppState>, project_id: &str) -> (usize, usize) {
     let live_session_ids = state
-        .live_sessions
-        .read()
+        .attached_terminal_session_ids()
         .await
-        .keys()
-        .cloned()
+        .into_iter()
         .collect::<std::collections::HashSet<_>>();
     let sessions = state.sessions.read().await;
     let mut global = 0usize;
