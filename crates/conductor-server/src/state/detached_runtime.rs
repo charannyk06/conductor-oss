@@ -174,6 +174,7 @@ struct DetachedHostStreamSlot {
     tx: mpsc::Sender<DetachedPtyHostStreamMessage>,
 }
 
+#[cfg(unix)]
 struct DetachedHostState {
     token: String,
     child_pid: u32,
