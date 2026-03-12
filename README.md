@@ -221,7 +221,8 @@ Phase 2 terminal validation now has explicit operator guidance:
 - [Terminal rollout notes](docs/terminal-rollout.md) cover benchmark hooks, acceptance targets, merge gates, and failure signals to capture.
 - [Terminal QA checklist](docs/terminal-qa-checklist.md) covers desktop, phone, and private-remote manual verification.
 - [Terminal QA matrix](docs/terminal-qa-matrix.md) is the sign-off sheet for recorded timings and pass/fail status.
-- `bun run bench:terminal -- <session-id>` runs the lightweight terminal benchmark sweep through the dashboard endpoints.
+- `bun run bench:terminal -- <session-id>` runs the lightweight terminal benchmark sweep through the dashboard endpoints and prints aggregate p50 or p95 timing summaries.
+- `bun run check:terminal-release` runs the deterministic Workstream 5 regression checks for benchmark parsing, proxy headers, and backend validation routes.
 
 ## Architecture
 

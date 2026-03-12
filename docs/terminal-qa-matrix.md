@@ -1,6 +1,6 @@
 # Terminal Phase 2 QA Matrix
 
-Fill this out during the final merge pass. The `Observed` column should capture the actual numbers from `bun run bench:terminal -- <session-id>` or browser DevTools.
+Fill this out during the final merge pass. The `Observed` column should capture the actual p95 numbers and transport/path notes from `bun run bench:terminal -- <session-id>` or browser DevTools.
 
 | Area | Device / Path | Expected transport | Speed target | Correctness gates | Observed | Status | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -17,4 +17,7 @@ Fill this out during the final merge pass. The `Observed` column should capture 
 - Date:
 - Operator:
 - Branch or commit:
+- Benchmark command:
+- Benchmark artifact:
+- Runs per endpoint:
 - Result:

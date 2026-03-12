@@ -5,6 +5,7 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## Desktop
 
 - [ ] Launch a fresh session from the dashboard on macOS or Linux desktop.
+- [ ] Run `bun run bench:terminal -- <session-id>` once against the live session and keep the summary or JSON artifact with the rollout notes.
 - [ ] Confirm the session detail terminal resolves a live stream transport and reaches a usable prompt without degrading into snapshot mode.
 - [ ] Type directly into the terminal and verify shell editing, Enter, Backspace, Ctrl+C, and paste all work.
 - [ ] Scroll upward while output is streaming and confirm the viewport does not jump back to the live tail until `Jump to latest` is used.
@@ -45,6 +46,7 @@ Use this checklist before merging terminal architecture changes. Record the obse
 - [ ] session id
 - [ ] device and browser
 - [ ] local vs remote access path
+- [ ] benchmark summary or JSON artifact
 - [ ] terminal connection headers (`Server-Timing`, transport, connection path, interactive)
 - [ ] terminal snapshot headers (`Server-Timing`, source, live, restored, format)
 - [ ] terminal connection payload (`transport`, `fallbackReason`)

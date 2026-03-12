@@ -24,6 +24,8 @@ The terminal HTTP surfaces now expose benchmark-friendly headers.
 
 These headers are visible in browser DevTools and in `curl -D -` output, which keeps benchmarking out of the hot path and out of the UI.
 
+The dashboard proxy now preserves the same snapshot and resize headers from the Rust backend, so operator captures from `/api/sessions/:id/terminal/*` reflect the real release surface instead of only the backend internals.
+
 ## Quick Benchmark Pass
 
 Use a live session id while the dashboard is running locally.
@@ -32,9 +34,30 @@ Use a live session id while the dashboard is running locally.
 bun run bench:terminal -- <session-id>
 ```
 
-The script hits connection, live snapshot, resize, and read-only snapshot endpoints through the dashboard and prints status, total request time, response size, `Server-Timing`, transport mode, and snapshot source metadata.
+The script hits connection, live snapshot, resize, and read-only snapshot endpoints through the dashboard. It prints each request, then emits an aggregated p50 and p95 summary for total request time plus the primary `Server-Timing` metric for each endpoint.
+
+If you need a machine-readable artifact for sign-off or regression comparison, save the JSON form:
+
+```bash
+bun run bench:terminal -- --json <session-id> > /tmp/terminal-bench.json
+```
 
 If dashboard auth is enabled, run the benchmark from a local operator environment or reproduce the same requests with equivalent auth headers or cookies.
+
+### Optional Regression Gates
+
+You can make the benchmark fail fast when a release candidate regresses:
+
+```bash
+TERMINAL_BENCH_ASSERT_CONNECTION_MS=200 \
+TERMINAL_BENCH_ASSERT_SNAPSHOT_MS=400 \
+TERMINAL_BENCH_ASSERT_RESIZE_MS=150 \
+TERMINAL_BENCH_EXPECT_TRANSPORT=websocket \
+TERMINAL_BENCH_EXPECT_CONNECTION_PATH=direct \
+bun run bench:terminal -- <session-id>
+```
+
+Each latency budget checks the endpoint p95 against the primary `Server-Timing` metric when available, then falls back to total request time. The expectation flags fail if the benchmark sees an unexpected transport, connection path, or snapshot source/restored state.
 
 ## What To Track
 
@@ -67,11 +90,11 @@ These are merge targets, not protocol guarantees. Capture the observed numbers a
 
 ## Merge Readiness Gate
 
-1. Run `cargo test --workspace` on a tmux-capable machine that allows tmux socket creation.
-2. Run `cargo test -p conductor-server routes::terminal::tests -- --nocapture`.
+1. Run `bun run check:terminal-release` to cover benchmark parsing, terminal proxy header passthrough, and the backend snapshot or resize validation route.
+2. Run `cargo test --workspace` on a tmux-capable machine that allows tmux socket creation.
 3. Run `bun run typecheck`.
 4. Run `bun run --cwd packages/web build`.
-5. Run `bun test --cwd packages/web src/components/sessions/sessionTerminalUtils.test.ts` and `bun test --cwd packages/web 'src/app/api/sessions/[id]/terminal/connection/route.test.ts'`.
+5. Run the live benchmark sweep with `bun run bench:terminal -- <session-id>`.
 6. Complete the manual checklist in [docs/terminal-qa-checklist.md](docs/terminal-qa-checklist.md).
 7. Record observed numbers in [docs/terminal-qa-matrix.md](docs/terminal-qa-matrix.md).
 
@@ -81,6 +104,7 @@ When a run fails, capture:
 
 - session id
 - device, browser, and local vs remote path
+- benchmark summary block or JSON artifact path
 - response headers from the failing terminal endpoint
 - terminal connection payload (`transport`, `interactive`, `fallbackReason`)
 - terminal snapshot payload (`source`, `live`, `restored`, `format`, `sequence`)

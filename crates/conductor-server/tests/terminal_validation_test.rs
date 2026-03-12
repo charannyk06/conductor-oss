@@ -1,7 +1,7 @@
 mod common;
 
 use axum::body::{to_bytes, Body};
-use axum::http::{Request, StatusCode};
+use axum::http::{header::SERVER_TIMING, Request, StatusCode};
 use common::{spawn_request, wait_for_condition, TestHarness};
 use serde_json::Value;
 use tower::util::ServiceExt;
@@ -42,6 +42,26 @@ async fn terminal_snapshot_and_resize_routes_cover_live_session_validation_paths
         .await
         .unwrap();
     assert_eq!(snapshot_response.status(), StatusCode::OK);
+    assert_eq!(
+        snapshot_response
+            .headers()
+            .get("x-conductor-terminal-snapshot-source")
+            .and_then(|value| value.to_str().ok()),
+        Some("terminal_state")
+    );
+    assert_eq!(
+        snapshot_response
+            .headers()
+            .get("x-conductor-terminal-snapshot-restored")
+            .and_then(|value| value.to_str().ok()),
+        Some("true")
+    );
+    assert!(snapshot_response
+        .headers()
+        .get(SERVER_TIMING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .contains("terminal_snapshot;dur="));
     let snapshot_body = to_bytes(snapshot_response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -65,6 +85,26 @@ async fn terminal_snapshot_and_resize_routes_cover_live_session_validation_paths
         .await
         .unwrap();
     assert_eq!(resize_response.status(), StatusCode::OK);
+    assert_eq!(
+        resize_response
+            .headers()
+            .get("x-conductor-terminal-resize-cols")
+            .and_then(|value| value.to_str().ok()),
+        Some("90")
+    );
+    assert_eq!(
+        resize_response
+            .headers()
+            .get("x-conductor-terminal-resize-rows")
+            .and_then(|value| value.to_str().ok()),
+        Some("24")
+    );
+    assert!(resize_response
+        .headers()
+        .get(SERVER_TIMING)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .contains("terminal_resize;dur="));
     let resize_body = to_bytes(resize_response.into_body(), usize::MAX)
         .await
         .unwrap();

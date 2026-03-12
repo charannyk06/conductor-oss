@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Terminal validation coverage** — regression tests now cover terminal snapshot restore assembly, terminal route wiring, remote transport fallback gating, and frontend terminal helper behavior for mobile and remote flows.
 - **Terminal benchmark hooks** — terminal connection, snapshot, and resize endpoints now emit `Server-Timing` plus terminal-specific diagnostic headers for repeatable benchmark capture.
-- **Terminal rollout docs** — added Phase 2 rollout notes, a manual QA checklist, and a sign-off matrix for desktop, phone, and private-remote terminal validation.
+- **Terminal benchmark regression gates** — the benchmark sweep now emits aggregate p50 or p95 summaries, optional assertion gates, and JSON output for release sign-off artifacts.
+- **Terminal rollout docs** — added Phase 2 rollout notes, a manual QA checklist, a sign-off matrix, and a focused release check script for desktop, phone, and private-remote terminal validation.
 
 ## [0.1.0] - 2026-03-01
 
