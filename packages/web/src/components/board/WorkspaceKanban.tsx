@@ -1,7 +1,7 @@
 "use client";
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useRouter } from "next/navigation";
 import {
   Check,
@@ -110,7 +110,6 @@ type BoardResponse = {
   githubProject?: GitHubProjectLink | null;
   recentActions?: BoardActivity[];
   recentWebhookDeliveries?: WebhookDelivery[];
-  watcherHint?: string;
   createdTaskId?: string;
 };
 
@@ -610,7 +609,6 @@ function boardsEqual(
     left.repository !== right.repository ||
     left.boardPath !== right.boardPath ||
     left.workspacePath !== right.workspacePath ||
-    left.watcherHint !== right.watcherHint ||
     left.primaryRoles.length !== right.primaryRoles.length ||
     left.columns.length !== right.columns.length
   ) {
@@ -904,6 +902,128 @@ function findBoardTask(
   return null;
 }
 
+function findColumnByRole(
+  board: BoardResponse | null,
+  role: BoardRole
+): BoardColumn | null {
+  return board?.columns.find((column) => column.role === role) ?? null;
+}
+
+function getDropIndexForColumnEnd(
+  board: BoardResponse | null,
+  draggingTask: { taskId: string; role: BoardRole } | null,
+  role: BoardRole
+): number {
+  const column = findColumnByRole(board, role);
+  if (!column) return 0;
+
+  let count = column.tasks.length;
+  if (draggingTask?.role === role) {
+    const sourceIndex = column.tasks.findIndex(
+      (task) => task.id === draggingTask.taskId
+    );
+    if (sourceIndex >= 0) {
+      count -= 1;
+    }
+  }
+
+  return Math.max(count, 0);
+}
+
+function getDropIndexForTask(
+  board: BoardResponse | null,
+  draggingTask: { taskId: string; role: BoardRole } | null,
+  role: BoardRole,
+  taskId: string,
+  clientY: number,
+  taskElement: HTMLElement
+): number {
+  const column = findColumnByRole(board, role);
+  if (!column) return 0;
+
+  const hoverIndex = column.tasks.findIndex((task) => task.id === taskId);
+  if (hoverIndex < 0) {
+    return getDropIndexForColumnEnd(board, draggingTask, role);
+  }
+
+  const rect = taskElement.getBoundingClientRect();
+  const placement = clientY < rect.top + rect.height / 2 ? "before" : "after";
+  let nextIndex = hoverIndex + (placement === "after" ? 1 : 0);
+
+  if (draggingTask?.role === role) {
+    const sourceIndex = column.tasks.findIndex(
+      (task) => task.id === draggingTask.taskId
+    );
+    if (sourceIndex >= 0 && sourceIndex < nextIndex) {
+      nextIndex -= 1;
+    }
+  }
+
+  return nextIndex;
+}
+
+function moveTaskInBoard(
+  board: BoardResponse | null,
+  taskId: string,
+  targetRole: BoardRole,
+  targetIndex: number
+): BoardResponse | null {
+  if (!board) return board;
+
+  const nextColumns = board.columns.map((column) => ({
+    ...column,
+    tasks: [...column.tasks],
+  }));
+
+  let sourceColumnIndex = -1;
+  let sourceTaskIndex = -1;
+  let taskToMove: BoardTask | null = null;
+
+  for (let columnIndex = 0; columnIndex < nextColumns.length; columnIndex += 1) {
+    const taskIndex = nextColumns[columnIndex]?.tasks.findIndex(
+      (task) => task.id === taskId
+    ) ?? -1;
+    if (taskIndex >= 0) {
+      sourceColumnIndex = columnIndex;
+      sourceTaskIndex = taskIndex;
+      taskToMove = nextColumns[columnIndex]!.tasks.splice(taskIndex, 1)[0] ?? null;
+      break;
+    }
+  }
+
+  if (!taskToMove || sourceColumnIndex < 0) {
+    return board;
+  }
+
+  let targetColumnIndex = nextColumns.findIndex(
+    (column) => column.role === targetRole
+  );
+  if (targetColumnIndex < 0) {
+    nextColumns.push({
+      role: targetRole,
+      heading: ROLE_LABEL[targetRole],
+      tasks: [],
+    });
+    targetColumnIndex = nextColumns.length - 1;
+  }
+
+  const targetTasks = nextColumns[targetColumnIndex]!.tasks;
+  const insertAt = Math.max(0, Math.min(targetIndex, targetTasks.length));
+  targetTasks.splice(insertAt, 0, taskToMove);
+
+  if (
+    sourceColumnIndex === targetColumnIndex &&
+    sourceTaskIndex === insertAt
+  ) {
+    return board;
+  }
+
+  return {
+    ...board,
+    columns: nextColumns,
+  };
+}
+
 function compareProjectSessions(
   left: ProjectSession,
   right: ProjectSession,
@@ -976,6 +1096,10 @@ export function WorkspaceKanban({
     taskId: string;
     role: BoardRole;
   } | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{
+    role: BoardRole;
+    index: number;
+  } | null>(null);
   const [projectSyncOpen, setProjectSyncOpen] = useState(false);
   const [projectSyncLoading, setProjectSyncLoading] = useState(false);
   const [projectSyncSaving, setProjectSyncSaving] = useState(false);
@@ -986,6 +1110,9 @@ export function WorkspaceKanban({
   const hasLoadedBoardRef = useRef(false);
   const boardRequestInFlightRef = useRef(false);
   const boardRefreshTimeoutRef = useRef<number | null>(null);
+  const latestBoardRef = useRef<BoardResponse | null>(null);
+  const mutationQueueRef = useRef(Promise.resolve<BoardResponse | null>(null));
+  const pendingMutationCountRef = useRef(0);
   const preferredMarkdownEditor = preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
@@ -997,6 +1124,10 @@ export function WorkspaceKanban({
     }
     return normalized;
   }, [agentOptions, defaultAgent]);
+
+  useEffect(() => {
+    latestBoardRef.current = board;
+  }, [board]);
 
   useEffect(() => {
     if (!orderedAgentOptions.includes(agent)) {
@@ -1073,6 +1204,9 @@ export function WorkspaceKanban({
         return;
       }
       if (boardRequestInFlightRef.current) {
+        return;
+      }
+      if (options?.silent && pendingMutationCountRef.current > 0) {
         return;
       }
 
@@ -1283,6 +1417,7 @@ export function WorkspaceKanban({
         };
       });
   }, [allColumns, search, viewFilter]);
+  const dragEnabled = search.trim().length === 0;
 
   const filteredContextFiles = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
@@ -1590,37 +1725,76 @@ export function WorkspaceKanban({
     }
   }
 
-  const mutatingRef = useRef(false);
+  async function handleBoardMutation(
+    payload: Record<string, unknown>,
+    options?: {
+      optimisticUpdate?: (current: BoardResponse) => BoardResponse | null;
+    }
+  ) {
+    if (!projectId) return null;
 
-  async function handleBoardMutation(payload: Record<string, unknown>) {
-    if (!projectId || mutatingRef.current) return;
-    mutatingRef.current = true;
-    try {
-      const res = await fetch("/api/boards", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId,
-          ...payload,
-        }),
-      });
-      const data = (await res.json().catch(() => null)) as
-        | BoardResponse
-        | { error?: string }
-        | null;
-      if (!res.ok) {
-        throw new Error(
-          (data as { error?: string } | null)?.error ??
-            `Failed to update board: ${res.status}`
+    const previousBoard = latestBoardRef.current;
+    if (previousBoard && options?.optimisticUpdate) {
+      const optimisticBoard = options.optimisticUpdate(previousBoard);
+      if (optimisticBoard) {
+        latestBoardRef.current = optimisticBoard;
+        setBoard((current) =>
+          boardsEqual(current, optimisticBoard) ? current : optimisticBoard
         );
       }
-      const nextBoard = normalizeBoardResponse(data as BoardResponse);
-      setBoard((current) =>
-        boardsEqual(current, nextBoard) ? current : nextBoard
-      );
-      setError(null);
+    }
+
+    pendingMutationCountRef.current += 1;
+    const queuedRequest = mutationQueueRef.current
+      .catch(() => null)
+      .then(async () => {
+        const res = await fetch("/api/boards", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId,
+            ...payload,
+          }),
+        });
+        const data = (await res.json().catch(() => null)) as
+          | BoardResponse
+          | { error?: string }
+          | null;
+        if (!res.ok) {
+          throw new Error(
+            (data as { error?: string } | null)?.error ??
+              `Failed to update board: ${res.status}`
+          );
+        }
+        const nextBoard = normalizeBoardResponse(data as BoardResponse);
+        latestBoardRef.current = nextBoard;
+        setBoard((current) =>
+          boardsEqual(current, nextBoard) ? current : nextBoard
+        );
+        setError(null);
+        return nextBoard;
+      });
+
+    mutationQueueRef.current = queuedRequest.then(
+      () => null,
+      () => null
+    );
+
+    try {
+      return await queuedRequest;
+    } catch (err) {
+      if (options?.optimisticUpdate && previousBoard) {
+        latestBoardRef.current = previousBoard;
+        setBoard((current) =>
+          boardsEqual(current, previousBoard) ? current : previousBoard
+        );
+      }
+      throw err;
     } finally {
-      mutatingRef.current = false;
+      pendingMutationCountRef.current = Math.max(
+        0,
+        pendingMutationCountRef.current - 1
+      );
     }
   }
 
@@ -1800,6 +1974,87 @@ export function WorkspaceKanban({
     }
   }
 
+  function handleTaskDragStart(taskId: string, role: BoardRole) {
+    setDraggingTask({ taskId, role });
+    const endIndex = getDropIndexForColumnEnd(latestBoardRef.current, { taskId, role }, role);
+    setDropIndicator({ role, index: endIndex });
+  }
+
+  function handleColumnDragOver(
+    event: DragEvent<HTMLDivElement>,
+    role: BoardRole
+  ) {
+    if (!draggingTask) return;
+    event.preventDefault();
+    if (event.target !== event.currentTarget) return;
+    const endIndex = getDropIndexForColumnEnd(latestBoardRef.current, draggingTask, role);
+    setDropIndicator((current) =>
+      current?.role === role && current.index === endIndex
+        ? current
+        : { role, index: endIndex }
+    );
+  }
+
+  function handleTaskDragOver(
+    event: DragEvent<HTMLDivElement>,
+    role: BoardRole,
+    taskId: string
+  ) {
+    if (!draggingTask) return;
+    event.preventDefault();
+    const nextIndex = getDropIndexForTask(
+      latestBoardRef.current,
+      draggingTask,
+      role,
+      taskId,
+      event.clientY,
+      event.currentTarget
+    );
+    setDropIndicator((current) =>
+      current?.role === role && current.index === nextIndex
+        ? current
+        : { role, index: nextIndex }
+    );
+  }
+
+  async function handleColumnDrop(role: BoardRole) {
+    if (!draggingTask) return;
+    const sourceColumn = findColumnByRole(latestBoardRef.current, draggingTask.role);
+    const sourceIndex =
+      sourceColumn?.tasks.findIndex((task) => task.id === draggingTask.taskId) ?? -1;
+    const fallbackIndex = getDropIndexForColumnEnd(
+      latestBoardRef.current,
+      draggingTask,
+      role
+    );
+    const targetIndex =
+      dropIndicator?.role === role ? dropIndicator.index : fallbackIndex;
+    const moveTargetChanged =
+      draggingTask.role !== role ||
+      targetIndex !== sourceIndex;
+
+    try {
+      if (moveTargetChanged) {
+        await handleBoardMutation(
+          {
+            taskId: draggingTask.taskId,
+            role,
+            targetIndex,
+          },
+          {
+            optimisticUpdate: (current) =>
+              moveTaskInBoard(current, draggingTask.taskId, role, targetIndex),
+          }
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to move task");
+    } finally {
+      setDraggingTask(null);
+      setDropIndicator(null);
+    }
+  }
+
   if (!projectId) {
     return (
       <div className="flex h-full items-center justify-center text-[14px] text-[var(--vk-text-muted)]">
@@ -1885,6 +2140,12 @@ export function WorkspaceKanban({
             </a>
           ) : null}
         </div>
+
+        {!dragEnabled && (
+          <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">
+            Clear search to reorder cards.
+          </p>
+        )}
 
         {projectSyncOpen && (
           <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-3">
@@ -2042,12 +2303,6 @@ export function WorkspaceKanban({
           </div>
         )}
 
-        {board?.watcherHint && (
-          <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">
-            {board.watcherHint}
-          </p>
-        )}
-
         {(board?.recentActions?.length ?? 0) > 0 && (
           <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
@@ -2099,35 +2354,46 @@ export function WorkspaceKanban({
           </div>
         ) : (
           <div
-            className="flex min-w-0 flex-col gap-3 rounded-[4px] border border-[var(--vk-border)] lg:grid lg:gap-0"
-            style={{
-              gridTemplateColumns: `repeat(${Math.max(
-                visibleColumns.length,
-                1
-              )}, minmax(240px, 1fr))`,
-            }}
+            className="flex min-h-full min-w-0 items-start gap-3 overflow-x-auto pb-3"
           >
-            {visibleColumns.map((column, columnIndex) => (
+            {visibleColumns.map((column) => {
+              const fullColumn = allColumns.find(
+                (candidate) => candidate.role === column.role
+              );
+              const sourceIndex =
+                dragEnabled && draggingTask?.role === column.role
+                  ? fullColumn?.tasks.findIndex(
+                      (task) => task.id === draggingTask.taskId
+                    ) ?? -1
+                  : -1;
+              const fullTaskCount = fullColumn?.tasks.length ?? column.tasks.length;
+              const effectiveTaskCount = Math.max(
+                fullTaskCount - (sourceIndex >= 0 ? 1 : 0),
+                0
+              );
+
+              return (
               <article
                 key={column.role}
                 className={cn(
-                  "flex min-h-[320px] flex-col border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] lg:min-h-[540px] lg:border-b-0 lg:border-r",
-                  columnIndex === visibleColumns.length - 1 &&
-                    "border-b-0 lg:border-r-0"
+                  "flex min-h-[560px] w-[320px] shrink-0 flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)]",
+                  draggingTask && "snap-start"
                 )}
               >
-                <header className="flex h-[41px] items-center border-b border-[var(--vk-border)] px-2">
-                  <span
-                    className="h-2 w-2 rounded-full"
-                    style={{ backgroundColor: ROLE_COLOR[column.role] }}
-                  />
-                  <span className="ml-2 text-[14px] text-[var(--vk-text-normal)]">
-                    {column.heading || ROLE_LABEL[column.role]}
+                <header className="flex items-center gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: ROLE_COLOR[column.role] }} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[14px] font-medium text-[var(--vk-text-normal)]">
+                      {column.heading || ROLE_LABEL[column.role]}
+                    </p>
+                  </div>
+                  <span className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                    {column.tasks.length}
                   </span>
                   <button
                     type="button"
                     onClick={() => openComposer(column.role)}
-                    className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                    className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                     aria-label={`Add task to ${column.heading}`}
                   >
                     <Plus className="h-3.5 w-3.5" />
@@ -2136,40 +2402,46 @@ export function WorkspaceKanban({
 
                 <div
                   className={cn(
-                    "flex-1 space-y-2 overflow-y-auto p-2",
+                    "flex-1 overflow-y-auto px-3 pb-3 pt-2",
                     draggingTask?.role === column.role &&
                       "bg-[rgba(255,255,255,0.02)]"
                   )}
-                  onDragOver={(event) => {
-                    if (!draggingTask) return;
-                    event.preventDefault();
-                  }}
+                  onDragOver={(event) =>
+                    dragEnabled ? handleColumnDragOver(event, column.role) : undefined
+                  }
                   onDrop={(event) => {
                     event.preventDefault();
-                    if (!draggingTask || draggingTask.role === column.role)
-                      return;
-                    void handleBoardMutation({
-                      taskId: draggingTask.taskId,
-                      role: column.role,
-                    }).catch((err) => {
-                      setError(
-                        err instanceof Error
-                          ? err.message
-                          : "Failed to move task"
-                      );
-                    });
-                    setDraggingTask(null);
+                    if (!dragEnabled) return;
+                    void handleColumnDrop(column.role);
                   }}
                 >
+                  {dragEnabled &&
+                  dropIndicator?.role === column.role &&
+                  dropIndicator.index === 0 ? (
+                    <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                  ) : null}
+
                   {column.tasks.length === 0 && (
-                    <div className="rounded-[3px] border border-dashed border-[var(--vk-border)] px-2 py-2 text-[13px] text-[var(--vk-text-muted)]">
-                      No tasks
+                    <div className="rounded-[10px] border border-dashed border-[var(--vk-border)] px-3 py-4 text-[13px] text-[var(--vk-text-muted)]">
+                      Drop a card here or create a new one.
                     </div>
                   )}
 
+                  <div className="space-y-2">
                   {column.tasks.map((task) => {
                     const { title: taskTitle, description: taskDescription } =
                       splitTaskText(task.text);
+                    const fullTaskIndex =
+                      fullColumn?.tasks.findIndex((item) => item.id === task.id) ??
+                      0;
+                    const effectiveTaskIndex =
+                      sourceIndex >= 0
+                        ? task.id === draggingTask?.taskId
+                          ? null
+                          : fullTaskIndex > sourceIndex
+                          ? fullTaskIndex - 1
+                          : fullTaskIndex
+                        : fullTaskIndex;
                     const taskLinkKey = getTaskLinkKey(task);
                     const issueUrl = buildGitHubIssueUrl(
                       board?.repository,
@@ -2197,21 +2469,34 @@ export function WorkspaceKanban({
                         ? task.attemptRef
                         : null;
                     return (
-                      <div
-                        key={`${column.role}-${task.id}`}
-                        draggable
-                        onDragStart={() =>
-                          setDraggingTask({
-                            taskId: task.id,
-                            role: column.role,
-                          })
-                        }
-                        onDragEnd={() => setDraggingTask(null)}
-                        className={cn(
-                          "rounded-[3px] border border-[var(--vk-border)] bg-[color:#212121] p-2 [content-visibility:auto] [contain-intrinsic-size:220px]",
-                          draggingTask?.taskId === task.id && "opacity-60"
-                        )}
-                      >
+                      <div key={`${column.role}-${task.id}`}>
+                        {dragEnabled &&
+                        dropIndicator?.role === column.role &&
+                        effectiveTaskIndex !== null &&
+                        dropIndicator.index === effectiveTaskIndex ? (
+                          <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                        ) : null}
+                        <div
+                          draggable={dragEnabled}
+                          onDragStart={() =>
+                            dragEnabled
+                              ? handleTaskDragStart(task.id, column.role)
+                              : undefined
+                          }
+                          onDragOver={(event) =>
+                            dragEnabled
+                              ? handleTaskDragOver(event, column.role, task.id)
+                              : undefined
+                          }
+                          onDragEnd={() => {
+                            setDraggingTask(null);
+                            setDropIndicator(null);
+                          }}
+                          className={cn(
+                            "rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]",
+                            draggingTask?.taskId === task.id && "opacity-60"
+                          )}
+                        >
                         <div className="flex items-start gap-2">
                           <p className="min-w-0 flex-1 font-mono text-[12px] text-[var(--vk-text-muted)]">
                             {task.taskRef?.trim() ||
@@ -2470,12 +2755,21 @@ export function WorkspaceKanban({
                             )}
                           </div>
                         </div>
+                        </div>
                       </div>
                     );
                   })}
+                  </div>
+
+                  {dragEnabled &&
+                  dropIndicator?.role === column.role &&
+                  dropIndicator.index === effectiveTaskCount ? (
+                    <div className="mt-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                  ) : null}
                 </div>
               </article>
-            ))}
+            );
+            })}
           </div>
         )}
       </div>

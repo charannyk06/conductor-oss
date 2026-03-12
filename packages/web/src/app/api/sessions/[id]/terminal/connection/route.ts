@@ -13,9 +13,9 @@ const TERMINAL_TRANSPORT_HEADER = "x-conductor-terminal-transport";
 const TERMINAL_INTERACTIVE_HEADER = "x-conductor-terminal-interactive";
 const TERMINAL_CONNECTION_PATH_HEADER = "x-conductor-terminal-connection-path";
 
-type TerminalConnectionTransport = "websocket" | "snapshot";
+type TerminalConnectionTransport = "websocket" | "snapshot" | "eventstream";
 type TerminalControlTransport = "websocket" | "http";
-type TerminalConnectionPath = "direct" | "managed_remote" | "auth_limited" | "unavailable";
+type TerminalConnectionPath = "direct" | "managed_remote" | "dashboard_proxy" | "auth_limited" | "unavailable";
 
 type ResolvedWebSocketBaseUrl = {
   baseUrl: string | null;
@@ -38,6 +38,10 @@ function toWebSocketUrl(baseUrl: string, pathname: string): string {
   const url = new URL(pathname, baseUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
+}
+
+function buildTerminalStreamProxyUrl(id: string): string {
+  return `/api/sessions/${encodeURIComponent(id)}/terminal/stream`;
 }
 
 function resolveRequestHostname(request: Request): string {
@@ -140,25 +144,26 @@ function applyTerminalConnectionHeaders(
   return response;
 }
 
-function buildSnapshotFallback(
+function buildEventStreamConnection(
   id: string,
   interactive: boolean,
-  reason: string,
+  reason: string | null,
   startedAt: number,
   connectionPath: TerminalConnectionPath,
 ): Response {
   const controlPaths = buildControlPaths(id);
+  const streamUrl = buildTerminalStreamProxyUrl(id);
   return applyTerminalConnectionHeaders(NextResponse.json({
-    transport: "snapshot" satisfies TerminalConnectionTransport,
-    wsUrl: null,
+    transport: "eventstream" satisfies TerminalConnectionTransport,
+    wsUrl: streamUrl,
     pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
     interactive,
     requiresToken: false,
     tokenExpiresInSeconds: null,
     fallbackReason: reason,
     stream: {
-      transport: "snapshot" satisfies TerminalConnectionTransport,
-      wsUrl: null,
+      transport: "eventstream" satisfies TerminalConnectionTransport,
+      wsUrl: streamUrl,
       pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
     },
     control: {
@@ -172,7 +177,7 @@ function buildSnapshotFallback(
     },
   }), {
     startedAt,
-    transport: "snapshot",
+    transport: "eventstream",
     interactive,
     connectionPath,
   });
@@ -198,10 +203,10 @@ export async function GET(
   const access = await getDashboardAccess(request);
   const interactive = access.role ? roleMeetsRequirement(access.role, "operator") : false;
   if (!interactive) {
-    return buildSnapshotFallback(
+    return buildEventStreamConnection(
       id,
       false,
-      "Live terminal control requires operator access. Showing snapshot recovery mode.",
+      "Live terminal control requires operator access. The terminal stays live in read-only mode.",
       startedAt,
       "auth_limited",
     );
@@ -209,12 +214,12 @@ export async function GET(
 
   const resolvedWebSocket = resolveWebSocketBaseUrl(request, backendUrl);
   if (!resolvedWebSocket.baseUrl) {
-    return buildSnapshotFallback(
+    return buildEventStreamConnection(
       id,
       true,
-      "A browser-connectable terminal websocket is not available for this dashboard URL. Enable the managed private link or expose the backend websocket safely.",
+      "A browser-connectable terminal websocket is not available for this dashboard URL. Live terminal output is being proxied through the dashboard.",
       startedAt,
-      resolvedWebSocket.connectionPath,
+      "dashboard_proxy",
     );
   }
 

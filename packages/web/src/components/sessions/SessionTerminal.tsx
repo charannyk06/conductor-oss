@@ -14,11 +14,14 @@ import {
   buildTerminalWriteBatch,
   buildTerminalSocketUrl,
   calculateMobileTerminalViewportMetrics,
+  coalesceTerminalHttpControlOperations,
+  decodeTerminalBase64Payload,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
   normalizeTerminalSnapshot,
   parseTerminalBinaryFrame,
   stripBrowserTerminalResponses,
+  type TerminalHttpControlOperation,
   type TerminalWriteChunk,
 } from "./sessionTerminalUtils";
 import type { TerminalInsertRequest } from "./terminalInsert";
@@ -37,7 +40,7 @@ interface SessionTerminalProps {
 
 type TerminalConnectionInfo = {
   stream: {
-    transport: "websocket" | "snapshot";
+    transport: "websocket" | "snapshot" | "eventstream";
     wsUrl: string | null;
     pollIntervalMs: number;
   };
@@ -56,6 +59,7 @@ type TerminalSnapshot = {
   source: string;
   live: boolean;
   restored: boolean;
+  sequence: number | null;
 };
 
 type TerminalServerEvent =
@@ -72,12 +76,32 @@ type TerminalServerEvent =
     }
   | { type: "error"; sessionId: string; error: string };
 
+type TerminalStreamEventMessage =
+  | TerminalServerEvent
+  | {
+      type: "restore";
+      sessionId: string;
+      sequence: number;
+      snapshotVersion: number;
+      reason: "attach" | "lagged" | "unknown";
+      cols: number;
+      rows: number;
+      payload: string;
+    }
+  | {
+      type: "stream";
+      sessionId: string;
+      sequence: number;
+      payload: string;
+    };
+
 const LIVE_TERMINAL_STATUSES = new Set(["queued", "spawning", "running", "working", "needs_input", "stuck"]);
 const RESUMABLE_STATUSES = new Set(["done", "needs_input", "stuck", "errored", "terminated", "killed"]);
 const RECONNECT_BASE_DELAY_MS = 300;
 const RECONNECT_MAX_DELAY_MS = 1600;
 const RENDERER_RECOVERY_THROTTLE_MS = 120;
 const TERMINAL_WRITE_BATCH_MAX_DELAY_MS = 10;
+const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
 const LIVE_TERMINAL_SCROLLBACK = 50000;
 const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
@@ -97,6 +121,10 @@ const LIVE_TERMINAL_HELPER_KEYS = [
 ] as const;
 
 type PreferredFocusTarget = "none" | "terminal" | "live-input" | "resume";
+type PendingTerminalHttpControlOperation = TerminalHttpControlOperation & {
+  reject: (error: unknown) => void;
+  resolve: () => void;
+};
 const TERMINAL_TEXT_ENCODER = new TextEncoder();
 
 function shellEscapePath(path: string): string {
@@ -113,7 +141,7 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
   });
   const data = (await response.json().catch(() => null)) as
     | {
-        transport?: "websocket" | "snapshot";
+        transport?: "websocket" | "snapshot" | "eventstream";
         wsUrl?: string | null;
         pollIntervalMs?: number;
         interactive?: boolean;
@@ -121,7 +149,7 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
         tokenExpiresInSeconds?: number | null;
         fallbackReason?: string | null;
         stream?: {
-          transport?: "websocket" | "snapshot";
+          transport?: "websocket" | "snapshot" | "eventstream";
           wsUrl?: string | null;
           pollIntervalMs?: number;
         } | null;
@@ -144,9 +172,12 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
   const rawControlFallbackReason = data?.control?.fallbackReason;
   const rawStreamWsUrl = data?.stream?.wsUrl;
   const rawControlWsUrl = data?.control?.wsUrl;
-  const streamTransport = data?.stream?.transport === "snapshot" || data?.transport === "snapshot"
+  const rawStreamTransport = data?.stream?.transport ?? data?.transport;
+  const streamTransport = rawStreamTransport === "snapshot"
     ? "snapshot"
-    : "websocket";
+    : rawStreamTransport === "eventstream"
+      ? "eventstream"
+      : "websocket";
   const pollIntervalMs = typeof rawStreamPollIntervalMs === "number" && Number.isFinite(rawStreamPollIntervalMs) && rawStreamPollIntervalMs >= 100
     ? Math.round(rawStreamPollIntervalMs)
     : (typeof data?.pollIntervalMs === "number" && Number.isFinite(data.pollIntervalMs) && data.pollIntervalMs >= 100
@@ -175,8 +206,8 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
     ? rawControlWsUrl.trim()
     : null;
 
-  if (streamTransport === "websocket" && streamWsUrl === null) {
-    throw new Error("Terminal connection did not include a stream websocket URL");
+  if ((streamTransport === "websocket" || streamTransport === "eventstream") && streamWsUrl === null) {
+    throw new Error("Terminal connection did not include a live stream URL");
   }
   if (controlTransport === "websocket" && interactive && controlWsUrl === null) {
     throw new Error("Terminal connection did not include a control websocket URL");
@@ -204,7 +235,7 @@ async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<
     cache: "no-store",
   });
   const data = (await response.json().catch(() => null)) as
-    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; error?: string }
+    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; error?: string }
     | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
@@ -214,6 +245,9 @@ async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<
     source: typeof data?.source === "string" ? data.source : "empty",
     live: data?.live === true,
     restored: data?.restored === true,
+    sequence: typeof data?.sequence === "number" && Number.isSafeInteger(data.sequence)
+      ? data.sequence
+      : null,
   };
 }
 
@@ -225,7 +259,7 @@ async function fetchLiveTerminalSnapshot(sessionId: string, lines: number): Prom
     },
   );
   const data = (await response.json().catch(() => null)) as
-    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; error?: string }
+    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; error?: string }
     | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
@@ -235,6 +269,9 @@ async function fetchLiveTerminalSnapshot(sessionId: string, lines: number): Prom
     source: typeof data?.source === "string" ? data.source : "empty",
     live: data?.live === true,
     restored: data?.restored === true,
+    sequence: typeof data?.sequence === "number" && Number.isSafeInteger(data.sequence)
+      ? data.sequence
+      : null,
   };
 }
 
@@ -347,9 +384,13 @@ export function SessionTerminal({
   const searchRef = useRef<XSearchAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
   const controlSocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
-  const terminalHttpQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const terminalHttpControlQueueRef = useRef<PendingTerminalHttpControlOperation[]>([]);
+  const terminalHttpControlInFlightRef = useRef(false);
+  const terminalHttpControlFrameRef = useRef<number | null>(null);
+  const terminalHttpControlTimerRef = useRef<number | null>(null);
   const reconnectCountRef = useRef(0);
   const connectAttemptRef = useRef(0);
   const controlConnectAttemptRef = useRef(0);
@@ -364,6 +405,7 @@ export function SessionTerminal({
   const reconnectNoticeWrittenRef = useRef(false);
   const snapshotAppliedRef = useRef<string | null>(null);
   const lastLiveSnapshotRef = useRef("");
+  const lastTerminalSequenceRef = useRef<number | null>(null);
   const liveOutputStartedRef = useRef(false);
   const previousLiveTerminalRef = useRef(false);
   const recoveryFrameRef = useRef<number | null>(null);
@@ -386,10 +428,10 @@ export function SessionTerminal({
   const ignoreControlSocketCloseRef = useRef(false);
   const expectsLiveTerminalRef = useRef(false);
   const interactiveTerminalRef = useRef(true);
-  const transportModeRef = useRef<"websocket" | "snapshot">("websocket");
+  const transportModeRef = useRef<"websocket" | "snapshot" | "eventstream">("websocket");
 
   const [terminalReady, setTerminalReady] = useState(false);
-  const [transportMode, setTransportMode] = useState<"websocket" | "snapshot">("websocket");
+  const [transportMode, setTransportMode] = useState<"websocket" | "snapshot" | "eventstream">("websocket");
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
   const [controlTransportMode, setControlTransportMode] = useState<"websocket" | "http">("websocket");
   const [controlSocketBaseUrl, setControlSocketBaseUrl] = useState<string | null>(null);
@@ -434,7 +476,7 @@ export function SessionTerminal({
   const showResumeRail = RESUMABLE_STATUSES.has(normalizedSessionStatus) && !expectsLiveTerminal;
   const showSnapshotFallbackRail = expectsLiveTerminal && interactiveTerminal && transportMode === "snapshot";
   const showLiveInputRail = showSnapshotFallbackRail;
-  const showLiveHelperBar = expectsLiveTerminal && interactiveTerminal && showTerminalAccessoryBar && transportMode === "websocket";
+  const showLiveHelperBar = expectsLiveTerminal && interactiveTerminal && showTerminalAccessoryBar && transportMode !== "snapshot";
   const showPersistentTopControls = immersiveMobileMode || showTerminalAccessoryBar;
   const railPlaceholder = normalizedSessionStatus === "done"
     ? "Continue the session..."
@@ -491,30 +533,142 @@ export function SessionTerminal({
     setTransportError(null);
     setTransportNotice(null);
     setConnectionState("connecting");
-    setTransportMode("websocket");
     setSocketBaseUrl(null);
-    setControlTransportMode("websocket");
     setControlSocketBaseUrl(null);
     setReconnectToken((value) => value + 1);
   }, [clearReconnectTimer]);
 
-  const enqueueTerminalHttpOperation = useCallback((operation: () => Promise<void>): Promise<void> => {
-    const next = terminalHttpQueueRef.current
-      .catch(() => undefined)
-      .then(operation);
-    terminalHttpQueueRef.current = next.catch(() => undefined);
-    return next;
+  const clearScheduledTerminalHttpControlFlush = useCallback(() => {
+    if (terminalHttpControlFrameRef.current !== null) {
+      window.cancelAnimationFrame(terminalHttpControlFrameRef.current);
+      terminalHttpControlFrameRef.current = null;
+    }
+    if (terminalHttpControlTimerRef.current !== null) {
+      window.clearTimeout(terminalHttpControlTimerRef.current);
+      terminalHttpControlTimerRef.current = null;
+    }
   }, []);
+
+  const flushTerminalHttpControlOperations = useCallback(async () => {
+    clearScheduledTerminalHttpControlFlush();
+    if (terminalHttpControlInFlightRef.current) {
+      return;
+    }
+
+    const pendingOperations = terminalHttpControlQueueRef.current.splice(0);
+    if (pendingOperations.length === 0) {
+      return;
+    }
+
+    terminalHttpControlInFlightRef.current = true;
+    try {
+      const operations = coalesceTerminalHttpControlOperations(pendingOperations.map((operation) => {
+        if (operation.kind === "keys") {
+          return { kind: "keys", keys: operation.keys } satisfies TerminalHttpControlOperation;
+        }
+        if (operation.kind === "resize") {
+          return {
+            kind: "resize",
+            cols: operation.cols,
+            rows: operation.rows,
+          } satisfies TerminalHttpControlOperation;
+        }
+        return { kind: "special", special: operation.special } satisfies TerminalHttpControlOperation;
+      }));
+
+      for (const operation of operations) {
+        if (operation.kind === "keys") {
+          await postSessionTerminalKeys(sessionId, { keys: operation.keys });
+          continue;
+        }
+        if (operation.kind === "resize") {
+          await postTerminalResize(sessionId, operation.cols, operation.rows);
+          continue;
+        }
+        await postSessionTerminalKeys(sessionId, { special: operation.special });
+      }
+
+      for (const operation of pendingOperations) {
+        operation.resolve();
+      }
+    } catch (error) {
+      for (const operation of pendingOperations) {
+        operation.reject(error);
+      }
+    } finally {
+      terminalHttpControlInFlightRef.current = false;
+      if (terminalHttpControlQueueRef.current.length > 0) {
+        if (typeof window === "undefined") {
+          void flushTerminalHttpControlOperations();
+          return;
+        }
+        terminalHttpControlFrameRef.current = window.requestAnimationFrame(() => {
+          void flushTerminalHttpControlOperations();
+        });
+        terminalHttpControlTimerRef.current = window.setTimeout(() => {
+          void flushTerminalHttpControlOperations();
+        }, TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS);
+      }
+    }
+  }, [clearScheduledTerminalHttpControlFlush, sessionId]);
+
+  const scheduleTerminalHttpControlFlush = useCallback(() => {
+    if (terminalHttpControlInFlightRef.current || terminalHttpControlQueueRef.current.length === 0) {
+      return;
+    }
+
+    if (typeof window === "undefined") {
+      void flushTerminalHttpControlOperations();
+      return;
+    }
+
+    if (terminalHttpControlFrameRef.current !== null || terminalHttpControlTimerRef.current !== null) {
+      return;
+    }
+
+    terminalHttpControlFrameRef.current = window.requestAnimationFrame(() => {
+      void flushTerminalHttpControlOperations();
+    });
+    terminalHttpControlTimerRef.current = window.setTimeout(() => {
+      void flushTerminalHttpControlOperations();
+    }, TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS);
+  }, [flushTerminalHttpControlOperations]);
+
+  const enqueueTerminalHttpControlOperation = useCallback((
+    operation: TerminalHttpControlOperation,
+    flushNow = false,
+  ): Promise<void> => new Promise<void>((resolve, reject) => {
+    terminalHttpControlQueueRef.current.push({
+      ...operation,
+      resolve,
+      reject,
+    });
+
+    if (flushNow) {
+      void flushTerminalHttpControlOperations();
+      return;
+    }
+
+    scheduleTerminalHttpControlFlush();
+  }), [flushTerminalHttpControlOperations, scheduleTerminalHttpControlFlush]);
 
   const sendResize = useCallback(async (cols: number, rows: number): Promise<boolean> => {
     if (controlTransportMode === "http") {
-      await enqueueTerminalHttpOperation(() => postTerminalResize(sessionId, cols, rows));
+      await enqueueTerminalHttpControlOperation({
+        kind: "resize",
+        cols,
+        rows,
+      });
       return true;
     }
 
     const socket = controlSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      await enqueueTerminalHttpOperation(() => postTerminalResize(sessionId, cols, rows));
+      await enqueueTerminalHttpControlOperation({
+        kind: "resize",
+        cols,
+        rows,
+      });
       return true;
     }
     socket.send(JSON.stringify({
@@ -523,7 +677,7 @@ export function SessionTerminal({
       rows: Math.max(1, Math.round(rows)),
     }));
     return true;
-  }, [controlTransportMode, enqueueTerminalHttpOperation, sessionId]);
+  }, [controlTransportMode, enqueueTerminalHttpControlOperation]);
 
   const sendTerminalKeys = useCallback(async (data: string) => {
     if (!interactiveTerminal) {
@@ -535,17 +689,17 @@ export function SessionTerminal({
     }
 
     if (controlTransportMode === "http") {
-      await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { keys }));
+      await enqueueTerminalHttpControlOperation({ kind: "keys", keys });
       return;
     }
 
     const socket = controlSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { keys }));
+      await enqueueTerminalHttpControlOperation({ kind: "keys", keys });
       return;
     }
     socket.send(JSON.stringify({ type: "keys", keys }));
-  }, [controlTransportMode, enqueueTerminalHttpOperation, interactiveTerminal, sessionId]);
+  }, [controlTransportMode, enqueueTerminalHttpControlOperation, interactiveTerminal]);
 
   const sendTerminalSpecial = useCallback(async (special: string) => {
     if (!interactiveTerminal) {
@@ -553,17 +707,17 @@ export function SessionTerminal({
     }
 
     if (controlTransportMode === "http") {
-      await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { special }));
+      await enqueueTerminalHttpControlOperation({ kind: "special", special }, true);
       return;
     }
 
     const socket = controlSocketRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      await enqueueTerminalHttpOperation(() => postSessionTerminalKeys(sessionId, { special }));
+      await enqueueTerminalHttpControlOperation({ kind: "special", special }, true);
       return;
     }
     socket.send(JSON.stringify({ type: "keys", special }));
-  }, [controlTransportMode, enqueueTerminalHttpOperation, interactiveTerminal, sessionId]);
+  }, [controlTransportMode, enqueueTerminalHttpControlOperation, interactiveTerminal]);
 
   const detectFocusedSurface = useCallback((): PreferredFocusTarget => {
     if (typeof document === "undefined") {
@@ -906,6 +1060,7 @@ export function SessionTerminal({
   const applyFetchedSnapshot = useCallback((snapshot: TerminalSnapshot) => {
     snapshotAppliedRef.current = null;
     lastLiveSnapshotRef.current = snapshot.snapshot;
+    lastTerminalSequenceRef.current = snapshot.sequence;
     setSnapshotAnsi(snapshot.snapshot);
     setSnapshotReady(true);
     if (snapshot.live) {
@@ -1012,6 +1167,7 @@ export function SessionTerminal({
     reconnectNoticeWrittenRef.current = false;
     snapshotAppliedRef.current = null;
     lastLiveSnapshotRef.current = "";
+    lastTerminalSequenceRef.current = null;
     liveOutputStartedRef.current = false;
     reconnectCountRef.current = 0;
     connectAttemptRef.current = 0;
@@ -1024,20 +1180,24 @@ export function SessionTerminal({
     clearReconnectTimer();
     clearScheduledRecovery();
     clearScheduledTerminalFlush();
+    clearScheduledTerminalHttpControlFlush();
     terminalWriteQueueRef.current = [];
     terminalWriteInFlightRef.current = false;
     terminalWriteRestoreFocusRef.current = false;
+    terminalHttpControlQueueRef.current = [];
+    terminalHttpControlInFlightRef.current = false;
     lastObservedContainerSizeRef.current = null;
     lastViewportOptionKeyRef.current = null;
+    eventSourceRef.current?.close();
     socketRef.current?.close();
     const controlSocket = controlSocketRef.current;
     if (controlSocket) {
       ignoreControlSocketCloseRef.current = true;
       controlSocket.close();
     }
+    eventSourceRef.current = null;
     socketRef.current = null;
     controlSocketRef.current = null;
-    terminalHttpQueueRef.current = Promise.resolve();
     setTransportMode("websocket");
     setSocketBaseUrl(null);
     setControlTransportMode("websocket");
@@ -1063,7 +1223,7 @@ export function SessionTerminal({
     setMobileKeyboardVisible(false);
     termRef.current?.reset();
     updateScrollState();
-  }, [clearReconnectTimer, clearScheduledRecovery, clearScheduledTerminalFlush, sessionId, updateScrollState]);
+  }, [clearReconnectTimer, clearScheduledRecovery, clearScheduledTerminalFlush, clearScheduledTerminalHttpControlFlush, sessionId, updateScrollState]);
 
   useEffect(() => {
     setSessionStatusOverride(null);
@@ -1168,6 +1328,66 @@ export function SessionTerminal({
       mounted = false;
     };
   }, [expectsLiveTerminal, reconnectToken, sessionId, shouldStreamLiveTerminal]);
+
+  const handleTerminalServerEvent = useEffectEvent((payload: TerminalServerEvent) => {
+    if (payload.type === "error") {
+      setTransportError(payload.error);
+      setConnectionState("error");
+      return;
+    }
+
+    if (payload.type === "control") {
+      if (payload.event === "exit") {
+        setConnectionState("closed");
+      } else {
+        setTransportError(null);
+        setConnectionState("live");
+      }
+      return;
+    }
+
+    setTransportError(null);
+    setConnectionState("live");
+  });
+
+  const handleTerminalPayloadFrame = useEffectEvent((
+    kind: "restore" | "stream",
+    sequence: number,
+    payload: Uint8Array,
+  ) => {
+    liveOutputStartedRef.current = true;
+    lastTerminalSequenceRef.current = sequence;
+    setTransportError(null);
+    setConnectionState("live");
+    queueTerminalWrite(
+      {
+        kind: kind === "restore" ? "snapshot" : "stream",
+        payload,
+      },
+      kind === "restore",
+    );
+    if (kind === "restore") {
+      snapshotAppliedRef.current = sessionId;
+    }
+  });
+
+  const handleTerminalEventStreamMessage = useEffectEvent((payload: TerminalStreamEventMessage) => {
+    if (payload.type === "stream" || payload.type === "restore") {
+      try {
+        handleTerminalPayloadFrame(
+          payload.type,
+          payload.sequence,
+          decodeTerminalBase64Payload(payload.payload),
+        );
+      } catch {
+        setTransportError("Received an invalid terminal frame");
+        setConnectionState("error");
+      }
+      return;
+    }
+
+    handleTerminalServerEvent(payload);
+  });
 
   const handleTerminalData = useEffectEvent((data: string) => {
     void sendTerminalKeys(data).catch(() => {
@@ -1480,13 +1700,21 @@ export function SessionTerminal({
 
     clearReconnectTimer();
     clearScheduledTerminalFlush();
+    clearScheduledTerminalHttpControlFlush();
     terminalWriteQueueRef.current = [];
     terminalWriteInFlightRef.current = false;
     terminalWriteRestoreFocusRef.current = false;
+    terminalHttpControlQueueRef.current = [];
+    terminalHttpControlInFlightRef.current = false;
+    const eventSource = eventSourceRef.current;
     const socket = socketRef.current;
     const controlSocket = controlSocketRef.current;
+    eventSourceRef.current = null;
     socketRef.current = null;
     controlSocketRef.current = null;
+    if (eventSource) {
+      eventSource.close();
+    }
     if (socket) {
       socket.close();
     }
@@ -1494,7 +1722,7 @@ export function SessionTerminal({
       ignoreControlSocketCloseRef.current = true;
       controlSocket.close();
     }
-  }, [clearReconnectTimer, clearScheduledTerminalFlush, shouldStreamLiveTerminal]);
+  }, [clearReconnectTimer, clearScheduledTerminalFlush, clearScheduledTerminalHttpControlFlush, shouldStreamLiveTerminal]);
 
   useEffect(() => {
     if (
@@ -1558,11 +1786,107 @@ export function SessionTerminal({
       || !socketBaseUrl
       || !termRef.current
       || !shouldStreamLiveTerminal
+      || transportMode !== "eventstream"
+    ) return;
+
+    const term = termRef.current;
+    const streamUrl = buildTerminalSocketUrl(
+      socketBaseUrl,
+      term.cols,
+      term.rows,
+      lastTerminalSequenceRef.current,
+    );
+    const attemptId = connectAttemptRef.current + 1;
+    connectAttemptRef.current = attemptId;
+    clearReconnectTimer();
+    setConnectionState("connecting");
+
+    const source = new EventSource(streamUrl);
+    eventSourceRef.current = source;
+
+    source.onopen = () => {
+      if (connectAttemptRef.current !== attemptId) return;
+      reconnectCountRef.current = 0;
+      pendingResizeSyncRef.current = true;
+      setTransportError(null);
+      setConnectionState("live");
+      const wasReconnect = hasConnectedOnceRef.current;
+      hasConnectedOnceRef.current = true;
+      reconnectNoticeWrittenRef.current = false;
+      if (wasReconnect) {
+        term.writeln("\r\n\x1b[90m[Reconnected]\x1b[0m");
+      }
+      updateScrollState();
+      scheduleRendererRecovery(true);
+    };
+
+    source.onmessage = (event) => {
+      if (connectAttemptRef.current !== attemptId) return;
+      try {
+        handleTerminalEventStreamMessage(JSON.parse(event.data) as TerminalStreamEventMessage);
+      } catch {
+        setTransportError("Received an invalid terminal event");
+        setConnectionState("error");
+      }
+    };
+
+    source.onerror = () => {
+      if (connectAttemptRef.current !== attemptId) return;
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+      source.close();
+      const shouldRetry = LIVE_TERMINAL_STATUSES.has(latestStatusRef.current);
+      if (shouldRetry) {
+        pendingResizeSyncRef.current = true;
+        const currentTerm = termRef.current;
+        if (currentTerm && hasConnectedOnceRef.current && !reconnectNoticeWrittenRef.current) {
+          reconnectNoticeWrittenRef.current = true;
+          currentTerm.writeln("\r\n\x1b[90m[Connection lost. Reconnecting...]\x1b[0m");
+        }
+        setConnectionState("connecting");
+        setSocketBaseUrl(null);
+        scheduleReconnect();
+        return;
+      }
+      setTransportError("Terminal connection failed");
+      setConnectionState("error");
+    };
+
+    return () => {
+      if (eventSourceRef.current === source) {
+        eventSourceRef.current = null;
+      }
+      source.close();
+    };
+  }, [
+    clearReconnectTimer,
+    handleTerminalEventStreamMessage,
+    scheduleReconnect,
+    scheduleRendererRecovery,
+    shouldStreamLiveTerminal,
+    socketBaseUrl,
+    terminalReady,
+    transportMode,
+    updateScrollState,
+  ]);
+
+  useEffect(() => {
+    if (
+      !terminalReady
+      || !socketBaseUrl
+      || !termRef.current
+      || !shouldStreamLiveTerminal
       || transportMode !== "websocket"
     ) return;
 
     const term = termRef.current;
-    const socketUrl = buildTerminalSocketUrl(socketBaseUrl, term.cols, term.rows);
+    const socketUrl = buildTerminalSocketUrl(
+      socketBaseUrl,
+      term.cols,
+      term.rows,
+      lastTerminalSequenceRef.current,
+    );
     const attemptId = connectAttemptRef.current + 1;
     connectAttemptRef.current = attemptId;
     clearReconnectTimer();
@@ -1594,20 +1918,7 @@ export function SessionTerminal({
       if (typeof event.data === "string") {
         try {
           const payload = JSON.parse(event.data) as TerminalServerEvent;
-          if (payload.type === "error") {
-            setTransportError(payload.error);
-            setConnectionState("error");
-          } else if (payload.type === "control") {
-            if (payload.event === "exit") {
-              setConnectionState("closed");
-            } else {
-              setTransportError(null);
-              setConnectionState("live");
-            }
-          } else if (payload.type === "recovery") {
-            setTransportError(null);
-            setConnectionState("live");
-          }
+          handleTerminalServerEvent(payload);
         } catch {
           setTransportError("Received an invalid terminal event");
           setConnectionState("error");
@@ -1618,19 +1929,7 @@ export function SessionTerminal({
       if (event.data instanceof ArrayBuffer) {
         try {
           const frame = parseTerminalBinaryFrame(event.data);
-          liveOutputStartedRef.current = true;
-          setTransportError(null);
-          setConnectionState("live");
-          queueTerminalWrite(
-            {
-              kind: frame.kind === "restore" ? "snapshot" : "stream",
-              payload: frame.payload,
-            },
-            frame.kind === "restore",
-          );
-          if (frame.kind === "restore") {
-            snapshotAppliedRef.current = sessionId;
-          }
+          handleTerminalPayloadFrame(frame.kind, frame.sequence, frame.payload);
         } catch {
           setTransportError("Received an invalid terminal frame");
           setConnectionState("error");
@@ -1687,10 +1986,10 @@ export function SessionTerminal({
   }, [
     clearReconnectTimer,
     reconnectToken,
-    queueTerminalWrite,
+    handleTerminalPayloadFrame,
+    handleTerminalServerEvent,
     scheduleReconnect,
     scheduleRendererRecovery,
-    sessionId,
     shouldStreamLiveTerminal,
     socketBaseUrl,
     terminalReady,
@@ -1778,13 +2077,20 @@ export function SessionTerminal({
   ]);
 
   useEffect(() => {
-    if (!terminalReady || !shouldStreamLiveTerminal || transportMode !== "websocket") {
+    if (!terminalReady || !shouldStreamLiveTerminal || transportMode === "snapshot") {
       return;
     }
 
-    const socket = socketRef.current;
-    if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
-      return;
+    if (transportMode === "eventstream") {
+      const source = eventSourceRef.current;
+      if (source && (source.readyState === EventSource.CONNECTING || source.readyState === EventSource.OPEN)) {
+        return;
+      }
+    } else {
+      const socket = socketRef.current;
+      if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+        return;
+      }
     }
 
     if (connectionState !== "closed" && connectionState !== "error") {
@@ -1802,16 +2108,21 @@ export function SessionTerminal({
     clearReconnectTimer();
     clearScheduledRecovery();
     clearScheduledTerminalFlush();
+    clearScheduledTerminalHttpControlFlush();
     clearVisibilityRecoveryTimers();
     terminalWriteQueueRef.current = [];
     terminalWriteInFlightRef.current = false;
     terminalWriteRestoreFocusRef.current = false;
+    terminalHttpControlQueueRef.current = [];
+    terminalHttpControlInFlightRef.current = false;
+    eventSourceRef.current?.close();
     socketRef.current?.close();
     if (controlSocketRef.current) {
       ignoreControlSocketCloseRef.current = true;
       controlSocketRef.current.close();
     }
-  }, [clearReconnectTimer, clearScheduledRecovery, clearScheduledTerminalFlush, clearVisibilityRecoveryTimers]);
+    eventSourceRef.current = null;
+  }, [clearReconnectTimer, clearScheduledRecovery, clearScheduledTerminalFlush, clearScheduledTerminalHttpControlFlush, clearVisibilityRecoveryTimers]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -2129,7 +2440,7 @@ export function SessionTerminal({
         </div>
       ) : (
         <div className={`${immersiveMobileMode ? "absolute right-3 top-14" : "absolute right-2 top-2 sm:right-3 sm:top-3"} z-10 flex items-center gap-1.5 transition-opacity sm:gap-2 ${
-          connectionState === "live" && transportMode === "websocket" && !showPersistentTopControls
+          connectionState === "live" && transportMode !== "snapshot" && !showPersistentTopControls
             ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
             : "opacity-100"
         }`}>
@@ -2200,7 +2511,7 @@ export function SessionTerminal({
             {expectsLiveTerminal && interactiveTerminal
               ? "Drop files or screenshots to insert uploaded paths into the terminal"
               : expectsLiveTerminal
-                ? "Live terminal input is read-only in snapshot recovery mode"
+                ? "Live terminal input is read-only without operator access"
               : "Drop files or screenshots to attach them before resuming"}
           </span>
         </div>
@@ -2265,7 +2576,7 @@ export function SessionTerminal({
             </button>
           </div>
           <p className="mt-2 text-[11px] text-[#8e847d]">
-            {transportNotice ?? "Live terminal websocket unavailable. Recovery mode keeps the terminal refreshed from server snapshots."}
+            {transportNotice ?? "Live terminal recovery mode keeps the terminal refreshed from server snapshots."}
           </p>
           {sendError ? (
             <p className="mt-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
