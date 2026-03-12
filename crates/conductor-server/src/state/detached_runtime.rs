@@ -865,10 +865,14 @@ impl AppState {
                     let mut decoder = DetachedPtyStreamFrameDecoder::default();
                     let mut buffer = [0_u8; 8192];
                     loop {
-                        let read = stream.read(&mut buffer).await?;
-                        if read == 0 {
-                            break;
-                        }
+                        let read = match stream.read(&mut buffer).await {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(err) => {
+                                tracing::debug!(session_id, error = %err, "Detached PTY stream read error, reconnecting");
+                                break;
+                            }
+                        };
                         for frame in decoder.push(&buffer[..read])? {
                             match frame.kind {
                                 DetachedPtyStreamFrameKind::Data => {
