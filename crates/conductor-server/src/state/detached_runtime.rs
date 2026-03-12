@@ -17,6 +17,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::{
     AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter, SeekFrom,
 };
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -275,6 +276,7 @@ impl DetachedPtyStreamFrameDecoder {
     }
 }
 
+#[cfg(unix)]
 pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     let spec = serde_json::from_slice::<DetachedPtyHostSpec>(&tokio::fs::read(&spec_path).await?)
         .with_context(|| {
@@ -455,6 +457,14 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+pub async fn run_detached_pty_host(_spec_path: PathBuf) -> Result<()> {
+    Err(anyhow!(
+        "Detached PTY host is only supported on Unix platforms"
+    ))
+}
+
+#[cfg(unix)]
 impl AppState {
     pub(crate) async fn spawn_detached_runtime_or_legacy(
         self: &Arc<Self>,
@@ -1027,6 +1037,50 @@ impl AppState {
     }
 }
 
+#[cfg(not(unix))]
+impl AppState {
+    pub(crate) async fn spawn_detached_runtime_or_legacy(
+        self: &Arc<Self>,
+        executor: Arc<dyn Executor>,
+        _session_id: &str,
+        options: SpawnOptions,
+    ) -> Result<RuntimeLaunch> {
+        tracing::warn!(
+            "Detached PTY host is unavailable on this platform; falling back to in-process direct runtime"
+        );
+        self.spawn_legacy_direct_runtime(executor, options).await
+    }
+
+    pub(crate) async fn restore_detached_runtime(
+        self: &Arc<Self>,
+        _session_id: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    pub(crate) async fn kill_detached_runtime(&self, _session_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn spawn_legacy_direct_runtime(
+        self: &Arc<Self>,
+        executor: Arc<dyn Executor>,
+        mut options: SpawnOptions,
+    ) -> Result<RuntimeLaunch> {
+        options.interactive = executor.supports_direct_terminal_ui();
+        options.structured_output = false;
+        let handle = executor.spawn(options).await?;
+        Ok(RuntimeLaunch {
+            handle,
+            metadata: HashMap::from([(
+                super::tmux_runtime::RUNTIME_MODE_METADATA_KEY.to_string(),
+                DIRECT_RUNTIME_MODE.to_string(),
+            )]),
+        })
+    }
+}
+
+#[cfg(unix)]
 async fn handle_detached_host_connection(
     stream: UnixStream,
     state: Arc<DetachedHostState>,
@@ -1094,6 +1148,7 @@ async fn handle_detached_host_connection(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn handle_detached_stream_connection(
     stream: UnixStream,
     state: Arc<DetachedHostState>,
@@ -1169,6 +1224,7 @@ async fn handle_detached_stream_connection(
     result
 }
 
+#[cfg(unix)]
 async fn forward_detached_host_stream(
     mut stream: UnixStream,
     log_path: PathBuf,
@@ -1230,6 +1286,7 @@ async fn forward_detached_host_stream(
     }
 }
 
+#[cfg(unix)]
 async fn handle_detached_host_stream_message(
     stream: &mut UnixStream,
     stream_floor: &mut u64,
@@ -1300,6 +1357,7 @@ async fn handle_detached_host_stream_message(
     }
 }
 
+#[cfg(unix)]
 async fn replay_detached_log_range(
     stream: &mut UnixStream,
     log_path: &Path,
@@ -1340,6 +1398,7 @@ async fn replay_detached_log_range(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn flush_detached_stream_batch(
     stream: &mut UnixStream,
     pending_offset: &mut Option<u64>,
@@ -1358,6 +1417,7 @@ async fn flush_detached_stream_batch(
     Ok(())
 }
 
+#[cfg(unix)]
 fn clone_detached_host_stream_sender(
     state: &DetachedHostState,
 ) -> Option<mpsc::Sender<DetachedPtyHostStreamMessage>> {
@@ -1369,6 +1429,7 @@ fn clone_detached_host_stream_sender(
         .map(|slot| slot.tx.clone())
 }
 
+#[cfg(unix)]
 async fn run_detached_capture_writer(
     log_path: PathBuf,
     mut rx: mpsc::Receiver<DetachedPtyHostCaptureMessage>,
@@ -1430,6 +1491,7 @@ async fn run_detached_capture_writer(
     .await;
 }
 
+#[cfg(unix)]
 async fn flush_detached_capture(
     capture_tx: &mpsc::Sender<DetachedPtyHostCaptureMessage>,
 ) -> Result<()> {
@@ -1444,6 +1506,7 @@ async fn flush_detached_capture(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn detached_log_len(log_path: &Path) -> Result<u64> {
     match tokio::fs::metadata(log_path).await {
         Ok(metadata) => Ok(metadata.len()),
@@ -1452,6 +1515,7 @@ async fn detached_log_len(log_path: &Path) -> Result<u64> {
     }
 }
 
+#[cfg(unix)]
 async fn connect_detached_runtime_stream(
     metadata: &DetachedRuntimeMetadata,
     offset: u64,
@@ -1485,6 +1549,7 @@ async fn connect_detached_runtime_stream(
     }
 }
 
+#[cfg(unix)]
 async fn flush_detached_partial_line(
     output_tx: &mpsc::Sender<ExecutorOutput>,
     partial: &mut Vec<u8>,
@@ -1505,6 +1570,7 @@ async fn flush_detached_partial_line(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn emit_detached_runtime_exit(
     state: &AppState,
     session_id: &str,
@@ -1525,6 +1591,7 @@ async fn emit_detached_runtime_exit(
     let _ = output_tx.send(event).await;
 }
 
+#[cfg(unix)]
 async fn emit_detached_runtime_error(
     state: &AppState,
     session_id: &str,
@@ -1543,6 +1610,7 @@ async fn emit_detached_runtime_error(
         .await;
 }
 
+#[cfg(unix)]
 async fn write_detached_stream_frame<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     kind: DetachedPtyStreamFrameKind,
@@ -1566,6 +1634,7 @@ async fn write_detached_stream_frame<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+#[cfg(unix)]
 fn decode_detached_stream_frame_kind(value: u8) -> Result<DetachedPtyStreamFrameKind> {
     match value {
         1 => Ok(DetachedPtyStreamFrameKind::Data),
@@ -1577,6 +1646,7 @@ fn decode_detached_stream_frame_kind(value: u8) -> Result<DetachedPtyStreamFrame
     }
 }
 
+#[cfg(unix)]
 fn decode_detached_exit_payload(payload: &[u8]) -> Result<i32> {
     if payload.len() != std::mem::size_of::<i32>() {
         return Err(anyhow!(
@@ -1587,6 +1657,7 @@ fn decode_detached_exit_payload(payload: &[u8]) -> Result<i32> {
     Ok(i32::from_be_bytes(payload.try_into().unwrap()))
 }
 
+#[cfg(unix)]
 async fn write_detached_host_input(
     writer: &Arc<StdMutex<Box<dyn std::io::Write + Send>>>,
     value: &str,
@@ -1607,6 +1678,7 @@ async fn write_detached_host_input(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn resize_detached_host(
     master: &Arc<StdMutex<Option<Box<dyn MasterPty + Send>>>>,
     cols: u16,
@@ -1630,6 +1702,7 @@ async fn resize_detached_host(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn kill_detached_host_child(
     child: &Arc<StdMutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 ) -> Result<()> {
@@ -1656,6 +1729,7 @@ async fn kill_detached_host_child(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn wait_for_detached_child(
     child: Arc<StdMutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 ) -> Result<i32> {
@@ -1676,6 +1750,7 @@ async fn wait_for_detached_child(
     }
 }
 
+#[cfg(unix)]
 fn detached_runtime_metadata(session: &SessionRecord) -> Option<DetachedRuntimeMetadata> {
     Some(DetachedRuntimeMetadata {
         host_pid: session.metadata.get("detachedPid")?.parse::<u32>().ok()?,
@@ -1708,6 +1783,7 @@ fn detached_runtime_metadata(session: &SessionRecord) -> Option<DetachedRuntimeM
     })
 }
 
+#[cfg(unix)]
 async fn ping_detached_runtime(
     metadata: &DetachedRuntimeMetadata,
 ) -> Result<Option<DetachedPtyHostResponse>> {
@@ -1719,6 +1795,7 @@ async fn ping_detached_runtime(
     }
 }
 
+#[cfg(unix)]
 fn detached_runtime_unreachable(error: &anyhow::Error) -> bool {
     if error.chain().any(|cause| {
         cause
@@ -1746,6 +1823,7 @@ fn detached_runtime_unreachable(error: &anyhow::Error) -> bool {
         || message.contains("No such file or directory")
 }
 
+#[cfg(unix)]
 async fn send_detached_runtime_request(
     metadata: &DetachedRuntimeMetadata,
     command: DetachedPtyHostCommand,
@@ -1775,9 +1853,10 @@ async fn send_detached_runtime_request(
 }
 
 fn detached_runtime_disabled() -> bool {
-    std::env::var("CONDUCTOR_DISABLE_DETACHED_PTY_HOST")
-        .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(cfg!(test))
+    !cfg!(unix)
+        || std::env::var("CONDUCTOR_DISABLE_DETACHED_PTY_HOST")
+            .map(|value| value.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(cfg!(test))
 }
 
 fn resolve_detached_runtime_launcher() -> Option<PathBuf> {
@@ -1822,8 +1901,13 @@ fn configure_detached_process_group(command: &mut tokio::process::Command) {
             });
         }
     }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
 }
 
+#[cfg(unix)]
 async fn wait_for_detached_ready(path: &Path, timeout: Duration) -> Result<DetachedPtyHostReady> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -1842,6 +1926,7 @@ async fn wait_for_detached_ready(path: &Path, timeout: Duration) -> Result<Detac
     }
 }
 
+#[cfg(unix)]
 async fn read_detached_log_chunk(log_path: &Path, offset: u64) -> Result<Option<(u64, Vec<u8>)>> {
     let mut file = match OpenOptions::new().read(true).open(log_path).await {
         Ok(file) => file,
@@ -1857,6 +1942,7 @@ async fn read_detached_log_chunk(log_path: &Path, offset: u64) -> Result<Option<
     Ok(Some((offset + chunk.len() as u64, chunk)))
 }
 
+#[cfg(unix)]
 fn watch_detached_log(
     log_path: &Path,
 ) -> Result<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
@@ -1884,6 +1970,7 @@ fn watch_detached_log(
     Ok((watcher, rx))
 }
 
+#[cfg(unix)]
 fn detached_log_event_matches(log_path: &Path, event: &Event) -> bool {
     if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
         return false;
@@ -1897,6 +1984,7 @@ fn detached_log_event_matches(log_path: &Path, event: &Event) -> bool {
     })
 }
 
+#[cfg(unix)]
 fn split_detached_log_lines(partial: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
     partial.extend_from_slice(chunk);
     let mut lines = Vec::new();
@@ -1913,6 +2001,7 @@ fn split_detached_log_lines(partial: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> 
     lines
 }
 
+#[cfg(unix)]
 async fn read_detached_exit_code(path: &Path) -> Result<Option<i32>> {
     let content = match tokio::fs::read_to_string(path).await {
         Ok(content) => content,
