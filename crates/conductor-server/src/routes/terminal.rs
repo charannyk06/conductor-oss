@@ -21,7 +21,9 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
-use crate::routes::config::{access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole};
+use crate::routes::config::{
+    access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole,
+};
 use crate::state::{
     capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
     SessionRecord, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,

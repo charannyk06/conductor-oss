@@ -254,7 +254,9 @@ mod tests {
 
         let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
-        registry.attach_runtime(&handle, input_tx, None, kill_tx).await;
+        registry
+            .attach_runtime(&handle, input_tx, None, kill_tx)
+            .await;
 
         assert_eq!(
             registry.attached_session_ids().await,

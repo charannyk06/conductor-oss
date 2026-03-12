@@ -1,7 +1,7 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use conductor_executors::process::PtyDimensions;
 use conductor_executors::executor::ExecutorInput;
+use conductor_executors::process::PtyDimensions;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
