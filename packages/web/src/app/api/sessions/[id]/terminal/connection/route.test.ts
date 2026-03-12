@@ -266,12 +266,12 @@ test("GET uses a direct websocket when the backend URL is already browser-reacha
   }
 });
 
-test("GET falls back to snapshot mode when no browser-reachable websocket endpoint is available", async () => {
+test("GET uses a live dashboard-proxied stream when no browser-reachable websocket endpoint is available", async () => {
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
 
   global.fetch = (async () => {
-    throw new Error("terminal token lookup should not run for snapshot fallback");
+    throw new Error("terminal token lookup should not run for dashboard-proxied streaming");
   }) as typeof fetch;
 
   try {
@@ -286,22 +286,22 @@ test("GET falls back to snapshot mode when no browser-reachable websocket endpoi
     );
 
     assert.equal(response.status, 200);
-    assert.equal(response.headers.get("x-conductor-terminal-transport"), "snapshot");
+    assert.equal(response.headers.get("x-conductor-terminal-transport"), "eventstream");
     assert.equal(response.headers.get("x-conductor-terminal-interactive"), "true");
-    assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "unavailable");
+    assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "dashboard_proxy");
     assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
     const payload = await response.json() as TerminalConnectionPayload;
 
-    assert.equal(payload.transport, "snapshot");
-    assert.equal(payload.wsUrl, null);
+    assert.equal(payload.transport, "eventstream");
+    assert.equal(payload.wsUrl, "/api/sessions/session-1/terminal/stream");
     assert.equal(payload.interactive, true);
     assert.equal(payload.requiresToken, false);
     assert.equal(payload.tokenExpiresInSeconds, null);
-    assert.match(payload.fallbackReason ?? "", /browser-connectable terminal websocket/i);
+    assert.match(payload.fallbackReason ?? "", /proxied through the dashboard/i);
     assert.equal(typeof payload.pollIntervalMs, "number");
     assert.deepEqual(payload.stream, {
-      transport: "snapshot",
-      wsUrl: null,
+      transport: "eventstream",
+      wsUrl: "/api/sessions/session-1/terminal/stream",
       pollIntervalMs: payload.pollIntervalMs,
     });
     assert.deepEqual(payload.control, {
@@ -320,7 +320,7 @@ test("GET falls back to snapshot mode when no browser-reachable websocket endpoi
   }
 });
 
-test("GET falls back to snapshot mode for viewers without operator access", async () => {
+test("GET keeps a live read-only stream for viewers without operator access", async () => {
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
   process.env.CONDUCTOR_ACCESS_DEFAULT_ROLE = "viewer";
@@ -339,7 +339,7 @@ test("GET falls back to snapshot mode for viewers without operator access", asyn
   });
 
   global.fetch = (async () => {
-    throw new Error("terminal token lookup should not run for viewer snapshot fallback");
+    throw new Error("terminal token lookup should not run for viewer live stream fallback");
   }) as typeof fetch;
 
   try {
@@ -354,20 +354,21 @@ test("GET falls back to snapshot mode for viewers without operator access", asyn
     );
 
     assert.equal(response.status, 200);
-    assert.equal(response.headers.get("x-conductor-terminal-transport"), "snapshot");
+    assert.equal(response.headers.get("x-conductor-terminal-transport"), "eventstream");
     assert.equal(response.headers.get("x-conductor-terminal-interactive"), "false");
     assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "auth_limited");
     assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
     const payload = await response.json() as TerminalConnectionPayload;
 
-    assert.equal(payload.transport, "snapshot");
-    assert.equal(payload.wsUrl, null);
+    assert.equal(payload.transport, "eventstream");
+    assert.equal(payload.wsUrl, "/api/sessions/session-1/terminal/stream");
     assert.equal(payload.interactive, false);
     assert.equal(payload.requiresToken, false);
     assert.equal(payload.tokenExpiresInSeconds, null);
-    assert.match(payload.fallbackReason ?? "", /operator access/i);
+    assert.match(payload.fallbackReason ?? "", /read-only mode/i);
     assert.equal(typeof payload.pollIntervalMs, "number");
-    assert.equal(payload.stream.transport, "snapshot");
+    assert.equal(payload.stream.transport, "eventstream");
+    assert.equal(payload.stream.wsUrl, "/api/sessions/session-1/terminal/stream");
     assert.equal(payload.control.transport, "http");
     assert.equal(payload.control.wsUrl, null);
     assert.equal(payload.control.interactive, false);

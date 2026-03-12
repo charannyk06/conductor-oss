@@ -1,20 +1,24 @@
 mod app_update;
 mod board_collaboration;
+mod detached_runtime;
 mod helpers;
 mod runtime_status;
 mod session_manager;
 mod session_store;
 mod spawn_queue;
+mod terminal_hosts;
 mod tmux_runtime;
 pub mod types;
 mod workspace;
 
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
+pub use detached_runtime::run_detached_pty_host;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
+pub(crate) use session_manager::OutputConsumerConfig;
 pub(crate) use tmux_runtime::{
     capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, TMUX_LOG_PATH_METADATA_KEY,
 };
@@ -33,11 +37,15 @@ use conductor_core::support::{startup_config_sync, sync_workspace_support_files}
 use conductor_core::types::AgentKind;
 use conductor_db::Database;
 use conductor_executors::executor::{Executor, ExecutorInput};
+use conductor_executors::process::PtyDimensions;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use terminal_hosts::TerminalHostRegistry;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 pub(crate) struct DevServerRecord {
@@ -72,6 +80,13 @@ struct FeedPayloadCacheEntry {
 }
 
 const RUNTIME_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
+const TERMINAL_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
+const TERMINAL_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+const TERMINAL_CAPTURE_FORCE_FLUSH_BYTES: usize = 16 * 1024;
+const TERMINAL_RESTORE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
+const TERMINAL_RESTORE_FORCE_SEQUENCE_DELTA: u64 = 24;
+const TERMINAL_HOST_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
+const TERMINAL_HOST_IDLE_EVICTION_TTL: Duration = Duration::from_secs(45);
 
 /// Shared application state for the HTTP server.
 pub struct AppState {
@@ -81,7 +96,7 @@ pub struct AppState {
     pub db: Database,
     pub executors: RwLock<HashMap<AgentKind, Arc<dyn Executor>>>,
     pub sessions: RwLock<HashMap<String, SessionRecord>>,
-    pub live_sessions: RwLock<HashMap<String, Arc<LiveSessionHandle>>>,
+    terminal_hosts: TerminalHostRegistry,
     pub event_snapshots: broadcast::Sender<String>,
     /// Sends (session_id, delta_line) for incremental output updates.
     pub output_updates: broadcast::Sender<(String, String)>,
@@ -111,7 +126,7 @@ impl AppState {
             db,
             executors: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
-            live_sessions: RwLock::new(HashMap::new()),
+            terminal_hosts: TerminalHostRegistry::default(),
             event_snapshots,
             output_updates,
             app_update: Mutex::new(app_update_state),
@@ -358,13 +373,62 @@ impl AppState {
             .insert(session_id.to_string(), FeedPayloadCacheEntry { payload });
     }
 
-    pub(crate) fn new_terminal_stream(&self) -> broadcast::Sender<TerminalStreamEvent> {
-        let (sender, _) = broadcast::channel(2048);
-        sender
+    pub(crate) fn start_terminal_host_watchdog(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(TERMINAL_HOST_MAINTENANCE_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = state.terminal_hosts.wait_for_flush_request() => {}
+                }
+                state.maintain_terminal_hosts().await;
+            }
+        });
+    }
+
+    async fn maintain_terminal_hosts(&self) {
+        for (session_id, handle) in self.terminal_hosts.dirty_capture_hosts().await {
+            self.flush_terminal_capture_handle(&session_id, &handle)
+                .await;
+        }
+
+        for (session_id, handle) in self.terminal_hosts.dirty_hosts().await {
+            self.flush_terminal_restore_snapshot_handle(&session_id, &handle)
+                .await;
+        }
+
+        for (session_id, handle) in self
+            .terminal_hosts
+            .idle_eviction_candidates(TERMINAL_HOST_IDLE_EVICTION_TTL)
+            .await
+        {
+            self.flush_terminal_restore_snapshot_handle(&session_id, &handle)
+                .await;
+            if self
+                .terminal_hosts
+                .remove_if_same(&session_id, &handle)
+                .await
+            {
+                tracing::debug!(session_id, "Evicted idle terminal host");
+            }
+        }
+    }
+
+    pub(crate) async fn has_terminal_host(&self, session_id: &str) -> bool {
+        self.terminal_hosts.contains(session_id).await
+    }
+
+    pub(crate) async fn attached_terminal_session_ids(&self) -> Vec<String> {
+        self.terminal_hosts.attached_session_ids().await
+    }
+
+    pub async fn take_terminal_host(&self, session_id: &str) -> Option<Arc<LiveSessionHandle>> {
+        self.terminal_hosts.remove(session_id).await
     }
 
     pub(crate) async fn ensure_terminal_host(&self, session_id: &str) -> Arc<LiveSessionHandle> {
-        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
+        if let Some(handle) = self.terminal_hosts.get(session_id).await {
             return handle;
         }
 
@@ -380,62 +444,36 @@ impl AppState {
             }
         };
 
-        let mut live_sessions = self.live_sessions.write().await;
-        if let Some(handle) = live_sessions.get(session_id).cloned() {
-            return handle;
-        }
-
-        let mut terminal_store = types::TerminalStateStore::new();
-        if let Some(snapshot) = persisted_snapshot.as_ref() {
-            terminal_store.hydrate_from_snapshot(snapshot);
-        }
-        let handle = Arc::new(LiveSessionHandle {
-            input_tx: RwLock::new(None),
-            terminal_tx: self.new_terminal_stream(),
-            terminal_store: Arc::new(std::sync::Mutex::new(terminal_store)),
-            kill_tx: Mutex::new(None),
-        });
-        live_sessions.insert(session_id.to_string(), handle.clone());
-        handle
+        self.terminal_hosts
+            .ensure_host(session_id, persisted_snapshot.as_ref())
+            .await
     }
 
     pub(crate) async fn attach_terminal_runtime(
         &self,
         session_id: &str,
         input_tx: mpsc::Sender<ExecutorInput>,
+        resize_tx: Option<mpsc::Sender<PtyDimensions>>,
         kill_tx: oneshot::Sender<()>,
     ) -> Arc<LiveSessionHandle> {
         let handle = self.ensure_terminal_host(session_id).await;
-        *handle.input_tx.write().await = Some(input_tx);
-        *handle.kill_tx.lock().await = Some(kill_tx);
+        self.terminal_hosts
+            .attach_runtime(&handle, input_tx, resize_tx, kill_tx)
+            .await;
         handle
     }
 
     pub(crate) async fn detach_terminal_runtime(&self, session_id: &str) {
-        let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() else {
+        self.flush_terminal_capture(session_id).await;
+        self.flush_terminal_restore_snapshot(session_id).await;
+        let Some(handle) = self.terminal_hosts.peek(session_id).await else {
             return;
         };
-        *handle.input_tx.write().await = None;
-        let _ = handle.kill_tx.lock().await.take();
-    }
-
-    pub(crate) async fn subscribe_terminal_stream(
-        &self,
-        session_id: &str,
-    ) -> Option<broadcast::Receiver<TerminalStreamEvent>> {
-        self.live_sessions
-            .read()
-            .await
-            .get(session_id)
-            .map(|handle| handle.terminal_tx.subscribe())
+        self.terminal_hosts.detach_runtime(&handle).await;
     }
 
     pub(crate) async fn terminal_runtime_attached(&self, session_id: &str) -> bool {
-        let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() else {
-            return false;
-        };
-        let attached = handle.input_tx.read().await.is_some();
-        attached
+        self.terminal_hosts.runtime_attached(session_id).await
     }
 
     pub(crate) async fn emit_terminal_stream_event(
@@ -443,9 +481,193 @@ impl AppState {
         session_id: &str,
         event: TerminalStreamEvent,
     ) {
-        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
+        if matches!(
+            &event,
+            TerminalStreamEvent::Exit(_) | TerminalStreamEvent::Error(_)
+        ) {
+            self.flush_terminal_capture(session_id).await;
+            self.flush_terminal_restore_snapshot(session_id).await;
+        }
+        if let Some(handle) = self.terminal_hosts.get(session_id).await {
             let _ = handle.terminal_tx.send(event);
         }
+    }
+
+    fn should_flush_terminal_capture(capture: &types::TerminalCaptureState) -> bool {
+        capture.pending_bytes >= TERMINAL_CAPTURE_FORCE_FLUSH_BYTES
+            || capture
+                .last_flushed_at
+                .map(|flushed_at| flushed_at.elapsed() >= TERMINAL_CAPTURE_FLUSH_INTERVAL)
+                .unwrap_or(true)
+    }
+
+    async fn append_terminal_capture_buffered(
+        &self,
+        session_id: &str,
+        handle: &Arc<LiveSessionHandle>,
+        bytes: &[u8],
+    ) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.session_terminal_capture_path(session_id);
+        let mut capture = handle.terminal_capture.lock().await;
+        if capture.writer.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .await?;
+            capture.writer = Some(tokio::io::BufWriter::with_capacity(
+                TERMINAL_CAPTURE_BUFFER_CAPACITY,
+                file,
+            ));
+        }
+
+        let write_result = capture
+            .writer
+            .as_mut()
+            .expect("terminal capture writer should exist after lazy open")
+            .write_all(bytes)
+            .await;
+        if let Err(err) = write_result {
+            capture.writer = None;
+            return Err(err.into());
+        }
+
+        capture.dirty = true;
+        capture.pending_bytes = capture.pending_bytes.saturating_add(bytes.len());
+        let should_request_flush = Self::should_flush_terminal_capture(&capture);
+        drop(capture);
+        if should_request_flush {
+            self.terminal_hosts.request_flush();
+        }
+        Ok(())
+    }
+
+    fn should_persist_terminal_restore(
+        tracking: &types::TerminalPersistenceState,
+        update: &types::TerminalStateUpdate,
+    ) -> bool {
+        tracking.last_persisted_sequence == 0
+            || update.sequence <= 1
+            || update
+                .sequence
+                .saturating_sub(tracking.last_persisted_sequence)
+                >= TERMINAL_RESTORE_FORCE_SEQUENCE_DELTA
+            || tracking
+                .last_persisted_at
+                .map(|persisted_at| persisted_at.elapsed() >= TERMINAL_RESTORE_PERSIST_INTERVAL)
+                .unwrap_or(true)
+    }
+
+    async fn record_terminal_restore_persisted(handle: &Arc<LiveSessionHandle>, sequence: u64) {
+        let mut tracking = handle.terminal_persistence.lock().await;
+        tracking.last_persisted_sequence = sequence;
+        tracking.last_persisted_at = Some(Instant::now());
+        tracking.dirty = false;
+    }
+
+    async fn maybe_checkpoint_terminal_restore_snapshot(
+        &self,
+        handle: &Arc<LiveSessionHandle>,
+        update: &types::TerminalStateUpdate,
+    ) {
+        let should_request_flush = {
+            let mut tracking = handle.terminal_persistence.lock().await;
+            tracking.dirty = true;
+            tracking.last_touched_at = Instant::now();
+            Self::should_persist_terminal_restore(&tracking, update)
+        };
+
+        if should_request_flush {
+            self.terminal_hosts.request_flush();
+        }
+    }
+
+    async fn flush_terminal_restore_snapshot_handle(
+        &self,
+        session_id: &str,
+        handle: &Arc<LiveSessionHandle>,
+    ) {
+        let snapshot = match handle.terminal_store.lock() {
+            Ok(store) => store.restore_snapshot(),
+            Err(_) => return,
+        };
+
+        let should_flush = {
+            let tracking = handle.terminal_persistence.lock().await;
+            tracking.dirty || tracking.last_persisted_sequence != snapshot.sequence
+        };
+        if !should_flush {
+            return;
+        }
+
+        if let Err(err) = self
+            .persist_terminal_restore_snapshot(session_id, &snapshot)
+            .await
+        {
+            tracing::debug!(
+                session_id,
+                error = %err,
+                "Failed to flush terminal restore snapshot"
+            );
+            let mut tracking = handle.terminal_persistence.lock().await;
+            tracking.dirty = true;
+            return;
+        }
+
+        Self::record_terminal_restore_persisted(handle, snapshot.sequence).await;
+    }
+
+    async fn flush_terminal_capture_handle(
+        &self,
+        session_id: &str,
+        handle: &Arc<LiveSessionHandle>,
+    ) {
+        let mut capture = handle.terminal_capture.lock().await;
+        if !capture.dirty {
+            return;
+        }
+
+        let Some(writer) = capture.writer.as_mut() else {
+            capture.dirty = false;
+            capture.pending_bytes = 0;
+            capture.last_flushed_at = Some(Instant::now());
+            return;
+        };
+
+        if let Err(err) = writer.flush().await {
+            tracing::debug!(
+                session_id,
+                error = %err,
+                "Failed to flush terminal capture bytes"
+            );
+            capture.writer = None;
+            capture.dirty = true;
+            return;
+        }
+
+        capture.dirty = false;
+        capture.pending_bytes = 0;
+        capture.last_flushed_at = Some(Instant::now());
+    }
+
+    pub(crate) async fn flush_terminal_capture(&self, session_id: &str) {
+        let Some(handle) = self.terminal_hosts.peek(session_id).await else {
+            return;
+        };
+        self.flush_terminal_capture_handle(session_id, &handle)
+            .await;
+    }
+
+    pub(crate) async fn flush_terminal_restore_snapshot(&self, session_id: &str) {
+        let Some(handle) = self.terminal_hosts.peek(session_id).await else {
+            return;
+        };
+        self.flush_terminal_restore_snapshot_handle(session_id, &handle)
+            .await;
     }
 
     async fn apply_terminal_output(
@@ -457,31 +679,25 @@ impl AppState {
             return None;
         }
 
-        if let Err(err) = self.append_terminal_capture(session_id, bytes).await {
+        let handle = self.ensure_terminal_host(session_id).await;
+        if let Err(err) = self
+            .append_terminal_capture_buffered(session_id, &handle, bytes)
+            .await
+        {
             tracing::debug!(
                 session_id,
                 error = %err,
                 "Failed to persist terminal capture bytes"
             );
         }
-
-        let handle = self.ensure_terminal_host(session_id).await;
         let update = if let Ok(mut store) = handle.terminal_store.lock() {
             store.apply_output(bytes)
         } else {
             None
         };
         if let Some(update) = update.as_ref() {
-            if let Err(err) = self
-                .persist_terminal_restore_snapshot(session_id, &update.restore_snapshot)
-                .await
-            {
-                tracing::debug!(
-                    session_id,
-                    error = %err,
-                    "Failed to persist terminal restore snapshot"
-                );
-            }
+            self.maybe_checkpoint_terminal_restore_snapshot(&handle, update)
+                .await;
         }
         update.map(|update| (handle, update))
     }
@@ -505,7 +721,7 @@ impl AppState {
     }
 
     pub(crate) async fn resize_terminal_store(&self, session_id: &str, cols: u16, rows: u16) {
-        if let Some(handle) = self.live_sessions.read().await.get(session_id).cloned() {
+        if let Some(handle) = self.terminal_hosts.get(session_id).await {
             let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
                 Some(store.resize(cols, rows))
             } else {
@@ -521,6 +737,8 @@ impl AppState {
                         error = %err,
                         "Failed to persist resized terminal restore snapshot"
                     );
+                } else {
+                    Self::record_terminal_restore_persisted(&handle, snapshot.sequence).await;
                 }
             }
         }
@@ -530,22 +748,16 @@ impl AppState {
         &self,
         session_id: &str,
     ) -> Option<TerminalRestoreSnapshot> {
-        if let Some(snapshot) = self
-            .live_sessions
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .and_then(|handle| {
-                handle
-                    .terminal_store
-                    .lock()
-                    .ok()
-                    .map(|store| store.restore_snapshot())
-            })
-            .filter(|snapshot| !snapshot.is_empty())
-        {
-            return Some(snapshot);
+        if let Some(handle) = self.terminal_hosts.get(session_id).await {
+            if let Some(snapshot) = handle
+                .terminal_store
+                .lock()
+                .ok()
+                .map(|store| store.restore_snapshot())
+                .filter(|snapshot| !snapshot.is_empty())
+            {
+                return Some(snapshot);
+            }
         }
 
         match self.load_terminal_restore_snapshot(session_id).await {

@@ -4,6 +4,8 @@ use conductor_core::config::ProjectConfig;
 use conductor_executors::executor::{
     Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
 };
+use conductor_executors::process::PtyDimensions;
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -13,10 +15,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{mpsc, oneshot};
 
+use super::detached_runtime::DIRECT_RUNTIME_MODE;
 use super::helpers::sanitize_terminal_text;
-use crate::state::{AppState, SessionRecord, SessionStatus};
+use crate::state::{AppState, OutputConsumerConfig, SessionRecord, SessionStatus};
 
-pub(crate) const DIRECT_RUNTIME_MODE: &str = "direct";
 pub(crate) const TMUX_RUNTIME_MODE: &str = "tmux";
 pub(crate) const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
 pub(crate) const TMUX_SESSION_METADATA_KEY: &str = "tmuxSession";
@@ -28,13 +30,15 @@ pub(crate) const TMUX_LAUNCH_COMMAND_METADATA_KEY: &str = "tmuxLaunchCommand";
 const TMUX_OBSERVED_ACTIVITY_METADATA_KEY: &str = "tmuxObservedActivity";
 const TMUX_OBSERVED_ACTIVITY_STREAK_METADATA_KEY: &str = "tmuxObservedActivityStreak";
 
-const TMUX_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const TMUX_POLL_INTERVAL: Duration = Duration::from_millis(32);
+const TMUX_LOG_WATCH_FALLBACK_INTERVAL: Duration = Duration::from_millis(250);
 const TMUX_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const TMUX_ACTIVITY_WATCH_INTERVAL: Duration = Duration::from_millis(750);
 const TMUX_ACTIVITY_OUTPUT_GRACE_PERIOD: Duration = Duration::from_millis(2500);
 const TMUX_DEFAULT_COLUMNS: &str = "120";
 const TMUX_DEFAULT_ROWS: &str = "32";
 const TMUX_HISTORY_LIMIT: &str = "50000";
+const TMUX_RAW_BYTES_PER_COMMAND: usize = 256;
 static TMUX_AVAILABILITY: OnceLock<Result<(), String>> = OnceLock::new();
 
 fn new_tmux_command() -> tokio::process::Command {
@@ -257,17 +261,9 @@ impl AppState {
                 options.structured_output = false;
                 self.spawn_tmux_runtime(executor, session_id, options).await
             }
-            _ => {
-                options.interactive = false;
-                let handle = executor.spawn(options).await?;
-                Ok(RuntimeLaunch {
-                    handle,
-                    metadata: HashMap::from([(
-                        RUNTIME_MODE_METADATA_KEY.to_string(),
-                        DIRECT_RUNTIME_MODE.to_string(),
-                    )]),
-                })
-            }
+            _ => self
+                .spawn_detached_runtime_or_legacy(executor, session_id, options)
+                .await,
         }
     }
 
@@ -281,7 +277,7 @@ impl AppState {
                     session
                         .metadata
                         .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == TMUX_RUNTIME_MODE)
+                        .map(|value| value == TMUX_RUNTIME_MODE || value == DIRECT_RUNTIME_MODE)
                         .unwrap_or_else(|| {
                             session
                                 .metadata
@@ -295,8 +291,20 @@ impl AppState {
         };
 
         for session_id in session_ids {
-            if let Err(err) = self.restore_tmux_session(&session_id).await {
-                tracing::warn!(session_id, error = %err, "Failed to restore tmux runtime session");
+            let result = match self.get_session(&session_id).await {
+                Some(session)
+                    if session
+                        .metadata
+                        .get(RUNTIME_MODE_METADATA_KEY)
+                        .map(|value| value == DIRECT_RUNTIME_MODE)
+                        .unwrap_or(false) =>
+                {
+                    self.restore_detached_runtime(&session_id).await
+                }
+                _ => self.restore_tmux_session(&session_id).await,
+            };
+            if let Err(err) = result {
+                tracing::warn!(session_id, error = %err, "Failed to restore runtime session");
             }
         }
     }
@@ -308,13 +316,7 @@ impl AppState {
             loop {
                 interval.tick().await;
 
-                let session_ids = state
-                    .live_sessions
-                    .read()
-                    .await
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let session_ids = state.attached_terminal_session_ids().await;
 
                 for session_id in session_ids {
                     if let Err(err) = state.reconcile_tmux_session_activity(&session_id).await {
@@ -358,7 +360,16 @@ impl AppState {
             });
 
         if !is_tmux_runtime {
-            return Ok(false);
+            let is_direct_runtime = session
+                .metadata
+                .get(RUNTIME_MODE_METADATA_KEY)
+                .map(|value| value == DIRECT_RUNTIME_MODE)
+                .unwrap_or(false);
+            if !is_direct_runtime {
+                return Ok(false);
+            }
+            self.restore_detached_runtime(session_id).await?;
+            return Ok(self.terminal_runtime_attached(session_id).await);
         }
 
         self.restore_tmux_session(session_id).await?;
@@ -638,18 +649,22 @@ impl AppState {
                     pid,
                 })
                 .await?;
-            let (_pid, _kind, output_rx, input_tx, kill_tx) = handle.into_parts();
+            let (_pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
+                handle.into_parts();
 
-            self.attach_terminal_runtime(session_id, input_tx, kill_tx)
+            self.attach_terminal_runtime(session_id, input_tx, resize_tx, kill_tx)
                 .await;
 
             self.start_output_consumer(
                 session_id.to_string(),
                 executor,
                 output_rx,
-                false,
-                true,
-                None,
+                OutputConsumerConfig {
+                    terminal_rx,
+                    mirror_terminal_output: false,
+                    output_is_parsed: true,
+                    timeout: None,
+                },
             );
 
             let mut sessions = self.sessions.write().await;
@@ -813,6 +828,7 @@ impl AppState {
             exit_path,
             mut offset,
         } = forwarder;
+        let (_log_watcher, mut log_events) = watch_tmux_log(&log_path)?;
         let mut partial = Vec::new();
         let mut exit_deadline = None;
 
@@ -883,7 +899,19 @@ impl AppState {
                 exit_deadline = None;
             }
 
-            tokio::time::sleep(TMUX_POLL_INTERVAL).await;
+            let wait_duration = if exit_deadline.is_some() {
+                TMUX_POLL_INTERVAL
+            } else {
+                TMUX_LOG_WATCH_FALLBACK_INTERVAL
+            };
+            tokio::select! {
+                event = log_events.recv() => {
+                    if event.is_none() {
+                        tokio::time::sleep(wait_duration).await;
+                    }
+                }
+                _ = tokio::time::sleep(wait_duration) => {}
+            }
         }
     }
 
@@ -921,6 +949,10 @@ impl AppState {
             return Ok(());
         };
         let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&session) else {
+            let handle = self.ensure_terminal_host(session_id).await;
+            if let Some(resize_tx) = handle.resize_tx.read().await.clone() {
+                let _ = resize_tx.send(PtyDimensions { cols, rows }).await;
+            }
             return Ok(());
         };
         if !tmux_session_exists(&socket_path, &tmux_session).await? {
@@ -1139,15 +1171,20 @@ async fn send_tmux_text(socket_path: &Path, session_name: &str, value: &str) -> 
 }
 
 async fn send_tmux_raw_bytes(socket_path: &Path, session_name: &str, bytes: &[u8]) -> Result<()> {
-    for byte in bytes {
-        let status = new_tmux_command()
+    for chunk in bytes.chunks(TMUX_RAW_BYTES_PER_COMMAND) {
+        let mut command = new_tmux_command();
+        command
             .arg("-S")
             .arg(socket_path)
             .arg("send-keys")
             .arg("-t")
             .arg(session_name)
-            .arg("-H")
-            .arg(format!("{byte:02x}"))
+            .arg("-H");
+        for hex in tmux_raw_hex_args(chunk) {
+            command.arg(hex);
+        }
+
+        let status = command
             .status()
             .await
             .with_context(|| format!("Failed to send raw bytes to tmux session {session_name}"))?;
@@ -1157,6 +1194,10 @@ async fn send_tmux_raw_bytes(socket_path: &Path, session_name: &str, bytes: &[u8
     }
 
     Ok(())
+}
+
+fn tmux_raw_hex_args(bytes: &[u8]) -> Vec<String> {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 async fn resize_tmux_session(
@@ -1222,6 +1263,45 @@ async fn read_tmux_log_chunk(log_path: &Path, offset: u64) -> Result<Option<(u64
 
     let next_offset = offset + chunk.len() as u64;
     Ok(Some((next_offset, chunk)))
+}
+
+fn watch_tmux_log(log_path: &Path) -> Result<(RecommendedWatcher, mpsc::UnboundedReceiver<()>)> {
+    let watch_path = log_path.parent().unwrap_or(log_path).to_path_buf();
+    let target_log_path = log_path.to_path_buf();
+    let callback_path = target_log_path.clone();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut watcher = RecommendedWatcher::new(
+        move |res: Result<Event, notify::Error>| match res {
+            Ok(event) => {
+                if tmux_log_event_matches(&callback_path, &event) {
+                    let _ = tx.send(());
+                }
+            }
+            Err(err) => {
+                tracing::debug!(
+                    path = %callback_path.display(),
+                    error = %err,
+                    "tmux log watcher callback error"
+                );
+            }
+        },
+        Config::default(),
+    )?;
+    watcher.watch(&watch_path, RecursiveMode::NonRecursive)?;
+    Ok((watcher, rx))
+}
+
+fn tmux_log_event_matches(log_path: &Path, event: &Event) -> bool {
+    if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+        return false;
+    }
+
+    let parent = log_path.parent();
+    event.paths.iter().any(|path| {
+        path == log_path
+            || parent.map(|candidate| path == candidate).unwrap_or(false)
+            || (path.parent().is_none() && path.file_name() == log_path.file_name())
+    })
 }
 
 fn split_tmux_log_lines(partial: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
@@ -1344,6 +1424,7 @@ mod tests {
     use conductor_core::types::AgentKind;
     use conductor_db::Database;
     use conductor_executors::process::spawn_process;
+    use notify::event::{CreateKind, DataChange, ModifyKind};
     use std::collections::BTreeMap;
     use std::fs;
     use tokio::time::{timeout, Duration};
@@ -1355,6 +1436,40 @@ mod tests {
             classify_tmux_pane("codex", "Thinking about changes\n› "),
             TmuxActivityState::Ready
         );
+    }
+
+    #[test]
+    fn tmux_raw_hex_args_encodes_bytes_for_single_send_keys_invocation() {
+        assert_eq!(
+            tmux_raw_hex_args(b"\x1b[A"),
+            vec!["1b".to_string(), "5b".to_string(), "41".to_string()]
+        );
+    }
+
+    #[test]
+    fn tmux_log_event_matches_target_file_and_parent_directory() {
+        let log_path = PathBuf::from("/tmp/conductor/session.log");
+
+        let file_event = Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![log_path.clone()],
+            attrs: Default::default(),
+        };
+        assert!(tmux_log_event_matches(&log_path, &file_event));
+
+        let parent_event = Event {
+            kind: EventKind::Create(CreateKind::File),
+            paths: vec![PathBuf::from("/tmp/conductor")],
+            attrs: Default::default(),
+        };
+        assert!(tmux_log_event_matches(&log_path, &parent_event));
+
+        let unrelated_event = Event {
+            kind: EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![PathBuf::from("/tmp/other/session.log")],
+            attrs: Default::default(),
+        };
+        assert!(!tmux_log_event_matches(&log_path, &unrelated_event));
     }
 
     #[test]
@@ -1649,7 +1764,7 @@ mod tests {
 
         timeout(Duration::from_secs(2), async {
             loop {
-                if restored.live_sessions.read().await.contains_key(session_id) {
+                if restored.has_terminal_host(session_id).await {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1793,7 +1908,7 @@ mod tests {
         .await
         .expect("tmux session should accept follow-up input after reattach");
 
-        assert!(restored.live_sessions.read().await.contains_key(session_id));
+        assert!(restored.has_terminal_host(session_id).await);
         assert!(final_session
             .conversation
             .iter()

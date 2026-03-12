@@ -2,20 +2,26 @@ use anyhow::{anyhow, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::future::pending;
+use std::convert::Infallible;
 use std::path::{Path as StdPath, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{self as stream, StreamExt};
 
-use crate::routes::config::access_control_enabled;
+use crate::routes::config::{access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole};
 use crate::state::{
     capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
     SessionRecord, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
@@ -32,7 +38,6 @@ const MAX_TERMINAL_SNAPSHOT_LINES: usize = 12000;
 const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
 const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 384 * 1024;
-const ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
 const TERMINAL_FRAME_PROTOCOL_VERSION: u8 = 1;
@@ -87,6 +92,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/sessions/{id}/terminal/snapshot",
             get(terminal_snapshot),
         )
+        .route("/api/sessions/{id}/terminal/stream", get(terminal_stream))
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
@@ -168,6 +174,7 @@ struct TerminalQuery {
     cols: Option<u16>,
     rows: Option<u16>,
     token: Option<String>,
+    sequence: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,7 +219,10 @@ async fn terminal_websocket(
 
     let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
     let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
-    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, id, cols, rows))
+    let client_sequence = query.sequence;
+    ws.on_upgrade(move |socket| {
+        handle_terminal_socket(socket, state, id, cols, rows, client_sequence)
+    })
 }
 
 async fn terminal_control_websocket(
@@ -284,6 +294,107 @@ async fn terminal_snapshot(
             started_at,
         ),
     }
+}
+
+async fn terminal_stream(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<TerminalQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
+
+    if let Err(err) =
+        authorize_terminal_stream_access(&state, &id, query.token.as_deref(), &headers).await
+    {
+        return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
+    }
+
+    let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
+    let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
+    let _ = state.ensure_session_live(&id).await;
+    let handle = state.ensure_terminal_host(&id).await;
+    let _ = state.resize_live_terminal(&id, cols, rows).await;
+
+    let terminal_events = handle.terminal_tx.subscribe();
+    let sequence_floor = Arc::new(AtomicU64::new(0));
+    let mut initial_events = vec![Ok::<SseEvent, Infallible>(
+        SseEvent::default().data(server_ready_event(&id)),
+    )];
+
+    if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
+        sequence_floor.store(snapshot.sequence, Ordering::Relaxed);
+        if should_send_initial_restore(&snapshot, query.sequence) {
+            initial_events.push(Ok(SseEvent::default().data(server_terminal_restore_event(
+                &id,
+                &snapshot,
+                TerminalSnapshotReason::Attach,
+                LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
+            ))));
+        }
+    }
+
+    let session_id = id.clone();
+    let state_for_updates = state.clone();
+    let sequence_floor_for_updates = sequence_floor.clone();
+    let updates = BroadcastStream::new(terminal_events)
+        .then(move |result| {
+            let session_id = session_id.clone();
+            let state = state_for_updates.clone();
+            let sequence_floor = sequence_floor_for_updates.clone();
+            async move {
+                match result {
+                    Ok(TerminalStreamEvent::Stream(chunk)) => {
+                        if should_skip_stream_chunk(
+                            Some(sequence_floor.load(Ordering::Relaxed)),
+                            chunk.sequence,
+                        ) {
+                            None
+                        } else {
+                            Some(Ok(SseEvent::default()
+                                .data(server_terminal_stream_event(&session_id, &chunk))))
+                        }
+                    }
+                    Ok(TerminalStreamEvent::Exit(exit_code)) => Some(Ok(
+                        SseEvent::default().data(server_exit_event(&session_id, exit_code))
+                    )),
+                    Ok(TerminalStreamEvent::Error(err)) => Some(Ok(
+                        SseEvent::default().data(server_error_event(&session_id, err))
+                    )),
+                    Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
+                        skipped,
+                    )) => {
+                        if let Some(session) = state.get_session(&session_id).await {
+                            if let Ok(Some(snapshot)) =
+                                build_terminal_restore_snapshot(&state, &session).await
+                            {
+                                sequence_floor.store(snapshot.sequence, Ordering::Relaxed);
+                                return Some(Ok(SseEvent::default().data(
+                                    server_terminal_restore_event(
+                                        &session_id,
+                                        &snapshot,
+                                        TerminalSnapshotReason::Lagged,
+                                        LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
+                                    ),
+                                )));
+                            }
+                        }
+
+                        Some(Ok(SseEvent::default().data(server_error_event(
+                            &session_id,
+                            format!("Terminal stream skipped {skipped} frames while catching up"),
+                        ))))
+                    }
+                }
+            }
+        })
+        .filter_map(|event| event);
+
+    Sse::new(stream::iter(initial_events).chain(updates))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn terminal_resize(
@@ -519,12 +630,28 @@ fn encode_terminal_stream_frame(chunk: &TerminalStreamChunk) -> Vec<u8> {
     frame
 }
 
+fn should_send_initial_restore(
+    snapshot: &TerminalRestoreSnapshot,
+    client_sequence: Option<u64>,
+) -> bool {
+    client_sequence
+        .map(|sequence| sequence != snapshot.sequence)
+        .unwrap_or(true)
+}
+
+fn should_skip_stream_chunk(sequence_floor: Option<u64>, chunk_sequence: u64) -> bool {
+    sequence_floor
+        .map(|sequence| chunk_sequence <= sequence)
+        .unwrap_or(false)
+}
+
 async fn handle_terminal_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
     session_id: String,
     cols: u16,
     rows: u16,
+    client_sequence: Option<u64>,
 ) {
     if socket
         .send(Message::Text(server_ready_event(&session_id).into()))
@@ -535,47 +662,45 @@ async fn handle_terminal_socket(
     }
 
     let _ = state.ensure_session_live(&session_id).await;
+    let handle = state.ensure_terminal_host(&session_id).await;
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
+    let mut terminal_events = Some(handle.terminal_tx.subscribe());
+    let mut stream_sequence_floor = None;
     if let Some(session) = state.get_session(&session_id).await {
         if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
-            let restore_frame = encode_terminal_restore_frame(
-                &snapshot,
-                TerminalSnapshotReason::Attach,
-                LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
-            );
-            if socket
-                .send(Message::Binary(restore_frame.into()))
-                .await
-                .is_err()
-            {
-                return;
+            if should_send_initial_restore(&snapshot, client_sequence) {
+                let restore_frame = encode_terminal_restore_frame(
+                    &snapshot,
+                    TerminalSnapshotReason::Attach,
+                    LIVE_TERMINAL_SNAPSHOT_MAX_BYTES,
+                );
+                if socket
+                    .send(Message::Binary(restore_frame.into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                stream_sequence_floor = Some(snapshot.sequence);
+            } else {
+                stream_sequence_floor = Some(snapshot.sequence);
             }
         }
     }
 
-    let mut terminal_events = state.subscribe_terminal_stream(&session_id).await;
-    let mut attach_retry = tokio::time::interval(ATTACH_RETRY_INTERVAL);
-    attach_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     loop {
         tokio::select! {
-            _ = attach_retry.tick(), if terminal_events.is_none() => {
-                let _ = state.ensure_session_live(&session_id).await;
-                if terminal_events.is_none() {
-                    terminal_events = state.subscribe_terminal_stream(&session_id).await;
-                    if terminal_events.is_some() {
-                        let _ = state.resize_live_terminal(&session_id, cols, rows).await;
-                    }
-                }
-            }
             attach_event = async {
                 match terminal_events.as_mut() {
                     Some(receiver) => Some(receiver.recv().await),
-                    None => pending().await,
+                    None => None,
                 }
             } => {
                 match attach_event {
                     Some(Ok(TerminalStreamEvent::Stream(chunk))) => {
+                        if should_skip_stream_chunk(stream_sequence_floor, chunk.sequence) {
+                            continue;
+                        }
                         if socket
                             .send(Message::Binary(encode_terminal_stream_frame(&chunk).into()))
                             .await
@@ -621,10 +746,11 @@ async fn handle_terminal_socket(
                                 {
                                     break;
                                 }
+                                stream_sequence_floor = Some(snapshot.sequence);
                             } else if socket
                                 .send(Message::Text(server_error_event(&session_id, format!("Terminal stream skipped {skipped} frames while catching up")).into()))
                                 .await
-                                .is_err()
+                            .is_err()
                             {
                                 break;
                             }
@@ -637,10 +763,10 @@ async fn handle_terminal_socket(
                         }
                     }
                     Some(Err(broadcast::error::RecvError::Closed)) => {
-                        terminal_events = None;
+                        break;
                     }
                     None => {
-                        terminal_events = None;
+                        break;
                     }
                 }
             }
@@ -838,6 +964,27 @@ async fn authorize_terminal_access(
     Err(anyhow!("Invalid terminal token"))
 }
 
+async fn authorize_terminal_stream_access(
+    state: &Arc<AppState>,
+    session_id: &str,
+    token: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<()> {
+    let access = state.config.read().await.access.clone();
+    if !access_control_enabled(&access) {
+        return Ok(());
+    }
+
+    let identity = resolve_access_identity(headers, &access).await;
+    if proxy_request_authorized(headers)
+        && matches!(identity.role, Some(role) if role.allows(AccessRole::Viewer))
+    {
+        return Ok(());
+    }
+
+    authorize_terminal_access(state, session_id, token).await
+}
+
 fn verify_terminal_token(session_id: &str, token: &str) -> Result<bool> {
     let secret = terminal_token_secret();
 
@@ -926,6 +1073,35 @@ fn server_recovery_event(
     .to_string()
 }
 
+fn server_terminal_restore_event(
+    session_id: &str,
+    snapshot: &TerminalRestoreSnapshot,
+    reason: TerminalSnapshotReason,
+    max_bytes: usize,
+) -> String {
+    json!({
+        "type": "restore",
+        "sessionId": session_id,
+        "sequence": snapshot.sequence,
+        "snapshotVersion": snapshot.version,
+        "reason": reason.as_str(),
+        "cols": snapshot.cols,
+        "rows": snapshot.rows,
+        "payload": BASE64_STANDARD.encode(snapshot.render_bytes(max_bytes)),
+    })
+    .to_string()
+}
+
+fn server_terminal_stream_event(session_id: &str, chunk: &TerminalStreamChunk) -> String {
+    json!({
+        "type": "stream",
+        "sessionId": session_id,
+        "sequence": chunk.sequence,
+        "payload": BASE64_STANDARD.encode(&chunk.bytes),
+    })
+    .to_string()
+}
+
 fn server_exit_event(session_id: &str, exit_code: i32) -> String {
     json!({
         "type": "control",
@@ -993,7 +1169,7 @@ mod tests {
         let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
         state
-            .attach_terminal_runtime(&session.id, input_tx, kill_tx)
+            .attach_terminal_runtime(&session.id, input_tx, None, kill_tx)
             .await;
         state
             .emit_terminal_text(&session.id, "first line\r\nprompt> ")
@@ -1057,6 +1233,55 @@ mod tests {
     }
 
     #[test]
+    fn server_terminal_restore_event_encodes_snapshot_payload() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: 1,
+            sequence: 17,
+            cols: 132,
+            rows: 40,
+            has_output: true,
+            history: b"hello".to_vec(),
+            screen: b"prompt> ".to_vec(),
+        };
+
+        let payload = server_terminal_restore_event(
+            "session-123",
+            &snapshot,
+            TerminalSnapshotReason::Lagged,
+            4096,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("restore payload should be valid json");
+
+        assert_eq!(parsed["type"], "restore");
+        assert_eq!(parsed["sessionId"], "session-123");
+        assert_eq!(parsed["sequence"], 17);
+        assert_eq!(parsed["reason"], "lagged");
+        assert_eq!(
+            parsed["payload"],
+            BASE64_STANDARD.encode(snapshot.render_bytes(4096))
+        );
+    }
+
+    #[test]
+    fn server_terminal_stream_event_encodes_chunk_payload() {
+        let payload = server_terminal_stream_event(
+            "session-123",
+            &TerminalStreamChunk {
+                sequence: 23,
+                bytes: b"hello".to_vec(),
+            },
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("stream payload should be valid json");
+
+        assert_eq!(parsed["type"], "stream");
+        assert_eq!(parsed["sessionId"], "session-123");
+        assert_eq!(parsed["sequence"], 23);
+        assert_eq!(parsed["payload"], BASE64_STANDARD.encode("hello"));
+    }
+
+    #[test]
     fn encode_terminal_restore_frame_prefixes_snapshot_metadata() {
         let snapshot = TerminalRestoreSnapshot {
             version: 1,
@@ -1095,6 +1320,32 @@ mod tests {
         assert_eq!(frame[5], TERMINAL_FRAME_KIND_STREAM);
         assert_eq!(u64::from_be_bytes(frame[6..14].try_into().unwrap()), 7);
         assert_eq!(&frame[14..], b"hello");
+    }
+
+    #[test]
+    fn should_send_initial_restore_when_client_sequence_is_missing_or_stale() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: 1,
+            sequence: 9,
+            cols: 100,
+            rows: 28,
+            has_output: true,
+            history: b"hello\r\n".to_vec(),
+            screen: b"prompt> ".to_vec(),
+        };
+
+        assert!(should_send_initial_restore(&snapshot, None));
+        assert!(should_send_initial_restore(&snapshot, Some(8)));
+        assert!(!should_send_initial_restore(&snapshot, Some(9)));
+        assert!(should_send_initial_restore(&snapshot, Some(10)));
+    }
+
+    #[test]
+    fn should_skip_stream_chunk_when_restore_or_attach_already_covers_it() {
+        assert!(!should_skip_stream_chunk(None, 1));
+        assert!(should_skip_stream_chunk(Some(9), 9));
+        assert!(should_skip_stream_chunk(Some(9), 8));
+        assert!(!should_skip_stream_chunk(Some(9), 10));
     }
 
     #[test]
@@ -1255,6 +1506,53 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .contains("terminal_snapshot;dur="));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_route_rejects_unauthorized_remote_requests() {
+        let (state, root) = build_test_state().await;
+        let session = seed_live_terminal_session(&state, "session-stream-auth").await;
+        state.config.write().await.access.require_auth = true;
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{}/terminal/stream", session.id))
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn terminal_stream_route_accepts_forwarded_proxy_identity() {
+        let (state, root) = build_test_state().await;
+        let session = seed_live_terminal_session(&state, "session-stream-proxy").await;
+        state.config.write().await.access.require_auth = true;
+
+        let response = router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{}/terminal/stream", session.id))
+                    .header("x-conductor-proxy-authorized", "true")
+                    .header("x-conductor-access-authenticated", "true")
+                    .header("x-conductor-access-role", "viewer")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("route should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
 
         let _ = std::fs::remove_dir_all(root);
     }

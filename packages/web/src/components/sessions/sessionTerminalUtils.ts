@@ -16,6 +16,21 @@ export type TerminalWriteBatch = {
   payload: Uint8Array | null;
 };
 
+export type TerminalHttpControlOperation =
+  | {
+      kind: "keys";
+      keys: string;
+    }
+  | {
+      kind: "special";
+      special: string;
+    }
+  | {
+      kind: "resize";
+      cols: number;
+      rows: number;
+    };
+
 export type MobileTerminalViewportMetrics = {
   usableHeight: number;
   keyboardInset: number;
@@ -114,11 +129,91 @@ export function buildTerminalWriteBatch(chunks: readonly TerminalWriteChunk[]): 
   };
 }
 
-export function buildTerminalSocketUrl(baseUrl: string, cols: number, rows: number): string {
-  const url = new URL(baseUrl);
+export function coalesceTerminalHttpControlOperations(
+  operations: readonly TerminalHttpControlOperation[],
+): TerminalHttpControlOperation[] {
+  const coalesced: TerminalHttpControlOperation[] = [];
+
+  for (const operation of operations) {
+    if (operation.kind === "keys") {
+      if (operation.keys.length === 0) {
+        continue;
+      }
+
+      const lastOperation = coalesced[coalesced.length - 1];
+      if (lastOperation?.kind === "keys") {
+        lastOperation.keys += operation.keys;
+      } else {
+        coalesced.push({
+          kind: "keys",
+          keys: operation.keys,
+        });
+      }
+      continue;
+    }
+
+    if (operation.kind === "resize") {
+      const cols = Math.max(1, Math.round(operation.cols));
+      const rows = Math.max(1, Math.round(operation.rows));
+      const lastOperation = coalesced[coalesced.length - 1];
+      if (lastOperation?.kind === "resize") {
+        lastOperation.cols = cols;
+        lastOperation.rows = rows;
+      } else {
+        coalesced.push({
+          kind: "resize",
+          cols,
+          rows,
+        });
+      }
+      continue;
+    }
+
+    coalesced.push({
+      kind: "special",
+      special: operation.special,
+    });
+  }
+
+  return coalesced;
+}
+
+export function buildTerminalSocketUrl(
+  baseUrl: string,
+  cols: number,
+  rows: number,
+  sequence?: number | null,
+): string {
+  const fallbackOrigin = typeof window !== "undefined" ? window.location.origin : "http://localhost";
+  const url = new URL(baseUrl, fallbackOrigin);
   url.searchParams.set("cols", String(Math.max(1, cols)));
   url.searchParams.set("rows", String(Math.max(1, rows)));
+  if (typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0) {
+    url.searchParams.set("sequence", String(sequence));
+  }
   return url.toString();
+}
+
+export function decodeTerminalBase64Payload(value: string): Uint8Array {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return new Uint8Array(0);
+  }
+
+  if (typeof atob === "function") {
+    const decoded = atob(normalized);
+    const bytes = new Uint8Array(decoded.length);
+    for (let index = 0; index < decoded.length; index += 1) {
+      bytes[index] = decoded.charCodeAt(index);
+    }
+    return bytes;
+  }
+
+  if (typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(normalized, "base64"));
+  }
+
+  throw new Error("A base64 decoder is not available in this environment");
 }
 
 export function parseTerminalBinaryFrame(buffer: ArrayBuffer): TerminalBinaryFrame {

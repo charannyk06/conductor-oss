@@ -50,7 +50,7 @@ If dashboard auth is enabled, run the benchmark from a local operator environmen
   - `terminal_resize` header timing
   - visible prompt stability after viewport or orientation changes
 - Reconnect success
-  - whether the terminal returns to `websocket` instead of degrading into snapshot mode during nominal flows
+  - whether the terminal returns to a live stream transport instead of degrading into snapshot mode during nominal flows
   - time from disconnect notice to usable prompt
 - Mobile input reliability
   - direct typing, Enter, Backspace, paste, accessory keys, and keyboard open or close stability
@@ -71,7 +71,7 @@ These are merge targets, not protocol guarantees. Capture the observed numbers a
 2. Run `cargo test -p conductor-server routes::terminal::tests -- --nocapture`.
 3. Run `bun run typecheck`.
 4. Run `bun run --cwd packages/web build`.
-5. Run `bun test packages/web/src/components/sessions/sessionTerminalUtils.test.ts 'packages/web/src/app/api/sessions/[id]/terminal/connection/route.test.ts'`.
+5. Run `bun test --cwd packages/web src/components/sessions/sessionTerminalUtils.test.ts` and `bun test --cwd packages/web 'src/app/api/sessions/[id]/terminal/connection/route.test.ts'`.
 6. Complete the manual checklist in [docs/terminal-qa-checklist.md](docs/terminal-qa-checklist.md).
 7. Record observed numbers in [docs/terminal-qa-matrix.md](docs/terminal-qa-matrix.md).
 

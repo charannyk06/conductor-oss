@@ -1,9 +1,13 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use conductor_executors::process::PtyDimensions;
 use conductor_executors::executor::ExecutorInput;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
+use tokio::fs::File;
+use tokio::io::BufWriter;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 
 // Re-export core types so existing imports within the server crate continue to work.
@@ -228,9 +232,40 @@ where
 
 pub struct LiveSessionHandle {
     pub input_tx: RwLock<Option<mpsc::Sender<ExecutorInput>>>,
+    pub resize_tx: RwLock<Option<mpsc::Sender<PtyDimensions>>>,
     pub terminal_tx: broadcast::Sender<TerminalStreamEvent>,
     pub terminal_store: Arc<StdMutex<TerminalStateStore>>,
+    pub terminal_persistence: Mutex<TerminalPersistenceState>,
+    pub terminal_capture: Mutex<TerminalCaptureState>,
     pub kill_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+pub struct TerminalPersistenceState {
+    pub last_persisted_sequence: u64,
+    pub last_persisted_at: Option<Instant>,
+    pub dirty: bool,
+    pub last_touched_at: Instant,
+    pub last_detached_at: Option<Instant>,
+}
+
+impl Default for TerminalPersistenceState {
+    fn default() -> Self {
+        Self {
+            last_persisted_sequence: 0,
+            last_persisted_at: None,
+            dirty: false,
+            last_touched_at: Instant::now(),
+            last_detached_at: None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct TerminalCaptureState {
+    pub writer: Option<BufWriter<File>>,
+    pub dirty: bool,
+    pub pending_bytes: usize,
+    pub last_flushed_at: Option<Instant>,
 }
 
 #[cfg(test)]

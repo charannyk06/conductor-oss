@@ -47,6 +47,10 @@ impl Executor for CcrExecutor {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
+    fn supports_direct_terminal_ui(&self) -> bool {
+        true
+    }
+
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let handle = if options.interactive {
@@ -62,7 +66,8 @@ impl Executor for CcrExecutor {
             output_rx,
             handle.input_tx,
             handle.kill_tx,
-        ))
+        )
+        .with_terminal_io(handle.terminal_rx, handle.resize_tx))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
