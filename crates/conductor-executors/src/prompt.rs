@@ -418,7 +418,10 @@ fn attachment_name(attachment: &PromptAttachment) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     struct TestDir {
         path: PathBuf,
@@ -430,8 +433,9 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
+            let counter = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
-                "conductor-prompt-tests-{}-{unique}",
+                "conductor-prompt-tests-{}-{unique}-{counter}",
                 std::process::id()
             ));
             fs::create_dir_all(&path).unwrap();

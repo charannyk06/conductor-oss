@@ -261,9 +261,10 @@ impl AppState {
                 options.structured_output = false;
                 self.spawn_tmux_runtime(executor, session_id, options).await
             }
-            _ => self
-                .spawn_detached_runtime_or_legacy(executor, session_id, options)
-                .await,
+            _ => {
+                self.spawn_detached_runtime_or_legacy(executor, session_id, options)
+                    .await
+            }
         }
     }
 
@@ -1430,6 +1431,33 @@ mod tests {
     use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
+    async fn tmux_runtime_supported() -> bool {
+        if tokio::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .await
+            .is_err()
+        {
+            return false;
+        }
+
+        let probe_socket =
+            std::env::temp_dir().join(format!("conductor-tmux-probe-{}.sock", Uuid::new_v4()));
+        let probe_socket_arg = probe_socket.to_string_lossy().to_string();
+        let probe_output = tokio::process::Command::new("tmux")
+            .args(["-S", probe_socket_arg.as_str(), "start-server"])
+            .output()
+            .await;
+        let supported = matches!(probe_output, Ok(ref output) if output.status.success());
+        if supported {
+            let _ = tokio::process::Command::new("tmux")
+                .args(["-S", probe_socket_arg.as_str(), "kill-server"])
+                .output()
+                .await;
+        }
+        supported
+    }
+
     #[test]
     fn classify_tmux_pane_marks_codex_prompt_ready() {
         assert_eq!(
@@ -1702,6 +1730,9 @@ mod tests {
 
     #[tokio::test]
     async fn restore_runtime_sessions_reattaches_running_tmux_sessions() {
+        if !tmux_runtime_supported().await {
+            return;
+        }
         let root = std::env::temp_dir().join(format!("conductor-tmux-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         let session_id = "tmux-restore-session";
@@ -1815,6 +1846,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_to_session_reattaches_tmux_runtime_on_demand() {
+        if !tmux_runtime_supported().await {
+            return;
+        }
         let root =
             std::env::temp_dir().join(format!("conductor-tmux-send-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -1922,6 +1956,9 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_with_runtime_preserves_plain_terminal_output_for_tmux_sessions() {
+        if !tmux_runtime_supported().await {
+            return;
+        }
         let root =
             std::env::temp_dir().join(format!("conductor-tmux-structured-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -2059,6 +2096,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_raw_to_session_preserves_escape_sequences_for_tmux_runtime() {
+        if !tmux_runtime_supported().await {
+            return;
+        }
         let root = std::env::temp_dir().join(format!("conductor-tmux-raw-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         let session_id = "tmux-raw-session";
@@ -2156,6 +2196,9 @@ mod tests {
 
     #[tokio::test]
     async fn kill_session_keeps_tmux_runtime_sessions_killed() {
+        if !tmux_runtime_supported().await {
+            return;
+        }
         let root =
             std::env::temp_dir().join(format!("conductor-tmux-kill-test-{}", Uuid::new_v4()));
         let state = build_state(&root).await;
