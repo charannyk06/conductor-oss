@@ -79,7 +79,7 @@ const DEFAULT_AGENT_CONFIG = {
 };
 
 const DEFAULT_PROJECT_PLUGINS = {
-  runtime: "tmux" as const,
+  runtime: "direct" as const,
   agent: "claude-code" as const,
   workspace: "worktree" as const,
   notifiers: ["desktop"],
@@ -159,7 +159,7 @@ const ProjectConfigSchema = z.object({
 });
 
 const DefaultPluginsSchema = z.object({
-  runtime: z.string().default("tmux"),
+  runtime: z.string().default("direct"),
   agent: z.string().default("claude-code"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default(["desktop"]),

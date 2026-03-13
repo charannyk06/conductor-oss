@@ -14,6 +14,8 @@ mod workspace;
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
 pub use detached_runtime::run_detached_pty_host;
+pub(crate) use detached_runtime::DETACHED_LOG_PATH_METADATA_KEY;
+pub(crate) use helpers::sanitize_terminal_text;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
@@ -46,7 +48,7 @@ use std::time::{Duration, Instant};
 use terminal_hosts::TerminalHostRegistry;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
 
 pub(crate) struct DevServerRecord {
     pub pid: u32,
@@ -81,8 +83,8 @@ struct FeedPayloadCacheEntry {
 
 const RUNTIME_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
 const TERMINAL_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
-const TERMINAL_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
-const TERMINAL_CAPTURE_FORCE_FLUSH_BYTES: usize = 16 * 1024;
+const TERMINAL_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(32);
+const TERMINAL_CAPTURE_FORCE_FLUSH_BYTES: usize = 64 * 1024;
 const TERMINAL_RESTORE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_RESTORE_FORCE_SEQUENCE_DELTA: u64 = 24;
 const TERMINAL_HOST_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
@@ -106,6 +108,7 @@ pub struct AppState {
     board_collaboration: RwLock<BoardCollaborationStore>,
     /// Serializes board-triggered spawns to prevent TOCTOU races in limit checks.
     pub spawn_guard: Mutex<()>,
+    detached_runtime_spawn_limit: Arc<Semaphore>,
     dev_servers: Mutex<HashMap<String, DevServerRecord>>,
     runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
     dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
@@ -134,6 +137,7 @@ impl AppState {
             started_at: Utc::now(),
             board_collaboration: RwLock::new(BoardCollaborationStore::default()),
             spawn_guard: Mutex::new(()),
+            detached_runtime_spawn_limit: Arc::new(Semaphore::new(detached_runtime_spawn_limit())),
             dev_servers: Mutex::new(HashMap::new()),
             runtime_status_cache: Mutex::new(HashMap::new()),
             dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
@@ -321,11 +325,21 @@ impl AppState {
 
     pub async fn dashboard_session(&self, session_id: &str) -> Option<Value> {
         let _ = self.refresh_dashboard_snapshot_cache().await;
-        let cache = self.dashboard_snapshot_cache.lock().await;
-        cache
-            .sessions_by_id
-            .get(session_id)
-            .map(|entry| entry.value.clone())
+        let cached = {
+            let cache = self.dashboard_snapshot_cache.lock().await;
+            cache
+                .sessions_by_id
+                .get(session_id)
+                .map(|entry| entry.value.clone())
+        };
+
+        if cached.is_some() {
+            return cached;
+        }
+
+        self.get_session(session_id)
+            .await
+            .map(|session| session_to_dashboard_value(&session))
     }
 
     pub async fn session_runtime_status(
@@ -707,6 +721,10 @@ impl AppState {
             return;
         };
 
+        if let Some(cwd) = update.cwd.clone() {
+            self.update_terminal_cwd(session_id, &cwd).await;
+        }
+
         let _ = handle
             .terminal_tx
             .send(TerminalStreamEvent::Stream(TerminalStreamChunk {
@@ -756,12 +774,21 @@ impl AppState {
                 .map(|store| store.restore_snapshot())
                 .filter(|snapshot| !snapshot.is_empty())
             {
-                return Some(snapshot);
+                if terminal_restore_snapshot_is_valid(&snapshot) {
+                    return Some(snapshot);
+                }
+
+                tracing::debug!(
+                    session_id,
+                    "Falling back to persisted terminal restore snapshot after invalid live snapshot"
+                );
             }
         }
 
         match self.load_terminal_restore_snapshot(session_id).await {
-            Ok(snapshot) => snapshot.filter(|snapshot| !snapshot.is_empty()),
+            Ok(snapshot) => snapshot
+                .filter(|snapshot| !snapshot.is_empty())
+                .filter(terminal_restore_snapshot_is_valid),
             Err(err) => {
                 tracing::debug!(
                     session_id,
@@ -771,6 +798,75 @@ impl AppState {
                 None
             }
         }
+    }
+
+    pub(crate) async fn current_terminal_transcript(
+        &self,
+        session_id: &str,
+        lines: usize,
+        max_bytes: usize,
+    ) -> Option<String> {
+        if let Some(handle) = self.terminal_hosts.get(session_id).await {
+            if let Some(transcript) = handle
+                .terminal_store
+                .lock()
+                .ok()
+                .map(|mut store| store.transcript_tail(lines, max_bytes))
+                .filter(|transcript| !transcript.trim().is_empty())
+            {
+                return Some(transcript);
+            }
+        }
+
+        match self.load_terminal_restore_snapshot(session_id).await {
+            Ok(snapshot) => snapshot
+                .filter(|snapshot| !snapshot.is_empty())
+                .filter(terminal_restore_snapshot_is_valid)
+                .map(|snapshot| snapshot.transcript(lines, max_bytes))
+                .filter(|transcript| !transcript.trim().is_empty()),
+            Err(err) => {
+                tracing::debug!(
+                    session_id,
+                    error = %err,
+                    "Failed to load persisted terminal restore transcript"
+                );
+                None
+            }
+        }
+    }
+
+    pub(crate) fn acquire_detached_runtime_spawn_limit(&self) -> Arc<Semaphore> {
+        self.detached_runtime_spawn_limit.clone()
+    }
+
+    async fn update_terminal_cwd(&self, session_id: &str, cwd: &str) {
+        let normalized = cwd.trim();
+        if normalized.is_empty() {
+            return;
+        }
+
+        let updated = {
+            let mut sessions = self.sessions.write().await;
+            let Some(session) = sessions.get_mut(session_id) else {
+                return;
+            };
+            if session.metadata.get("agentCwd").map(String::as_str) == Some(normalized) {
+                return;
+            }
+            session
+                .metadata
+                .insert("agentCwd".to_string(), normalized.to_string());
+            session.last_activity_at = Utc::now().to_rfc3339();
+            session.clone()
+        };
+
+        if let Err(err) = self.persist_session(&updated).await {
+            tracing::debug!(session_id, error = %err, "Failed to persist terminal cwd");
+            return;
+        }
+
+        self.invalidate_session_caches(session_id).await;
+        self.publish_snapshot().await;
     }
 
     pub fn config_projects_payload(&self, config: &ConductorConfig) -> Value {
@@ -799,4 +895,18 @@ impl AppState {
             .collect::<Vec<_>>();
         json!({ "projects": projects })
     }
+}
+
+fn detached_runtime_spawn_limit() -> usize {
+    const DEFAULT_LIMIT: usize = 4;
+
+    std::env::var("CONDUCTOR_DETACHED_RUNTIME_MAX_SPAWNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_LIMIT)
+}
+
+fn terminal_restore_snapshot_is_valid(snapshot: &TerminalRestoreSnapshot) -> bool {
+    snapshot.screen.is_empty() || snapshot.screen.first() == Some(&0x1b)
 }

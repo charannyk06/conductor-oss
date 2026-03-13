@@ -25,9 +25,10 @@ use crate::routes::config::{
     access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole,
 };
 use crate::state::{
-    capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, trim_lines_tail, AppState,
-    SessionRecord, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
-    TERMINAL_RESTORE_SNAPSHOT_FORMAT, TMUX_LOG_PATH_METADATA_KEY,
+    capture_tmux_pane, sanitize_terminal_text, tmux_runtime_metadata, tmux_session_exists,
+    trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot, TerminalStreamChunk,
+    TerminalStreamEvent, DETACHED_LOG_PATH_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    TMUX_LOG_PATH_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -42,10 +43,11 @@ const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
 const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 384 * 1024;
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
-const TERMINAL_FRAME_PROTOCOL_VERSION: u8 = 1;
+const TERMINAL_FRAME_PROTOCOL_VERSION: u8 = 2;
 const TERMINAL_FRAME_MAGIC: [u8; 4] = *b"CTP2";
 const TERMINAL_FRAME_KIND_RESTORE: u8 = 1;
 const TERMINAL_FRAME_KIND_STREAM: u8 = 2;
+const TERMINAL_RESTORE_FRAME_MODE_BYTES: usize = 4;
 const SERVER_TIMING_HEADER: &str = "server-timing";
 const TERMINAL_SNAPSHOT_SOURCE_HEADER: &str = "x-conductor-terminal-snapshot-source";
 const TERMINAL_SNAPSHOT_LIVE_HEADER: &str = "x-conductor-terminal-snapshot-live";
@@ -195,6 +197,22 @@ struct TerminalResizeBody {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum TerminalControlMessage {
     Ping,
+    Batch {
+        operations: Vec<TerminalControlBatchOperation>,
+    },
+    Keys {
+        keys: Option<String>,
+        special: Option<String>,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TerminalControlBatchOperation {
     Keys {
         keys: Option<String>,
         special: Option<String>,
@@ -286,8 +304,9 @@ async fn terminal_snapshot(
     } else {
         READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES
     };
+    let live_requested = terminal_snapshot_live_requested(query.live.as_deref());
 
-    match build_terminal_snapshot(&state, &session, lines, max_bytes).await {
+    match build_terminal_snapshot(&state, &session, lines, max_bytes, live_requested).await {
         Ok(snapshot) => build_terminal_snapshot_response(snapshot, started_at),
         Err(err) => timed_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -444,18 +463,34 @@ async fn build_terminal_snapshot(
     session: &SessionRecord,
     lines: usize,
     max_bytes: usize,
+    live_requested: bool,
 ) -> Result<Value> {
     if let Some(snapshot) = build_terminal_restore_snapshot(state, session).await? {
         let live = state.terminal_runtime_attached(&session.id).await;
-        let restore_bytes = snapshot.render_bytes(max_bytes);
+        let restore_bytes = if live_requested {
+            snapshot.render_restore_bytes(max_bytes)
+        } else {
+            snapshot.render_bytes(max_bytes)
+        };
+        let transcript = state
+            .current_terminal_transcript(&session.id, lines, max_bytes)
+            .await
+            .unwrap_or_else(|| snapshot.transcript(lines, max_bytes));
+        let transcript = if transcript.trim().is_empty() {
+            terminal_snapshot_transcript_fallback(session, lines, max_bytes).await?
+        } else {
+            transcript
+        };
         return Ok(json!({
             "snapshot": String::from_utf8_lossy(&restore_bytes),
+            "transcript": transcript,
             "source": "terminal_state",
             "format": TERMINAL_RESTORE_SNAPSHOT_FORMAT,
             "snapshotVersion": snapshot.version,
             "sequence": snapshot.sequence,
             "cols": snapshot.cols,
             "rows": snapshot.rows,
+            "modes": snapshot.modes,
             "historyBytes": snapshot.history_len(),
             "screenBytes": snapshot.screen_len(),
             "live": live,
@@ -517,6 +552,37 @@ async fn build_terminal_snapshot(
     }))
 }
 
+async fn terminal_snapshot_transcript_fallback(
+    session: &SessionRecord,
+    lines: usize,
+    max_bytes: usize,
+) -> Result<String> {
+    if let Some(path) = session
+        .metadata
+        .get(DETACHED_LOG_PATH_METADATA_KEY)
+        .map(PathBuf::from)
+    {
+        if let Some(transcript) = read_terminal_log_transcript(&path, lines, max_bytes).await? {
+            return Ok(transcript);
+        }
+    }
+
+    if let Some(path) = session
+        .metadata
+        .get(TMUX_LOG_PATH_METADATA_KEY)
+        .map(PathBuf::from)
+    {
+        if let Some(transcript) = read_terminal_log_transcript(&path, lines, max_bytes).await? {
+            return Ok(transcript);
+        }
+    }
+
+    Ok(trim_utf8_tail_string(
+        trim_lines_tail(&session.output, lines),
+        max_bytes,
+    ))
+}
+
 async fn build_terminal_restore_snapshot(
     state: &AppState,
     session: &SessionRecord,
@@ -529,10 +595,13 @@ async fn read_terminal_log_tail(
     lines: usize,
     max_bytes: usize,
 ) -> Result<Option<String>> {
-    let Some(bytes) = read_terminal_log_tail_bytes(path, lines, max_bytes).await? else {
+    let Some(bytes) = read_terminal_log_bytes(path).await? else {
         return Ok(None);
     };
-    let snapshot = String::from_utf8_lossy(&bytes).to_string();
+    let snapshot = trim_utf8_tail_string(
+        trim_lines_tail(String::from_utf8_lossy(&bytes).as_ref(), lines),
+        max_bytes,
+    );
     if snapshot.trim().is_empty() {
         Ok(None)
     } else {
@@ -540,11 +609,60 @@ async fn read_terminal_log_tail(
     }
 }
 
-async fn read_terminal_log_tail_bytes(
+async fn read_terminal_log_transcript(
     path: &StdPath,
     lines: usize,
     max_bytes: usize,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Option<String>> {
+    let Some(bytes) = read_terminal_log_bytes(path).await? else {
+        return Ok(None);
+    };
+
+    let sanitized = sanitize_terminal_text(String::from_utf8_lossy(&bytes).as_ref());
+    let transcript = normalize_terminal_transcript(trim_utf8_tail_string(
+        trim_lines_tail(&sanitized, lines),
+        max_bytes,
+    ));
+    if transcript.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(transcript))
+    }
+}
+
+fn normalize_terminal_transcript(value: String) -> String {
+    let mut normalized = Vec::new();
+    let mut previous_non_empty: Option<String> = None;
+    let mut emitted_blank = false;
+
+    for raw_line in value.lines() {
+        let line = raw_line.trim_end();
+        if line.trim().is_empty() {
+            if normalized.is_empty() || emitted_blank {
+                continue;
+            }
+            normalized.push(String::new());
+            emitted_blank = true;
+            continue;
+        }
+
+        if previous_non_empty.as_deref() == Some(line) {
+            continue;
+        }
+
+        normalized.push(line.to_string());
+        previous_non_empty = Some(line.to_string());
+        emitted_blank = false;
+    }
+
+    while normalized.last().is_some_and(|line| line.is_empty()) {
+        normalized.pop();
+    }
+
+    normalized.join("\n")
+}
+
+async fn read_terminal_log_bytes(path: &StdPath) -> Result<Option<Vec<u8>>> {
     let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -557,15 +675,10 @@ async fn read_terminal_log_tail_bytes(
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
-    let snapshot = trim_utf8_tail_string(
-        trim_lines_tail(String::from_utf8_lossy(&bytes).as_ref(), lines),
-        max_bytes,
-    )
-    .into_bytes();
-    if String::from_utf8_lossy(&snapshot).trim().is_empty() {
+    if String::from_utf8_lossy(&bytes).trim().is_empty() {
         Ok(None)
     } else {
-        Ok(Some(snapshot))
+        Ok(Some(bytes))
     }
 }
 
@@ -608,8 +721,8 @@ fn encode_terminal_restore_frame(
     reason: TerminalSnapshotReason,
     max_bytes: usize,
 ) -> Vec<u8> {
-    let payload = snapshot.render_bytes(max_bytes);
-    let mut frame = Vec::with_capacity(20 + payload.len());
+    let payload = snapshot.render_restore_bytes(max_bytes);
+    let mut frame = Vec::with_capacity(20 + TERMINAL_RESTORE_FRAME_MODE_BYTES + payload.len());
     frame.extend_from_slice(&TERMINAL_FRAME_MAGIC);
     frame.push(TERMINAL_FRAME_PROTOCOL_VERSION);
     frame.push(TERMINAL_FRAME_KIND_RESTORE);
@@ -618,6 +731,10 @@ fn encode_terminal_restore_frame(
     frame.push(reason.as_code());
     frame.extend_from_slice(&snapshot.cols.to_be_bytes());
     frame.extend_from_slice(&snapshot.rows.to_be_bytes());
+    frame.push(terminal_mode_flags(snapshot));
+    frame.push(terminal_mouse_protocol_mode_code(snapshot));
+    frame.push(terminal_mouse_protocol_encoding_code(snapshot));
+    frame.push(0);
     frame.extend_from_slice(&payload);
     frame
 }
@@ -630,6 +747,45 @@ fn encode_terminal_stream_frame(chunk: &TerminalStreamChunk) -> Vec<u8> {
     frame.extend_from_slice(&chunk.sequence.to_be_bytes());
     frame.extend_from_slice(&chunk.bytes);
     frame
+}
+
+fn terminal_mode_flags(snapshot: &TerminalRestoreSnapshot) -> u8 {
+    let mut flags = 0_u8;
+    if snapshot.modes.alternate_screen {
+        flags |= 1 << 0;
+    }
+    if snapshot.modes.application_keypad {
+        flags |= 1 << 1;
+    }
+    if snapshot.modes.application_cursor {
+        flags |= 1 << 2;
+    }
+    if snapshot.modes.hide_cursor {
+        flags |= 1 << 3;
+    }
+    if snapshot.modes.bracketed_paste {
+        flags |= 1 << 4;
+    }
+    flags
+}
+
+fn terminal_mouse_protocol_mode_code(snapshot: &TerminalRestoreSnapshot) -> u8 {
+    match snapshot.modes.mouse_protocol_mode.as_str() {
+        "Press" => 1,
+        "PressRelease" => 2,
+        "ButtonMotion" => 3,
+        "AnyMotion" => 4,
+        _ => 0,
+    }
+}
+
+fn terminal_mouse_protocol_encoding_code(snapshot: &TerminalRestoreSnapshot) -> u8 {
+    match snapshot.modes.mouse_protocol_encoding.as_str() {
+        "Utf8" => 1,
+        "Sgr" => 2,
+        "Urxvt" => 3,
+        _ => 0,
+    }
 }
 
 fn should_send_initial_restore(
@@ -901,6 +1057,29 @@ async fn handle_control_message(
 ) -> Result<Option<String>> {
     match message {
         TerminalControlMessage::Ping => Ok(Some(server_pong_event(session_id))),
+        TerminalControlMessage::Batch { operations } => {
+            for operation in operations {
+                match operation {
+                    TerminalControlBatchOperation::Keys { keys, special } => {
+                        let chunk = resolve_terminal_keys(keys, special)?;
+                        if state.ensure_session_live(session_id).await? {
+                            state.send_raw_to_session(session_id, chunk).await?;
+                        } else {
+                            return Err(anyhow!("Terminal is not currently attached"));
+                        }
+                    }
+                    TerminalControlBatchOperation::Resize {
+                        cols: next_cols,
+                        rows: next_rows,
+                    } => {
+                        *cols = next_cols.max(1);
+                        *rows = next_rows.max(1);
+                        state.resize_live_terminal(session_id, *cols, *rows).await?;
+                    }
+                }
+            }
+            Ok(None)
+        }
         TerminalControlMessage::Keys { keys, special } => {
             let chunk = resolve_terminal_keys(keys, special)?;
             if state.ensure_session_live(session_id).await? {
@@ -1071,6 +1250,7 @@ fn server_recovery_event(
         "snapshotVersion": snapshot.version,
         "cols": snapshot.cols,
         "rows": snapshot.rows,
+        "modes": snapshot.modes,
     })
     .to_string()
 }
@@ -1089,7 +1269,8 @@ fn server_terminal_restore_event(
         "reason": reason.as_str(),
         "cols": snapshot.cols,
         "rows": snapshot.rows,
-        "payload": BASE64_STANDARD.encode(snapshot.render_bytes(max_bytes)),
+        "modes": snapshot.modes,
+        "payload": BASE64_STANDARD.encode(snapshot.render_restore_bytes(max_bytes)),
     })
     .to_string()
 }
@@ -1136,6 +1317,7 @@ mod tests {
     use conductor_db::Database;
     use conductor_executors::executor::ExecutorInput;
     use std::sync::Arc;
+    use tokio::fs;
     use tokio::sync::{mpsc, oneshot};
     use tower::util::ServiceExt;
     use uuid::Uuid;
@@ -1199,6 +1381,32 @@ mod tests {
     }
 
     #[test]
+    fn terminal_control_message_batch_deserializes() {
+        let payload = serde_json::json!({
+            "type": "batch",
+            "operations": [
+                { "type": "keys", "keys": "abc" },
+                { "type": "resize", "cols": 120, "rows": 40 }
+            ]
+        });
+        let message: TerminalControlMessage =
+            serde_json::from_value(payload).expect("batch control message should deserialize");
+
+        assert_eq!(
+            message,
+            TerminalControlMessage::Batch {
+                operations: vec![
+                    TerminalControlBatchOperation::Keys {
+                        keys: Some("abc".to_string()),
+                        special: None,
+                    },
+                    TerminalControlBatchOperation::Resize { cols: 120, rows: 40 },
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn server_control_event_includes_event_name() {
         let payload = server_ready_event("session-123");
         let parsed: serde_json::Value =
@@ -1217,6 +1425,7 @@ mod tests {
             cols: 132,
             rows: 40,
             has_output: true,
+            modes: Default::default(),
             history: b"hello".to_vec(),
             screen: b"prompt> ".to_vec(),
         };
@@ -1232,6 +1441,7 @@ mod tests {
         assert_eq!(parsed["sequence"], 17);
         assert_eq!(parsed["cols"], 132);
         assert_eq!(parsed["rows"], 40);
+        assert_eq!(parsed["modes"]["alternateScreen"], false);
     }
 
     #[test]
@@ -1242,6 +1452,7 @@ mod tests {
             cols: 132,
             rows: 40,
             has_output: true,
+            modes: Default::default(),
             history: b"hello".to_vec(),
             screen: b"prompt> ".to_vec(),
         };
@@ -1259,9 +1470,10 @@ mod tests {
         assert_eq!(parsed["sessionId"], "session-123");
         assert_eq!(parsed["sequence"], 17);
         assert_eq!(parsed["reason"], "lagged");
+        assert_eq!(parsed["modes"]["alternateScreen"], false);
         assert_eq!(
             parsed["payload"],
-            BASE64_STANDARD.encode(snapshot.render_bytes(4096))
+            BASE64_STANDARD.encode(snapshot.render_restore_bytes(4096))
         );
     }
 
@@ -1291,6 +1503,7 @@ mod tests {
             cols: 100,
             rows: 28,
             has_output: true,
+            modes: Default::default(),
             history: b"hello\r\n".to_vec(),
             screen: b"prompt> ".to_vec(),
         };
@@ -1305,7 +1518,11 @@ mod tests {
         assert_eq!(frame[15], TerminalSnapshotReason::Lagged.as_code());
         assert_eq!(u16::from_be_bytes(frame[16..18].try_into().unwrap()), 100);
         assert_eq!(u16::from_be_bytes(frame[18..20].try_into().unwrap()), 28);
-        assert_eq!(&frame[20..], &snapshot.render_bytes(4096));
+        assert_eq!(frame[20], 0);
+        assert_eq!(frame[21], 0);
+        assert_eq!(frame[22], 0);
+        assert_eq!(frame[23], 0);
+        assert_eq!(&frame[24..], &snapshot.render_restore_bytes(4096));
     }
 
     #[test]
@@ -1332,6 +1549,7 @@ mod tests {
             cols: 100,
             rows: 28,
             has_output: true,
+            modes: Default::default(),
             history: b"hello\r\n".to_vec(),
             screen: b"prompt> ".to_vec(),
         };
@@ -1413,17 +1631,77 @@ mod tests {
         let (state, root) = build_test_state().await;
         let session = seed_live_terminal_session(&state, "session-live").await;
 
-        let payload = build_terminal_snapshot(&state, &session, 200, 4096)
+        let payload = build_terminal_snapshot(&state, &session, 200, 4096, true)
             .await
             .expect("snapshot should build");
 
         assert_eq!(payload["source"], "terminal_state");
         assert_eq!(payload["live"], true);
         assert_eq!(payload["restored"], true);
-        assert!(payload["snapshot"]
+        let snapshot = payload["snapshot"]
             .as_str()
-            .expect("snapshot should be a string")
-            .contains("prompt> "));
+            .expect("snapshot should be a string");
+        assert!(snapshot.contains("\u{1b}[?1049"));
+        assert!(snapshot.contains("prompt> "));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_terminal_snapshot_falls_back_to_detached_log_transcript_when_restore_state_is_blank(
+    ) {
+        let (state, root) = build_test_state().await;
+        let log_path = root.join("direct-session.log");
+        fs::write(
+            &log_path,
+            b"\x1b[90mstatus\x1b[0m\r\nplain transcript line\r\nprompt> ",
+        )
+        .await
+        .expect("detached log should write");
+
+        let mut session = SessionRecord::builder(
+            "session-log-fallback".to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "Validate transcript fallback".to_string(),
+        )
+        .build();
+        session.metadata.insert(
+            DETACHED_LOG_PATH_METADATA_KEY.to_string(),
+            log_path.to_string_lossy().to_string(),
+        );
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+
+        state
+            .persist_terminal_restore_snapshot(
+                &session.id,
+                &TerminalRestoreSnapshot {
+                    version: 1,
+                    sequence: 9,
+                    cols: 120,
+                    rows: 32,
+                    has_output: true,
+                    modes: Default::default(),
+                    history: Vec::new(),
+                    screen: b"\x1b[2J\x1b[H".to_vec(),
+                },
+            )
+            .await
+            .expect("restore snapshot should persist");
+
+        let payload = build_terminal_snapshot(&state, &session, 200, 4096, true)
+            .await
+            .expect("snapshot should build");
+
+        assert_eq!(payload["source"], "terminal_state");
+        assert_eq!(
+            payload["transcript"].as_str(),
+            Some("status\nplain transcript line\nprompt>")
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

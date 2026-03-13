@@ -108,7 +108,7 @@ where
     }
 }
 
-pub(super) fn sanitize_terminal_text(value: &str) -> String {
+pub(crate) fn sanitize_terminal_text(value: &str) -> String {
     let mut result = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
 

@@ -96,6 +96,13 @@ export const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set([
   "killed", "terminated", "done", "cleanup", "errored", "merged",
 ]);
 
+/** Statuses that can be safely archived from bulk cleanup flows. */
+export const ARCHIVABLE_STATUSES: ReadonlySet<SessionStatus> = new Set([
+  ...TERMINAL_STATUSES,
+  "needs_input",
+  "stuck",
+]);
+
 /** Activity states that indicate the session is no longer running. */
 export const TERMINAL_ACTIVITIES: ReadonlySet<ActivityState> = new Set(["exited"]);
 

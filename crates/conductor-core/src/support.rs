@@ -325,7 +325,14 @@ fn build_project(project_id: &str, project: &ProjectConfig) -> MirrorProject {
         runtime: project
             .runtime
             .clone()
-            .unwrap_or_else(|| "tmux".to_string()),
+            .map(|runtime| {
+                if runtime.trim() == "tmux" {
+                    "direct".to_string()
+                } else {
+                    runtime
+                }
+            })
+            .unwrap_or_else(|| "direct".to_string()),
         agent_config: project.agent_config.clone(),
         scm: extract_scm_plugin(project),
         board_dir: project.board_dir.clone(),

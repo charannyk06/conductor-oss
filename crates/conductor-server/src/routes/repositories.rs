@@ -231,7 +231,7 @@ fn repository_payload(
         "agentModel": project.agent_config.model.clone(),
         "agentReasoningEffort": project.agent_config.reasoning_effort.clone(),
         "workspaceMode": project.workspace.clone().unwrap_or_else(|| "worktree".to_string()),
-        "runtimeMode": project.runtime.clone().unwrap_or_else(|| "tmux".to_string()),
+        "runtimeMode": project.runtime.clone().unwrap_or_else(|| "direct".to_string()),
         "scmMode": "git",
         "githubProject": project.github_project.clone(),
         "defaultWorkingDirectory": project.default_working_directory.clone().unwrap_or_default(),
