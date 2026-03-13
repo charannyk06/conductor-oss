@@ -144,6 +144,10 @@ if (!args.includes(fixture.prompt)) {
 }
 
 (async () => {
+  // Allow the detached PTY stream forwarder time to connect before emitting
+  // output. Without this, fast-exiting agents can race the stream setup and
+  // early lines are lost when the forwarder has not yet replayed the log.
+  await delay(500);
   process.stdout.write("Thinking about the request\\n");
   await delay(25);
   process.stdout.write("Read /tmp/demo.txt\\n");

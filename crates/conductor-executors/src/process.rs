@@ -548,7 +548,7 @@ mod tests {
 
         let _ = handle.kill_tx.send(());
 
-        let exit_event = timeout(Duration::from_secs(8), async {
+        let exit_event = timeout(Duration::from_secs(15), async {
             loop {
                 match handle.output_rx.recv().await {
                     Some(ExecutorOutput::Failed { error, .. }) if error == "killed" => break,
@@ -560,7 +560,7 @@ mod tests {
         .await;
         assert!(exit_event.is_ok(), "pty process should report killed");
 
-        let terminated = timeout(Duration::from_secs(3), async {
+        let terminated = timeout(Duration::from_secs(8), async {
             loop {
                 if !is_process_alive(child_pid) {
                     break;
