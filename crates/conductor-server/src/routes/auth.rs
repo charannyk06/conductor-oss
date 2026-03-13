@@ -8,6 +8,7 @@ use serde_json::json;
 use sha2::Sha256;
 use std::sync::Arc;
 
+use crate::routes::config::proxy_request_authorized;
 use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -164,14 +165,17 @@ fn build_cookie(value: &str, secure: bool, max_age: i64) -> String {
     cookie
 }
 
-/// Check if the request came via HTTPS by inspecting the X-Forwarded-Proto header.
-/// IMPORTANT: This trusts the header without validation. The backend MUST be behind a
-/// trusted reverse proxy that sets this header when remote auth is enabled.
+/// Check if the request came via HTTPS via a trusted reverse-proxy signal.
 fn is_secure(headers: &HeaderMap) -> bool {
+    if !proxy_request_authorized(headers) {
+        return false;
+    }
+
     headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.eq_ignore_ascii_case("https"))
+        .and_then(|value| value.split(',').next())
+        .map(|value| value.trim().eq_ignore_ascii_case("https"))
         .unwrap_or(false)
 }
 
@@ -252,6 +256,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/auth/session")
                     .header("content-type", "application/json")
+                    .header("x-conductor-proxy-authorized", "true")
                     .header("x-forwarded-proto", "https")
                     .body(Body::from(r#"{"token":"test-token"}"#))
                     .unwrap(),
@@ -260,7 +265,56 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().get(SET_COOKIE).is_some());
+        let set_cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .expect("Set-Cookie should be set")
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains("; Secure"));
+
+        unsafe {
+            std::env::remove_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV);
+            std::env::remove_var(BUILTIN_REMOTE_SESSION_SECRET_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_session_skips_secure_cookie_without_proxy_authorization() {
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV, "test-token");
+            std::env::set_var(BUILTIN_REMOTE_SESSION_SECRET_ENV, "test-secret");
+        }
+
+        let state = build_state(DashboardAccessConfig {
+            allow_signed_share_links: true,
+            ..DashboardAccessConfig::default()
+        })
+        .await;
+        let app = router().with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/session")
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-proto", "https")
+                    .body(Body::from(r#"{"token":"test-token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response
+            .headers()
+            .get(SET_COOKIE)
+            .expect("Set-Cookie should be set")
+            .to_str()
+            .unwrap();
+        assert!(!set_cookie.contains("; Secure"));
 
         unsafe {
             std::env::remove_var(BUILTIN_REMOTE_ACCESS_TOKEN_ENV);

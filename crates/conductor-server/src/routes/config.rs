@@ -385,7 +385,7 @@ fn resolve_proxy_access_identity(headers: &HeaderMap) -> Option<AccessIdentity> 
         .get(PROXY_AUTHENTICATED_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     Some(AccessIdentity {
         authenticated,
@@ -1804,6 +1804,26 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(super::PROXY_AUTHORIZED_HEADER, "true".parse().unwrap());
         headers.insert(super::PROXY_AUTHENTICATED_HEADER, "false".parse().unwrap());
+        headers.insert(super::PROXY_ROLE_HEADER, "admin".parse().unwrap());
+        headers.insert(super::PROXY_EMAIL_HEADER, "local".parse().unwrap());
+        headers.insert(super::PROXY_PROVIDER_HEADER, "local".parse().unwrap());
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(!identity.authenticated);
+        assert_eq!(identity.role, Some(AccessRole::Admin));
+        assert_eq!(identity.email.as_deref(), Some("local"));
+        assert_eq!(identity.provider.as_deref(), Some("local"));
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_defaults_missing_proxy_authenticated_to_false() {
+        let access = DashboardAccessConfig {
+            require_auth: true,
+            ..DashboardAccessConfig::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(super::PROXY_AUTHORIZED_HEADER, "true".parse().unwrap());
         headers.insert(super::PROXY_ROLE_HEADER, "admin".parse().unwrap());
         headers.insert(super::PROXY_EMAIL_HEADER, "local".parse().unwrap());
         headers.insert(super::PROXY_PROVIDER_HEADER, "local".parse().unwrap());
