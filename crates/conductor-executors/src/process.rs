@@ -504,6 +504,12 @@ mod tests {
     use std::path::Path;
     use tokio::time::{timeout, Duration};
 
+    fn parse_child_pid(line: &str) -> Option<u32> {
+        line.split("child_pid=")
+            .nth(1)
+            .and_then(|value| value.trim().parse::<u32>().ok())
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn kill_signal_terminates_shell_children_for_pty_sessions() {
@@ -511,7 +517,8 @@ mod tests {
             Path::new("/bin/sh"),
             &[
                 "-lc".to_string(),
-                "sleep 30 & child=$!; printf '%s\\n' \"$child\"; wait \"$child\"".to_string(),
+                "sleep 30 & child=$!; printf 'child_pid=%s\\n' \"$child\"; wait \"$child\""
+                    .to_string(),
             ],
             Path::new("."),
             &HashMap::new(),
@@ -519,13 +526,21 @@ mod tests {
         .await
         .expect("pty process should spawn");
 
-        let child_pid = match timeout(Duration::from_secs(3), handle.output_rx.recv()).await {
-            Ok(Some(ExecutorOutput::Stdout(line))) => line
-                .trim()
-                .parse::<u32>()
-                .expect("shell should print child pid"),
-            other => panic!("expected child pid from shell, got {other:?}"),
-        };
+        let child_pid = timeout(Duration::from_secs(3), async {
+            loop {
+                match handle.output_rx.recv().await {
+                    Some(ExecutorOutput::Stdout(line)) => {
+                        if let Some(pid) = parse_child_pid(line.trim()) {
+                            break pid;
+                        }
+                    }
+                    Some(_) => continue,
+                    None => panic!("pty output channel closed before child pid"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for child pid");
         assert!(
             is_process_alive(child_pid),
             "child should be alive before kill"
