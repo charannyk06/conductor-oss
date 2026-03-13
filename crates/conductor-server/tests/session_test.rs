@@ -131,33 +131,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
 }
 
 #[tokio::test]
-async fn resume_session_restores_tmux_runtime_when_live_handle_is_missing() {
-    if tokio::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let probe_socket = std::env::temp_dir().join(format!(
-        "conductor-tmux-probe-{}.sock",
-        uuid::Uuid::new_v4()
-    ));
-    let probe_output = tokio::process::Command::new("tmux")
-        .args(["-S", &probe_socket.to_string_lossy(), "start-server"])
-        .output()
-        .await;
-    let tmux_runtime_supported = matches!(probe_output, Ok(ref output) if output.status.success());
-    if tmux_runtime_supported {
-        let _ = tokio::process::Command::new("tmux")
-            .args(["-S", &probe_socket.to_string_lossy(), "kill-server"])
-            .output()
-            .await;
-    } else {
-        return;
-    }
-
+async fn resume_session_uses_direct_runtime_even_when_project_requests_tmux() {
     let harness = TestHarness::new("conductor-session-resume-test", "tmux").await;
     harness
         .state
@@ -168,24 +142,20 @@ async fn resume_session_restores_tmux_runtime_when_live_handle_is_missing() {
 
     let queued = harness
         .state
-        .spawn_session(spawn_request("Start tmux runtime"))
+        .spawn_session(spawn_request("Start runtime"))
         .await
         .unwrap();
-    let session = wait_for_condition("tmux runtime session", || {
+    let session = wait_for_condition("direct runtime session", || {
         let state = harness.state.clone();
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                let is_tmux = session
+                let is_direct = session
                     .metadata
                     .get("runtimeMode")
-                    .filter(|value| value.as_str() == "tmux")
+                    .filter(|value| value.as_str() == "direct")
                     .is_some();
-                if is_tmux {
-                    Some(session)
-                } else {
-                    None
-                }
+                is_direct.then_some(session)
             })
         }
     })
@@ -206,25 +176,23 @@ async fn resume_session_restores_tmux_runtime_when_live_handle_is_missing() {
         .await
         .unwrap();
 
-    let updated = wait_for_condition("resumed tmux session output", || {
+    let updated = wait_for_condition("resumed direct session", || {
         let state = harness.state.clone();
         let session_id = session.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                session
-                    .output
-                    .contains("echo:Continue after reconnect")
+                (session.metadata.get("runtimeMode").map(String::as_str) == Some("direct")
+                    && session.pid.is_some())
                     .then_some(session)
             })
         }
     })
     .await;
 
-    assert!(updated.output.contains("echo:Continue after reconnect"));
-    assert!(updated
-        .conversation
-        .iter()
-        .any(|entry| entry.kind == "user_message" && entry.text == "Continue after reconnect"));
+    assert_eq!(
+        updated.metadata.get("runtimeMode").map(String::as_str),
+        Some("direct")
+    );
 
     harness.state.kill_session(&session.id).await.unwrap();
 }

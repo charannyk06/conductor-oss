@@ -48,6 +48,16 @@ pub(crate) const DETACHED_STREAM_SOCKET_METADATA_KEY: &str = "detachedStreamSock
 pub(crate) const DETACHED_CONTROL_TOKEN_METADATA_KEY: &str = "detachedControlToken";
 pub(crate) const DETACHED_LOG_PATH_METADATA_KEY: &str = "detachedLogPath";
 pub(crate) const DETACHED_EXIT_PATH_METADATA_KEY: &str = "detachedExitPath";
+pub(crate) const DETACHED_PROTOCOL_VERSION_METADATA_KEY: &str = "detachedProtocolVersion";
+pub(crate) const DETACHED_TRANSPORT_METADATA_KEY: &str = "detachedTransport";
+pub(crate) const DETACHED_EMULATOR_METADATA_KEY: &str = "detachedTerminalEmulator";
+pub(crate) const DETACHED_BACKPRESSURE_METADATA_KEY: &str = "detachedBackpressure";
+pub(crate) const DETACHED_BATCH_INTERVAL_METADATA_KEY: &str = "detachedBatchIntervalMs";
+pub(crate) const DETACHED_BATCH_BYTES_METADATA_KEY: &str = "detachedBatchBytes";
+pub(crate) const DETACHED_ISOLATION_METADATA_KEY: &str = "detachedIsolation";
+const TERMINAL_DAEMON_CONTROL_SOCKET_ENV: &str = "CONDUCTOR_TERMINAL_DAEMON_CONTROL_SOCKET";
+const TERMINAL_DAEMON_TOKEN_ENV: &str = "CONDUCTOR_TERMINAL_DAEMON_TOKEN";
+const TERMINAL_DAEMON_PROTOCOL_VERSION_ENV: &str = "CONDUCTOR_TERMINAL_DAEMON_PROTOCOL_VERSION";
 const DETACHED_READY_TIMEOUT: Duration = Duration::from_secs(5);
 const DETACHED_LOG_WATCH_FALLBACK_INTERVAL: Duration = Duration::from_millis(250);
 const DETACHED_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -61,11 +71,163 @@ const DETACHED_CAPTURE_CHANNEL_CAPACITY: usize = 256;
 const DETACHED_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
 const DETACHED_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const DETACHED_CAPTURE_FORCE_FLUSH_BYTES: usize = 16 * 1024;
+const DETACHED_INPUT_BATCH_MAX_ITEMS: usize = 32;
+const DETACHED_INPUT_BATCH_MAX_BYTES: usize = 16 * 1024;
 const DETACHED_SOCKET_ROOT: &str = "/tmp/conductor-pty";
+const DETACHED_PTY_PROTOCOL_VERSION: u16 = 1;
+const DETACHED_PTY_TRANSPORT: &str = "dual_socket_control_json_stream_binary_v1";
+const DETACHED_PTY_TERMINAL_EMULATOR: &str = "vt100_restore_v1";
+const DETACHED_PTY_BACKPRESSURE_MODE: &str = "bounded_channel_pause_pty_read_v2";
+const DETACHED_PTY_ISOLATION_MODE: &str = "portable_pty_subprocess_v1";
+
+fn detached_protocol_version() -> u16 {
+    DETACHED_PTY_PROTOCOL_VERSION
+}
+
+fn detached_stream_flush_interval_ms() -> u64 {
+    DETACHED_STREAM_FLUSH_INTERVAL.as_millis() as u64
+}
+
+fn detached_stream_max_batch_bytes() -> usize {
+    DETACHED_STREAM_MAX_BATCH_BYTES
+}
+
+#[cfg(unix)]
+fn coalesce_detached_input_commands(inputs: Vec<ExecutorInput>) -> Vec<DetachedPtyHostCommand> {
+    let mut commands = Vec::new();
+    let mut pending_raw = String::new();
+
+    for input in inputs {
+        match input {
+            ExecutorInput::Text(text) => {
+                if !pending_raw.is_empty() {
+                    commands.push(DetachedPtyHostCommand::Raw {
+                        data: std::mem::take(&mut pending_raw),
+                    });
+                }
+                commands.push(DetachedPtyHostCommand::Text { text });
+            }
+            ExecutorInput::Raw(raw) => {
+                if raw.len() >= DETACHED_INPUT_BATCH_MAX_BYTES {
+                    if !pending_raw.is_empty() {
+                        commands.push(DetachedPtyHostCommand::Raw {
+                            data: std::mem::take(&mut pending_raw),
+                        });
+                    }
+                    commands.push(DetachedPtyHostCommand::Raw { data: raw });
+                    continue;
+                }
+
+                if pending_raw.len() + raw.len() > DETACHED_INPUT_BATCH_MAX_BYTES
+                    && !pending_raw.is_empty()
+                {
+                    commands.push(DetachedPtyHostCommand::Raw {
+                        data: std::mem::take(&mut pending_raw),
+                    });
+                }
+                pending_raw.push_str(&raw);
+            }
+        }
+    }
+
+    if !pending_raw.is_empty() {
+        commands.push(DetachedPtyHostCommand::Raw { data: pending_raw });
+    }
+
+    commands
+}
+
+#[cfg(unix)]
+async fn connect_detached_runtime_control(
+    metadata: &DetachedRuntimeMetadata,
+) -> Result<BufReader<UnixStream>> {
+    let stream = UnixStream::connect(&metadata.control_socket_path).await?;
+    Ok(BufReader::new(stream))
+}
+
+#[cfg(unix)]
+async fn send_detached_runtime_request_over_connection(
+    reader: &mut BufReader<UnixStream>,
+    metadata: &DetachedRuntimeMetadata,
+    command: DetachedPtyHostCommand,
+) -> Result<DetachedPtyHostResponse> {
+    let request = DetachedPtyHostRequest {
+        protocol_version: metadata.protocol_version,
+        token: metadata.control_token.clone(),
+        command,
+    };
+    reader.get_mut().write_all(&serde_json::to_vec(&request)?).await?;
+    reader.get_mut().write_all(b"\n").await?;
+    reader.get_mut().flush().await?;
+
+    let mut line = Vec::new();
+    let count = reader.read_until(b'\n', &mut line).await?;
+    if count == 0 {
+        return Err(anyhow!("Detached PTY host closed the control socket"));
+    }
+    let response = serde_json::from_slice::<DetachedPtyHostResponse>(&line)?;
+    ensure_detached_protocol_version(response.protocol_version)?;
+    if response.ok {
+        Ok(response)
+    } else {
+        Err(anyhow!(response.error.unwrap_or_else(|| {
+            "Detached PTY host request failed".to_string()
+        })))
+    }
+}
+
+#[cfg(unix)]
+async fn run_detached_runtime_control_queue(
+    metadata: DetachedRuntimeMetadata,
+    session_id: String,
+    mut control_rx: mpsc::Receiver<DetachedPtyHostCommand>,
+) {
+    let mut connection: Option<BufReader<UnixStream>> = None;
+
+    while let Some(command) = control_rx.recv().await {
+        let mut pending = Some(command);
+        let mut retries = 0_u8;
+
+        while let Some(next_command) = pending.take() {
+            if connection.is_none() {
+                match connect_detached_runtime_control(&metadata).await {
+                    Ok(reader) => {
+                        connection = Some(reader);
+                    }
+                    Err(err) => {
+                        tracing::warn!(session_id, error = %err, "Failed to connect detached PTY control socket");
+                        break;
+                    }
+                }
+            }
+
+            let Some(reader) = connection.as_mut() else {
+                break;
+            };
+
+            match send_detached_runtime_request_over_connection(reader, &metadata, next_command.clone()).await {
+                Ok(_) => break,
+                Err(err) if retries == 0 && detached_runtime_unreachable(&err) => {
+                    connection = None;
+                    pending = Some(next_command);
+                    retries += 1;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => {
+                    tracing::warn!(session_id, error = %err, "Detached PTY control command failed");
+                    connection = None;
+                    break;
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetachedPtyHostSpec {
+    #[serde(default = "detached_protocol_version")]
+    pub protocol_version: u16,
     pub token: String,
     pub binary: PathBuf,
     pub args: Vec<String>,
@@ -78,11 +240,17 @@ pub struct DetachedPtyHostSpec {
     pub log_path: PathBuf,
     pub exit_path: PathBuf,
     pub ready_path: PathBuf,
+    #[serde(default = "detached_stream_flush_interval_ms")]
+    pub stream_flush_interval_ms: u64,
+    #[serde(default = "detached_stream_max_batch_bytes")]
+    pub stream_max_batch_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetachedPtyHostReady {
+    #[serde(default = "detached_protocol_version")]
+    pub protocol_version: u16,
     pub host_pid: u32,
     pub child_pid: u32,
 }
@@ -100,6 +268,8 @@ pub enum DetachedPtyHostCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetachedPtyHostRequest {
+    #[serde(default = "detached_protocol_version")]
+    pub protocol_version: u16,
     pub token: String,
     #[serde(flatten)]
     pub command: DetachedPtyHostCommand,
@@ -108,6 +278,8 @@ pub struct DetachedPtyHostRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetachedPtyHostResponse {
+    #[serde(default = "detached_protocol_version")]
+    pub protocol_version: u16,
     pub ok: bool,
     pub child_pid: Option<u32>,
     pub error: Option<String>,
@@ -116,6 +288,8 @@ pub struct DetachedPtyHostResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DetachedPtyHostStreamRequest {
+    #[serde(default = "detached_protocol_version")]
+    protocol_version: u16,
     token: String,
     offset: u64,
 }
@@ -123,13 +297,51 @@ struct DetachedPtyHostStreamRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DetachedPtyHostStreamResponse {
+    #[serde(default = "detached_protocol_version")]
+    protocol_version: u16,
     ok: bool,
     child_pid: Option<u32>,
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case")]
+enum TerminalDaemonRequest {
+    Ping {
+        protocol_version: u16,
+        token: String,
+    },
+    SpawnHost {
+        protocol_version: u16,
+        token: String,
+        session_id: String,
+        spec_path: PathBuf,
+        ready_path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalDaemonResponse {
+    #[serde(default = "detached_protocol_version")]
+    protocol_version: u16,
+    ok: bool,
+    daemon_pid: Option<u32>,
+    host_pid: Option<u32>,
+    child_pid: Option<u32>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TerminalDaemonMetadata {
+    control_socket_path: PathBuf,
+    token: String,
+    protocol_version: u16,
+}
+
 #[derive(Debug, Clone)]
 struct DetachedRuntimeMetadata {
+    protocol_version: u16,
     host_pid: u32,
     control_socket_path: PathBuf,
     stream_socket_path: Option<PathBuf>,
@@ -175,7 +387,15 @@ struct DetachedHostStreamSlot {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct DetachedStreamBatchConfig {
+    flush_interval: Duration,
+    max_batch_bytes: usize,
+}
+
+#[cfg(unix)]
 struct DetachedHostState {
+    protocol_version: u16,
     token: String,
     child_pid: u32,
     writer: Arc<StdMutex<Box<dyn std::io::Write + Send>>>,
@@ -186,6 +406,7 @@ struct DetachedHostState {
     stream_generation: AtomicU64,
     log_offset: AtomicU64,
     log_path: PathBuf,
+    stream_batch: DetachedStreamBatchConfig,
 }
 
 #[cfg(unix)]
@@ -305,6 +526,7 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
         .with_context(|| {
         format!("Failed to parse detached PTY spec {}", spec_path.display())
     })?;
+    ensure_detached_protocol_version(spec.protocol_version)?;
 
     if let Some(parent) = spec.log_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -366,6 +588,7 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     ));
 
     let shared = Arc::new(DetachedHostState {
+        protocol_version: spec.protocol_version,
         token: spec.token.clone(),
         child_pid,
         writer,
@@ -376,6 +599,10 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
         stream_generation: AtomicU64::new(0),
         log_offset: AtomicU64::new(0),
         log_path: spec.log_path.clone(),
+        stream_batch: DetachedStreamBatchConfig {
+            flush_interval: Duration::from_millis(spec.stream_flush_interval_ms.max(1)),
+            max_batch_bytes: spec.stream_max_batch_bytes.max(1024),
+        },
     });
 
     let shared_for_output = shared.clone();
@@ -393,15 +620,31 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
                         offset,
                         bytes: Arc::<[u8]>::from(buffer[..read].to_vec()),
                     };
+                    // Prioritize the live stream before durable capture so reconnect safety
+                    // does not add avoidable latency to the active terminal path.
+                    if let Some(sender) = clone_detached_host_stream_sender(&shared_for_output) {
+                        let _ =
+                            sender.blocking_send(DetachedPtyHostStreamMessage::Data(chunk.clone()));
+                    }
                     if shared_for_output
                         .capture_tx
-                        .blocking_send(DetachedPtyHostCaptureMessage::Data(chunk.clone()))
+                        .try_send(DetachedPtyHostCaptureMessage::Data(chunk.clone()))
+                        .or_else(|error| match error {
+                            mpsc::error::TrySendError::Full(message) => shared_for_output
+                                .capture_tx
+                                .blocking_send(message)
+                                .map_err(|_| {
+                                    mpsc::error::TrySendError::Closed(
+                                        DetachedPtyHostCaptureMessage::Shutdown,
+                                    )
+                                }),
+                            mpsc::error::TrySendError::Closed(message) => {
+                                Err(mpsc::error::TrySendError::Closed(message))
+                            }
+                        })
                         .is_err()
                     {
                         break;
-                    }
-                    if let Some(sender) = clone_detached_host_stream_sender(&shared_for_output) {
-                        let _ = sender.blocking_send(DetachedPtyHostStreamMessage::Data(chunk));
                     }
                 }
                 Err(_) => break,
@@ -410,6 +653,7 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     });
 
     let ready = DetachedPtyHostReady {
+        protocol_version: spec.protocol_version,
         host_pid: std::process::id(),
         child_pid,
     };
@@ -493,16 +737,18 @@ impl AppState {
         self: &Arc<Self>,
         executor: Arc<dyn Executor>,
         session_id: &str,
-        options: SpawnOptions,
+        mut options: SpawnOptions,
     ) -> Result<RuntimeLaunch> {
         if detached_runtime_disabled() {
             return self.spawn_legacy_direct_runtime(executor, options).await;
         }
-
-        let Some(launcher_path) = resolve_detached_runtime_launcher() else {
-            tracing::warn!("Detached PTY host launcher is unavailable; falling back to in-process direct runtime");
-            return self.spawn_legacy_direct_runtime(executor, options).await;
-        };
+        options.interactive = executor.supports_direct_terminal_ui();
+        options.structured_output = false;
+        let _spawn_permit = self
+            .acquire_detached_runtime_spawn_limit()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("Detached runtime spawn semaphore was closed"))?;
 
         let runtime_root = self.direct_runtime_root().await;
         tokio::fs::create_dir_all(&runtime_root).await?;
@@ -515,6 +761,7 @@ impl AppState {
         let control_token = uuid::Uuid::new_v4().to_string();
 
         let spec = DetachedPtyHostSpec {
+            protocol_version: DETACHED_PTY_PROTOCOL_VERSION,
             token: control_token.clone(),
             binary: executor.binary_path().to_path_buf(),
             args: executor.build_args(&options),
@@ -527,38 +774,64 @@ impl AppState {
             log_path: log_path.clone(),
             exit_path: exit_path.clone(),
             ready_path: ready_path.clone(),
+            stream_flush_interval_ms: detached_stream_flush_interval_ms(),
+            stream_max_batch_bytes: detached_stream_max_batch_bytes(),
         };
         tokio::fs::write(&spec_path, serde_json::to_vec(&spec)?).await?;
 
-        let mut command = tokio::process::Command::new(&launcher_path);
-        command
-            .arg("--workspace")
-            .arg(&self.workspace_path)
-            .arg("--config")
-            .arg(&self.config_path)
-            .arg("pty-host")
-            .arg("--spec")
-            .arg(&spec_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .current_dir(&self.workspace_path);
-        configure_detached_process_group(&mut command);
-        let child = command.spawn().with_context(|| {
-            format!(
-                "Failed to launch detached PTY host via {}",
-                launcher_path.display()
-            )
-        })?;
-        let host_pid = child.id().unwrap_or(0);
-        drop(child);
-
-        let ready = wait_for_detached_ready(&ready_path, DETACHED_READY_TIMEOUT).await?;
+        let daemon_metadata = resolve_terminal_daemon_metadata();
+        let (ready, host_pid) = match spawn_detached_runtime_via_daemon(
+            daemon_metadata.as_ref(),
+            session_id,
+            &spec_path,
+            &ready_path,
+        )
+        .await
+        {
+            Ok(Some((ready, host_pid))) => (ready, host_pid),
+            Ok(None) => {
+                let Some(launcher_path) = resolve_detached_runtime_launcher() else {
+                    tracing::warn!("Detached PTY host launcher is unavailable; falling back to in-process direct runtime");
+                    return self.spawn_legacy_direct_runtime(executor, options).await;
+                };
+                let mut command = tokio::process::Command::new(&launcher_path);
+                command
+                    .arg("--workspace")
+                    .arg(&self.workspace_path)
+                    .arg("--config")
+                    .arg(&self.config_path)
+                    .arg("pty-host")
+                    .arg("--spec")
+                    .arg(&spec_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .current_dir(&self.workspace_path);
+                configure_detached_process_group(&mut command);
+                let child = command.spawn().with_context(|| {
+                    format!(
+                        "Failed to launch detached PTY host via {}",
+                        launcher_path.display()
+                    )
+                })?;
+                let host_pid = child.id().unwrap_or(0);
+                drop(child);
+                let ready = wait_for_detached_ready(&ready_path, DETACHED_READY_TIMEOUT).await?;
+                (ready, host_pid)
+            }
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&spec_path).await;
+                let _ = tokio::fs::remove_file(&ready_path).await;
+                return Err(err);
+            }
+        };
+        ensure_detached_protocol_version(ready.protocol_version)?;
         let attachment = DetachedRuntimeAttachment {
             kind: executor.kind(),
             session_id: session_id.to_string(),
             child_pid: ready.child_pid,
             metadata: DetachedRuntimeMetadata {
+                protocol_version: ready.protocol_version,
                 host_pid: if ready.host_pid > 0 {
                     ready.host_pid
                 } else {
@@ -609,6 +882,34 @@ impl AppState {
                 (
                     DETACHED_EXIT_PATH_METADATA_KEY.to_string(),
                     exit_path.to_string_lossy().to_string(),
+                ),
+                (
+                    DETACHED_PROTOCOL_VERSION_METADATA_KEY.to_string(),
+                    DETACHED_PTY_PROTOCOL_VERSION.to_string(),
+                ),
+                (
+                    DETACHED_TRANSPORT_METADATA_KEY.to_string(),
+                    DETACHED_PTY_TRANSPORT.to_string(),
+                ),
+                (
+                    DETACHED_EMULATOR_METADATA_KEY.to_string(),
+                    DETACHED_PTY_TERMINAL_EMULATOR.to_string(),
+                ),
+                (
+                    DETACHED_BACKPRESSURE_METADATA_KEY.to_string(),
+                    DETACHED_PTY_BACKPRESSURE_MODE.to_string(),
+                ),
+                (
+                    DETACHED_BATCH_INTERVAL_METADATA_KEY.to_string(),
+                    detached_stream_flush_interval_ms().to_string(),
+                ),
+                (
+                    DETACHED_BATCH_BYTES_METADATA_KEY.to_string(),
+                    detached_stream_max_batch_bytes().to_string(),
+                ),
+                (
+                    DETACHED_ISOLATION_METADATA_KEY.to_string(),
+                    DETACHED_PTY_ISOLATION_MODE.to_string(),
                 ),
             ]),
         })
@@ -797,49 +1098,59 @@ impl AppState {
         let (resize_tx, mut resize_rx) =
             mpsc::channel::<conductor_executors::process::PtyDimensions>(8);
         let (kill_tx, mut kill_rx) = oneshot::channel::<()>();
-        let metadata_for_input = metadata.clone();
-        let session_id_for_input = session_id.clone();
+        let (control_tx, control_rx) = mpsc::channel::<DetachedPtyHostCommand>(256);
+        let metadata_for_control = metadata.clone();
+        let session_id_for_control = session_id.clone();
         tokio::spawn(async move {
-            while let Some(input) = input_rx.recv().await {
-                let command = match input {
-                    ExecutorInput::Text(text) => DetachedPtyHostCommand::Text { text },
-                    ExecutorInput::Raw(raw) => DetachedPtyHostCommand::Raw { data: raw },
-                };
-                if let Err(err) = send_detached_runtime_request(&metadata_for_input, command).await
-                {
-                    tracing::warn!(session_id_for_input, error = %err, "Failed to send input to detached PTY runtime");
-                    break;
+            run_detached_runtime_control_queue(metadata_for_control, session_id_for_control, control_rx)
+                .await;
+        });
+
+        let control_tx_for_input = control_tx.clone();
+        tokio::spawn(async move {
+            while let Some(first) = input_rx.recv().await {
+                let mut batch = vec![first];
+                while batch.len() < DETACHED_INPUT_BATCH_MAX_ITEMS {
+                    match input_rx.try_recv() {
+                        Ok(next) => batch.push(next),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                for command in coalesce_detached_input_commands(batch) {
+                    if control_tx_for_input.send(command).await.is_err() {
+                        return;
+                    }
                 }
             }
         });
 
-        let metadata_for_resize = metadata.clone();
-        let session_id_for_resize = session_id.clone();
+        let control_tx_for_resize = control_tx.clone();
         tokio::spawn(async move {
-            while let Some(dimensions) = resize_rx.recv().await {
-                if let Err(err) = send_detached_runtime_request(
-                    &metadata_for_resize,
-                    DetachedPtyHostCommand::Resize {
+            while let Some(mut dimensions) = resize_rx.recv().await {
+                while let Ok(next) = resize_rx.try_recv() {
+                    dimensions = next;
+                }
+                if control_tx_for_resize
+                    .send(DetachedPtyHostCommand::Resize {
                         cols: dimensions.cols,
                         rows: dimensions.rows,
-                    },
-                )
-                .await
+                    })
+                    .await
+                    .is_err()
                 {
-                    tracing::warn!(session_id_for_resize, error = %err, "Failed to resize detached PTY runtime");
-                    break;
+                    return;
                 }
             }
         });
 
-        let metadata_for_kill = metadata.clone();
         tokio::spawn(async move {
             if kill_rx.try_recv().is_ok() {
                 return;
             }
             let _ = kill_rx.await;
-            let _ = send_detached_runtime_request(&metadata_for_kill, DetachedPtyHostCommand::Kill)
-                .await;
+            let _ = control_tx.send(DetachedPtyHostCommand::Kill).await;
         });
 
         let state = self.clone();
@@ -906,7 +1217,18 @@ impl AppState {
                                 break;
                             }
                         };
-                        for frame in decoder.push(&buffer[..read])? {
+                        let frames = match decoder.push(&buffer[..read]) {
+                            Ok(frames) => frames,
+                            Err(err) => {
+                                tracing::warn!(
+                                    session_id,
+                                    error = %err,
+                                    "Detached PTY stream frame decode failed, reconnecting"
+                                );
+                                break;
+                            }
+                        };
+                        for frame in frames {
                             match frame.kind {
                                 DetachedPtyStreamFrameKind::Data => {
                                     let next_offset = frame.offset + frame.payload.len() as u64;
@@ -1110,65 +1432,79 @@ async fn handle_detached_host_connection(
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = Vec::new();
-    let count = reader.read_until(b'\n', &mut line).await?;
-    if count == 0 {
-        return Ok(());
-    }
-    let request = serde_json::from_slice::<DetachedPtyHostRequest>(&line)
-        .context("Failed to parse detached PTY host request")?;
-    let response = if request.token != state.token {
-        DetachedPtyHostResponse {
-            ok: false,
-            child_pid: Some(state.child_pid),
-            error: Some("Unauthorized detached PTY host request".to_string()),
+    loop {
+        line.clear();
+        let count = reader.read_until(b'\n', &mut line).await?;
+        if count == 0 {
+            return Ok(());
         }
-    } else {
-        match request.command {
-            DetachedPtyHostCommand::Ping => DetachedPtyHostResponse {
-                ok: true,
+        let request = serde_json::from_slice::<DetachedPtyHostRequest>(&line)
+            .context("Failed to parse detached PTY host request")?;
+        let response = if let Err(error) = ensure_detached_protocol_version(request.protocol_version) {
+            DetachedPtyHostResponse {
+                protocol_version: state.protocol_version,
+                ok: false,
                 child_pid: Some(state.child_pid),
-                error: None,
-            },
-            DetachedPtyHostCommand::Text { text } => {
-                write_detached_host_input(&state.writer, &text, true).await?;
-                DetachedPtyHostResponse {
+                error: Some(error.to_string()),
+            }
+        } else if request.token != state.token {
+            DetachedPtyHostResponse {
+                protocol_version: state.protocol_version,
+                ok: false,
+                child_pid: Some(state.child_pid),
+                error: Some("Unauthorized detached PTY host request".to_string()),
+            }
+        } else {
+            match request.command {
+                DetachedPtyHostCommand::Ping => DetachedPtyHostResponse {
+                    protocol_version: state.protocol_version,
                     ok: true,
                     child_pid: Some(state.child_pid),
                     error: None,
+                },
+                DetachedPtyHostCommand::Text { text } => {
+                    write_detached_host_input(&state.writer, &text, true).await?;
+                    DetachedPtyHostResponse {
+                        protocol_version: state.protocol_version,
+                        ok: true,
+                        child_pid: Some(state.child_pid),
+                        error: None,
+                    }
+                }
+                DetachedPtyHostCommand::Raw { data } => {
+                    write_detached_host_input(&state.writer, &data, false).await?;
+                    DetachedPtyHostResponse {
+                        protocol_version: state.protocol_version,
+                        ok: true,
+                        child_pid: Some(state.child_pid),
+                        error: None,
+                    }
+                }
+                DetachedPtyHostCommand::Resize { cols, rows } => {
+                    resize_detached_host(&state.master, cols, rows).await?;
+                    DetachedPtyHostResponse {
+                        protocol_version: state.protocol_version,
+                        ok: true,
+                        child_pid: Some(state.child_pid),
+                        error: None,
+                    }
+                }
+                DetachedPtyHostCommand::Kill => {
+                    kill_detached_host_child(&state.child).await?;
+                    DetachedPtyHostResponse {
+                        protocol_version: state.protocol_version,
+                        ok: true,
+                        child_pid: Some(state.child_pid),
+                        error: None,
+                    }
                 }
             }
-            DetachedPtyHostCommand::Raw { data } => {
-                write_detached_host_input(&state.writer, &data, false).await?;
-                DetachedPtyHostResponse {
-                    ok: true,
-                    child_pid: Some(state.child_pid),
-                    error: None,
-                }
-            }
-            DetachedPtyHostCommand::Resize { cols, rows } => {
-                resize_detached_host(&state.master, cols, rows).await?;
-                DetachedPtyHostResponse {
-                    ok: true,
-                    child_pid: Some(state.child_pid),
-                    error: None,
-                }
-            }
-            DetachedPtyHostCommand::Kill => {
-                kill_detached_host_child(&state.child).await?;
-                DetachedPtyHostResponse {
-                    ok: true,
-                    child_pid: Some(state.child_pid),
-                    error: None,
-                }
-            }
-        }
-    };
+        };
 
-    let mut stream = reader.into_inner();
-    stream.write_all(&serde_json::to_vec(&response)?).await?;
-    stream.write_all(b"\n").await?;
-    stream.flush().await?;
-    Ok(())
+        reader.get_mut().write_all(&serde_json::to_vec(&response)?).await?;
+        reader.get_mut().write_all(b"\n").await?;
+        reader.get_mut().flush().await?;
+    }
 }
 
 #[cfg(unix)]
@@ -1185,8 +1521,21 @@ async fn handle_detached_stream_connection(
     let request = serde_json::from_slice::<DetachedPtyHostStreamRequest>(&line)
         .context("Failed to parse detached PTY stream request")?;
     let mut stream = reader.into_inner();
+    if let Err(error) = ensure_detached_protocol_version(request.protocol_version) {
+        let response = DetachedPtyHostStreamResponse {
+            protocol_version: state.protocol_version,
+            ok: false,
+            child_pid: Some(state.child_pid),
+            error: Some(error.to_string()),
+        };
+        stream.write_all(&serde_json::to_vec(&response)?).await?;
+        stream.write_all(b"\n").await?;
+        stream.flush().await?;
+        return Ok(());
+    }
     if request.token != state.token {
         let response = DetachedPtyHostStreamResponse {
+            protocol_version: state.protocol_version,
             ok: false,
             child_pid: Some(state.child_pid),
             error: Some("Unauthorized detached PTY stream request".to_string()),
@@ -1214,6 +1563,7 @@ async fn handle_detached_stream_connection(
         flush_detached_capture(&state.capture_tx).await?;
         let replay_limit = detached_log_len(&state.log_path).await?;
         let response = DetachedPtyHostStreamResponse {
+            protocol_version: state.protocol_version,
             ok: true,
             child_pid: Some(state.child_pid),
             error: None,
@@ -1226,6 +1576,7 @@ async fn handle_detached_stream_connection(
             state.log_path.clone(),
             request.offset,
             replay_limit,
+            state.stream_batch,
             rx,
         )
         .await
@@ -1253,6 +1604,7 @@ async fn forward_detached_host_stream(
     log_path: PathBuf,
     requested_offset: u64,
     replay_limit: u64,
+    stream_batch: DetachedStreamBatchConfig,
     mut rx: mpsc::Receiver<DetachedPtyHostStreamMessage>,
 ) -> Result<()> {
     let mut stream_floor = requested_offset.min(replay_limit);
@@ -1277,6 +1629,7 @@ async fn forward_detached_host_stream(
                         &mut pending_offset,
                         &mut pending,
                         &mut flush_deadline,
+                        stream_batch,
                         message,
                     )
                     .await? {
@@ -1299,6 +1652,7 @@ async fn forward_detached_host_stream(
                 &mut pending_offset,
                 &mut pending,
                 &mut flush_deadline,
+                stream_batch,
                 message,
             )
             .await?
@@ -1316,6 +1670,7 @@ async fn handle_detached_host_stream_message(
     pending_offset: &mut Option<u64>,
     pending: &mut Vec<u8>,
     flush_deadline: &mut Option<tokio::time::Instant>,
+    stream_batch: DetachedStreamBatchConfig,
     message: DetachedPtyHostStreamMessage,
 ) -> Result<bool> {
     match message {
@@ -1339,13 +1694,12 @@ async fn handle_detached_host_stream_message(
             }
             if pending_offset.is_none() {
                 *pending_offset = Some(effective_offset);
-                *flush_deadline =
-                    Some(tokio::time::Instant::now() + DETACHED_STREAM_FLUSH_INTERVAL);
+                *flush_deadline = Some(tokio::time::Instant::now() + stream_batch.flush_interval);
             }
             pending.extend_from_slice(bytes);
             *stream_floor = (*stream_floor).max(chunk_end);
 
-            if pending.len() >= DETACHED_STREAM_MAX_BATCH_BYTES {
+            if pending.len() >= stream_batch.max_batch_bytes {
                 flush_detached_stream_batch(stream, pending_offset, pending).await?;
                 *flush_deadline = None;
             }
@@ -1549,6 +1903,7 @@ async fn connect_detached_runtime_stream(
         .ok_or_else(|| anyhow!("Detached PTY stream socket is unavailable"))?;
     let mut stream = UnixStream::connect(stream_path).await?;
     let request = DetachedPtyHostStreamRequest {
+        protocol_version: metadata.protocol_version,
         token: metadata.control_token.clone(),
         offset,
     };
@@ -1563,6 +1918,7 @@ async fn connect_detached_runtime_stream(
         return Err(anyhow!("Detached PTY host closed the stream socket"));
     }
     let response = serde_json::from_slice::<DetachedPtyHostStreamResponse>(&line)?;
+    ensure_detached_protocol_version(response.protocol_version)?;
     if response.ok {
         Ok(reader.into_inner())
     } else {
@@ -1776,6 +2132,11 @@ async fn wait_for_detached_child(
 #[cfg(unix)]
 fn detached_runtime_metadata(session: &SessionRecord) -> Option<DetachedRuntimeMetadata> {
     Some(DetachedRuntimeMetadata {
+        protocol_version: session
+            .metadata
+            .get(DETACHED_PROTOCOL_VERSION_METADATA_KEY)
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(DETACHED_PTY_PROTOCOL_VERSION),
         host_pid: session.metadata.get("detachedPid")?.parse::<u32>().ok()?,
         control_socket_path: PathBuf::from(
             session
@@ -1851,11 +2212,32 @@ async fn send_detached_runtime_request(
     metadata: &DetachedRuntimeMetadata,
     command: DetachedPtyHostCommand,
 ) -> Result<DetachedPtyHostResponse> {
+    let mut reader = connect_detached_runtime_control(metadata).await?;
+    send_detached_runtime_request_over_connection(&mut reader, metadata, command).await
+}
+
+#[cfg(unix)]
+fn resolve_terminal_daemon_metadata() -> Option<TerminalDaemonMetadata> {
+    let control_socket_path =
+        PathBuf::from(std::env::var(TERMINAL_DAEMON_CONTROL_SOCKET_ENV).ok()?);
+    let token = std::env::var(TERMINAL_DAEMON_TOKEN_ENV).ok()?;
+    let protocol_version = std::env::var(TERMINAL_DAEMON_PROTOCOL_VERSION_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(DETACHED_PTY_PROTOCOL_VERSION);
+    Some(TerminalDaemonMetadata {
+        control_socket_path,
+        token,
+        protocol_version,
+    })
+}
+
+#[cfg(unix)]
+async fn send_terminal_daemon_request(
+    metadata: &TerminalDaemonMetadata,
+    request: TerminalDaemonRequest,
+) -> Result<TerminalDaemonResponse> {
     let mut stream = UnixStream::connect(&metadata.control_socket_path).await?;
-    let request = DetachedPtyHostRequest {
-        token: metadata.control_token.clone(),
-        command,
-    };
     stream.write_all(&serde_json::to_vec(&request)?).await?;
     stream.write_all(b"\n").await?;
     stream.flush().await?;
@@ -1863,16 +2245,56 @@ async fn send_detached_runtime_request(
     let mut line = Vec::new();
     let count = reader.read_until(b'\n', &mut line).await?;
     if count == 0 {
-        return Err(anyhow!("Detached PTY host closed the control socket"));
+        return Err(anyhow!("Terminal daemon closed the control socket"));
     }
-    let response = serde_json::from_slice::<DetachedPtyHostResponse>(&line)?;
+    let response = serde_json::from_slice::<TerminalDaemonResponse>(&line)?;
+    ensure_detached_protocol_version(response.protocol_version)?;
     if response.ok {
         Ok(response)
     } else {
         Err(anyhow!(response.error.unwrap_or_else(|| {
-            "Detached PTY host request failed".to_string()
+            "Terminal daemon request failed".to_string()
         })))
     }
+}
+
+#[cfg(unix)]
+async fn spawn_detached_runtime_via_daemon(
+    daemon_metadata: Option<&TerminalDaemonMetadata>,
+    session_id: &str,
+    spec_path: &Path,
+    ready_path: &Path,
+) -> Result<Option<(DetachedPtyHostReady, u32)>> {
+    let Some(metadata) = daemon_metadata else {
+        return Ok(None);
+    };
+
+    let response = match send_terminal_daemon_request(
+        metadata,
+        TerminalDaemonRequest::SpawnHost {
+            protocol_version: metadata.protocol_version,
+            token: metadata.token.clone(),
+            session_id: session_id.to_string(),
+            spec_path: spec_path.to_path_buf(),
+            ready_path: ready_path.to_path_buf(),
+        },
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if detached_runtime_unreachable(&error) => {
+            tracing::warn!(
+                session_id,
+                error = %error,
+                "Terminal daemon was unavailable; falling back to direct detached PTY host launch"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+
+    let ready = wait_for_detached_ready(ready_path, DETACHED_READY_TIMEOUT).await?;
+    Ok(Some((ready, response.host_pid.unwrap_or(0))))
 }
 
 fn detached_runtime_disabled() -> bool {
@@ -1880,6 +2302,17 @@ fn detached_runtime_disabled() -> bool {
         || std::env::var("CONDUCTOR_DISABLE_DETACHED_PTY_HOST")
             .map(|value| value.trim().eq_ignore_ascii_case("true"))
             .unwrap_or(cfg!(test))
+}
+
+fn ensure_detached_protocol_version(version: u16) -> Result<()> {
+    if version == DETACHED_PTY_PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Unsupported detached PTY protocol version: {version} (expected {})",
+            DETACHED_PTY_PROTOCOL_VERSION
+        ))
+    }
 }
 
 fn resolve_detached_runtime_launcher() -> Option<PathBuf> {
@@ -2081,6 +2514,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn coalesce_detached_input_commands_merges_adjacent_raw_chunks() {
+        let commands = coalesce_detached_input_commands(vec![
+            ExecutorInput::Raw("he".to_string()),
+            ExecutorInput::Raw("llo".to_string()),
+            ExecutorInput::Raw("!".to_string()),
+        ]);
+
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            DetachedPtyHostCommand::Raw { data } => assert_eq!(data, "hello!"),
+            other => panic!("expected merged raw command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coalesce_detached_input_commands_preserves_text_boundaries() {
+        let commands = coalesce_detached_input_commands(vec![
+            ExecutorInput::Raw("abc".to_string()),
+            ExecutorInput::Text("prompt".to_string()),
+            ExecutorInput::Raw("xyz".to_string()),
+        ]);
+
+        assert_eq!(commands.len(), 3);
+        match &commands[0] {
+            DetachedPtyHostCommand::Raw { data } => assert_eq!(data, "abc"),
+            other => panic!("expected leading raw command, got {other:?}"),
+        }
+        match &commands[1] {
+            DetachedPtyHostCommand::Text { text } => assert_eq!(text, "prompt"),
+            other => panic!("expected text command boundary, got {other:?}"),
+        }
+        match &commands[2] {
+            DetachedPtyHostCommand::Raw { data } => assert_eq!(data, "xyz"),
+            other => panic!("expected trailing raw command, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn detached_pty_host_streams_replays_and_persists_output() {
         let root = std::env::temp_dir().join(format!(
@@ -2102,6 +2573,7 @@ mod tests {
         ));
         let token = Uuid::new_v4().to_string();
         let spec = DetachedPtyHostSpec {
+            protocol_version: DETACHED_PTY_PROTOCOL_VERSION,
             token: token.clone(),
             binary: PathBuf::from("/bin/sh"),
             args: vec!["-lc".to_string(), "cat".to_string()],
@@ -2114,6 +2586,8 @@ mod tests {
             log_path: log_path.clone(),
             exit_path: exit_path.clone(),
             ready_path: ready_path.clone(),
+            stream_flush_interval_ms: detached_stream_flush_interval_ms(),
+            stream_max_batch_bytes: detached_stream_max_batch_bytes(),
         };
         tokio::fs::write(&spec_path, serde_json::to_vec(&spec).unwrap())
             .await
@@ -2145,6 +2619,7 @@ mod tests {
             }
         };
         let metadata = DetachedRuntimeMetadata {
+            protocol_version: ready.protocol_version,
             host_pid: ready.host_pid,
             control_socket_path,
             stream_socket_path: Some(stream_socket_path),
@@ -2153,9 +2628,16 @@ mod tests {
             exit_path: exit_path.clone(),
         };
 
-        let ping = send_detached_runtime_request(&metadata, DetachedPtyHostCommand::Ping)
+        let mut control = connect_detached_runtime_control(&metadata)
             .await
-            .expect("ping should succeed");
+            .expect("control should connect");
+        let ping = send_detached_runtime_request_over_connection(
+            &mut control,
+            &metadata,
+            DetachedPtyHostCommand::Ping,
+        )
+        .await
+        .expect("ping should succeed");
         assert!(ping.ok);
         assert_eq!(ping.child_pid, Some(ready.child_pid));
 
@@ -2163,7 +2645,8 @@ mod tests {
             .await
             .expect("stream should connect");
 
-        send_detached_runtime_request(
+        send_detached_runtime_request_over_connection(
+            &mut control,
             &metadata,
             DetachedPtyHostCommand::Text {
                 text: "hello from host".to_string(),
@@ -2182,7 +2665,8 @@ mod tests {
         let first_end = first.offset + first.payload.len() as u64;
         drop(stream);
 
-        send_detached_runtime_request(
+        send_detached_runtime_request_over_connection(
+            &mut control,
             &metadata,
             DetachedPtyHostCommand::Text {
                 text: "replayed line".to_string(),
@@ -2201,11 +2685,17 @@ mod tests {
         assert_eq!(replayed.kind, DetachedPtyStreamFrameKind::Data);
         assert!(String::from_utf8_lossy(&replayed.payload).contains("replayed line"));
 
-        let log_contents = wait_for_detached_log("detached host output", &log_path).await;
+        let log_contents = wait_for_detached_log_contains(
+            "detached host output",
+            &log_path,
+            &["hello from host", "replayed line"],
+        )
+        .await;
         assert!(log_contents.contains("hello from host"));
         assert!(log_contents.contains("replayed line"));
 
-        send_detached_runtime_request(
+        send_detached_runtime_request_over_connection(
+            &mut control,
             &metadata,
             DetachedPtyHostCommand::Resize {
                 cols: 132,
@@ -2215,14 +2705,22 @@ mod tests {
         .await
         .expect("resize should be accepted");
 
-        send_detached_runtime_request(&metadata, DetachedPtyHostCommand::Kill)
-            .await
-            .expect("kill should be accepted");
+        send_detached_runtime_request_over_connection(
+            &mut control,
+            &metadata,
+            DetachedPtyHostCommand::Kill,
+        )
+        .await
+        .expect("kill should be accepted");
 
-        let exit_frame = read_next_stream_frame(&mut replay_stream, &mut replay_decoder)
-            .await
-            .expect("exit frame should arrive");
-        assert_eq!(exit_frame.kind, DetachedPtyStreamFrameKind::Exit);
+        let exit_frame = loop {
+            let frame = read_next_stream_frame(&mut replay_stream, &mut replay_decoder)
+                .await
+                .expect("stream frame should arrive after kill");
+            if frame.kind == DetachedPtyStreamFrameKind::Exit {
+                break frame;
+            }
+        };
         assert_ne!(
             decode_detached_exit_payload(&exit_frame.payload).expect("exit payload should decode"),
             i32::MIN
@@ -2270,6 +2768,7 @@ mod tests {
     #[tokio::test]
     async fn ping_detached_runtime_returns_none_for_missing_unix_socket() {
         let metadata = DetachedRuntimeMetadata {
+            protocol_version: DETACHED_PTY_PROTOCOL_VERSION,
             host_pid: 0,
             control_socket_path: PathBuf::from(format!(
                 "/tmp/co-detached-{}-missing-ctrl.sock",
@@ -2296,6 +2795,15 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn detached_protocol_version_rejects_unknown_versions() {
+        let error = ensure_detached_protocol_version(DETACHED_PTY_PROTOCOL_VERSION + 1)
+            .expect_err("unsupported protocol version should fail");
+        assert!(error
+            .to_string()
+            .contains("Unsupported detached PTY protocol version"));
+    }
+
     async fn read_next_stream_frame(
         stream: &mut UnixStream,
         decoder: &mut DetachedPtyStreamFrameDecoder,
@@ -2317,11 +2825,16 @@ mod tests {
         .map_err(|_| anyhow!("timed out waiting for detached PTY stream frame"))?
     }
 
-    async fn wait_for_detached_log(label: &str, path: &Path) -> String {
+    async fn wait_for_detached_log_contains(label: &str, path: &Path, needles: &[&str]) -> String {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match tokio::fs::read_to_string(path).await {
-                    Ok(content) if !content.trim().is_empty() => return content,
+                    Ok(content)
+                        if !content.trim().is_empty()
+                            && needles.iter().all(|needle| content.contains(needle)) =>
+                    {
+                        return content
+                    }
                     _ => tokio::time::sleep(Duration::from_millis(25)).await,
                 }
             }

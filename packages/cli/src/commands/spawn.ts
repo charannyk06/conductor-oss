@@ -81,8 +81,7 @@ export function registerSpawn(program: Command): void {
           console.log(`  Issue:    ${chalk.dim(session.issueId)}`);
         }
 
-        const tmuxTarget = sessionTmuxTarget(session);
-        console.log(`  Attach:   ${chalk.dim(`tmux attach -t ${tmuxTarget}`)}`);
+        console.log(`  Terminal: ${chalk.dim("Open the session in the dashboard terminal")}`);
         console.log();
         console.log(`SESSION=${session.id}`);
       } catch (err) {

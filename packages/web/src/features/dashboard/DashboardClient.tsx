@@ -1189,7 +1189,7 @@ export default function DashboardClient() {
     error: selectedSessionError,
   } = useSession(
     selectedSessionId,
-    selectedSessionId ? sessionsById.get(selectedSessionId) ?? null : null,
+    null,
     { enabled: Boolean(selectedSessionId) },
   );
   const workspaceError = createError ?? configError ?? sessionsError ?? selectedSessionError ?? preferencesError;
@@ -1949,14 +1949,11 @@ export default function DashboardClient() {
     }
 
     return (
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
         <WorkspaceOverview
           projects={projects}
           sessions={dashboardSessions}
-          selectedProjectId={selectedProjectId}
-          agentCount={agentOptions.length}
           onCreateWorkspace={openWorkspaceDialog}
-          onSelectProject={handleSelectProject}
           onSelectSession={handleSelectSession}
         />
       </div>
@@ -1965,12 +1962,10 @@ export default function DashboardClient() {
     dashboardSessions,
     projectWorkspaceContent,
     selectedSessionId,
-    handleSelectProject,
     handleSelectSession,
     openWorkspaceDialog,
     projects,
     selectedProjectId,
-    agentOptions.length,
   ]);
 
   return (

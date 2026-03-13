@@ -20,7 +20,7 @@ import type {
 } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { AgentTileIcon } from "./AgentTileIcon";
-import { TERMINAL_STATUSES } from "@conductor-oss/core/types";
+import { ARCHIVABLE_STATUSES, TERMINAL_STATUSES } from "@conductor-oss/core/types";
 import { SessionCard } from "./SessionCard";
 import { EmptyState } from "./EmptyState";
 import { useTheme } from "./ThemeProvider";
@@ -1207,7 +1207,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
   }, [filteredSessions]);
 
   const cleanupCandidates = useMemo(
-    () => filteredSessions.filter((s) => TERMINAL_STATUSES.has(s.status)),
+    () => filteredSessions.filter((s) => ARCHIVABLE_STATUSES.has(s.status)),
     [filteredSessions],
   );
 
@@ -1631,8 +1631,8 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       ids,
       "terminal-bulk",
       "cleanup",
-      `Clean up ${ids.length} terminal ${noun}`,
-      `Clean up all terminal sessions in the current view (${ids.length} ${noun}).`,
+      `Clean up ${ids.length} ${noun}`,
+      `Clean up all archivable sessions in the current view (${ids.length} ${noun}).`,
     );
   };
 
@@ -1834,7 +1834,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
       },
       {
         id: "cleanup",
-        label: `Cleanup terminal sessions (${cleanupCandidates.length})`,
+        label: `Cleanup sessions (${cleanupCandidates.length})`,
         hint: "Agent control",
         run: () => {
           void handleCleanupTerminal();
@@ -2406,7 +2406,7 @@ export function Dashboard({ sessions: initialSessions, stats: initialStats, conf
                   onClick={() => void handleCleanupTerminal()}
                   disabled={cleanupCandidates.length === 0 || bulkBusy || busySessionId !== null || dashboardTab === "chat" || dashboardTab === "review"}
                   className="rounded-md border border-[rgba(239,68,68,0.28)] px-2.5 py-2 text-[11px] font-medium text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.08)] disabled:cursor-not-allowed disabled:opacity-40"
-                  title={cleanupCandidates.length === 0 ? "No terminal sessions in current view" : "Clean up terminal sessions in current view"}
+                  title={cleanupCandidates.length === 0 ? "No archivable sessions in current view" : "Clean up archivable sessions in current view"}
                 >
                   {bulkBusy ? "Cleaning..." : `Cleanup (${cleanupCandidates.length})`}
                 </button>

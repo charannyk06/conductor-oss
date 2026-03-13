@@ -37,14 +37,25 @@ export type MobileTerminalViewportMetrics = {
   keyboardVisible: boolean;
 };
 
+export type TerminalModeState = {
+  alternateScreen: boolean;
+  applicationKeypad: boolean;
+  applicationCursor: boolean;
+  hideCursor: boolean;
+  bracketedPaste: boolean;
+  mouseProtocolMode: string;
+  mouseProtocolEncoding: string;
+};
+
 const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
 const COMPACT_TERMINAL_CHROME_MAX_EDGE_PX = 700;
 const TERMINAL_FRAME_MAGIC = [0x43, 0x54, 0x50, 0x32] as const;
-const TERMINAL_FRAME_PROTOCOL_VERSION = 1;
+const TERMINAL_FRAME_PROTOCOL_VERSION = 2;
 const TERMINAL_FRAME_KIND_RESTORE = 1;
 const TERMINAL_FRAME_KIND_STREAM = 2;
 const TERMINAL_STREAM_FRAME_HEADER_BYTES = 14;
-const TERMINAL_RESTORE_FRAME_HEADER_BYTES = 20;
+const TERMINAL_RESTORE_FRAME_HEADER_BYTES_V1 = 20;
+const TERMINAL_RESTORE_FRAME_HEADER_BYTES_V2 = 24;
 const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
   /\x1b\[(?:I|O)/g,
   /\x1b\[\d+;\d+R/g,
@@ -61,6 +72,7 @@ export type TerminalBinaryFrame =
       reason: "attach" | "lagged" | "unknown";
       cols: number;
       rows: number;
+      modes?: TerminalModeState;
       payload: Uint8Array;
     }
   | {
@@ -77,6 +89,97 @@ function decodeTerminalRestoreReason(code: number): "attach" | "lagged" | "unkno
     return "lagged";
   }
   return "unknown";
+}
+
+function decodeTerminalMouseProtocolMode(code: number): string {
+  if (code === 1) return "Press";
+  if (code === 2) return "PressRelease";
+  if (code === 3) return "ButtonMotion";
+  if (code === 4) return "AnyMotion";
+  return "None";
+}
+
+function decodeTerminalMouseProtocolEncoding(code: number): string {
+  if (code === 1) return "Utf8";
+  if (code === 2) return "Sgr";
+  if (code === 3) return "Urxvt";
+  return "Default";
+}
+
+function decodeTerminalModes(flags: number, mouseModeCode: number, mouseEncodingCode: number): TerminalModeState {
+  return {
+    alternateScreen: (flags & (1 << 0)) !== 0,
+    applicationKeypad: (flags & (1 << 1)) !== 0,
+    applicationCursor: (flags & (1 << 2)) !== 0,
+    hideCursor: (flags & (1 << 3)) !== 0,
+    bracketedPaste: (flags & (1 << 4)) !== 0,
+    mouseProtocolMode: decodeTerminalMouseProtocolMode(mouseModeCode),
+    mouseProtocolEncoding: decodeTerminalMouseProtocolEncoding(mouseEncodingCode),
+  };
+}
+
+function concatTerminalPayload(prefix: Uint8Array, payload: Uint8Array): Uint8Array {
+  if (prefix.byteLength === 0) {
+    return payload;
+  }
+
+  if (payload.byteLength === 0) {
+    return prefix;
+  }
+
+  const merged = new Uint8Array(prefix.byteLength + payload.byteLength);
+  merged.set(prefix, 0);
+  merged.set(payload, prefix.byteLength);
+  return merged;
+}
+
+export function encodeTerminalModesPrefix(modes?: TerminalModeState | null): Uint8Array {
+  if (!modes) {
+    return new Uint8Array(0);
+  }
+
+  const sequences = [
+    modes.alternateScreen ? "\u001b[?1049h" : "\u001b[?1049l",
+    modes.applicationCursor ? "\u001b[?1h" : "\u001b[?1l",
+    modes.applicationKeypad ? "\u001b=" : "\u001b>",
+    modes.hideCursor ? "\u001b[?25l" : "\u001b[?25h",
+    modes.bracketedPaste ? "\u001b[?2004h" : "\u001b[?2004l",
+    "\u001b[?1000l\u001b[?1002l\u001b[?1003l\u001b[?1005l\u001b[?1006l\u001b[?1015l",
+  ];
+
+  if (modes.mouseProtocolMode === "Press") {
+    sequences.push("\u001b[?1000h");
+  } else if (modes.mouseProtocolMode === "ButtonMotion") {
+    sequences.push("\u001b[?1002h");
+  } else if (modes.mouseProtocolMode === "AnyMotion") {
+    sequences.push("\u001b[?1003h");
+  } else if (modes.mouseProtocolMode === "PressRelease") {
+    sequences.push("\u001b[?1000h");
+  }
+
+  if (modes.mouseProtocolEncoding === "Utf8") {
+    sequences.push("\u001b[?1005h");
+  } else if (modes.mouseProtocolEncoding === "Sgr") {
+    sequences.push("\u001b[?1006h");
+  } else if (modes.mouseProtocolEncoding === "Urxvt") {
+    sequences.push("\u001b[?1015h");
+  }
+
+  return new TextEncoder().encode(sequences.join(""));
+}
+
+export function prependTerminalModes(
+  payload: Uint8Array,
+  modes?: TerminalModeState | null,
+): Uint8Array {
+  return concatTerminalPayload(encodeTerminalModesPrefix(modes), payload);
+}
+
+export function buildTerminalSnapshotPayload(
+  snapshot: string,
+  modes?: TerminalModeState | null,
+): Uint8Array {
+  return prependTerminalModes(new TextEncoder().encode(normalizeTerminalSnapshot(snapshot)), modes);
 }
 
 function concatTerminalWritePayloads(chunks: readonly Uint8Array[]): Uint8Array | null {
@@ -230,7 +333,7 @@ export function parseTerminalBinaryFrame(buffer: ArrayBuffer): TerminalBinaryFra
 
   const view = new DataView(buffer);
   const version = view.getUint8(4);
-  if (version !== TERMINAL_FRAME_PROTOCOL_VERSION) {
+  if (version !== 1 && version !== TERMINAL_FRAME_PROTOCOL_VERSION) {
     throw new Error(`Unsupported terminal frame protocol version: ${version}`);
   }
 
@@ -241,7 +344,8 @@ export function parseTerminalBinaryFrame(buffer: ArrayBuffer): TerminalBinaryFra
   }
 
   if (kind === TERMINAL_FRAME_KIND_RESTORE) {
-    if (bytes.byteLength < TERMINAL_RESTORE_FRAME_HEADER_BYTES) {
+    const headerBytes = version >= 2 ? TERMINAL_RESTORE_FRAME_HEADER_BYTES_V2 : TERMINAL_RESTORE_FRAME_HEADER_BYTES_V1;
+    if (bytes.byteLength < headerBytes) {
       throw new Error("Terminal restore frame was shorter than the restore header");
     }
 
@@ -252,7 +356,10 @@ export function parseTerminalBinaryFrame(buffer: ArrayBuffer): TerminalBinaryFra
       reason: decodeTerminalRestoreReason(view.getUint8(15)),
       cols: view.getUint16(16, false),
       rows: view.getUint16(18, false),
-      payload: bytes.slice(TERMINAL_RESTORE_FRAME_HEADER_BYTES),
+      modes: version >= 2
+        ? decodeTerminalModes(view.getUint8(20), view.getUint8(21), view.getUint8(22))
+        : undefined,
+      payload: bytes.slice(headerBytes),
     };
   }
 

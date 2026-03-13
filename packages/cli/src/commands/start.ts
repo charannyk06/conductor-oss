@@ -20,6 +20,7 @@ import ora from "ora";
 import type { Command } from "commander";
 import { parse as parseYaml } from "yaml";
 import { resolveRustCliLaunch } from "../rust-cli.js";
+import { ensureTerminalDaemon } from "../terminal-daemon.js";
 
 function commandExists(command: string): boolean {
   const checker = process.platform === "win32" ? "where" : "which";
@@ -898,6 +899,17 @@ export function registerStart(program: Command): void {
         process.env["CO_CONFIG_PATH"] = configPath;
         clearRemoteAccessRuntimeState(workspacePath);
         shutdownTasks.push(() => clearRemoteAccessRuntimeState(workspacePath));
+
+        const terminalDaemon = await ensureTerminalDaemon(workspacePath, configPath);
+        if (terminalDaemon) {
+          process.env["CONDUCTOR_TERMINAL_DAEMON_CONTROL_SOCKET"] = terminalDaemon.socketPath;
+          process.env["CONDUCTOR_TERMINAL_DAEMON_TOKEN"] = terminalDaemon.token;
+          process.env["CONDUCTOR_TERMINAL_DAEMON_PROTOCOL_VERSION"] = String(terminalDaemon.protocolVersion);
+        } else {
+          delete process.env["CONDUCTOR_TERMINAL_DAEMON_CONTROL_SOCKET"];
+          delete process.env["CONDUCTOR_TERMINAL_DAEMON_TOKEN"];
+          delete process.env["CONDUCTOR_TERMINAL_DAEMON_PROTOCOL_VERSION"];
+        }
 
         const runShutdown = async (): Promise<void> => {
           if (isShuttingDown) return;

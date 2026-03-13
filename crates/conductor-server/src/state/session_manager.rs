@@ -8,20 +8,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::AppState;
 use super::helpers::{
     append_output, is_runtime_status_line, merge_assistant_fragment, runtime_tool_metadata,
     sanitize_terminal_text,
 };
 use super::runtime_status::resolve_native_resume_target;
-use super::tmux_runtime::{
-    runtime_mode, tmux_runtime_metadata, tmux_session_exists, TMUX_RUNTIME_MODE,
-};
+use super::tmux_runtime::{tmux_compatibility_mode, tmux_runtime_metadata, tmux_session_exists};
 use super::types::{
-    ConversationEntry, SessionRecord, SessionStatus, SpawnRequest, TerminalStreamEvent,
-    DEFAULT_SESSION_HISTORY_LIMIT,
+    ConversationEntry, DEFAULT_SESSION_HISTORY_LIMIT, SessionRecord, SessionStatus, SpawnRequest,
+    TerminalStreamEvent,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::AppState;
 
 const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
@@ -346,6 +344,34 @@ fn detect_parser_state(session: &mut SessionRecord, text: &str) -> bool {
 }
 
 impl AppState {
+    fn apply_requested_termination(session: &mut SessionRecord, action: &str) {
+        let (status, summary) = match action {
+            "kill" => (SessionStatus::Killed, "Interrupted"),
+            "archive" => (SessionStatus::Archived, "Archived"),
+            _ => return,
+        };
+        let finished_at = Utc::now().to_rfc3339();
+        clear_parser_state(session);
+        session.status = status;
+        session.activity = Some("exited".to_string());
+        session.last_activity_at = finished_at.clone();
+        session.pid = None;
+        session.summary = Some(summary.to_string());
+        session
+            .metadata
+            .insert("finishedAt".to_string(), finished_at.clone());
+        session.metadata.remove(DETACHED_PID_METADATA_KEY);
+        session.metadata.remove("terminationRequested");
+        session
+            .metadata
+            .insert("summary".to_string(), summary.to_string());
+        if action == "archive" {
+            session
+                .metadata
+                .insert("archivedAt".to_string(), finished_at);
+        }
+    }
+
     async fn mark_termination_requested(&self, session_id: &str, action: &str) -> Result<()> {
         let mut sessions = self.sessions.write().await;
         let Some(session) = sessions.get_mut(session_id) else {
@@ -736,7 +762,7 @@ impl AppState {
             .insert("startedAt".to_string(), started_at.clone());
         record.metadata.insert(
             "launchState".to_string(),
-            if runtime_mode(&project) == TMUX_RUNTIME_MODE {
+            if tmux_compatibility_mode(&project) {
                 "attached".to_string()
             } else {
                 "running".to_string()
@@ -844,7 +870,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: runtime_mode(&project) != TMUX_RUNTIME_MODE,
+                mirror_terminal_output: !tmux_compatibility_mode(&project),
                 output_is_parsed: true,
                 timeout: project
                     .agent_config
@@ -1004,6 +1030,9 @@ impl AppState {
 
         session.last_activity_at = Utc::now().to_rfc3339();
         let termination_requested = session.metadata.get("terminationRequested").cloned();
+        let requested_termination = termination_requested
+            .as_deref()
+            .filter(|action| matches!(*action, "kill" | "archive"));
 
         match event {
             ExecutorOutput::Stdout(line) => {
@@ -1041,20 +1070,10 @@ impl AppState {
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
-                let requested_kill = termination_requested.as_deref() == Some("kill");
-                session.metadata.remove("terminationRequested");
-                if requested_kill {
-                    clear_parser_state(session);
-                    session.status = SessionStatus::Killed;
-                    session.activity = Some("exited".to_string());
-                    session
-                        .metadata
-                        .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-                    session.summary = Some("Interrupted".to_string());
-                    session
-                        .metadata
-                        .insert("summary".to_string(), "Interrupted".to_string());
+                if let Some(action) = requested_termination {
+                    Self::apply_requested_termination(session, action);
                 } else if exit_code == 0 {
+                    session.metadata.remove("terminationRequested");
                     clear_parser_state(session);
                     session
                         .metadata
@@ -1097,35 +1116,40 @@ impl AppState {
                         .unwrap_or_else(|| format!("Process exited with code {exit_code}"));
                     session.summary = Some(summary.clone());
                     session.metadata.insert("summary".to_string(), summary);
+                    session.metadata.remove("terminationRequested");
                 }
             }
             ExecutorOutput::Failed { error, exit_code } => {
                 let parser_state_detected = detect_parser_state(session, &error);
-                let requested_kill = termination_requested.as_deref() == Some("kill");
-                let summary = if requested_kill || error == "killed" {
-                    "Interrupted".to_string()
+                if let Some(action) = requested_termination {
+                    Self::apply_requested_termination(session, action);
                 } else {
-                    error.clone()
-                };
-                session.status = if requested_kill || error == "killed" {
-                    SessionStatus::Killed
-                } else {
-                    SessionStatus::Errored
-                };
-                session.activity = Some("exited".to_string());
-                session
-                    .metadata
-                    .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-                session.summary = Some(summary.clone());
-                session.metadata.insert("summary".to_string(), summary);
-                if let Some(code) = exit_code {
+                    let requested_kill = error == "killed";
+                    let summary = if requested_kill {
+                        "Interrupted".to_string()
+                    } else {
+                        error.clone()
+                    };
+                    session.status = if requested_kill {
+                        SessionStatus::Killed
+                    } else {
+                        SessionStatus::Errored
+                    };
+                    session.activity = Some("exited".to_string());
                     session
                         .metadata
-                        .insert("exitCode".to_string(), code.to_string());
-                }
-                session.metadata.remove("terminationRequested");
-                if !parser_state_detected && (requested_kill || error == "killed") {
-                    clear_parser_state(session);
+                        .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
+                    session.summary = Some(summary.clone());
+                    session.metadata.insert("summary".to_string(), summary);
+                    if let Some(code) = exit_code {
+                        session
+                            .metadata
+                            .insert("exitCode".to_string(), code.to_string());
+                    }
+                    session.metadata.remove("terminationRequested");
+                    if !parser_state_detected && requested_kill {
+                        clear_parser_state(session);
+                    }
                 }
             }
             ExecutorOutput::Composite(_) => {}
@@ -1340,7 +1364,7 @@ impl AppState {
         let skip_permissions = project_defaults_to_skip_permissions(&project);
         let native_resume_target =
             resolve_native_resume_target(agent_kind.clone(), workspace_path.clone()).await;
-        let terminal_follow_up = runtime_mode(&project) == TMUX_RUNTIME_MODE;
+        let terminal_follow_up = tmux_compatibility_mode(&project);
         let send_follow_up_after_spawn = native_resume_target.is_some() || terminal_follow_up;
 
         // Apply the same environment overrides as initial spawn to avoid
@@ -1443,7 +1467,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: runtime_mode(&project) != TMUX_RUNTIME_MODE,
+                mirror_terminal_output: !tmux_compatibility_mode(&project),
                 output_is_parsed: true,
                 timeout: project
                     .agent_config
@@ -1513,7 +1537,7 @@ impl AppState {
     pub async fn kill_session(&self, session_id: &str) -> Result<()> {
         self.flush_terminal_capture(session_id).await;
         self.flush_terminal_restore_snapshot(session_id).await;
-        let live_handle = self.take_terminal_host(session_id).await;
+        let live_handle = self.terminal_hosts.get(session_id).await;
         self.mark_termination_requested(session_id, "kill").await?;
         let had_live_handle = if let Some(handle) = live_handle {
             if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
@@ -1535,11 +1559,34 @@ impl AppState {
                 }
             }
             let _ = self.kill_detached_runtime(session_id).await;
+        }
+
+        if had_live_handle {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if let Some(pid) = self
+                .get_session(session_id)
+                .await
+                .and_then(|session| session.pid)
+                .filter(|&pid| pid > 1 && is_process_alive(pid))
+            {
+                tracing::warn!(
+                    session_id,
+                    pid,
+                    "Process still alive after kill signal, sending SIGKILL"
+                );
+                if !terminate_process(pid) && is_process_alive(pid) {
+                    return Err(anyhow::anyhow!(
+                        "Failed to terminate process for session {session_id} (pid {pid})"
+                    ));
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        } else {
             if let Some(pid) = self
                 .get_session(session_id)
                 .await
                 .and_then(|session| detached_runtime_pid(&session))
-                .filter(|pid| is_process_alive(*pid))
+                .filter(|&pid| pid > 1 && is_process_alive(pid))
             {
                 if !terminate_process(pid) && is_process_alive(pid) {
                     return Err(anyhow::anyhow!(
@@ -1549,21 +1596,11 @@ impl AppState {
             }
         }
 
+        self.detach_terminal_runtime(session_id).await;
+
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
-            session.status = SessionStatus::Killed;
-            session.activity = Some("exited".to_string());
-            session.last_activity_at = Utc::now().to_rfc3339();
-            session.pid = None;
-            session.summary = Some("Interrupted".to_string());
-            session
-                .metadata
-                .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-            session.metadata.remove(DETACHED_PID_METADATA_KEY);
-            session.metadata.remove("terminationRequested");
-            session
-                .metadata
-                .insert("summary".to_string(), "Interrupted".to_string());
+            Self::apply_requested_termination(session, "kill");
             let updated = session.clone();
             drop(sessions);
             self.replace_session(updated).await?;
@@ -1574,7 +1611,7 @@ impl AppState {
     pub async fn archive_session(&self, session_id: &str) -> Result<()> {
         self.flush_terminal_capture(session_id).await;
         self.flush_terminal_restore_snapshot(session_id).await;
-        let live_handle = self.take_terminal_host(session_id).await;
+        let live_handle = self.terminal_hosts.get(session_id).await;
         self.mark_termination_requested(session_id, "archive")
             .await?;
         let had_live_handle = if let Some(handle) = live_handle {
@@ -1597,11 +1634,34 @@ impl AppState {
                 }
             }
             let _ = self.kill_detached_runtime(session_id).await;
+        }
+
+        if had_live_handle {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if let Some(pid) = self
+                .get_session(session_id)
+                .await
+                .and_then(|session| session.pid)
+                .filter(|&pid| pid > 1 && is_process_alive(pid))
+            {
+                tracing::warn!(
+                    session_id,
+                    pid,
+                    "Process still alive after kill signal, sending SIGKILL"
+                );
+                if !terminate_process(pid) && is_process_alive(pid) {
+                    return Err(anyhow::anyhow!(
+                        "Failed to terminate process for session {session_id} (pid {pid})"
+                    ));
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        } else {
             if let Some(pid) = self
                 .get_session(session_id)
                 .await
                 .and_then(|session| detached_runtime_pid(&session))
-                .filter(|pid| is_process_alive(*pid))
+                .filter(|&pid| pid > 1 && is_process_alive(pid))
             {
                 if !terminate_process(pid) && is_process_alive(pid) {
                     return Err(anyhow::anyhow!(
@@ -1611,30 +1671,16 @@ impl AppState {
             }
         }
 
+        self.detach_terminal_runtime(session_id).await;
+
         let mut sessions = self.sessions.write().await;
         let session = sessions
             .get_mut(session_id)
             .with_context(|| format!("Session {session_id} not found"))?;
-        if session.status == SessionStatus::Archived {
-            return Ok(());
+        let already_archived = session.status == SessionStatus::Archived;
+        if !already_archived {
+            Self::apply_requested_termination(session, "archive");
         }
-
-        session.status = SessionStatus::Archived;
-        session.activity = Some("exited".to_string());
-        session.last_activity_at = Utc::now().to_rfc3339();
-        session.pid = None;
-        session.summary = Some("Archived".to_string());
-        session
-            .metadata
-            .insert("finishedAt".to_string(), Utc::now().to_rfc3339());
-        session.metadata.remove(DETACHED_PID_METADATA_KEY);
-        session.metadata.remove("terminationRequested");
-        session
-            .metadata
-            .insert("summary".to_string(), "Archived".to_string());
-        session
-            .metadata
-            .insert("archivedAt".to_string(), session.last_activity_at.clone());
 
         let updated = session.clone();
         drop(sessions);
@@ -1644,7 +1690,9 @@ impl AppState {
                 tracing::warn!(session_id, error = %err, "Failed to archive workspace");
             }
         }
-        self.replace_session(updated).await?;
+        if !already_archived {
+            self.replace_session(updated).await?;
+        }
         Ok(())
     }
 
@@ -1709,42 +1757,15 @@ mod tests {
     use conductor_core::config::{ConductorConfig, ProjectConfig};
     use conductor_db::Database;
     use conductor_executors::executor::{Executor, ExecutorHandle};
-    use conductor_executors::process::{spawn_process, PtyDimensions};
+    use conductor_executors::process::{PtyDimensions, spawn_process};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command as StdCommand};
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
     use uuid::Uuid;
-
-    async fn tmux_runtime_supported() -> bool {
-        if tokio::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .await
-            .is_err()
-        {
-            return false;
-        }
-
-        let probe_socket =
-            std::env::temp_dir().join(format!("conductor-tmux-probe-{}.sock", Uuid::new_v4()));
-        let probe_socket_arg = probe_socket.to_string_lossy().to_string();
-        let probe_output = tokio::process::Command::new("tmux")
-            .args(["-S", probe_socket_arg.as_str(), "start-server"])
-            .output()
-            .await;
-        let supported = matches!(probe_output, Ok(ref output) if output.status.success());
-        if supported {
-            let _ = tokio::process::Command::new("tmux")
-                .args(["-S", probe_socket_arg.as_str(), "kill-server"])
-                .output()
-                .await;
-        }
-        supported
-    }
 
     struct TestExecutor {
         kind: AgentKind,
@@ -2491,10 +2512,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_session_with_prompt_routes_tmux_follow_up_through_terminal_host() {
-        if !tmux_runtime_supported().await {
-            return;
-        }
+    async fn resume_session_with_prompt_ignores_legacy_tmux_project_configuration() {
         let root =
             std::env::temp_dir().join(format!("conductor-resume-tmux-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -2552,35 +2570,22 @@ mod tests {
         let updated = timeout(Duration::from_secs(5), async {
             loop {
                 let current = state.get_session("resume-tmux-session").await.unwrap();
-                if current.output.contains("echo:Continue") {
+                if current.metadata.get("runtimeMode").map(String::as_str)
+                    == Some(crate::state::detached_runtime::DIRECT_RUNTIME_MODE)
+                    && current.pid.is_some()
+                {
                     return current;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("tmux resume should deliver follow-up through the live terminal host");
+        .expect("resume should relaunch the session on the direct runtime");
 
-        assert!(updated.output.contains("echo:Continue"));
-        assert_eq!(
-            updated
-                .conversation
-                .iter()
-                .filter(|entry| entry.kind == "user_message" && entry.text == "Continue")
-                .count(),
-            1
-        );
         assert_eq!(
             updated.metadata.get("runtimeMode").map(String::as_str),
-            Some(crate::state::tmux_runtime::TMUX_RUNTIME_MODE)
+            Some(crate::state::detached_runtime::DIRECT_RUNTIME_MODE)
         );
-
-        if let Some((socket_path, tmux_session)) =
-            crate::state::tmux_runtime::tmux_runtime_metadata(&updated)
-        {
-            let _ =
-                crate::state::tmux_runtime::kill_tmux_session(&socket_path, &tmux_session).await;
-        }
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2635,6 +2640,117 @@ mod tests {
         let updated = state.get_session("detached-kill").await.unwrap();
         assert_eq!(updated.status, SessionStatus::Killed);
         assert!(!updated.metadata.contains_key(DETACHED_PID_METADATA_KEY));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn archive_session_terminates_detached_runtime() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-archive-pid-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        let mut child = spawn_sleep_process();
+        let pid = child.id();
+
+        let mut session = SessionRecord::new(
+            "detached-archive".to_string(),
+            "demo".to_string(),
+            Some("session/demo".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(pid),
+        );
+        session.status = SessionStatus::Stuck;
+        session.activity = Some("blocked".to_string());
+        session
+            .metadata
+            .insert(DETACHED_PID_METADATA_KEY.to_string(), pid.to_string());
+        state.replace_session(session).await.unwrap();
+
+        state.archive_session("detached-archive").await.unwrap();
+
+        let waited = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "detached runtime should terminate");
+
+        let updated = state.get_session("detached-archive").await.unwrap();
+        assert_eq!(updated.status, SessionStatus::Archived);
+        assert!(!updated.metadata.contains_key(DETACHED_PID_METADATA_KEY));
+        assert!(updated.metadata.contains_key("archivedAt"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn completed_event_honors_archive_termination_request() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-archive-termination-test-{}",
+            Uuid::new_v4()
+        ));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let mut session = SessionRecord::new(
+            "archive-completed".to_string(),
+            "demo".to_string(),
+            Some("session/demo".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(42),
+        );
+        session.status = SessionStatus::Working;
+        session.activity = Some("active".to_string());
+        session
+            .metadata
+            .insert("terminationRequested".to_string(), "archive".to_string());
+        state.replace_session(session).await.unwrap();
+
+        state
+            .apply_runtime_event(
+                "archive-completed",
+                ExecutorOutput::Completed { exit_code: 0 },
+            )
+            .await
+            .unwrap();
+
+        let updated = state.get_session("archive-completed").await.unwrap();
+        assert_eq!(updated.status, SessionStatus::Archived);
+        assert_eq!(updated.summary.as_deref(), Some("Archived"));
+        assert_eq!(updated.activity.as_deref(), Some("exited"));
+        assert!(updated.metadata.contains_key("archivedAt"));
+        assert!(!updated.metadata.contains_key("terminationRequested"));
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -56,6 +56,52 @@ function resetEnv(): void {
   clearRemoteAccessRuntimeState();
 }
 
+type MockSessionConnectionFetchOptions = {
+  id: string;
+  metadata?: Record<string, unknown> | null;
+  token?: {
+    token?: string | null;
+    required?: boolean;
+    expiresInSeconds?: number | null;
+    error?: string;
+  };
+};
+
+function setMockSessionConnectionFetch({
+  id,
+  metadata = { runtimeMode: "direct" },
+  token,
+}: MockSessionConnectionFetchOptions): void {
+  const sessionMetadataUrl = `/api/sessions/${encodeURIComponent(id)}`;
+  const terminalTokenUrl = `/api/sessions/${encodeURIComponent(id)}/terminal/token`;
+  global.fetch = (async (input: string | Request | URL) => {
+    const url = typeof input === "string" || input instanceof URL
+      ? new URL(input)
+      : new URL(input.url);
+    if (url.pathname === sessionMetadataUrl) {
+      return new Response(JSON.stringify(metadata === null ? null : { metadata }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.pathname === terminalTokenUrl) {
+      if (token === undefined) {
+        throw new Error("terminal token lookup should not run for this test");
+      }
+      return new Response(JSON.stringify(token), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    throw new Error(`Unexpected fetch in terminal connection route test: ${url.pathname}`);
+  }) as typeof fetch;
+}
+
+function assertJsonResponse(response: Response): Promise<TerminalConnectionPayload> {
+  return response.json() as Promise<TerminalConnectionPayload>;
+}
+
 test.afterEach(() => {
   resetEnv();
 });
@@ -104,11 +150,12 @@ test.after(() => {
 test("GET returns a websocket transport for loopback dashboard requests", async () => {
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
-
-  global.fetch = (async () => new Response(JSON.stringify({ token: "signed-token" }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  })) as typeof fetch;
+  setMockSessionConnectionFetch({
+    id: "session-1",
+    token: {
+      token: "signed-token",
+    },
+  });
 
   try {
     const response = await GET(
@@ -122,7 +169,7 @@ test("GET returns a websocket transport for loopback dashboard requests", async 
     assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "direct");
     assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
     assert.match(response.headers.get("server-timing") ?? "", /terminal_token;dur=/);
-    const payload = await response.json() as TerminalConnectionPayload;
+    const payload = await assertJsonResponse(response);
 
     assert.equal(payload.transport, "websocket");
     assert.equal(payload.wsUrl, "ws://127.0.0.1:4749/api/sessions/session-1/terminal/ws?token=signed-token");
@@ -169,14 +216,14 @@ test("GET returns a tailscale websocket transport for authenticated remote reque
     startedAt: new Date().toISOString(),
   });
 
-  global.fetch = (async () => new Response(JSON.stringify({
-    token: "signed-token",
-    required: true,
-    expiresInSeconds: 60,
-  }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  })) as typeof fetch;
+  setMockSessionConnectionFetch({
+    id: "session-1",
+    token: {
+      token: "signed-token",
+      required: true,
+      expiresInSeconds: 60,
+    },
+  });
 
   try {
     const request = new NextRequest("https://laptop.tailnet.ts.net/api/sessions/session-1/terminal/connection", {
@@ -190,7 +237,7 @@ test("GET returns a tailscale websocket transport for authenticated remote reque
     );
 
     assert.equal(response.status, 200);
-    const payload = await response.json() as TerminalConnectionPayload;
+    const payload = await assertJsonResponse(response);
 
     assert.equal(payload.transport, "websocket");
     assert.equal(payload.wsUrl, "wss://laptop.tailnet.ts.net:4749/api/sessions/session-1/terminal/ws?token=signed-token");
@@ -227,14 +274,14 @@ test("GET uses a direct websocket when the backend URL is already browser-reacha
     startedAt: new Date().toISOString(),
   });
 
-  global.fetch = (async () => new Response(JSON.stringify({
-    token: "signed-token",
-    required: true,
-    expiresInSeconds: 60,
-  }), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  })) as typeof fetch;
+  setMockSessionConnectionFetch({
+    id: "session-1",
+    token: {
+      token: "signed-token",
+      required: true,
+      expiresInSeconds: 60,
+    },
+  });
 
   try {
     const request = new NextRequest("https://dashboard.example.com/api/sessions/session-1/terminal/connection", {
@@ -248,7 +295,7 @@ test("GET uses a direct websocket when the backend URL is already browser-reacha
     );
 
     assert.equal(response.status, 200);
-    const payload = await response.json() as TerminalConnectionPayload;
+    const payload = await assertJsonResponse(response);
 
     assert.equal(payload.transport, "websocket");
     assert.equal(payload.wsUrl, "wss://backend.example.com:4749/api/sessions/session-1/terminal/ws?token=signed-token");
@@ -266,13 +313,84 @@ test("GET uses a direct websocket when the backend URL is already browser-reacha
   }
 });
 
+test("GET falls back to snapshot transport for tmux runtime sessions", async () => {
+  resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  setMockSessionConnectionFetch({
+    id: "session-1",
+    metadata: {
+      runtimeMode: "tmux",
+    },
+  });
+
+  try {
+    const response = await GET(
+      new NextRequest("http://127.0.0.1:3000/api/sessions/session-1/terminal/connection"),
+      { params: Promise.resolve({ id: "session-1" }) },
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-conductor-terminal-transport"), "snapshot");
+    assert.equal(response.headers.get("x-conductor-terminal-interactive"), "false");
+    assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "dashboard_proxy");
+    const payload = await assertJsonResponse(response);
+
+    assert.equal(payload.transport, "snapshot");
+    assert.equal(payload.interactive, false);
+    assert.equal(payload.requiresToken, false);
+    assert.match(payload.fallbackReason ?? "", /legacy tmux compatibility path/i);
+    assert.equal(payload.stream.transport, "snapshot");
+    assert.equal(payload.control.transport, "http");
+    assert.equal(payload.control.interactive, false);
+    assert.equal(payload.control.fallbackReason, payload.fallbackReason);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("GET keeps websocket transport when runtime mode metadata is missing", async () => {
+  resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  setMockSessionConnectionFetch({
+    id: "session-1",
+    metadata: {},
+    token: {
+      token: "signed-token",
+      required: true,
+      expiresInSeconds: 60,
+    },
+  });
+
+  try {
+    const response = await GET(
+      new NextRequest("http://127.0.0.1:3000/api/sessions/session-1/terminal/connection"),
+      { params: Promise.resolve({ id: "session-1" }) },
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-conductor-terminal-transport"), "websocket");
+    assert.equal(response.headers.get("x-conductor-terminal-interactive"), "true");
+    assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "direct");
+    const payload = await assertJsonResponse(response);
+
+    assert.equal(payload.transport, "websocket");
+    assert.equal(payload.interactive, true);
+    assert.equal(payload.requiresToken, true);
+    assert.equal(payload.fallbackReason, null);
+    assert.equal(payload.stream.transport, "websocket");
+    assert.equal(payload.control.transport, "websocket");
+    assert.equal(payload.control.interactive, true);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("GET uses a live dashboard-proxied stream when no browser-reachable websocket endpoint is available", async () => {
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
-
-  global.fetch = (async () => {
-    throw new Error("terminal token lookup should not run for dashboard-proxied streaming");
-  }) as typeof fetch;
+  setMockSessionConnectionFetch({
+    id: "session-1",
+  });
 
   try {
     const request = new NextRequest("http://127.0.0.1:3000/api/sessions/session-1/terminal/connection", {
@@ -290,7 +408,7 @@ test("GET uses a live dashboard-proxied stream when no browser-reachable websock
     assert.equal(response.headers.get("x-conductor-terminal-interactive"), "true");
     assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "dashboard_proxy");
     assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
-    const payload = await response.json() as TerminalConnectionPayload;
+    const payload = await assertJsonResponse(response);
 
     assert.equal(payload.transport, "eventstream");
     assert.equal(payload.wsUrl, "/api/sessions/session-1/terminal/stream");
@@ -338,9 +456,9 @@ test("GET keeps a live read-only stream for viewers without operator access", as
     startedAt: new Date().toISOString(),
   });
 
-  global.fetch = (async () => {
-    throw new Error("terminal token lookup should not run for viewer live stream fallback");
-  }) as typeof fetch;
+  setMockSessionConnectionFetch({
+    id: "session-1",
+  });
 
   try {
     const request = new NextRequest("https://laptop.tailnet.ts.net/api/sessions/session-1/terminal/connection", {
@@ -358,7 +476,7 @@ test("GET keeps a live read-only stream for viewers without operator access", as
     assert.equal(response.headers.get("x-conductor-terminal-interactive"), "false");
     assert.equal(response.headers.get("x-conductor-terminal-connection-path"), "auth_limited");
     assert.match(response.headers.get("server-timing") ?? "", /terminal_connection;dur=/);
-    const payload = await response.json() as TerminalConnectionPayload;
+    const payload = await assertJsonResponse(response);
 
     assert.equal(payload.transport, "eventstream");
     assert.equal(payload.wsUrl, "/api/sessions/session-1/terminal/stream");

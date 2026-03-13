@@ -1,16 +1,17 @@
 "use client";
 
-import { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import React, { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
 import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
 import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xterm/xterm";
-import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, X } from "lucide-react";
+import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { getTerminalTheme } from "@/components/terminal/xtermTheme";
 import { extractLocalFileTransferPath, uploadProjectAttachments } from "./attachmentUploads";
 import { captureTerminalViewport, restoreTerminalViewport } from "./terminalViewport";
 import {
+  buildTerminalSnapshotPayload,
   buildTerminalWriteBatch,
   buildTerminalSocketUrl,
   calculateMobileTerminalViewportMetrics,
@@ -18,9 +19,11 @@ import {
   decodeTerminalBase64Payload,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
-  normalizeTerminalSnapshot,
   parseTerminalBinaryFrame,
+  prependTerminalModes,
+  sanitizeRemoteTerminalSnapshot,
   stripBrowserTerminalResponses,
+  type TerminalModeState,
   type TerminalHttpControlOperation,
   type TerminalWriteChunk,
 } from "./sessionTerminalUtils";
@@ -36,6 +39,15 @@ interface SessionTerminalProps {
   active: boolean;
   pendingInsert: TerminalInsertRequest | null;
   immersiveMobileMode?: boolean;
+}
+
+declare global {
+  interface Window {
+    __conductorSessionTerminalDebug?: {
+      sessionId: string;
+      getState: () => Record<string, unknown>;
+    };
+  }
 }
 
 type TerminalConnectionInfo = {
@@ -56,10 +68,12 @@ type TerminalConnectionInfo = {
 
 type TerminalSnapshot = {
   snapshot: string;
+  transcript: string;
   source: string;
   live: boolean;
   restored: boolean;
   sequence: number | null;
+  modes?: TerminalModeState;
 };
 
 type TerminalServerEvent =
@@ -73,6 +87,7 @@ type TerminalServerEvent =
       snapshotVersion: number;
       cols: number;
       rows: number;
+      modes?: TerminalSnapshot["modes"];
     }
   | { type: "error"; sessionId: string; error: string };
 
@@ -86,6 +101,7 @@ type TerminalStreamEventMessage =
       reason: "attach" | "lagged" | "unknown";
       cols: number;
       rows: number;
+      modes?: TerminalSnapshot["modes"];
       payload: string;
     }
   | {
@@ -105,7 +121,6 @@ const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
 const LIVE_TERMINAL_SCROLLBACK = 50000;
 const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
-const MANAGED_SCROLL_PRIVATE_MODES = new Set([1000, 1002, 1003, 1005, 1006, 1015, 1047, 1048, 1049]);
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
 const LIVE_TERMINAL_HELPER_KEYS = [
   { label: "Enter", special: "Enter" },
@@ -125,7 +140,23 @@ type PendingTerminalHttpControlOperation = TerminalHttpControlOperation & {
   reject: (error: unknown) => void;
   resolve: () => void;
 };
-const TERMINAL_TEXT_ENCODER = new TextEncoder();
+type TerminalControlSocketOperation =
+  | {
+      type: "keys";
+      keys?: string;
+      special?: string;
+    }
+  | {
+      type: "resize";
+      cols: number;
+      rows: number;
+    };
+type TerminalControlSocketMessage =
+  | TerminalControlSocketOperation
+  | {
+      type: "batch";
+      operations: TerminalControlSocketOperation[];
+    };
 
 function shellEscapePath(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
@@ -133,6 +164,29 @@ function shellEscapePath(path: string): string {
 
 function shellEscapePaths(paths: string[]): string {
   return paths.map(shellEscapePath).join(" ");
+}
+
+function extractClipboardFiles(clipboard: DataTransfer): File[] {
+  const files = Array.from(clipboard.files ?? []);
+  const seen = new Set(files.map((file) => `${file.name}:${file.size}:${file.type}:${file.lastModified}`));
+
+  for (const item of Array.from(clipboard.items ?? [])) {
+    if (item.kind !== "file") {
+      continue;
+    }
+    const file = item.getAsFile();
+    if (!file) {
+      continue;
+    }
+    const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    files.push(file);
+  }
+
+  return files;
 }
 
 async function fetchTerminalConnection(sessionId: string): Promise<TerminalConnectionInfo> {
@@ -230,24 +284,50 @@ async function fetchTerminalConnection(sessionId: string): Promise<TerminalConne
   };
 }
 
+function parseTerminalModes(value: unknown): TerminalModeState | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const mouseProtocolMode = typeof candidate["mouseProtocolMode"] === "string"
+    ? candidate["mouseProtocolMode"]
+    : "None";
+  const mouseProtocolEncoding = typeof candidate["mouseProtocolEncoding"] === "string"
+    ? candidate["mouseProtocolEncoding"]
+    : "Default";
+
+  return {
+    alternateScreen: candidate["alternateScreen"] === true,
+    applicationKeypad: candidate["applicationKeypad"] === true,
+    applicationCursor: candidate["applicationCursor"] === true,
+    hideCursor: candidate["hideCursor"] === true,
+    bracketedPaste: candidate["bracketedPaste"] === true,
+    mouseProtocolMode,
+    mouseProtocolEncoding,
+  };
+}
+
 async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
   const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}`, {
     cache: "no-store",
   });
   const data = (await response.json().catch(() => null)) as
-    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; error?: string }
+    | { snapshot?: string; transcript?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; modes?: unknown; error?: string }
     | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
   }
   return {
     snapshot: typeof data?.snapshot === "string" ? data.snapshot : "",
+    transcript: typeof data?.transcript === "string" ? data.transcript : "",
     source: typeof data?.source === "string" ? data.source : "empty",
     live: data?.live === true,
     restored: data?.restored === true,
     sequence: typeof data?.sequence === "number" && Number.isSafeInteger(data.sequence)
       ? data.sequence
       : null,
+    modes: parseTerminalModes(data?.modes),
   };
 }
 
@@ -259,19 +339,21 @@ async function fetchLiveTerminalSnapshot(sessionId: string, lines: number): Prom
     },
   );
   const data = (await response.json().catch(() => null)) as
-    | { snapshot?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; error?: string }
+    | { snapshot?: string; transcript?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; modes?: unknown; error?: string }
     | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
   }
   return {
     snapshot: typeof data?.snapshot === "string" ? data.snapshot : "",
+    transcript: typeof data?.transcript === "string" ? data.transcript : "",
     source: typeof data?.source === "string" ? data.source : "empty",
     live: data?.live === true,
     restored: data?.restored === true,
     sequence: typeof data?.sequence === "number" && Number.isSafeInteger(data.sequence)
       ? data.sequence
       : null,
+    modes: parseTerminalModes(data?.modes),
   };
 }
 
@@ -337,6 +419,13 @@ function localFileTransferError(path: string): string {
   return "The browser exposed only a local file path for this drop. Use paste or the attach button so Conductor can upload the file instead of injecting raw path text.";
 }
 
+function buildReadableSnapshotPayload(snapshot: string, transcript: string): Uint8Array {
+  const normalized = (transcript.trim().length > 0 ? transcript : sanitizeRemoteTerminalSnapshot(snapshot))
+    .replace(/\r?\n/g, "\r\n")
+    .replace(/\u0000/g, "");
+  return new TextEncoder().encode(normalized);
+}
+
 function terminalHasRenderedContent(term: XTerminal): boolean {
   const buffer = term.buffer.active;
   if (buffer.baseY > 0) {
@@ -397,13 +486,18 @@ export function SessionTerminal({
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const scrollDisposableRef = useRef<IDisposable | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const liveInputRef = useRef<HTMLInputElement>(null);
+  const liveInputRef = useRef<HTMLTextAreaElement>(null);
   const resumeTextareaRef = useRef<HTMLTextAreaElement>(null);
   const latestStatusRef = useRef(sessionState);
   const activeRef = useRef(active);
+  const pageVisibleRef = useRef(typeof document === "undefined" ? true : !document.hidden);
   const hasConnectedOnceRef = useRef(false);
   const reconnectNoticeWrittenRef = useRef(false);
+  const pendingLiveResyncRef = useRef(false);
   const snapshotAppliedRef = useRef<string | null>(null);
+  const snapshotAnsiRef = useRef("");
+  const snapshotTranscriptRef = useRef("");
+  const snapshotModesRef = useRef<TerminalModeState | undefined>(undefined);
   const lastLiveSnapshotRef = useRef("");
   const lastTerminalSequenceRef = useRef<number | null>(null);
   const liveOutputStartedRef = useRef(false);
@@ -418,6 +512,9 @@ export function SessionTerminal({
   const terminalWriteQueueRef = useRef<TerminalWriteChunk[]>([]);
   const terminalWriteInFlightRef = useRef(false);
   const terminalWriteRestoreFocusRef = useRef(false);
+  const terminalWriteDecoderRef = useRef<TextDecoder | null>(
+    typeof TextDecoder === "undefined" ? null : new TextDecoder(),
+  );
   const lastObservedContainerSizeRef = useRef<string | null>(null);
   const lastViewportOptionKeyRef = useRef<string | null>(null);
   const lastAppliedInsertNonceRef = useRef<number>(0);
@@ -452,6 +549,8 @@ export function SessionTerminal({
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [snapshotAnsi, setSnapshotAnsi] = useState("");
+  const [snapshotTranscript, setSnapshotTranscript] = useState("");
+  const [snapshotModes, setSnapshotModes] = useState<TerminalModeState | undefined>(undefined);
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
   const [showTerminalAccessoryBar, setShowTerminalAccessoryBar] = useState(() => shouldShowTerminalAccessoryBar());
@@ -483,13 +582,45 @@ export function SessionTerminal({
     : normalizedSessionStatus === "needs_input" || normalizedSessionStatus === "stuck"
       ? "Answer the agent and resume..."
       : "Restart this session with a follow-up...";
+  const terminalContextLabel = [
+    sessionModel || agentName || "session",
+    sessionReasoningEffort || null,
+    expectsLiveTerminal
+      ? (transportMode === "snapshot"
+        ? "recovery"
+        : connectionState === "live"
+          ? "streaming"
+          : connectionState)
+      : showResumeRail
+        ? "resume"
+        : normalizedSessionStatus,
+    projectId || null,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join(" · ");
+  const liveComposerPlaceholder = showSnapshotFallbackRail
+    ? "Write into the live session while the terminal stays in recovery mode..."
+    : "Write directly into the running terminal session...";
+  const liveComposerHint = showSnapshotFallbackRail
+    ? (transportNotice ?? "Recovery mode keeps streaming active while input is delivered through the backend.")
+    : "Enter sends immediately. Shift+Enter adds a newline. Files are uploaded and inserted as escaped paths.";
+  const resumeComposerHint = attachments.length > 0
+    ? "Press Enter to resume. Shift+Enter adds a newline. Attachments upload before the next run starts."
+    : "Press Enter to resume. Shift+Enter adds a newline.";
   const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && connectionState === "live";
+  const canRenderTerminal = active && pageVisible;
   expectsLiveTerminalRef.current = expectsLiveTerminal;
   interactiveTerminalRef.current = interactiveTerminal;
   transportModeRef.current = transportMode;
+  pageVisibleRef.current = pageVisible;
+  snapshotAnsiRef.current = snapshotAnsi;
+  snapshotTranscriptRef.current = snapshotTranscript;
+  snapshotModesRef.current = snapshotModes;
 
-  const floatingOverlayBottomPx = showResumeRail || showSnapshotFallbackRail
-    ? 96
+  const floatingOverlayBottomPx = showResumeRail || showLiveInputRail
+    ? helperPanelOpen && showLiveInputRail && !showSnapshotFallbackRail
+      ? 156
+      : 132
     : showLiveHelperBar
       ? helperPanelOpen ? 112 : 64
       : 12;
@@ -538,6 +669,13 @@ export function SessionTerminal({
     setReconnectToken((value) => value + 1);
   }, [clearReconnectTimer]);
 
+  const downgradeControlTransport = useCallback((reason: string) => {
+    controlSocketRef.current = null;
+    setControlSocketBaseUrl(null);
+    setControlTransportMode("http");
+    setTransportNotice((current) => current ?? reason);
+  }, []);
+
   const clearScheduledTerminalHttpControlFlush = useCallback(() => {
     if (terminalHttpControlFrameRef.current !== null) {
       window.cancelAnimationFrame(terminalHttpControlFrameRef.current);
@@ -576,16 +714,47 @@ export function SessionTerminal({
         return { kind: "special", special: operation.special } satisfies TerminalHttpControlOperation;
       }));
 
-      for (const operation of operations) {
-        if (operation.kind === "keys") {
-          await postSessionTerminalKeys(sessionId, { keys: operation.keys });
-          continue;
+      const socket = controlSocketRef.current;
+      if (controlTransportMode === "websocket" && socket && socket.readyState === WebSocket.OPEN) {
+        const socketOperations = operations.map<TerminalControlSocketOperation>((operation) => {
+          if (operation.kind === "keys") {
+            return {
+              type: "keys",
+              keys: operation.keys,
+            };
+          }
+          if (operation.kind === "resize") {
+            return {
+              type: "resize",
+              cols: Math.max(1, Math.round(operation.cols)),
+              rows: Math.max(1, Math.round(operation.rows)),
+            };
+          }
+          return {
+            type: "keys",
+            special: operation.special,
+          };
+        });
+
+        const payload: TerminalControlSocketMessage = socketOperations.length === 1
+          ? socketOperations[0]!
+          : {
+              type: "batch",
+              operations: socketOperations,
+            };
+        socket.send(JSON.stringify(payload));
+      } else {
+        for (const operation of operations) {
+          if (operation.kind === "keys") {
+            await postSessionTerminalKeys(sessionId, { keys: operation.keys });
+            continue;
+          }
+          if (operation.kind === "resize") {
+            await postTerminalResize(sessionId, operation.cols, operation.rows);
+            continue;
+          }
+          await postSessionTerminalKeys(sessionId, { special: operation.special });
         }
-        if (operation.kind === "resize") {
-          await postTerminalResize(sessionId, operation.cols, operation.rows);
-          continue;
-        }
-        await postSessionTerminalKeys(sessionId, { special: operation.special });
       }
 
       for (const operation of pendingOperations) {
@@ -610,7 +779,7 @@ export function SessionTerminal({
         }, TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS);
       }
     }
-  }, [clearScheduledTerminalHttpControlFlush, sessionId]);
+  }, [clearScheduledTerminalHttpControlFlush, controlTransportMode, sessionId]);
 
   const scheduleTerminalHttpControlFlush = useCallback(() => {
     if (terminalHttpControlInFlightRef.current || terminalHttpControlQueueRef.current.length === 0) {
@@ -653,31 +822,13 @@ export function SessionTerminal({
   }), [flushTerminalHttpControlOperations, scheduleTerminalHttpControlFlush]);
 
   const sendResize = useCallback(async (cols: number, rows: number): Promise<boolean> => {
-    if (controlTransportMode === "http") {
-      await enqueueTerminalHttpControlOperation({
-        kind: "resize",
-        cols,
-        rows,
-      });
-      return true;
-    }
-
-    const socket = controlSocketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      await enqueueTerminalHttpControlOperation({
-        kind: "resize",
-        cols,
-        rows,
-      });
-      return true;
-    }
-    socket.send(JSON.stringify({
-      type: "resize",
-      cols: Math.max(1, Math.round(cols)),
-      rows: Math.max(1, Math.round(rows)),
-    }));
+    await enqueueTerminalHttpControlOperation({
+      kind: "resize",
+      cols,
+      rows,
+    });
     return true;
-  }, [controlTransportMode, enqueueTerminalHttpControlOperation]);
+  }, [enqueueTerminalHttpControlOperation]);
 
   const sendTerminalKeys = useCallback(async (data: string) => {
     if (!interactiveTerminal) {
@@ -688,36 +839,16 @@ export function SessionTerminal({
       return;
     }
 
-    if (controlTransportMode === "http") {
-      await enqueueTerminalHttpControlOperation({ kind: "keys", keys });
-      return;
-    }
-
-    const socket = controlSocketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      await enqueueTerminalHttpControlOperation({ kind: "keys", keys });
-      return;
-    }
-    socket.send(JSON.stringify({ type: "keys", keys }));
-  }, [controlTransportMode, enqueueTerminalHttpControlOperation, interactiveTerminal]);
+    await enqueueTerminalHttpControlOperation({ kind: "keys", keys });
+  }, [enqueueTerminalHttpControlOperation, interactiveTerminal]);
 
   const sendTerminalSpecial = useCallback(async (special: string) => {
     if (!interactiveTerminal) {
       throw new Error("Operator access is required for live terminal input");
     }
 
-    if (controlTransportMode === "http") {
-      await enqueueTerminalHttpControlOperation({ kind: "special", special }, true);
-      return;
-    }
-
-    const socket = controlSocketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      await enqueueTerminalHttpControlOperation({ kind: "special", special }, true);
-      return;
-    }
-    socket.send(JSON.stringify({ type: "keys", special }));
-  }, [controlTransportMode, enqueueTerminalHttpControlOperation, interactiveTerminal]);
+    await enqueueTerminalHttpControlOperation({ kind: "special", special }, true);
+  }, [enqueueTerminalHttpControlOperation, interactiveTerminal]);
 
   const detectFocusedSurface = useCallback((): PreferredFocusTarget => {
     if (typeof document === "undefined") {
@@ -796,14 +927,11 @@ export function SessionTerminal({
   }, []);
 
   const clearScheduledTerminalFlush = useCallback(() => {
-    if (terminalWriteFrameRef.current !== null) {
-      window.cancelAnimationFrame(terminalWriteFrameRef.current);
-      terminalWriteFrameRef.current = null;
-    }
     if (terminalWriteTimerRef.current !== null) {
       window.clearTimeout(terminalWriteTimerRef.current);
       terminalWriteTimerRef.current = null;
     }
+    terminalWriteFrameRef.current = null;
   }, []);
 
   const flushTerminalWrites = useCallback(() => {
@@ -843,9 +971,14 @@ export function SessionTerminal({
     if (batch.replace) {
       snapshotAppliedRef.current = sessionId;
       term.reset();
+      terminalWriteDecoderRef.current = typeof TextDecoder === "undefined" ? null : new TextDecoder();
     }
 
-    term.write(batch.payload, () => {
+    const decodedPayload = terminalWriteDecoderRef.current
+      ? terminalWriteDecoderRef.current.decode(batch.payload, { stream: true })
+      : String.fromCharCode(...batch.payload);
+
+    term.write(decodedPayload, () => {
       terminalWriteInFlightRef.current = false;
       if (termRef.current !== term) {
         return;
@@ -860,12 +993,9 @@ export function SessionTerminal({
           flushTerminalWrites();
           return;
         }
-        terminalWriteFrameRef.current = window.requestAnimationFrame(() => {
-          flushTerminalWrites();
-        });
         terminalWriteTimerRef.current = window.setTimeout(() => {
           flushTerminalWrites();
-        }, TERMINAL_WRITE_BATCH_MAX_DELAY_MS);
+        }, 0);
       }
     });
   }, [clearScheduledTerminalFlush, restorePreferredFocus, sessionId, updateScrollState]);
@@ -884,12 +1014,9 @@ export function SessionTerminal({
       return;
     }
 
-    terminalWriteFrameRef.current = window.requestAnimationFrame(() => {
-      flushTerminalWrites();
-    });
     terminalWriteTimerRef.current = window.setTimeout(() => {
       flushTerminalWrites();
-    }, TERMINAL_WRITE_BATCH_MAX_DELAY_MS);
+    }, 0);
   }, [flushTerminalWrites]);
 
   const queueTerminalWrite = useCallback((chunk: TerminalWriteChunk, restoreFocus = false) => {
@@ -898,7 +1025,53 @@ export function SessionTerminal({
     scheduleTerminalFlush();
   }, [scheduleTerminalFlush]);
 
-  
+  const requestSnapshotRender = useCallback(() => {
+    const term = termRef.current;
+    const currentSnapshot = snapshotAnsiRef.current;
+    if (!term || currentSnapshot.length === 0 || !activeRef.current || !pageVisibleRef.current) {
+      return false;
+    }
+
+    snapshotAppliedRef.current = sessionId;
+    const payload = liveOutputStartedRef.current
+      ? buildTerminalSnapshotPayload(currentSnapshot, snapshotModesRef.current)
+      : buildReadableSnapshotPayload(currentSnapshot, snapshotTranscriptRef.current);
+    queueTerminalWrite({
+      kind: "snapshot",
+      payload,
+    });
+    return true;
+  }, [queueTerminalWrite, sessionId]);
+
+  const requestSnapshotRenderRef = useRef(requestSnapshotRender);
+  const updateScrollStateRef = useRef(updateScrollState);
+  const clearScheduledTerminalFlushRef = useRef(clearScheduledTerminalFlush);
+  const scheduleReconnectRef = useRef(scheduleReconnect);
+  const scheduleRendererRecoveryRef = useRef<(forceResize: boolean) => void>(() => {});
+  const handleTerminalServerEventRef = useRef<(payload: TerminalServerEvent) => void>(() => {});
+  const handleTerminalPayloadFrameRef = useRef<(
+    kind: "restore" | "stream",
+    sequence: number,
+    payload: Uint8Array,
+    modes?: TerminalModeState,
+  ) => void>(() => {});
+
+  useEffect(() => {
+    requestSnapshotRenderRef.current = requestSnapshotRender;
+  }, [requestSnapshotRender]);
+
+  useEffect(() => {
+    updateScrollStateRef.current = updateScrollState;
+  }, [updateScrollState]);
+
+  useEffect(() => {
+    clearScheduledTerminalFlushRef.current = clearScheduledTerminalFlush;
+  }, [clearScheduledTerminalFlush]);
+
+  useEffect(() => {
+    scheduleReconnectRef.current = scheduleReconnect;
+  }, [scheduleReconnect]);
+
 
   const syncTerminalDimensions = useCallback((forceSync: boolean) => {
     const term = termRef.current;
@@ -1029,6 +1202,26 @@ export function SessionTerminal({
     ]);
   }, []);
 
+  const appendLiveInputDraft = useCallback((value: string) => {
+    if (!value) {
+      return;
+    }
+    setLiveInputDraft((current) => {
+      if (current.length === 0) {
+        return value;
+      }
+      const separator = /[\s\n]$/.test(current)
+        ? ""
+        : value.includes("\n")
+          ? "\n"
+          : " ";
+      return `${current}${separator}${value}`;
+    });
+    requestAnimationFrame(() => {
+      liveInputRef.current?.focus();
+    });
+  }, []);
+
   const injectFilesIntoTerminal = useCallback(async (files: File[]) => {
     const uploadedPaths = await uploadProjectAttachments({
       files,
@@ -1040,12 +1233,26 @@ export function SessionTerminal({
     await sendTerminalKeys(`${escaped} `);
   }, [projectId, sendTerminalKeys]);
 
+  const stageFilesForLiveInput = useCallback(async (files: File[]) => {
+    const uploadedPaths = await uploadProjectAttachments({
+      files,
+      projectId,
+      preferAbsolute: true,
+    });
+    if (!uploadedPaths.length) return;
+    appendLiveInputDraft(shellEscapePaths(uploadedPaths));
+  }, [appendLiveInputDraft, projectId]);
+
   const handleIncomingFiles = useCallback(async (files: File[]) => {
     if (!files.length) return;
     setSendError(null);
     try {
       if (expectsLiveTerminal && !interactiveTerminal) {
         throw new Error(transportNotice ?? "Operator access is required for live terminal input");
+      }
+      if (expectsLiveTerminal && interactiveTerminal && showLiveInputRail) {
+        await stageFilesForLiveInput(files);
+        return;
       }
       if (canSendLiveInput) {
         await injectFilesIntoTerminal(files);
@@ -1055,19 +1262,29 @@ export function SessionTerminal({
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to process files");
     }
-  }, [canSendLiveInput, expectsLiveTerminal, injectFilesIntoTerminal, interactiveTerminal, queueResumeAttachments, transportNotice]);
+  }, [canSendLiveInput, expectsLiveTerminal, injectFilesIntoTerminal, interactiveTerminal, queueResumeAttachments, showLiveInputRail, stageFilesForLiveInput, transportNotice]);
 
   const applyFetchedSnapshot = useCallback((snapshot: TerminalSnapshot) => {
     snapshotAppliedRef.current = null;
     lastLiveSnapshotRef.current = snapshot.snapshot;
     lastTerminalSequenceRef.current = snapshot.sequence;
+    snapshotAnsiRef.current = snapshot.snapshot;
+    snapshotTranscriptRef.current = snapshot.transcript;
+    snapshotModesRef.current = snapshot.modes;
     setSnapshotAnsi(snapshot.snapshot);
+    setSnapshotTranscript(snapshot.transcript);
+    setSnapshotModes(snapshot.modes);
     setSnapshotReady(true);
+    if (typeof window !== "undefined" && termRef.current) {
+      window.requestAnimationFrame(() => {
+        requestSnapshotRender();
+      });
+    }
     if (snapshot.live) {
       setConnectionState("live");
       setTransportError(null);
     }
-  }, []);
+  }, [requestSnapshotRender]);
 
   useEffect(() => {
     const wasLiveTerminal = previousLiveTerminalRef.current;
@@ -1101,11 +1318,11 @@ export function SessionTerminal({
   }, []);
 
   useEffect(() => {
-    if (showLiveHelperBar) {
+    if (showLiveInputRail && !showSnapshotFallbackRail) {
       return;
     }
     setHelperPanelOpen(false);
-  }, [showLiveHelperBar]);
+  }, [showLiveInputRail, showSnapshotFallbackRail]);
 
   useEffect(() => {
     if (!immersiveMobileMode || typeof window === "undefined" || !window.visualViewport) {
@@ -1175,6 +1392,7 @@ export function SessionTerminal({
     lastAppliedInsertNonceRef.current = 0;
     lastSyncedTerminalSizeRef.current = null;
     pendingResizeSyncRef.current = true;
+    pendingLiveResyncRef.current = false;
     preferredFocusTargetRef.current = "none";
     restoreFocusOnRecoveryRef.current = false;
     clearReconnectTimer();
@@ -1218,6 +1436,8 @@ export function SessionTerminal({
     setShowScrollToBottom(false);
     setSnapshotReady(false);
     setSnapshotAnsi("");
+    setSnapshotTranscript("");
+    setSnapshotModes(undefined);
     setSessionStatusOverride(null);
     setMobileViewportHeight(null);
     setMobileKeyboardVisible(false);
@@ -1236,6 +1456,7 @@ export function SessionTerminal({
     if (expectsLiveTerminal) {
       if (!shouldStreamLiveTerminal) {
         setSnapshotAnsi("");
+        setSnapshotTranscript("");
         return () => {
           mounted = false;
         };
@@ -1256,6 +1477,7 @@ export function SessionTerminal({
           } catch {
             if (!mounted) return;
             setSnapshotAnsi("");
+            setSnapshotTranscript("");
           }
         } finally {
           if (mounted) {
@@ -1270,6 +1492,7 @@ export function SessionTerminal({
     }
 
     setSnapshotAnsi("");
+    setSnapshotTranscript("");
     void (async () => {
       try {
         const snapshot = await fetchTerminalSnapshot(sessionId, READ_ONLY_TERMINAL_SNAPSHOT_LINES);
@@ -1278,6 +1501,7 @@ export function SessionTerminal({
       } catch {
         if (!mounted) return;
         setSnapshotAnsi("");
+        setSnapshotTranscript("");
       } finally {
         if (mounted) {
           setSnapshotReady(true);
@@ -1293,8 +1517,9 @@ export function SessionTerminal({
   useEffect(() => {
     let mounted = true;
 
-    if (expectsLiveTerminal && !shouldStreamLiveTerminal) {
+    if (!expectsLiveTerminal || !shouldStreamLiveTerminal) {
       setSocketBaseUrl(null);
+      setControlSocketBaseUrl(null);
       setConnectionState("closed");
       setTransportError(null);
       return () => {
@@ -1354,15 +1579,33 @@ export function SessionTerminal({
     kind: "restore" | "stream",
     sequence: number,
     payload: Uint8Array,
+    modes?: TerminalModeState,
   ) => {
+    const previousSequence = lastTerminalSequenceRef.current;
+    if (typeof previousSequence === "number") {
+      if (kind === "stream" && sequence <= previousSequence) {
+        return;
+      }
+      if (kind === "restore" && liveOutputStartedRef.current && sequence <= previousSequence) {
+        return;
+      }
+    }
+
     liveOutputStartedRef.current = true;
     lastTerminalSequenceRef.current = sequence;
     setTransportError(null);
     setConnectionState("live");
+    if (!activeRef.current || !pageVisibleRef.current) {
+      pendingLiveResyncRef.current = true;
+      return;
+    }
+    const nextPayload = kind === "restore"
+      ? prependTerminalModes(payload, modes)
+      : payload;
     queueTerminalWrite(
       {
         kind: kind === "restore" ? "snapshot" : "stream",
-        payload,
+        payload: nextPayload,
       },
       kind === "restore",
     );
@@ -1371,6 +1614,18 @@ export function SessionTerminal({
     }
   });
 
+  useEffect(() => {
+    scheduleRendererRecoveryRef.current = scheduleRendererRecovery;
+  }, [scheduleRendererRecovery]);
+
+  useEffect(() => {
+    handleTerminalServerEventRef.current = handleTerminalServerEvent;
+  }, [handleTerminalServerEvent]);
+
+  useEffect(() => {
+    handleTerminalPayloadFrameRef.current = handleTerminalPayloadFrame;
+  }, [handleTerminalPayloadFrame]);
+
   const handleTerminalEventStreamMessage = useEffectEvent((payload: TerminalStreamEventMessage) => {
     if (payload.type === "stream" || payload.type === "restore") {
       try {
@@ -1378,6 +1633,7 @@ export function SessionTerminal({
           payload.type,
           payload.sequence,
           decodeTerminalBase64Payload(payload.payload),
+          payload.type === "restore" ? payload.modes : undefined,
         );
       } catch {
         setTransportError("Received an invalid terminal frame");
@@ -1467,45 +1723,11 @@ export function SessionTerminal({
         },
       };
       term = new xtermMod.Terminal(terminalOptions);
-      const registerManagedScrollMode = (final: "h" | "l") => {
-        term?.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
-          const hasManagedMode = params.some((param) => (
-            Array.isArray(param)
-              ? param.some((value) => MANAGED_SCROLL_PRIVATE_MODES.has(value))
-              : MANAGED_SCROLL_PRIVATE_MODES.has(param)
-          ));
-          if (!hasManagedMode) {
-            return false;
-          }
-          return true;
-        });
-      };
-      const handleManagedWheel = (event: WheelEvent): boolean => {
-        const normalizedDelta = event.deltaMode === WheelEvent.DOM_DELTA_LINE
-          ? event.deltaY
-          : event.deltaY / 14;
-        const scrollLines = normalizedDelta === 0
-          ? 0
-          : normalizedDelta > 0
-            ? Math.max(1, Math.round(normalizedDelta))
-            : Math.min(-1, Math.round(normalizedDelta));
-        if (scrollLines === 0) {
-          return false;
-        }
-        event.preventDefault();
-        event.stopPropagation();
-        term?.scrollLines(scrollLines);
-        updateScrollState();
-        return false;
-      };
-      registerManagedScrollMode("h");
-      registerManagedScrollMode("l");
-      term.attachCustomWheelEventHandler(handleManagedWheel);
-
       fit = new fitMod.FitAddon();
       term.loadAddon(fit);
       const searchAddon = new searchMod.SearchAddon();
       term.loadAddon(searchAddon);
+
       term.open(containerRef.current);
       fit.fit();
 
@@ -1516,9 +1738,15 @@ export function SessionTerminal({
       pendingResizeSyncRef.current = true;
       lastObservedContainerSizeRef.current = `${Math.round(containerRef.current.clientWidth)}x${Math.round(containerRef.current.clientHeight)}`;
       lastViewportOptionKeyRef.current = `${viewportOptions.fontFamily}:${viewportOptions.fontSize}:${viewportOptions.lineHeight}`;
-      term.options.disableStdin = !expectsLiveTerminalRef.current || !interactiveTerminalRef.current || transportModeRef.current === "snapshot";
+      term.options.disableStdin = !expectsLiveTerminalRef.current || !interactiveTerminalRef.current;
       setTerminalReady(true);
-      updateScrollState();
+      updateScrollStateRef.current();
+      window.requestAnimationFrame(() => {
+        if (!mounted) {
+          return;
+        }
+        requestSnapshotRenderRef.current();
+      });
 
       inputDisposableRef.current = term.onData((data) => {
         handleTerminalData(data);
@@ -1541,7 +1769,7 @@ export function SessionTerminal({
 
     return () => {
       mounted = false;
-      clearScheduledTerminalFlush();
+      clearScheduledTerminalFlushRef.current();
       inputDisposableRef.current?.dispose();
       inputDisposableRef.current = null;
       scrollDisposableRef.current?.dispose();
@@ -1560,22 +1788,27 @@ export function SessionTerminal({
       terminalWriteQueueRef.current = [];
       terminalWriteInFlightRef.current = false;
       terminalWriteRestoreFocusRef.current = false;
+      terminalWriteDecoderRef.current = typeof TextDecoder === "undefined" ? null : new TextDecoder();
       pendingResizeSyncRef.current = true;
       setTerminalReady(false);
     };
-  }, [clearScheduledTerminalFlush, handleTerminalData, handleTerminalResizeObserved, handleTerminalScroll, updateScrollState]);
+  }, [sessionId]);
 
   useEffect(() => {
     const term = termRef.current;
     if (!term) {
       return;
     }
-    term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal || transportMode === "snapshot";
-  }, [expectsLiveTerminal, interactiveTerminal, transportMode]);
+    term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal;
+  }, [expectsLiveTerminal, interactiveTerminal]);
 
   useEffect(() => {
     if (!active) {
       return;
+    }
+
+    if (expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
+      requestReconnect();
     }
 
     clearVisibilityRecoveryTimers();
@@ -1593,10 +1826,42 @@ export function SessionTerminal({
       window.cancelAnimationFrame(frameHandle);
       clearVisibilityRecoveryTimers();
     };
-  }, [active, clearVisibilityRecoveryTimers, scheduleRendererRecovery]);
+  }, [active, clearVisibilityRecoveryTimers, connectionState, expectsLiveTerminal, requestReconnect, scheduleRendererRecovery]);
 
   useEffect(() => {
-    if (!terminalReady || !snapshotReady) {
+    if (!expectsLiveTerminal || !canRenderTerminal || !pendingLiveResyncRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    pendingLiveResyncRef.current = false;
+
+    void (async () => {
+      try {
+        const snapshot = await fetchLiveTerminalSnapshot(sessionId, LIVE_TERMINAL_SNAPSHOT_LINES);
+        if (cancelled) {
+          return;
+        }
+        applyFetchedSnapshot(snapshot);
+      } catch {
+        if (cancelled) {
+          return;
+        }
+        pendingLiveResyncRef.current = true;
+      } finally {
+        if (!cancelled) {
+          scheduleRendererRecovery(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyFetchedSnapshot, canRenderTerminal, expectsLiveTerminal, scheduleRendererRecovery, sessionId]);
+
+  useEffect(() => {
+    if (!terminalReady || !snapshotReady || !canRenderTerminal) {
       return;
     }
 
@@ -1607,13 +1872,13 @@ export function SessionTerminal({
 
     if (transportMode === "snapshot" && expectsLiveTerminal) {
       if (snapshotAnsi.length > 0) {
-        queueTerminalWrite(
-          {
-            kind: "snapshot",
-            payload: TERMINAL_TEXT_ENCODER.encode(normalizeTerminalSnapshot(snapshotAnsi)),
-          },
-          true,
-        );
+        snapshotAppliedRef.current = sessionId;
+        queueTerminalWrite({
+          kind: "snapshot",
+          payload: liveOutputStartedRef.current
+            ? buildTerminalSnapshotPayload(snapshotAnsi, snapshotModes)
+            : buildReadableSnapshotPayload(snapshotAnsi, snapshotTranscript),
+        });
         return;
       }
 
@@ -1621,11 +1886,14 @@ export function SessionTerminal({
       return;
     }
 
-    if (snapshotAppliedRef.current === sessionId) {
+    const hasRenderedContent = terminalHasRenderedContent(term);
+
+    if (snapshotAppliedRef.current === sessionId && hasRenderedContent) {
+      updateScrollState();
       return;
     }
 
-    if (expectsLiveTerminal && (liveOutputStartedRef.current || terminalHasRenderedContent(term))) {
+    if (expectsLiveTerminal && liveOutputStartedRef.current && hasRenderedContent) {
       snapshotAppliedRef.current = sessionId;
       updateScrollState();
       return;
@@ -1633,43 +1901,95 @@ export function SessionTerminal({
 
     snapshotAppliedRef.current = sessionId;
     if (snapshotAnsi.length > 0) {
-      queueTerminalWrite(
-        {
-          kind: "snapshot",
-          payload: TERMINAL_TEXT_ENCODER.encode(normalizeTerminalSnapshot(snapshotAnsi)),
-        },
-        true,
-      );
+      queueTerminalWrite({
+        kind: "snapshot",
+        payload: liveOutputStartedRef.current
+          ? buildTerminalSnapshotPayload(snapshotAnsi, snapshotModes)
+          : buildReadableSnapshotPayload(snapshotAnsi, snapshotTranscript),
+      });
       return;
     }
 
     updateScrollState();
   }, [
     expectsLiveTerminal,
-    queueTerminalWrite,
     sessionId,
     snapshotAnsi,
+    snapshotTranscript,
+    snapshotModes,
     snapshotReady,
     terminalReady,
     transportMode,
+    queueTerminalWrite,
     updateScrollState,
+    canRenderTerminal,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || process.env.NODE_ENV === "production") {
+      return;
+    }
+
+    window.__conductorSessionTerminalDebug = {
+      sessionId,
+      getState: () => ({
+        sessionId,
+        active,
+        terminalReady,
+        snapshotReady,
+        snapshotLength: snapshotAnsi.length,
+        snapshotTranscriptLength: snapshotTranscript.length,
+        snapshotPreview: snapshotAnsi.slice(0, 120),
+        connectionState,
+        transportMode,
+        interactiveTerminal,
+        liveOutputStarted: liveOutputStartedRef.current,
+        snapshotApplied: snapshotAppliedRef.current,
+        hasRenderedContent: termRef.current ? terminalHasRenderedContent(termRef.current) : false,
+        termRows: termRef.current?.rows ?? null,
+        termCols: termRef.current?.cols ?? null,
+        bufferBaseY: termRef.current?.buffer.active.baseY ?? null,
+        bufferViewportY: termRef.current?.buffer.active.viewportY ?? null,
+      }),
+    };
+
+    return () => {
+      if (window.__conductorSessionTerminalDebug?.sessionId === sessionId) {
+        delete window.__conductorSessionTerminalDebug;
+      }
+    };
+  }, [
+    active,
+    connectionState,
+    interactiveTerminal,
+    sessionId,
+    snapshotAnsi,
+    snapshotTranscript,
+    snapshotReady,
+    terminalReady,
+    transportMode,
   ]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      const visible = !document.hidden;
-      setPageVisible(visible);
+      setPageVisible(!document.hidden);
       if (document.hidden) {
         rememberFocusedSurface();
         return;
       }
       normalizeWhitespaceOnlyDraft();
+      if (expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
+        requestReconnect();
+      }
       scheduleRendererRecovery(false);
     };
 
     const handleWindowFocus = () => {
       setPageVisible(!document.hidden);
       normalizeWhitespaceOnlyDraft();
+      if (!document.hidden && expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
+        requestReconnect();
+      }
       scheduleRendererRecovery(false);
     };
 
@@ -1680,7 +2000,7 @@ export function SessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [normalizeWhitespaceOnlyDraft, rememberFocusedSurface, scheduleRendererRecovery]);
+  }, [connectionState, expectsLiveTerminal, normalizeWhitespaceOnlyDraft, rememberFocusedSurface, requestReconnect, scheduleRendererRecovery]);
 
   useEffect(() => {
     const handleDocumentFocusIn = () => {
@@ -1810,14 +2130,10 @@ export function SessionTerminal({
       pendingResizeSyncRef.current = true;
       setTransportError(null);
       setConnectionState("live");
-      const wasReconnect = hasConnectedOnceRef.current;
       hasConnectedOnceRef.current = true;
       reconnectNoticeWrittenRef.current = false;
-      if (wasReconnect) {
-        term.writeln("\r\n\x1b[90m[Reconnected]\x1b[0m");
-      }
-      updateScrollState();
-      scheduleRendererRecovery(true);
+      updateScrollStateRef.current();
+      scheduleRendererRecoveryRef.current(true);
     };
 
     source.onmessage = (event) => {
@@ -1840,13 +2156,13 @@ export function SessionTerminal({
       if (shouldRetry) {
         pendingResizeSyncRef.current = true;
         const currentTerm = termRef.current;
-        if (currentTerm && hasConnectedOnceRef.current && !reconnectNoticeWrittenRef.current) {
+        if (currentTerm && hasConnectedOnceRef.current && liveOutputStartedRef.current && !reconnectNoticeWrittenRef.current) {
           reconnectNoticeWrittenRef.current = true;
           currentTerm.writeln("\r\n\x1b[90m[Connection lost. Reconnecting...]\x1b[0m");
         }
         setConnectionState("connecting");
         setSocketBaseUrl(null);
-        scheduleReconnect();
+        scheduleReconnectRef.current();
         return;
       }
       setTransportError("Terminal connection failed");
@@ -1861,14 +2177,10 @@ export function SessionTerminal({
     };
   }, [
     clearReconnectTimer,
-    handleTerminalEventStreamMessage,
-    scheduleReconnect,
-    scheduleRendererRecovery,
     shouldStreamLiveTerminal,
     socketBaseUrl,
     terminalReady,
     transportMode,
-    updateScrollState,
   ]);
 
   useEffect(() => {
@@ -1902,14 +2214,10 @@ export function SessionTerminal({
       pendingResizeSyncRef.current = true;
       setTransportError(null);
       setConnectionState("live");
-      const wasReconnect = hasConnectedOnceRef.current;
       hasConnectedOnceRef.current = true;
       reconnectNoticeWrittenRef.current = false;
-      if (wasReconnect) {
-        term.writeln("\r\n\x1b[90m[Reconnected]\x1b[0m");
-      }
-      updateScrollState();
-      scheduleRendererRecovery(true);
+      updateScrollStateRef.current();
+      scheduleRendererRecoveryRef.current(true);
     };
 
     socket.onmessage = (event) => {
@@ -1918,7 +2226,7 @@ export function SessionTerminal({
       if (typeof event.data === "string") {
         try {
           const payload = JSON.parse(event.data) as TerminalServerEvent;
-          handleTerminalServerEvent(payload);
+          handleTerminalServerEventRef.current(payload);
         } catch {
           setTransportError("Received an invalid terminal event");
           setConnectionState("error");
@@ -1929,7 +2237,12 @@ export function SessionTerminal({
       if (event.data instanceof ArrayBuffer) {
         try {
           const frame = parseTerminalBinaryFrame(event.data);
-          handleTerminalPayloadFrame(frame.kind, frame.sequence, frame.payload);
+          handleTerminalPayloadFrameRef.current(
+            frame.kind,
+            frame.sequence,
+            frame.payload,
+            frame.kind === "restore" ? frame.modes : undefined,
+          );
         } catch {
           setTransportError("Received an invalid terminal frame");
           setConnectionState("error");
@@ -1950,14 +2263,14 @@ export function SessionTerminal({
       if (shouldRetry) {
         pendingResizeSyncRef.current = true;
         const currentTerm = termRef.current;
-        if (currentTerm && hasConnectedOnceRef.current && !reconnectNoticeWrittenRef.current) {
+        if (currentTerm && hasConnectedOnceRef.current && liveOutputStartedRef.current && !reconnectNoticeWrittenRef.current) {
           reconnectNoticeWrittenRef.current = true;
           currentTerm.writeln("\r\n\x1b[90m[Connection lost. Reconnecting...]\x1b[0m");
         }
         setConnectionState("connecting");
         setSocketBaseUrl(null);
         setControlSocketBaseUrl(null);
-        scheduleReconnect();
+        scheduleReconnectRef.current();
         return;
       }
       setConnectionState("closed");
@@ -1986,15 +2299,68 @@ export function SessionTerminal({
   }, [
     clearReconnectTimer,
     reconnectToken,
-    handleTerminalPayloadFrame,
-    handleTerminalServerEvent,
-    scheduleReconnect,
-    scheduleRendererRecovery,
     shouldStreamLiveTerminal,
     socketBaseUrl,
     terminalReady,
     transportMode,
-    updateScrollState,
+  ]);
+
+  useEffect(() => {
+    if (
+      !terminalReady
+      || !snapshotReady
+      || !shouldStreamLiveTerminal
+      || transportMode !== "websocket"
+      || connectionState === "live"
+      || liveOutputStartedRef.current
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const poll = async () => {
+      if (cancelled || liveOutputStartedRef.current) {
+        return;
+      }
+
+      try {
+        const snapshot = await fetchLiveTerminalSnapshot(sessionId, LIVE_TERMINAL_SNAPSHOT_LINES);
+        if (cancelled || liveOutputStartedRef.current) {
+          return;
+        }
+        applyFetchedSnapshot(snapshot);
+      } catch {
+        // Keep the existing transport state; this is only a supplemental fallback.
+      } finally {
+        if (!cancelled && !liveOutputStartedRef.current) {
+          timer = window.setTimeout(() => {
+            void poll();
+          }, pollIntervalMs);
+        }
+      }
+    };
+
+    timer = window.setTimeout(() => {
+      void poll();
+    }, pollIntervalMs);
+
+    return () => {
+      cancelled = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [
+    applyFetchedSnapshot,
+    pollIntervalMs,
+    sessionId,
+    shouldStreamLiveTerminal,
+    snapshotReady,
+    terminalReady,
+    transportMode,
+    connectionState,
   ]);
 
   useEffect(() => {
@@ -2038,11 +2404,7 @@ export function SessionTerminal({
         ignoreControlSocketCloseRef.current = false;
         return;
       }
-      controlSocketRef.current = null;
-      if (LIVE_TERMINAL_STATUSES.has(latestStatusRef.current)) {
-        pendingResizeSyncRef.current = true;
-        requestReconnect();
-      }
+      downgradeControlTransport("Terminal control websocket disconnected. Falling back to the HTTP control path.");
     };
 
     socket.onerror = () => {
@@ -2051,13 +2413,7 @@ export function SessionTerminal({
         ignoreControlSocketCloseRef.current = false;
         return;
       }
-      controlSocketRef.current = null;
-      if (LIVE_TERMINAL_STATUSES.has(latestStatusRef.current)) {
-        pendingResizeSyncRef.current = true;
-        requestReconnect();
-        return;
-      }
-      setTransportError("Terminal control connection failed");
+      downgradeControlTransport("Terminal control websocket failed. Falling back to the HTTP control path.");
     };
 
     return () => {
@@ -2070,7 +2426,7 @@ export function SessionTerminal({
   }, [
     controlSocketBaseUrl,
     controlTransportMode,
-    requestReconnect,
+    downgradeControlTransport,
     shouldStreamLiveTerminal,
     terminalReady,
     transportMode,
@@ -2131,7 +2487,7 @@ export function SessionTerminal({
     const handlePaste = (event: ClipboardEvent) => {
       const clipboard = event.clipboardData;
       if (!clipboard) return;
-      const files = Array.from(clipboard.files ?? []);
+      const files = extractClipboardFiles(clipboard);
       if (files.length > 0) {
         event.preventDefault();
         void handleIncomingFiles(files);
@@ -2145,12 +2501,51 @@ export function SessionTerminal({
 
       event.preventDefault();
       setSendError(localFileTransferError(localFilePath));
+      return;
     };
 
-    container.addEventListener("paste", handlePaste, { capture: true });
-    return () => {
-      container.removeEventListener("paste", handlePaste, { capture: true });
+    const handlePlainTextPaste = (event: ClipboardEvent) => {
+      if (!showLiveInputRail || !expectsLiveTerminal || !interactiveTerminal) {
+        return;
+      }
+      const clipboard = event.clipboardData;
+      if (!clipboard) {
+        return;
+      }
+      const target = event.target;
+      if (target === liveInputRef.current || target === resumeTextareaRef.current) {
+        return;
+      }
+      const text = clipboard.getData("text/plain");
+      if (!text) {
+        return;
+      }
+      event.preventDefault();
+      appendLiveInputDraft(text);
+      setSendError(null);
     };
+
+    const pasteListener = (event: ClipboardEvent) => {
+      handlePaste(event);
+      if (event.defaultPrevented) {
+        return;
+      }
+      handlePlainTextPaste(event);
+    };
+
+    container.addEventListener("paste", pasteListener, { capture: true });
+    return () => {
+      container.removeEventListener("paste", pasteListener, { capture: true });
+    };
+  }, [appendLiveInputDraft, expectsLiveTerminal, handleIncomingFiles, interactiveTerminal, showLiveInputRail]);
+
+  const handleLiveInputPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = extractClipboardFiles(event.clipboardData);
+    if (files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    void handleIncomingFiles(files);
   }, [handleIncomingFiles]);
 
   const handleSend = useCallback(async () => {
@@ -2296,6 +2691,49 @@ export function SessionTerminal({
     focusTerminal();
   }, [focusTerminal]);
 
+  const handleTerminalWheel = useCallback((event: WheelEvent) => {
+    const term = termRef.current;
+    if (!term || event.ctrlKey || event.metaKey || event.defaultPrevented) {
+      return;
+    }
+
+    if (term.buffer.active.baseY <= 0) {
+      return;
+    }
+
+    let deltaLines = event.deltaY;
+    if (event.deltaMode === 0) {
+      deltaLines = event.deltaY / 18;
+    } else if (event.deltaMode === 2) {
+      deltaLines = event.deltaY * Math.max(1, term.rows - 1);
+    }
+
+    const roundedDelta = deltaLines > 0 ? Math.ceil(deltaLines) : Math.floor(deltaLines);
+    if (roundedDelta === 0) {
+      return;
+    }
+
+    term.scrollLines(roundedDelta);
+    updateScrollState();
+    event.preventDefault();
+  }, [updateScrollState]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const wheelListener = (event: WheelEvent) => {
+      handleTerminalWheel(event);
+    };
+
+    container.addEventListener("wheel", wheelListener, { passive: false });
+    return () => {
+      container.removeEventListener("wheel", wheelListener);
+    };
+  }, [handleTerminalWheel]);
+
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
     setSearchQuery("");
@@ -2392,6 +2830,11 @@ export function SessionTerminal({
           return;
         }
         try {
+          if (showLiveInputRail && expectsLiveTerminal && interactiveTerminal) {
+            appendLiveInputDraft(plainText.startsWith("/") ? shellEscapePath(plainText) : plainText);
+            setSendError(null);
+            return;
+          }
           if (canSendLiveInput) {
             const payload = plainText.startsWith("/") ? shellEscapePath(plainText) : plainText;
             await sendTerminalKeys(payload);
@@ -2528,7 +2971,7 @@ export function SessionTerminal({
         }}
       />
 
-      {transportNotice && !showSnapshotFallbackRail ? (
+      {transportNotice && !showLiveInputRail && !showResumeRail ? (
         <div
           className="pointer-events-none absolute left-3 right-3 z-10"
           style={{ bottom: `${floatingOverlayBottomPx}px` }}
@@ -2539,47 +2982,104 @@ export function SessionTerminal({
         </div>
       ) : null}
 
-      {showSnapshotFallbackRail ? (
-        <div className="border-t border-white/8 bg-[#0b0808]/98 px-3 py-3">
-          <div className="flex items-center gap-2">
-            <input
-              ref={liveInputRef}
-              value={liveInputDraft}
-              onChange={(event) => setLiveInputDraft(event.target.value)}
-              onFocus={() => {
-                preferredFocusTargetRef.current = "live-input";
-                restoreFocusOnRecoveryRef.current = true;
-                setSendError(null);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void handleRemoteInputSubmit(true);
-                }
-              }}
-              placeholder="Type into terminal..."
-              autoCapitalize="off"
-              autoCorrect="off"
-              autoComplete="off"
-              enterKeyHint="send"
-              inputMode="text"
-              spellCheck={false}
-              className="h-10 flex-1 rounded-[12px] border border-white/10 bg-black/35 px-3 text-[14px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20"
-            />
-            <button
-              type="button"
-              className="shrink-0 rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] px-3 py-2 text-[11px] font-medium text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => void handleRemoteInputSubmit(true)}
-              disabled={connectionState !== "live"}
-            >
-              Send
-            </button>
+      {showLiveInputRail ? (
+        <div className="border-t border-white/6 bg-[#080606]/98 px-3 py-3 sm:px-4 sm:pb-4">
+          <div className="rounded-[20px] border border-[#2c221d] bg-[linear-gradient(180deg,rgba(29,22,20,0.98),rgba(18,14,13,0.98))] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_22px_44px_rgba(0,0,0,0.34)]">
+            <div className="flex items-end gap-2.5">
+              <div className="min-h-[48px] min-w-0 flex-1">
+                <textarea
+                  ref={liveInputRef}
+                  value={liveInputDraft}
+                  onChange={(event) => setLiveInputDraft(event.target.value)}
+                  onPaste={handleLiveInputPaste}
+                  onFocus={() => {
+                    preferredFocusTargetRef.current = "live-input";
+                    restoreFocusOnRecoveryRef.current = true;
+                    setSendError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void handleRemoteInputSubmit(true);
+                    }
+                  }}
+                  placeholder={liveComposerPlaceholder}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  autoComplete="off"
+                  enterKeyHint="send"
+                  inputMode="text"
+                  spellCheck={false}
+                  rows={2}
+                  className="min-h-[38px] w-full resize-none border-0 bg-transparent py-2.5 pl-0.5 pr-1 text-[14px] leading-7 text-[#efe8e1] outline-none placeholder:text-[#7d746e]"
+                />
+              </div>
+              <button
+                type="button"
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/12 bg-[#f3f0ea] text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={() => void handleRemoteInputSubmit(true)}
+                disabled={connectionState !== "live"}
+                aria-label="Send input"
+              >
+                <Send className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 px-0.5 text-[10px] uppercase tracking-[0.18em] text-[#8c8078]">
+              <span className="max-w-full truncate">{terminalContextLabel}</span>
+              <span className="h-1 w-1 rounded-full bg-[#5f534d]" />
+              <span>{showSnapshotFallbackRail ? "remote recovery" : "native terminal composer"}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex h-8 rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-[11px] font-medium text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={focusTerminal}
+                disabled={connectionState !== "live"}
+              >
+                Focus terminal
+              </button>
+              {!showSnapshotFallbackRail ? (
+                <>
+                  <button
+                    type="button"
+                    className="inline-flex h-8 rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-[11px] font-medium text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={connectionState !== "live"}
+                  >
+                    <Paperclip className="mr-1.5 h-3.5 w-3.5" />
+                    Attach
+                  </button>
+                  <button
+                    type="button"
+                    className="inline-flex h-8 rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-[11px] font-medium text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    onClick={() => setHelperPanelOpen((current) => !current)}
+                    disabled={connectionState !== "live"}
+                    aria-expanded={helperPanelOpen}
+                  >
+                    {helperPanelOpen ? "Hide keys" : "Quick keys"}
+                  </button>
+                </>
+              ) : null}
+            </div>
+            {!showSnapshotFallbackRail && helperPanelOpen ? (
+              <div className="mt-2 flex items-center gap-2 overflow-x-auto pb-0.5">
+                {LIVE_TERMINAL_HELPER_KEYS.map(({ label, special }) => (
+                  <button
+                    key={special}
+                    type="button"
+                    className="inline-flex shrink-0 rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={connectionState !== "live"}
+                    onClick={() => handleLiveHelperKey(special)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-          <p className="mt-2 text-[11px] text-[#8e847d]">
-            {transportNotice ?? "Live terminal recovery mode keeps the terminal refreshed from server snapshots."}
-          </p>
+          <p className="mt-2 px-1 text-[11px] text-[#8e847d]">{liveComposerHint}</p>
           {sendError ? (
-            <p className="mt-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
+            <p className="mt-2 px-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
           ) : null}
         </div>
       ) : null}
@@ -2635,66 +3135,73 @@ export function SessionTerminal({
       ) : null}
 
       {showResumeRail ? (
-        <div className="border-t border-white/8 bg-[#0b0808]/98 px-3 py-3">
-          {attachments.length > 0 ? (
-            <div className="mb-2 flex flex-wrap gap-2">
-              {attachments.map(({ file }) => (
-                <button
-                  key={`${file.name}-${file.lastModified}`}
-                  type="button"
-                  className="inline-flex items-center gap-1 rounded-full border border-white/12 bg-white/6 px-2.5 py-1 text-[11px] text-[#d7cec7]"
-                  onClick={() => {
-                    setAttachments((current) => current.filter((attachment) => attachment.file !== file));
-                  }}
-                >
-                  <Paperclip className="h-3 w-3" />
-                  {file.name}
-                </button>
-              ))}
-            </div>
-          ) : null}
+        <div className="border-t border-white/6 bg-[#080606]/98 px-3 py-3 sm:px-4 sm:pb-4">
+          <div className="rounded-[20px] border border-[#2c221d] bg-[linear-gradient(180deg,rgba(29,22,20,0.98),rgba(18,14,13,0.98))] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_22px_44px_rgba(0,0,0,0.34)]">
+            {attachments.length > 0 ? (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {attachments.map(({ file }) => (
+                  <button
+                    key={`${file.name}-${file.lastModified}`}
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/6 px-2.5 py-1 text-[11px] text-[#d7cec7]"
+                    onClick={() => {
+                      setAttachments((current) => current.filter((attachment) => attachment.file !== file));
+                    }}
+                  >
+                    <Paperclip className="h-3 w-3" />
+                    {file.name}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
-          <div className="flex items-end gap-2">
-            <textarea
-              ref={resumeTextareaRef}
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              onFocus={() => {
-                preferredFocusTargetRef.current = "resume";
-                restoreFocusOnRecoveryRef.current = true;
-                normalizeWhitespaceOnlyDraft();
-              }}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
+            <div className="flex items-end gap-2.5">
+              <div className="min-h-[38px] min-w-0 flex-1">
+                <textarea
+                  ref={resumeTextareaRef}
+                  value={message}
+                  onChange={(event) => setMessage(event.target.value)}
+                  onFocus={() => {
+                    preferredFocusTargetRef.current = "resume";
+                    restoreFocusOnRecoveryRef.current = true;
+                    normalizeWhitespaceOnlyDraft();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void handleSend();
+                    }
+                  }}
+                  placeholder={railPlaceholder}
+                  className="min-h-[38px] w-full resize-none border-0 bg-transparent px-0.5 py-2.5 text-[14px] leading-7 text-[#efe8e1] outline-none placeholder:text-[#7d746e]"
+                />
+              </div>
+              <button
+                type="button"
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={sending || (!message.trim() && attachments.length === 0)}
+                onClick={() => {
                   void handleSend();
-                }
-              }}
-              placeholder={railPlaceholder}
-              className="min-h-[52px] flex-1 resize-none rounded-[14px] border border-white/10 bg-black/35 px-3 py-2 text-[13px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20"
-            />
-            <button
-              type="button"
-              className="rounded-full border border-white/12 bg-white/6 p-2 text-[#d7cec7] transition hover:bg-white/10"
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach files"
-            >
-              <Paperclip className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              className="rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] px-4 py-2 text-[12px] font-medium text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={sending || (!message.trim() && attachments.length === 0)}
-              onClick={() => {
-                void handleSend();
-              }}
-            >
-              {sending ? "Starting..." : "Resume"}
-            </button>
+                }}
+                aria-label="Resume session"
+              >
+                {sending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </button>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[#8c8078]">
+              <span className="max-w-full truncate">{terminalContextLabel}</span>
+              <span className="h-1 w-1 rounded-full bg-[#5f534d]" />
+              <span>{attachments.length > 0 ? `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : "resume session"}</span>
+            </div>
           </div>
+          <p className="mt-2 px-1 text-[11px] text-[#8e847d]">{resumeComposerHint}</p>
 
           {sendError ? (
-            <p className="mt-2 text-[12px] text-[#ff8f7a]">{sendError}</p>
+            <p className="mt-2 px-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
           ) : null}
         </div>
       ) : !showLiveHelperBar && sendError ? (

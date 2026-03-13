@@ -284,6 +284,13 @@ fn normalized_path(value: Option<&str>) -> String {
 }
 
 impl ProjectConfig {
+    pub fn normalize_runtime(&mut self) {
+        trim_to_option(&mut self.runtime);
+        if matches!(self.runtime.as_deref(), Some("tmux")) {
+            self.runtime = Some("direct".to_string());
+        }
+    }
+
     pub fn normalize_dev_server(&mut self) {
         self.dev_server_script = self
             .dev_server_script
@@ -624,6 +631,7 @@ impl ConductorConfig {
             webhook.normalize();
         }
         for project in config.projects.values_mut() {
+            project.normalize_runtime();
             project.normalize_dev_server();
         }
         config.config_path = Some(path.to_path_buf());

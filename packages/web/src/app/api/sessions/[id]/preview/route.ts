@@ -1,26 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
-import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
+import { guardApiAccess } from "@/lib/auth";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
-import { loadPreviewSessionContext } from "@/lib/previewSession";
-import type { PreviewCommandRequest, PreviewStatusResponse } from "@/lib/previewTypes";
+import { loadPreviewSessionContext, type PreviewSessionContext } from "@/lib/previewSession";
+import type { PreviewStatusResponse } from "@/lib/previewTypes";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
-function withLookupError(
-  status: PreviewStatusResponse,
-  lookupError: string | null,
-): PreviewStatusResponse {
-  if (!lookupError || status.connected || status.lastError) {
-    return status;
-  }
+function buildPreviewStatus(previewContext: PreviewSessionContext): PreviewStatusResponse {
+  const currentUrl = previewContext.candidateUrls[0] ?? null;
 
   return {
-    ...status,
-    lastError: lookupError,
+    connected: currentUrl !== null,
+    candidateUrls: previewContext.candidateUrls,
+    currentUrl,
+    title: null,
+    frames: [],
+    activeFrameId: null,
+    selectedElement: null,
+    consoleLogs: [],
+    networkLogs: [],
+    lastError: previewContext.error,
+    screenshotKey: currentUrl ?? "",
   };
 }
 
@@ -36,55 +39,19 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
     return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
   }
 
-  const manager = getPreviewBrowserManager();
-  const status = withLookupError(
-    await manager.getStatus(id, previewContext.candidateUrls),
-    previewContext.error,
-  );
-  return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json(buildPreviewStatus(previewContext), {
+    headers: { "Cache-Control": "no-store" },
+  });
 }
 
-export async function POST(request: NextRequest, context: RouteParams): Promise<Response> {
-  const denied = await guardApiAccess(request, "operator");
+export async function POST(request: NextRequest): Promise<Response> {
+  const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
-  const deniedAction = guardApiActionAccess(request);
-  if (deniedAction) return deniedAction;
 
-  const { id } = await context.params;
-  const previewContext = await loadPreviewSessionContext(id, {
-    headers: await buildForwardedAccessHeaders(request),
-  });
-  if (!previewContext.session && !previewContext.error) {
-    return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
-  }
-
-  let body: PreviewCommandRequest;
-  try {
-    body = await request.json() as PreviewCommandRequest;
-  } catch {
-    return NextResponse.json({ error: "Invalid preview command payload" }, { status: 400 });
-  }
-
-  const manager = getPreviewBrowserManager();
-
-  try {
-    await manager.runCommand(id, body);
-    const status = withLookupError(
-      await manager.getStatus(id, previewContext.candidateUrls),
-      previewContext.error,
-    );
-    return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    const status = withLookupError(
-      await manager.getStatus(id, previewContext.candidateUrls),
-      previewContext.error,
-    );
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Preview command failed",
-        status,
-      },
-      { status: 400, headers: { "Cache-Control": "no-store" } },
-    );
-  }
+  return NextResponse.json(
+    {
+      error: "Interactive preview controls were removed. Preview now renders the resolved URL directly.",
+    },
+    { status: 405, headers: { "Cache-Control": "no-store" } },
+  );
 }

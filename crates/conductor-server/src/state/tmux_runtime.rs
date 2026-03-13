@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use conductor_core::config::ProjectConfig;
@@ -20,6 +22,7 @@ use super::helpers::sanitize_terminal_text;
 use crate::state::{AppState, OutputConsumerConfig, SessionRecord, SessionStatus};
 
 pub(crate) const TMUX_RUNTIME_MODE: &str = "tmux";
+pub(crate) const TMUX_COMPATIBILITY_METADATA_KEY: &str = "tmuxCompatibilityMode";
 pub(crate) const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
 pub(crate) const TMUX_SESSION_METADATA_KEY: &str = "tmuxSession";
 pub(crate) const TMUX_SOCKET_METADATA_KEY: &str = "tmuxSocket";
@@ -251,19 +254,39 @@ impl AppState {
         project: &ProjectConfig,
         executor: Arc<dyn Executor>,
         session_id: &str,
-        mut options: SpawnOptions,
+        options: SpawnOptions,
     ) -> Result<RuntimeLaunch> {
-        match runtime_mode(project) {
-            TMUX_RUNTIME_MODE => {
-                options.interactive = true;
-                // User-facing tmux sessions should render the agent's native terminal UI.
-                // Enabling structured output here streams raw JSON into the pane.
-                options.structured_output = false;
-                self.spawn_tmux_runtime(executor, session_id, options).await
-            }
-            _ => {
-                self.spawn_detached_runtime_or_legacy(executor, session_id, options)
-                    .await
+        let _ = project;
+        self.spawn_detached_runtime_or_legacy(executor, session_id, options)
+            .await
+    }
+
+    pub(crate) async fn archive_legacy_tmux_sessions_on_startup(self: &Arc<Self>) {
+        let legacy_tmux_sessions = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|session| tmux_runtime_metadata(session).is_some())
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        if legacy_tmux_sessions.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            count = legacy_tmux_sessions.len(),
+            "Archiving legacy tmux sessions during startup"
+        );
+
+        for session_id in legacy_tmux_sessions {
+            if let Err(err) = self.archive_session(&session_id).await {
+                tracing::warn!(
+                    session_id,
+                    error = %err,
+                    "Failed to archive legacy tmux session during startup"
+                );
             }
         }
     }
@@ -278,32 +301,15 @@ impl AppState {
                     session
                         .metadata
                         .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == TMUX_RUNTIME_MODE || value == DIRECT_RUNTIME_MODE)
-                        .unwrap_or_else(|| {
-                            session
-                                .metadata
-                                .get(TMUX_SESSION_METADATA_KEY)
-                                .map(|value| !value.trim().is_empty())
-                                .unwrap_or(false)
-                        })
+                        .map(|value| value == DIRECT_RUNTIME_MODE)
+                        .unwrap_or(false)
                 })
                 .map(|session| session.id.clone())
                 .collect::<Vec<_>>()
         };
 
         for session_id in session_ids {
-            let result = match self.get_session(&session_id).await {
-                Some(session)
-                    if session
-                        .metadata
-                        .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == DIRECT_RUNTIME_MODE)
-                        .unwrap_or(false) =>
-                {
-                    self.restore_detached_runtime(&session_id).await
-                }
-                _ => self.restore_tmux_session(&session_id).await,
-            };
+            let result = self.restore_detached_runtime(&session_id).await;
             if let Err(err) = result {
                 tracing::warn!(session_id, error = %err, "Failed to restore runtime session");
             }
@@ -311,25 +317,7 @@ impl AppState {
     }
 
     pub(crate) fn start_tmux_activity_watchdog(self: &Arc<Self>) {
-        let state = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(TMUX_ACTIVITY_WATCH_INTERVAL);
-            loop {
-                interval.tick().await;
-
-                let session_ids = state.attached_terminal_session_ids().await;
-
-                for session_id in session_ids {
-                    if let Err(err) = state.reconcile_tmux_session_activity(&session_id).await {
-                        tracing::debug!(
-                            session_id,
-                            error = %err,
-                            "Failed to reconcile tmux activity"
-                        );
-                    }
-                }
-            }
-        });
+        let _ = self;
     }
 
     pub(crate) async fn ensure_session_live(self: &Arc<Self>, session_id: &str) -> Result<bool> {
@@ -360,20 +348,20 @@ impl AppState {
                     .unwrap_or(false)
             });
 
-        if !is_tmux_runtime {
-            let is_direct_runtime = session
-                .metadata
-                .get(RUNTIME_MODE_METADATA_KEY)
-                .map(|value| value == DIRECT_RUNTIME_MODE)
-                .unwrap_or(false);
-            if !is_direct_runtime {
-                return Ok(false);
-            }
-            self.restore_detached_runtime(session_id).await?;
-            return Ok(self.terminal_runtime_attached(session_id).await);
+        if is_tmux_runtime {
+            return Ok(false);
         }
 
-        self.restore_tmux_session(session_id).await?;
+        let is_direct_runtime = session
+            .metadata
+            .get(RUNTIME_MODE_METADATA_KEY)
+            .map(|value| value == DIRECT_RUNTIME_MODE)
+            .unwrap_or(false);
+        if !is_direct_runtime {
+            return Ok(false);
+        }
+
+        self.restore_detached_runtime(session_id).await?;
         Ok(self.terminal_runtime_attached(session_id).await)
     }
 
@@ -577,6 +565,10 @@ impl AppState {
         metadata.insert(
             RUNTIME_MODE_METADATA_KEY.to_string(),
             TMUX_RUNTIME_MODE.to_string(),
+        );
+        metadata.insert(
+            TMUX_COMPATIBILITY_METADATA_KEY.to_string(),
+            "true".to_string(),
         );
         metadata.insert(TMUX_SESSION_METADATA_KEY.to_string(), session_name);
         metadata.insert(
@@ -964,12 +956,13 @@ impl AppState {
 }
 
 pub(crate) fn runtime_mode(project: &ProjectConfig) -> &str {
-    project
-        .runtime
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(TMUX_RUNTIME_MODE)
+    let _ = project;
+    DIRECT_RUNTIME_MODE
+}
+
+pub(crate) fn tmux_compatibility_mode(project: &ProjectConfig) -> bool {
+    let _ = project;
+    false
 }
 
 pub(crate) fn tmux_runtime_metadata(session: &SessionRecord) -> Option<(PathBuf, String)> {
@@ -1728,8 +1721,25 @@ mod tests {
         state
     }
 
+    #[test]
+    fn runtime_mode_defaults_to_detached_runtime() {
+        let project = ProjectConfig::default();
+        assert_eq!(runtime_mode(&project), DIRECT_RUNTIME_MODE);
+        assert!(!tmux_compatibility_mode(&project));
+    }
+
+    #[test]
+    fn runtime_mode_ignores_explicit_tmux_configuration() {
+        let project = ProjectConfig {
+            runtime: Some(TMUX_RUNTIME_MODE.to_string()),
+            ..ProjectConfig::default()
+        };
+        assert_eq!(runtime_mode(&project), DIRECT_RUNTIME_MODE);
+        assert!(!tmux_compatibility_mode(&project));
+    }
+
     #[tokio::test]
-    async fn restore_runtime_sessions_reattaches_running_tmux_sessions() {
+    async fn archive_legacy_tmux_sessions_on_startup_archives_running_tmux_sessions() {
         if !tmux_runtime_supported().await {
             return;
         }
@@ -1791,37 +1801,19 @@ mod tests {
 
         drop(state);
         let restored = build_state(&root).await;
-        restored.restore_runtime_sessions().await;
+        restored.archive_legacy_tmux_sessions_on_startup().await;
 
-        timeout(Duration::from_secs(2), async {
-            loop {
-                if restored.has_terminal_host(session_id).await {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("tmux session should reattach");
-
-        let output_restored = timeout(Duration::from_secs(10), async {
+        let final_session = timeout(Duration::from_secs(5), async {
             loop {
                 let session = restored.get_session(session_id).await.unwrap();
-                if session.output.contains("phase-two") {
+                if session.status == SessionStatus::Archived {
                     return session;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
         .await
-        .expect("tmux session output should continue after reattach");
-
-        restored
-            .reconcile_tmux_session_activity(session_id)
-            .await
-            .expect("tmux session should reconcile after reattach");
-
-        let final_session = restored.get_session(session_id).await.unwrap();
+        .expect("legacy tmux session should be archived on startup");
 
         assert_eq!(
             final_session
@@ -1830,22 +1822,20 @@ mod tests {
                 .map(String::as_str),
             Some(TMUX_RUNTIME_MODE)
         );
-        assert!(output_restored.output.contains("phase-two"));
-        assert!(final_session.output.contains("phase-two"));
-        assert!(matches!(
-            final_session.status,
-            SessionStatus::Working | SessionStatus::NeedsInput
-        ));
-        assert!(!final_session.metadata.contains_key("recoveryState"));
+        assert_eq!(final_session.status, SessionStatus::Archived);
+        assert_eq!(final_session.summary.as_deref(), Some("Archived"));
+        assert!(!restored.has_terminal_host(session_id).await);
 
         if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
-            let _ = kill_tmux_session(&socket_path, &tmux_session).await;
+            assert!(!tmux_session_exists(&socket_path, &tmux_session)
+                .await
+                .unwrap());
         }
         let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
-    async fn send_to_session_reattaches_tmux_runtime_on_demand() {
+    async fn send_to_session_rejects_legacy_tmux_runtime_sessions() {
         if !tmux_runtime_supported().await {
             return;
         }
@@ -1918,7 +1908,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        restored
+        let error = restored
             .send_to_session(
                 session_id,
                 "make this panel bigger".to_string(),
@@ -1928,37 +1918,21 @@ mod tests {
                 "follow_up",
             )
             .await
-            .unwrap();
+            .expect_err("legacy tmux sessions should not accept follow-up input");
 
-        let final_session = timeout(Duration::from_secs(5), async {
-            loop {
-                let session = restored.get_session(session_id).await.unwrap();
-                if session.output.contains("echo:make this panel bigger") {
-                    return session;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("tmux session should accept follow-up input after reattach");
+        assert!(error.to_string().contains("is not running"));
+        assert!(!restored.has_terminal_host(session_id).await);
 
-        assert!(restored.has_terminal_host(session_id).await);
-        assert!(final_session
-            .conversation
-            .iter()
-            .any(|entry| entry.kind == "user_message" && entry.text == "make this panel bigger"));
-
-        if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
+        if let Some((socket_path, tmux_session)) =
+            tmux_runtime_metadata(&restored.get_session(session_id).await.unwrap())
+        {
             let _ = kill_tmux_session(&socket_path, &tmux_session).await;
         }
         let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
-    async fn spawn_with_runtime_preserves_plain_terminal_output_for_tmux_sessions() {
-        if !tmux_runtime_supported().await {
-            return;
-        }
+    async fn spawn_with_runtime_ignores_legacy_tmux_project_configuration() {
         let root =
             std::env::temp_dir().join(format!("conductor-tmux-structured-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -1997,40 +1971,14 @@ mod tests {
             .await
             .unwrap();
 
-        let launch_command = launch
-            .metadata
-            .get(TMUX_LAUNCH_COMMAND_METADATA_KEY)
-            .cloned()
-            .unwrap();
-        assert!(launch_command.contains("plain"));
-        assert!(!launch_command.contains("structured"));
-
-        let socket_path = PathBuf::from(
+        assert_eq!(
             launch
                 .metadata
-                .get(TMUX_SOCKET_METADATA_KEY)
-                .cloned()
-                .unwrap(),
+                .get(RUNTIME_MODE_METADATA_KEY)
+                .map(String::as_str),
+            Some(DIRECT_RUNTIME_MODE)
         );
-        let tmux_session = launch
-            .metadata
-            .get(TMUX_SESSION_METADATA_KEY)
-            .cloned()
-            .unwrap();
-        let status_output = tokio::process::Command::new("tmux")
-            .arg("-S")
-            .arg(&socket_path)
-            .arg("show-options")
-            .arg("-v")
-            .arg("-t")
-            .arg(&tmux_session)
-            .arg("status")
-            .output()
-            .await
-            .unwrap();
-        assert!(status_output.status.success());
-        assert_eq!(String::from_utf8_lossy(&status_output.stdout).trim(), "off");
-        let _ = kill_tmux_session(&socket_path, &tmux_session).await;
+        assert!(!launch.metadata.contains_key(TMUX_SESSION_METADATA_KEY));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2095,7 +2043,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_raw_to_session_preserves_escape_sequences_for_tmux_runtime() {
+    async fn send_raw_to_session_rejects_legacy_tmux_runtime_sessions() {
         if !tmux_runtime_supported().await {
             return;
         }
@@ -2155,7 +2103,7 @@ mod tests {
         record.metadata.extend(launch.metadata);
         state.replace_session(record).await.unwrap();
 
-        state
+        let error = state
             .send_to_session(
                 session_id,
                 "continue".to_string(),
@@ -2165,30 +2113,18 @@ mod tests {
                 "follow_up",
             )
             .await
-            .unwrap();
-        state
+            .expect_err("legacy tmux sessions should reject text input");
+        assert!(error.to_string().contains("is not running"));
+
+        let raw_error = state
             .send_raw_to_session(session_id, "\u{1b}[A".to_string())
             .await
-            .unwrap();
+            .expect_err("legacy tmux sessions should reject raw input");
+        assert!(raw_error.to_string().contains("not running"));
 
-        let final_session = timeout(Duration::from_secs(5), async {
-            loop {
-                let session = state.get_session(session_id).await.unwrap();
-                if session.output.contains("line:continue")
-                    && session.output.contains("bytes:1b5b41")
-                {
-                    return session;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("tmux runtime should receive raw escape sequences");
-
-        assert!(final_session.output.contains("line:continue"));
-        assert!(final_session.output.contains("bytes:1b5b41"));
-
-        if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&final_session) {
+        if let Some((socket_path, tmux_session)) =
+            tmux_runtime_metadata(&state.get_session(session_id).await.unwrap())
+        {
             let _ = kill_tmux_session(&socket_path, &tmux_session).await;
         }
         let _ = fs::remove_dir_all(&root);

@@ -11,8 +11,20 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  reactStrictMode: false,
   experimental: {
     turbopackFileSystemCacheForBuild: true,
+  },
+  webpack(config, { dev }) {
+    if (dev) {
+      config.watchOptions = {
+        ...config.watchOptions,
+        // Runtime sessions, restore snapshots, and detached worktrees live under .conductor.
+        // Ignoring them prevents dashboard Fast Refresh churn while terminals are active.
+        ignored: ["**/.conductor/**"],
+      };
+    }
+    return config;
   },
   serverExternalPackages: [
     "@conductor-oss/core",

@@ -28,8 +28,8 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     let state = AppState::new(config_path, config.clone(), db).await;
     state.discover_executors().await;
     state.start_terminal_host_watchdog();
+    state.archive_legacy_tmux_sessions_on_startup().await;
     state.restore_runtime_sessions().await;
-    state.start_tmux_activity_watchdog();
     let _runtime = runtime::initialize_runtime(config, state.clone(), _event_bus.clone()).await?;
     state.kick_spawn_supervisor().await;
     state.start_app_update_watchdog();

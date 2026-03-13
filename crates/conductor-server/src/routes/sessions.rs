@@ -729,7 +729,7 @@ async fn cleanup_sessions(
             continue;
         }
 
-        if !session.status.is_terminal() {
+        if !session_cleanup_eligible(&session) {
             result["skipped"]
                 .as_array_mut()
                 .expect("skipped is array")
@@ -765,6 +765,18 @@ async fn cleanup_sessions(
     }
 
     ok(result)
+}
+
+fn session_cleanup_eligible(session: &SessionRecord) -> bool {
+    session.status.is_terminal()
+        || matches!(
+            session.status,
+            SessionStatus::NeedsInput | SessionStatus::Stuck
+        )
+        || matches!(
+            session.activity.as_deref(),
+            Some("waiting_input" | "blocked")
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -853,5 +865,57 @@ async fn send_keys(
     match state.send_raw_to_session(&id, message).await {
         Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_cleanup_eligible;
+    use crate::state::{SessionRecord, SessionStatus};
+
+    fn build_session(id: &str, status: SessionStatus, activity: Option<&str>) -> SessionRecord {
+        let mut session = SessionRecord::new(
+            id.to_string(),
+            "demo".to_string(),
+            Some(format!("session/{id}")),
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Inspect".to_string(),
+            None,
+        );
+        session.status = status;
+        session.activity = activity.map(str::to_string);
+        session
+    }
+
+    #[test]
+    fn cleanup_eligible_for_terminal_sessions() {
+        let session = build_session("terminal", SessionStatus::Done, Some("exited"));
+        assert!(session_cleanup_eligible(&session));
+    }
+
+    #[test]
+    fn cleanup_eligible_for_needs_input_sessions() {
+        let session = build_session(
+            "needs-input",
+            SessionStatus::NeedsInput,
+            Some("waiting_input"),
+        );
+        assert!(session_cleanup_eligible(&session));
+    }
+
+    #[test]
+    fn cleanup_eligible_for_stuck_sessions() {
+        let session = build_session("stuck", SessionStatus::Stuck, Some("blocked"));
+        assert!(session_cleanup_eligible(&session));
+    }
+
+    #[test]
+    fn cleanup_skips_active_working_sessions() {
+        let session = build_session("working", SessionStatus::Working, Some("active"));
+        assert!(!session_cleanup_eligible(&session));
     }
 }

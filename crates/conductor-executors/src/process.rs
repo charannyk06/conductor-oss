@@ -1,6 +1,10 @@
 use anyhow::Result;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+#[cfg(unix)]
+use nix::libc;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -24,6 +28,117 @@ impl Default for PtyDimensions {
             rows: 48,
             cols: 160,
         }
+    }
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+
+    // SAFETY: `kill(pid, 0)` only checks process existence for an explicit pid.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if result == 0 {
+        return true;
+    }
+
+    matches!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM)
+    )
+}
+
+#[cfg(unix)]
+fn collect_descendant_pids(root_pid: u32) -> Vec<u32> {
+    let output = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let mut children_by_parent: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Some(ppid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        children_by_parent.entry(ppid).or_default().push(pid);
+    }
+
+    let mut ordered = Vec::new();
+    let mut stack = vec![root_pid];
+    let mut seen = HashSet::new();
+    while let Some(parent) = stack.pop() {
+        let Some(children) = children_by_parent.get(&parent) else {
+            continue;
+        };
+        for child in children {
+            if seen.insert(*child) {
+                ordered.push(*child);
+                stack.push(*child);
+            }
+        }
+    }
+
+    ordered
+}
+
+#[cfg(unix)]
+fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+    let poll_interval = Duration::from_millis(100);
+    let iterations = (timeout.as_millis() / poll_interval.as_millis()).max(1) as usize;
+    for _ in 0..iterations {
+        if !is_process_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(poll_interval);
+    }
+    !is_process_alive(pid)
+}
+
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: libc::c_int) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+
+    // SAFETY: libc::kill targets an explicit pid with a specific signal.
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn terminate_process_tree(root_pid: u32, timeout: Duration) {
+    if root_pid == 0 {
+        return;
+    }
+
+    let descendants = collect_descendant_pids(root_pid);
+    for pid in descendants.iter().rev() {
+        let _ = send_signal(*pid, libc::SIGTERM);
+    }
+    let _ = send_signal(root_pid, libc::SIGTERM);
+
+    for pid in descendants.iter().rev() {
+        let _ = wait_for_process_exit(*pid, timeout);
+    }
+    if wait_for_process_exit(root_pid, timeout) {
+        return;
+    }
+
+    for pid in descendants.iter().rev() {
+        if is_process_alive(*pid) {
+            let _ = send_signal(*pid, libc::SIGKILL);
+        }
+    }
+    if is_process_alive(root_pid) {
+        let _ = send_signal(root_pid, libc::SIGKILL);
     }
 }
 
@@ -183,15 +298,9 @@ pub async fn spawn_process_with_pty_size(
                         #[cfg(unix)]
                         {
                             if let Some(pid) = child.process_id() {
-                                let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
-                                let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
-                                // Wait up to 5 seconds for graceful exit
-                                for _ in 0..50 {
-                                    std::thread::sleep(Duration::from_millis(100));
-                                    if let Ok(Some(_)) = child.try_wait() {
-                                        return;
-                                    }
-                                }
+                                terminate_process_tree(pid, Duration::from_secs(5));
+                                let _ = child.wait();
+                                return;
                             }
                         }
                         // SIGKILL fallback (or non-Unix)
@@ -332,18 +441,16 @@ pub async fn spawn_process_no_stdin(
                     // Try graceful SIGTERM first (Unix only)
                     #[cfg(unix)]
                     if let Some(pid) = child.id() {
-                        let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
-                        let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGTERM);
-                        for _ in 0..50 {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            if let Ok(Some(_)) = child.try_wait() {
-                                let _ = exit_tx.send(ExecutorOutput::Failed {
-                                    error: "killed".to_string(),
-                                    exit_code: Some(-15),
-                                }).await;
-                                return;
-                            }
-                        }
+                        let _ = tokio::task::spawn_blocking(move || {
+                            terminate_process_tree(pid, Duration::from_secs(5));
+                        })
+                        .await;
+                        let _ = child.wait().await;
+                        let _ = exit_tx.send(ExecutorOutput::Failed {
+                            error: "killed".to_string(),
+                            exit_code: Some(-15),
+                        }).await;
+                        return;
                     }
                     // SIGKILL fallback
                     let _ = child.kill().await;
@@ -388,6 +495,70 @@ fn drain_terminal_lines(buffer: &mut Vec<u8>) -> Vec<String> {
         );
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExecutorOutput, is_process_alive, spawn_process};
+    use std::collections::HashMap;
+    use std::path::Path;
+    use tokio::time::{Duration, timeout};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_signal_terminates_shell_children_for_pty_sessions() {
+        let mut handle = spawn_process(
+            Path::new("/bin/sh"),
+            &[
+                "-lc".to_string(),
+                "sleep 30 & child=$!; printf '%s\\n' \"$child\"; wait \"$child\"".to_string(),
+            ],
+            Path::new("."),
+            &HashMap::new(),
+        )
+        .await
+        .expect("pty process should spawn");
+
+        let child_pid = match timeout(Duration::from_secs(3), handle.output_rx.recv()).await {
+            Ok(Some(ExecutorOutput::Stdout(line))) => line
+                .trim()
+                .parse::<u32>()
+                .expect("shell should print child pid"),
+            other => panic!("expected child pid from shell, got {other:?}"),
+        };
+        assert!(
+            is_process_alive(child_pid),
+            "child should be alive before kill"
+        );
+
+        let _ = handle.kill_tx.send(());
+
+        let exit_event = timeout(Duration::from_secs(8), async {
+            loop {
+                match handle.output_rx.recv().await {
+                    Some(ExecutorOutput::Failed { error, .. }) if error == "killed" => break,
+                    Some(_) => continue,
+                    None => panic!("pty output channel closed before kill event"),
+                }
+            }
+        })
+        .await;
+        assert!(exit_event.is_ok(), "pty process should report killed");
+
+        let terminated = timeout(Duration::from_secs(3), async {
+            loop {
+                if !is_process_alive(child_pid) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            terminated.is_ok(),
+            "shell child should terminate with parent"
+        );
+    }
 }
 
 fn flush_terminal_line_buffer(buffer: &mut Vec<u8>) -> Option<String> {

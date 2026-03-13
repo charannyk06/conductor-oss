@@ -15,7 +15,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 - **Backend:** Rust (axum, tokio, sqlx/SQLite) at port 4749
 - **Dashboard:** Next.js (packages/web) at port 3000/4747
 - **CLI:** Node.js launcher + Rust native binary
-- **Runtime:** tmux-based session management
+- **Runtime:** direct PTY-based session management
 - **Persistence:** SQLite in `.conductor/conductor.db` + Markdown files
 
 ### Rust Crates (37K+ lines)
@@ -43,7 +43,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 
 - `crates/conductor-server/src/routes/` - 22 route modules (sessions, tasks, boards, github, terminal, etc.)
 - `crates/conductor-server/src/state/session_manager.rs` - Core session lifecycle
-- `crates/conductor-server/src/state/tmux_runtime.rs` - tmux interaction layer
+- `crates/conductor-server/src/state/detached_runtime.rs` - direct PTY runtime and streaming
 - `crates/conductor-server/src/runtime.rs` - Runtime coordination
 - `crates/conductor-executors/src/agents/` - 10 agent adapters
 
@@ -60,7 +60,6 @@ Each adapter in `crates/conductor-executors/src/agents/` defines launch commands
 - Rust toolchain (stable)
 - Bun >= 1.2
 - Node.js >= 18
-- tmux
 - git
 
 ### Commands
@@ -126,7 +125,7 @@ Conventional commits: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 1. User creates/moves task on Kanban board (`CONDUCTOR.md`)
 2. File watcher detects change, parses board
 3. Dispatcher picks up "Ready to Dispatch" tasks
-4. Executor creates tmux session, launches agent CLI
+4. Executor launches a direct PTY session and streams the native agent terminal
 5. Session manager tracks lifecycle (spawn, running, complete, failed)
 6. Dashboard streams updates via SSE
 7. On completion: diff captured, task moved to Done

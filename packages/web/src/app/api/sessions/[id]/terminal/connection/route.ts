@@ -16,6 +16,13 @@ const TERMINAL_CONNECTION_PATH_HEADER = "x-conductor-terminal-connection-path";
 type TerminalConnectionTransport = "websocket" | "snapshot" | "eventstream";
 type TerminalControlTransport = "websocket" | "http";
 type TerminalConnectionPath = "direct" | "managed_remote" | "dashboard_proxy" | "auth_limited" | "unavailable";
+type SessionTerminalRuntimeMode = "direct" | "tmux" | "unknown";
+
+type SessionTerminalRuntimeInfo = {
+  runtimeMode: SessionTerminalRuntimeMode;
+  interactive: boolean;
+  fallbackReason: string | null;
+};
 
 type ResolvedWebSocketBaseUrl = {
   baseUrl: string | null;
@@ -183,6 +190,70 @@ function buildEventStreamConnection(
   });
 }
 
+async function resolveSessionTerminalRuntime(
+  request: Request,
+  backendUrl: string,
+  id: string,
+): Promise<SessionTerminalRuntimeInfo> {
+  let payload:
+    | {
+        metadata?: Record<string, unknown> | null;
+      }
+    | null = null;
+
+  try {
+    const response = await fetch(
+      new URL(`/api/sessions/${encodeURIComponent(id)}`, backendUrl),
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: await buildForwardedAccessHeaders(request),
+      },
+    );
+
+    if (response.ok) {
+      payload = (await response.json().catch(() => null)) as
+        | {
+            metadata?: Record<string, unknown> | null;
+          }
+        | null;
+    }
+  } catch {
+    payload = null;
+  }
+
+  const metadata = payload?.metadata && typeof payload.metadata === "object"
+    ? payload.metadata
+    : null;
+  const runtimeMode = typeof metadata?.["runtimeMode"] === "string"
+    ? metadata["runtimeMode"].trim().toLowerCase()
+    : "";
+  const compatibilityMode = metadata?.["tmuxCompatibilityMode"] === "true"
+    || metadata?.["tmuxCompatibilityMode"] === true;
+
+  if (runtimeMode === "tmux" || compatibilityMode) {
+    return {
+      runtimeMode: "tmux",
+      interactive: false,
+      fallbackReason: "This session is running on the legacy tmux compatibility path. Live PTY websocket transport is disabled for it.",
+    };
+  }
+
+  if (runtimeMode === "direct") {
+    return {
+      runtimeMode: "direct",
+      interactive: true,
+      fallbackReason: null,
+    };
+  }
+
+  return {
+    runtimeMode: "unknown",
+    interactive: true,
+    fallbackReason: null,
+  };
+}
+
 export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> },
@@ -202,6 +273,47 @@ export async function GET(
   const { id } = await context.params;
   const access = await getDashboardAccess(request);
   const interactive = access.role ? roleMeetsRequirement(access.role, "operator") : false;
+  let runtimeInfo: SessionTerminalRuntimeInfo;
+  try {
+    runtimeInfo = await resolveSessionTerminalRuntime(request, backendUrl, id);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to resolve terminal session metadata" },
+      { status: 502 },
+    );
+  }
+
+  if (runtimeInfo.runtimeMode === "tmux") {
+    return applyTerminalConnectionHeaders(NextResponse.json({
+      transport: "snapshot" satisfies TerminalConnectionTransport,
+      wsUrl: null,
+      pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
+      interactive: false,
+      requiresToken: false,
+      tokenExpiresInSeconds: null,
+      fallbackReason: runtimeInfo.fallbackReason,
+      stream: {
+        transport: "snapshot" satisfies TerminalConnectionTransport,
+        wsUrl: null,
+        pollIntervalMs: DEFAULT_REMOTE_POLL_INTERVAL_MS,
+      },
+      control: {
+        transport: "http" satisfies TerminalControlTransport,
+        wsUrl: null,
+        interactive: false,
+        requiresToken: false,
+        tokenExpiresInSeconds: null,
+        fallbackReason: runtimeInfo.fallbackReason,
+        ...buildControlPaths(id),
+      },
+    }), {
+      startedAt,
+      transport: "snapshot",
+      interactive: false,
+      connectionPath: "dashboard_proxy",
+    });
+  }
+
   if (!interactive) {
     return buildEventStreamConnection(
       id,
