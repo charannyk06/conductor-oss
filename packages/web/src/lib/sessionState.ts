@@ -248,7 +248,7 @@ function subscribeSessions(listener: Listener): () => void {
   };
 }
 
-async function refreshSessionRecord(id: string): Promise<void> {
+async function refreshSessionRecord(id: string): Promise<DashboardSession | null> {
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { cache: "no-store" });
     if (response.status === 404) {
@@ -257,7 +257,7 @@ async function refreshSessionRecord(id: string): Promise<void> {
       commitSessionsState(nextSessions, sortSessionIdsByCreatedAt(nextSessions));
       sessionsStore.error = null;
       emitSessionChange();
-      return;
+      return null;
     }
     if (!response.ok) {
       throw new Error(`Failed to fetch session: ${response.status}`);
@@ -268,8 +268,10 @@ async function refreshSessionRecord(id: string): Promise<void> {
     nextSessions.set(session.id, session);
     commitSessionsState(nextSessions, sortSessionIdsByCreatedAt(nextSessions));
     sessionsStore.error = null;
+    return session;
   } catch (error) {
     sessionsStore.error = error instanceof Error ? error.message : "Failed to fetch session";
+    throw error;
   } finally {
     sessionsStore.loading = false;
     emitSessionChange();
@@ -336,12 +338,16 @@ export function useSharedSession(
   const enabled = options?.enabled ?? true;
   const [, forceRender] = useReducer((value) => value + 1, 0);
   const normalizedId = typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
+  const [sessionOverride, setSessionOverride] = useState<DashboardSession | null>(initialSession);
+  const [sessionError, setSessionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(
     enabled && normalizedId !== null && initialSession === null && !sessionsStore.sessionsById.has(normalizedId),
   );
 
   useEffect(() => {
     primeSessionStore(initialSession);
+    setSessionOverride(initialSession);
+    setSessionError(null);
   }, [initialSession]);
 
   useEffect(() => {
@@ -353,32 +359,56 @@ export function useSharedSession(
 
   useEffect(() => {
     if (!enabled || normalizedId === null) {
+      setSessionOverride(null);
+      setSessionError(null);
       setLoading(false);
       return;
     }
 
     if (initialSession || sessionsStore.sessionsById.has(normalizedId)) {
+      setSessionOverride((current) => sessionsStore.sessionsById.get(normalizedId) ?? current ?? initialSession);
+      setSessionError(null);
       setLoading(false);
       return;
     }
 
     let cancelled = false;
     setLoading(true);
-    void refreshSessionRecord(normalizedId).finally(() => {
-      if (!cancelled) {
-        setLoading(false);
-      }
-    });
+    setSessionError(null);
+    void refreshSessionRecord(normalizedId)
+      .then((session) => {
+        if (cancelled) {
+          return;
+        }
+        setSessionOverride(session);
+        setSessionError(null);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setSessionOverride(null);
+        setSessionError(error instanceof Error ? error.message : "Failed to fetch session");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
 
     return () => {
       cancelled = true;
     };
   }, [enabled, normalizedId, initialSession]);
 
+  const session = normalizedId
+    ? sessionsStore.sessionsById.get(normalizedId) ?? sessionOverride ?? initialSession ?? null
+    : null;
+
   return {
-    session: normalizedId ? sessionsStore.sessionsById.get(normalizedId) ?? initialSession ?? null : null,
+    session,
     loading,
-    error: enabled && normalizedId ? sessionsStore.error : null,
+    error: enabled && normalizedId ? sessionError ?? sessionsStore.error : null,
   };
 }
 

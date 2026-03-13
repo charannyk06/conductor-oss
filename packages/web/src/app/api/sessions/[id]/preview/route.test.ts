@@ -129,11 +129,15 @@ test("GET forwards dashboard access headers to backend preview lookups", async (
     assert.deepEqual(seenAuthHeaders, ["true", "true"]);
 
     const payload = await response.json() as {
+      connected: boolean;
       candidateUrls: string[];
+      currentUrl: string | null;
       lastError: string | null;
     };
 
+    assert.equal(payload.connected, true);
     assert.deepEqual(payload.candidateUrls, ["http://localhost:3000/"]);
+    assert.equal(payload.currentUrl, "http://localhost:3000/");
     assert.equal(payload.lastError, null);
   } finally {
     global.fetch = originalFetch;

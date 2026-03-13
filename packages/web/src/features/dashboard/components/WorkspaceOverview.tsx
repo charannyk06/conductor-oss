@@ -18,20 +18,9 @@ import type { ConfigProject } from "@/hooks/useConfig";
 interface WorkspaceOverviewProps {
   projects: ConfigProject[];
   sessions: DashboardSession[];
-  selectedProjectId: string | null;
-  agentCount: number;
   onCreateWorkspace: () => void;
-  onSelectProject: (projectId: string | null) => void;
   onSelectSession: (sessionId: string) => void;
 }
-
-type ProjectSummary = {
-  id: string;
-  description: string | null;
-  branch: string;
-  totalSessions: number;
-  activeSessions: number;
-};
 
 function formatRelativeTime(isoDate: string): string {
   const diffMs = Date.now() - new Date(isoDate).getTime();
@@ -100,10 +89,7 @@ function selectRecentSessions(sessions: DashboardSession[], limit: number): Dash
 export function WorkspaceOverview({
   projects,
   sessions,
-  selectedProjectId,
-  agentCount,
   onCreateWorkspace,
-  onSelectProject,
   onSelectSession,
 }: WorkspaceOverviewProps) {
   const visibleSessions = useMemo(
@@ -111,38 +97,8 @@ export function WorkspaceOverview({
     [sessions],
   );
 
-  const sessionsByProjectId = useMemo(() => {
-    const grouped = new Map<string, DashboardSession[]>();
-    for (const session of visibleSessions) {
-      const current = grouped.get(session.projectId);
-      if (current) {
-        current.push(session);
-      } else {
-        grouped.set(session.projectId, [session]);
-      }
-    }
-    return grouped;
-  }, [visibleSessions]);
-
-  const projectSummaries = useMemo<ProjectSummary[]>(() => {
-    return projects
-      .map((project) => {
-        const projectSessions = sessionsByProjectId.get(project.id) ?? [];
-        const activeSessions = projectSessions.filter((session) => getAttentionLevel(session) !== "done").length;
-
-        return {
-          id: project.id,
-          description: project.description,
-          branch: project.defaultBranch || "main",
-          totalSessions: projectSessions.length,
-          activeSessions,
-        };
-      })
-      .sort((left, right) => right.activeSessions - left.activeSessions || right.totalSessions - left.totalSessions || left.id.localeCompare(right.id));
-  }, [projects, sessionsByProjectId]);
-
   const recentSessions = useMemo(() => {
-    return selectRecentSessions(visibleSessions, 5);
+    return selectRecentSessions(visibleSessions, Math.max(visibleSessions.length, 12));
   }, [visibleSessions]);
 
   const sessionStats = useMemo(() => {
@@ -165,7 +121,6 @@ export function WorkspaceOverview({
 
     return { active, attention, merge };
   }, [visibleSessions]);
-  const selectedProject = projectSummaries.find((project) => project.id === selectedProjectId) ?? null;
   const showWelcomeState = projects.length === 0 && visibleSessions.length === 0;
 
   const statCards = [
@@ -177,8 +132,8 @@ export function WorkspaceOverview({
 
   if (showWelcomeState) {
     return (
-      <div className="flex min-h-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
-        <div className="mx-auto flex min-h-full w-full max-w-[1200px] flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4">
+      <div className="flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
+        <div className="mx-auto flex h-full min-h-0 w-full max-w-[1200px] flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4">
           <div className="mb-4 flex justify-end">
             <Button variant="outline" size="md" onClick={onCreateWorkspace}>
               Add workspace
@@ -198,8 +153,8 @@ export function WorkspaceOverview({
                   Operate workspaces, sessions, and agents from one surface.
                 </h1>
                 <p className="mt-4 max-w-[560px] text-[14px] leading-7 text-[var(--vk-text-muted)] sm:text-[15px]">
-                  Start by linking a workspace. Once a project is connected, this page will show active sessions,
-                  recent work, and project focus without sending you through an empty composer first.
+                  Start by linking a workspace. Once a project is connected, this page will show active sessions
+                  and recent work without sending you through an empty composer first.
                 </p>
 
                 <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
@@ -219,8 +174,8 @@ export function WorkspaceOverview({
   }
 
   return (
-    <div className="flex min-h-full flex-col border-b border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
-      <div className="mx-auto flex min-h-full w-full max-w-[1440px] flex-1 flex-col gap-4 px-3 py-3 sm:px-4">
+    <div className="flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
+      <div className="flex h-full min-h-0 w-full flex-1 flex-col gap-4 px-3 py-3 sm:px-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-3xl">
             <p className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
@@ -230,8 +185,7 @@ export function WorkspaceOverview({
               Operate workspaces, sessions, and agents from one surface.
             </h1>
             <p className="mt-2 max-w-2xl text-[13px] leading-6 text-[var(--vk-text-muted)]">
-              The current design language stays intact, but the workspace entrypoint now exposes status, recent activity,
-              and project context without forcing you into a blank composer first.
+              The workspace entrypoint now exposes status and recent activity without forcing you into a blank composer first.
             </p>
           </div>
 
@@ -261,16 +215,18 @@ export function WorkspaceOverview({
           ))}
         </div>
 
-        <div className="grid flex-1 gap-3 xl:grid-cols-[1.35fr_0.95fr]">
-          <Card className="flex h-full min-h-[280px] flex-col">
+        <div className="flex min-h-0 w-full flex-1">
+          <Card className="flex min-h-0 w-full flex-1 flex-col">
             <CardHeader className="justify-between">
               <div>
                 <p className="text-[14px] font-semibold text-[var(--vk-text-strong)]">Recent sessions</p>
-                <p className="text-[12px] text-[var(--vk-text-muted)]">Jump back into active work without hunting through the sidebar.</p>
+                <p className="text-[12px] text-[var(--vk-text-muted)]">
+                  Jump back into active work without hunting through the sidebar.
+                </p>
               </div>
               <Badge variant="outline">{visibleSessions.length}</Badge>
             </CardHeader>
-            <CardContent className="flex-1 space-y-2">
+            <CardContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
               {recentSessions.length === 0 ? (
                 <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
                   No sessions yet. Create or open a workspace to start work.
@@ -301,72 +257,6 @@ export function WorkspaceOverview({
                   </div>
                 </button>
               ))}
-            </CardContent>
-          </Card>
-
-          <Card className="flex h-full min-h-[280px] flex-col">
-            <CardHeader className="justify-between">
-              <div>
-                <p className="text-[14px] font-semibold text-[var(--vk-text-strong)]">Project focus</p>
-                <p className="text-[12px] text-[var(--vk-text-muted)]">
-                  {selectedProject ? `Selected: ${selectedProject.id}` : "Select a project to scope new work."}
-                </p>
-              </div>
-              <Badge variant="outline">{agentCount} agents</Badge>
-            </CardHeader>
-            <CardContent className="flex-1 space-y-2">
-              <button
-                type="button"
-                onClick={() => onSelectProject(null)}
-                className={`flex w-full items-center justify-between rounded-[6px] border px-3 py-2 text-left ${
-                  selectedProjectId === null
-                    ? "border-[var(--vk-border)] bg-[var(--vk-bg-hover)] text-[var(--vk-text-strong)]"
-                    : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-                }`}
-              >
-                <span>All projects</span>
-                <Badge variant="outline">{visibleSessions.length}</Badge>
-              </button>
-
-              {projectSummaries.length === 0 ? (
-                <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
-                  No configured projects yet.
-                </div>
-              ) : projectSummaries.slice(0, 6).map((project) => (
-                <button
-                  key={project.id}
-                  type="button"
-                  onClick={() => onSelectProject(project.id)}
-                  className={`flex w-full items-start justify-between gap-3 rounded-[6px] border px-3 py-2.5 text-left [content-visibility:auto] [contain-intrinsic-size:72px] ${
-                    selectedProjectId === project.id
-                      ? "border-[var(--vk-border)] bg-[var(--vk-bg-hover)]"
-                      : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] hover:bg-[var(--vk-bg-hover)]"
-                  }`}
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">{project.id}</p>
-                    <p className="truncate text-[12px] text-[var(--vk-text-muted)]">
-                      {project.description?.trim() || `Default branch: ${project.branch}`}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right">
-                    <p className="text-[12px] text-[var(--vk-text-strong)]">{project.activeSessions} active</p>
-                    <p className="text-[11px] text-[var(--vk-text-muted)]">{project.totalSessions} total</p>
-                  </div>
-                </button>
-              ))}
-
-              {selectedProject ? (
-                <div className="rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
-                  <div className="flex items-center gap-2">
-                    <FolderKanban className="h-4 w-4 text-[var(--vk-text-muted)]" />
-                    <p className="text-[13px] font-medium text-[var(--vk-text-strong)]">{selectedProject.id}</p>
-                  </div>
-                  <p className="mt-2 text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                    {selectedProject.description?.trim() || "This project is ready to launch work from chat or board mode."}
-                  </p>
-                </div>
-              ) : null}
             </CardContent>
           </Card>
         </div>

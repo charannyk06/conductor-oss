@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   FileCode,
@@ -20,7 +20,6 @@ import { SessionDiff } from "./SessionDiff";
 import { SessionPreview } from "./SessionPreview";
 import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
 import { SessionTerminal } from "./SessionTerminal";
-import type { TerminalInsertRequest } from "./terminalInsert";
 
 interface SessionDetailProps {
   sessionId: string;
@@ -63,9 +62,6 @@ export function SessionDetail({
   const router = useRouter();
   const searchParams = useSearchParams();
   const { session, loading, error } = useSession(sessionId, initialSession);
-  const terminalInsertNonceRef = useRef(0);
-  const autoPreviewOpenedRef = useRef(false);
-  const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
   const [mobileTerminalPanelOpen, setMobileTerminalPanelOpen] = useState(false);
   const activeTab = useMemo(
     () => resolveSessionTab(searchParams.get("tab")),
@@ -84,30 +80,11 @@ export function SessionDetail({
     const nextUrl = nextQuery.length > 0 ? `${pathname}?${nextQuery}` : pathname;
     router.replace(nextUrl, { scroll: false });
   }, [pathname, router, searchParams]);
-  const queueTerminalInsert = useCallback((request: Omit<TerminalInsertRequest, "nonce">) => {
-    terminalInsertNonceRef.current += 1;
-    setPendingTerminalInsert({
-      nonce: terminalInsertNonceRef.current,
-      ...request,
-    });
-  }, []);
-  useEffect(() => {
-    autoPreviewOpenedRef.current = false;
-    terminalInsertNonceRef.current = 0;
-    setPendingTerminalInsert(null);
-  }, [sessionId]);
   useEffect(() => {
     if (!immersiveMobileMode || activeTab !== "terminal") {
       setMobileTerminalPanelOpen(false);
     }
   }, [activeTab, immersiveMobileMode, sessionId]);
-  const handlePreviewConnectionChange = useCallback((connected: boolean) => {
-    if (!connected || activeTab !== "terminal" || autoPreviewOpenedRef.current) {
-      return;
-    }
-    autoPreviewOpenedRef.current = true;
-    handleTabChange("preview");
-  }, [activeTab, handleTabChange]);
 
   if (loading) {
     return (
@@ -239,7 +216,7 @@ export function SessionDetail({
             forceMount
             className={immersiveTerminalActive
               ? "min-h-0 h-full overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-              : "min-h-0 h-full overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[#212121] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
+              : "min-h-0 h-full overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
           >
             <SessionTerminal
               key={sessionId}
@@ -250,7 +227,7 @@ export function SessionDetail({
               sessionReasoningEffort={sessionReasoningEffort}
               sessionState={status}
               active={activeTab === "terminal"}
-              pendingInsert={pendingTerminalInsert}
+              pendingInsert={null}
               immersiveMobileMode={immersiveTerminalActive}
             />
           </TabsContent>
@@ -264,8 +241,6 @@ export function SessionDetail({
                 key={sessionId}
                 sessionId={sessionId}
                 active
-                onQueueTerminalInsert={queueTerminalInsert}
-                onConnectionChange={handlePreviewConnectionChange}
               />
             ) : null}
           </TabsContent>

@@ -185,7 +185,7 @@ export function SessionOverview({ session }: SessionOverviewProps) {
         return "This session was recovered after a backend restart and requeued automatically.";
       }
       if (recoveryState === "reattach_pending") {
-        return "Reattaching the tmux-managed runtime after backend restart.";
+        return "Recovering the terminal runtime after backend restart.";
       }
       if (recoveryState === "detached_runtime") {
         return "The backend restarted while the agent may still be running. Kill or archive this session before resuming.";
