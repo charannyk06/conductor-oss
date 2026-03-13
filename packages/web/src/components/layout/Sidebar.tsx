@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import { Archive, Search } from "lucide-react";
 import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
@@ -10,7 +16,10 @@ import { cn } from "@/lib/cn";
 interface SidebarProps {
   sessions: DashboardSession[];
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (
+    id: string,
+    options?: { tab?: "overview" | "preview" | "diff" },
+  ) => void;
   onArchive?: (id: string) => Promise<void> | void;
   onCreateWorkspace?: () => void;
   showHeader?: boolean;
@@ -25,7 +34,18 @@ const SESSION_ICON_DOTS = [
   { top: 12, left: 9, delay: "600ms", opacity: 0.45 },
 ] as const;
 
-const BRAILLE_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const BRAILLE_SPINNER_FRAMES = [
+  "⠋",
+  "⠙",
+  "⠹",
+  "⠸",
+  "⠼",
+  "⠴",
+  "⠦",
+  "⠧",
+  "⠇",
+  "⠏",
+] as const;
 const BRAILLE_SPINNER_INTERVAL_MS = 80;
 
 interface SessionDiffStats {
@@ -56,7 +76,8 @@ function getSessionSubtitle(session: DashboardSession): string {
   const branch = session.branch?.trim();
   if (branch) return branch;
 
-  const summary = session.summary?.trim() || session.metadata["summary"]?.trim();
+  const summary =
+    session.summary?.trim() || session.metadata["summary"]?.trim();
   if (summary) return summary;
 
   if (session.status?.trim()) {
@@ -72,18 +93,16 @@ function getSessionAgent(session: DashboardSession): string | null {
 }
 
 function isSessionActivelyGenerating(session: DashboardSession): boolean {
-  const observedActivity = session.metadata["tmuxObservedActivity"]?.trim().toLowerCase();
-  if (observedActivity === "active") {
-    return true;
-  }
-  if (observedActivity === "waiting_input" || observedActivity === "blocked") {
+  if (session.activity === "waiting_input" || session.activity === "blocked") {
     return false;
   }
 
   return session.status === "spawning" || session.status === "working";
 }
 
-function parseDiffStats(session: DashboardSession): { additions: number; deletions: number } | null {
+function parseDiffStats(
+  session: DashboardSession
+): { additions: number; deletions: number } | null {
   const candidates = [
     session.metadata["lastStderr"],
     session.metadata["summary"],
@@ -92,7 +111,9 @@ function parseDiffStats(session: DashboardSession): { additions: number; deletio
 
   for (const candidate of candidates) {
     if (!candidate) continue;
-    const match = candidate.match(/(\d+)\s+insertions?\(\+\),\s+(\d+)\s+deletions?\(-\)/i);
+    const match = candidate.match(
+      /(\d+)\s+insertions?\(\+\),\s+(\d+)\s+deletions?\(-\)/i
+    );
     if (!match) continue;
     const additions = Number.parseInt(match[1] ?? "0", 10);
     const deletions = Number.parseInt(match[2] ?? "0", 10);
@@ -104,8 +125,13 @@ function parseDiffStats(session: DashboardSession): { additions: number; deletio
   return null;
 }
 
-function getStatusBadge(session: DashboardSession, level: AttentionLevel): { label: string; className: string } {
-  const summary = `${session.summary ?? ""} ${session.metadata["summary"] ?? ""}`.toLowerCase();
+function getStatusBadge(
+  session: DashboardSession,
+  level: AttentionLevel
+): { label: string; className: string } {
+  const summary = `${session.summary ?? ""} ${
+    session.metadata["summary"] ?? ""
+  }`.toLowerCase();
 
   if (session.status === "killed" || summary.includes("interrupted")) {
     return {
@@ -188,7 +214,9 @@ function SessionDiffBadge({
     <span
       className={cn(
         "inline-flex shrink-0 items-center rounded-[10px] px-3 py-1.5 font-mono text-[12px] leading-none tabular-nums",
-        isSelected ? "bg-[rgba(255,255,255,0.1)]" : "bg-[rgba(255,255,255,0.06)]",
+        isSelected
+          ? "bg-[rgba(255,255,255,0.1)]"
+          : "bg-[rgba(255,255,255,0.06)]"
       )}
     >
       <span className="inline-flex items-center gap-3">
@@ -197,6 +225,16 @@ function SessionDiffBadge({
       </span>
     </span>
   );
+}
+
+function handleOpenDiff(
+  event: MouseEvent<HTMLButtonElement> | KeyboardEvent<HTMLButtonElement>,
+  sessionId: string,
+  onSelect: SidebarProps["onSelect"],
+) {
+  event.stopPropagation();
+  event.preventDefault();
+  onSelect(sessionId, { tab: "diff" });
 }
 
 export function Sidebar({
@@ -212,7 +250,9 @@ export function Sidebar({
   const [archiveError, setArchiveError] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
-    const visibleSessions = sessions.filter((session) => session.status !== "archived");
+    const visibleSessions = sessions.filter(
+      (session) => session.status !== "archived"
+    );
     if (!search.trim()) return visibleSessions;
     const q = search.toLowerCase();
 
@@ -234,14 +274,20 @@ export function Sidebar({
     });
   }, [search, sessions]);
 
-  const handleSessionKeyDown = (event: KeyboardEvent<HTMLDivElement>, sessionId: string) => {
+  const handleSessionKeyDown = (
+    event: KeyboardEvent<HTMLDivElement>,
+    sessionId: string
+  ) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       onSelect(sessionId);
     }
   };
 
-  const handleArchive = async (event: MouseEvent<HTMLButtonElement>, sessionId: string) => {
+  const handleArchive = async (
+    event: MouseEvent<HTMLButtonElement>,
+    sessionId: string
+  ) => {
     event.stopPropagation();
     event.preventDefault();
     if (!onArchive || archivingId === sessionId) return;
@@ -259,7 +305,9 @@ export function Sidebar({
 
   const orderedSessions = useMemo(() => {
     return [...filtered].sort(
-      (a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime(),
+      (a, b) =>
+        new Date(b.lastActivityAt).getTime() -
+        new Date(a.lastActivityAt).getTime()
     );
   }, [filtered]);
 
@@ -281,7 +329,12 @@ export function Sidebar({
         </div>
       )}
 
-      <div className={cn("flex h-[38px] items-center px-2 pb-1.5", !showHeader && "pt-1.5")}>
+      <div
+        className={cn(
+          "flex h-[38px] items-center px-2 pb-1.5",
+          !showHeader && "pt-1.5"
+        )}
+      >
         <label className="flex h-[30px] flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2">
           <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
           <input
@@ -295,7 +348,9 @@ export function Sidebar({
 
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {orderedSessions.length === 0 ? (
-          <p className="px-2 py-2 text-[14px] text-[var(--vk-text-muted)]">No sessions</p>
+          <p className="px-2 py-2 text-[14px] text-[var(--vk-text-muted)]">
+            No sessions
+          </p>
         ) : (
           <div className="space-y-2">
             {orderedSessions.map((session) => {
@@ -320,7 +375,7 @@ export function Sidebar({
                     "[content-visibility:auto] [contain-intrinsic-size:92px]",
                     isSelected
                       ? "border-[rgba(234,122,42,0.28)] bg-[rgba(255,255,255,0.08)]"
-                      : "border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] hover:bg-[var(--vk-bg-hover)]",
+                      : "border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] hover:bg-[var(--vk-bg-hover)]"
                   )}
                 >
                   <SessionRuntimeIcon running={isRunning} />
@@ -334,7 +389,10 @@ export function Sidebar({
                             title={sessionAgent}
                             aria-label={`${sessionAgent} agent`}
                           >
-                            <AgentTileIcon seed={{ label: sessionAgent }} className="h-4 w-4" />
+                            <AgentTileIcon
+                              seed={{ label: sessionAgent }}
+                              className="h-4 w-4"
+                            />
                           </span>
                         ) : null}
                         <span className="min-w-0 truncate text-[14px] font-medium text-[var(--vk-text-strong)]">
@@ -344,19 +402,36 @@ export function Sidebar({
                       {diffStats ? (
                         <>
                           <span className="hidden shrink-0 sm:block">
-                            <SessionDiffBadge
-                              additions={diffStats.additions}
-                              deletions={diffStats.deletions}
-                              isSelected={isSelected}
-                            />
+                            <button
+                              type="button"
+                              onClick={(event) => handleOpenDiff(event, session.id, onSelect)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter" || event.key === " ") {
+                                  handleOpenDiff(event, session.id, onSelect);
+                                }
+                              }}
+                              className="rounded-[10px] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vk-orange)]"
+                              aria-label={`Open diff for session ${session.id}`}
+                              title="Open diff tab"
+                            >
+                              <SessionDiffBadge
+                                additions={diffStats.additions}
+                                deletions={diffStats.deletions}
+                                isSelected={isSelected}
+                              />
+                            </button>
                           </span>
                           <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium sm:hidden">
-                            <span className={statusBadge.className}>{statusBadge.label}</span>
+                            <span className={statusBadge.className}>
+                              {statusBadge.label}
+                            </span>
                           </span>
                         </>
                       ) : (
                         <span className="shrink-0 rounded-[8px] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium">
-                          <span className={statusBadge.className}>{statusBadge.label}</span>
+                          <span className={statusBadge.className}>
+                            {statusBadge.label}
+                          </span>
                         </span>
                       )}
                     </span>
@@ -373,12 +448,19 @@ export function Sidebar({
                         "mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] transition",
                         "opacity-70 group-hover:opacity-100 focus-visible:opacity-100",
                         "hover:border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]",
-                        isArchiving && "cursor-wait opacity-100",
+                        isArchiving && "cursor-wait opacity-100"
                       )}
                       aria-label={`Archive session ${session.id}`}
-                      title={hasArchiveError ? "Archive failed" : "Archive session"}
+                      title={
+                        hasArchiveError ? "Archive failed" : "Archive session"
+                      }
                     >
-                      <Archive className={cn("h-3.5 w-3.5", hasArchiveError && "text-red-400")} />
+                      <Archive
+                        className={cn(
+                          "h-3.5 w-3.5",
+                          hasArchiveError && "text-red-400"
+                        )}
+                      />
                     </button>
                   ) : null}
                 </div>

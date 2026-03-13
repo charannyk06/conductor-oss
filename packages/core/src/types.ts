@@ -2,7 +2,7 @@
  * Conductor v2 — Core Type Definitions
  *
  * 8 plugin slots + core services:
- *   1. Runtime    — where sessions execute (tmux)
+ *   1. Runtime    — where sessions execute (direct PTY)
  *   2. Agent      — AI coding tool (claude-code, codex, gemini, amp, cursor-cli, opencode, droid, qwen-code, ccr, github-copilot)
  *   3. Workspace  — code isolation (worktree)
  *   4. Tracker    — issue tracking (github)
@@ -93,7 +93,12 @@ export const SESSION_STATUS = {
 export const DEFAULT_READY_THRESHOLD_MS = 300_000; // 5 minutes
 
 export const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set([
-  "killed", "terminated", "done", "cleanup", "errored", "merged",
+  "killed",
+  "terminated",
+  "done",
+  "cleanup",
+  "errored",
+  "merged",
 ]);
 
 /** Statuses that can be safely archived from bulk cleanup flows. */
@@ -104,10 +109,14 @@ export const ARCHIVABLE_STATUSES: ReadonlySet<SessionStatus> = new Set([
 ]);
 
 /** Activity states that indicate the session is no longer running. */
-export const TERMINAL_ACTIVITIES: ReadonlySet<ActivityState> = new Set(["exited"]);
+export const TERMINAL_ACTIVITIES: ReadonlySet<ActivityState> = new Set([
+  "exited",
+]);
 
 /** Statuses that must never be restored (e.g. already merged). */
-export const NON_RESTORABLE_STATUSES: ReadonlySet<SessionStatus> = new Set(["merged"]);
+export const NON_RESTORABLE_STATUSES: ReadonlySet<SessionStatus> = new Set([
+  "merged",
+]);
 
 /** Check if a session is in a terminal (dead) state. */
 export function isTerminalSession(session: {
@@ -125,7 +134,9 @@ export function isRestorable(session: {
   status: SessionStatus;
   activity: ActivityState | null;
 }): boolean {
-  return isTerminalSession(session) && !NON_RESTORABLE_STATUSES.has(session.status);
+  return (
+    isTerminalSession(session) && !NON_RESTORABLE_STATUSES.has(session.status)
+  );
 }
 
 export interface Session {
@@ -207,7 +218,7 @@ export interface RuntimeHandle {
 }
 
 export interface AttachInfo {
-  type: "tmux" | "process" | "web";
+  type: "process" | "web";
   target: string;
   command?: string;
 }
@@ -221,11 +232,20 @@ export interface Agent {
   getLaunchCommand(config: AgentLaunchConfig): string;
   getEnvironment(config: AgentLaunchConfig): Record<string, string>;
   detectActivity(terminalOutput: string): ActivityState;
-  getActivityState(session: Session, readyThresholdMs?: number): Promise<ActivityDetection | null>;
+  getActivityState(
+    session: Session,
+    readyThresholdMs?: number
+  ): Promise<ActivityDetection | null>;
   isProcessRunning(handle: RuntimeHandle): Promise<boolean>;
   getSessionInfo(session: Session): Promise<AgentSessionInfo | null>;
-  getRestoreCommand?(session: Session, project: ProjectConfig): Promise<string | null>;
-  setupWorkspaceHooks?(workspacePath: string, config: WorkspaceHooksConfig): Promise<void>;
+  getRestoreCommand?(
+    session: Session,
+    project: ProjectConfig
+  ): Promise<string | null>;
+  setupWorkspaceHooks?(
+    workspacePath: string,
+    config: WorkspaceHooksConfig
+  ): Promise<void>;
   postLaunchSetup?(session: Session): Promise<void>;
 }
 
@@ -276,7 +296,10 @@ export interface Workspace {
   list(projectId: string): Promise<WorkspaceInfo[]>;
   postCreate?(info: WorkspaceInfo, project: ProjectConfig): Promise<void>;
   exists?(workspacePath: string): Promise<boolean>;
-  restore?(config: WorkspaceCreateConfig, workspacePath: string): Promise<WorkspaceInfo>;
+  restore?(
+    config: WorkspaceCreateConfig,
+    workspacePath: string
+  ): Promise<WorkspaceInfo>;
 }
 
 export interface WorkspaceCreateConfig {
@@ -371,12 +394,21 @@ export const CI_STATUS = {
 
 export interface Review {
   author: string;
-  state: "approved" | "changes_requested" | "commented" | "dismissed" | "pending";
+  state:
+    | "approved"
+    | "changes_requested"
+    | "commented"
+    | "dismissed"
+    | "pending";
   body?: string;
   submittedAt: Date;
 }
 
-export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
+export type ReviewDecision =
+  | "approved"
+  | "changes_requested"
+  | "pending"
+  | "none";
 
 export interface MergeReadiness {
   mergeable: boolean;
@@ -406,13 +438,28 @@ export interface Terminal {
 export type EventPriority = "urgent" | "action" | "warning" | "info";
 
 export type EventType =
-  | "session.spawned" | "session.working" | "session.exited" | "session.restored"
-  | "session.killed" | "session.stuck" | "session.needs_input" | "session.errored"
-  | "pr.created" | "pr.merged" | "pr.closed"
-  | "ci.passing" | "ci.failing" | "ci.fix_sent"
-  | "review.pending" | "review.approved" | "review.changes_requested"
-  | "merge.ready" | "merge.completed" | "merge.conflicts"
-  | "reaction.triggered" | "reaction.escalated"
+  | "session.spawned"
+  | "session.working"
+  | "session.exited"
+  | "session.restored"
+  | "session.killed"
+  | "session.stuck"
+  | "session.needs_input"
+  | "session.errored"
+  | "pr.created"
+  | "pr.merged"
+  | "pr.closed"
+  | "ci.passing"
+  | "ci.failing"
+  | "ci.fix_sent"
+  | "review.pending"
+  | "review.approved"
+  | "review.changes_requested"
+  | "merge.ready"
+  | "merge.completed"
+  | "merge.conflicts"
+  | "reaction.triggered"
+  | "reaction.escalated"
   | "summary.all_complete";
 
 export interface OrchestratorEvent {
@@ -531,7 +578,9 @@ export interface AgentModelCatalog {
 type StaticAgentModelCatalog = {
   modelsByAccess: Partial<Record<AgentModelAccess, AgentModelOption[]>>;
   defaultModelByAccess: Partial<Record<AgentModelAccess, string>>;
-  reasoningOptionsByAccess?: Partial<Record<AgentModelAccess, AgentReasoningOption[]>>;
+  reasoningOptionsByAccess?: Partial<
+    Record<AgentModelAccess, AgentReasoningOption[]>
+  >;
   defaultReasoningByAccess?: Partial<Record<AgentModelAccess, string>>;
 };
 
@@ -558,7 +607,8 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "default",
         label: "Local CLI",
-        description: "Use the locally installed Amp CLI catalog and custom override support.",
+        description:
+          "Use the locally installed Amp CLI catalog and custom override support.",
       },
     ],
   },
@@ -571,17 +621,20 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "pro",
         label: "Claude Pro",
-        description: "Shows the current Sonnet models that Claude Code documents for Pro usage.",
+        description:
+          "Shows the current Sonnet models that Claude Code documents for Pro usage.",
       },
       {
         id: "max",
         label: "Claude Max",
-        description: "Unlocks both Sonnet and Opus model choices in Claude Code.",
+        description:
+          "Unlocks both Sonnet and Opus model choices in Claude Code.",
       },
       {
         id: "api",
         label: "Anthropic API",
-        description: "Use direct Anthropic API credentials instead of a Claude subscription.",
+        description:
+          "Use direct Anthropic API credentials instead of a Claude subscription.",
       },
     ],
   },
@@ -594,12 +647,14 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "chatgpt",
         label: "ChatGPT Plan",
-        description: "Use the ChatGPT-backed Codex login flow for paid ChatGPT workspaces.",
+        description:
+          "Use the ChatGPT-backed Codex login flow for paid ChatGPT workspaces.",
       },
       {
         id: "api",
         label: "OpenAI API",
-        description: "Use direct OpenAI API credentials when Codex is pointed at the API.",
+        description:
+          "Use direct OpenAI API credentials when Codex is pointed at the API.",
       },
     ],
   },
@@ -612,7 +667,8 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "default",
         label: "Local CLI",
-        description: "Use the locally installed Cursor Agent catalog and custom override support.",
+        description:
+          "Use the locally installed Cursor Agent catalog and custom override support.",
       },
     ],
   },
@@ -625,7 +681,8 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "default",
         label: "Local CLI",
-        description: "Use the locally installed Droid catalog and custom override support.",
+        description:
+          "Use the locally installed Droid catalog and custom override support.",
       },
     ],
   },
@@ -638,12 +695,14 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "oauth",
         label: "Google Login",
-        description: "Use the built-in Google account flow that Gemini CLI ships with.",
+        description:
+          "Use the built-in Google account flow that Gemini CLI ships with.",
       },
       {
         id: "api",
         label: "Gemini API",
-        description: "Use a Gemini API key or Vertex AI project for broader model control.",
+        description:
+          "Use a Gemini API key or Vertex AI project for broader model control.",
       },
     ],
   },
@@ -656,7 +715,8 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "default",
         label: "Local CLI",
-        description: "Use the locally installed Copilot CLI catalog and custom override support.",
+        description:
+          "Use the locally installed Copilot CLI catalog and custom override support.",
       },
     ],
   },
@@ -669,7 +729,8 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "default",
         label: "Local CLI",
-        description: "Use the locally installed OpenCode catalog and custom override support.",
+        description:
+          "Use the locally installed OpenCode catalog and custom override support.",
       },
     ],
   },
@@ -682,12 +743,14 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "oauth",
         label: "Qwen OAuth",
-        description: "Use Qwen Code's built-in browser login and bundled provider defaults.",
+        description:
+          "Use Qwen Code's built-in browser login and bundled provider defaults.",
       },
       {
         id: "api",
         label: "DashScope / Custom API",
-        description: "Use DashScope or another OpenAI-compatible endpoint configured for Qwen Code.",
+        description:
+          "Use DashScope or another OpenAI-compatible endpoint configured for Qwen Code.",
       },
     ],
   },
@@ -700,7 +763,8 @@ const AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, AgentModelCatalog> = {
       {
         id: "default",
         label: "Local CLI",
-        description: "Use the locally installed Claude Code Router catalog and custom override support.",
+        description:
+          "Use the locally installed Claude Code Router catalog and custom override support.",
       },
     ],
   },
@@ -750,19 +814,42 @@ function modelOption(
   id: string,
   description: string,
   access: AgentModelAccess[],
-  label = formatModelLabel(id),
+  label = formatModelLabel(id)
 ): AgentModelOption {
   return { id, label, description, access };
 }
 
-const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelCatalog> = {
+const STATIC_AGENT_MODEL_CATALOGS: Record<
+  SupportedModelAgent,
+  StaticAgentModelCatalog
+> = {
   amp: {
     modelsByAccess: {
       default: [
-        modelOption("free", "Amp Free mode prioritizes lower-cost execution.", ["default"], "Amp Free"),
-        modelOption("rush", "Amp Rush mode prioritizes faster turnaround.", ["default"], "Amp Rush"),
-        modelOption("smart", "Amp Smart mode balances quality, speed, and tool choice.", ["default"], "Amp Smart"),
-        modelOption("deep", "Amp Deep mode enables the highest-capability reasoning path.", ["default"], "Amp Deep"),
+        modelOption(
+          "free",
+          "Amp Free mode prioritizes lower-cost execution.",
+          ["default"],
+          "Amp Free"
+        ),
+        modelOption(
+          "rush",
+          "Amp Rush mode prioritizes faster turnaround.",
+          ["default"],
+          "Amp Rush"
+        ),
+        modelOption(
+          "smart",
+          "Amp Smart mode balances quality, speed, and tool choice.",
+          ["default"],
+          "Amp Smart"
+        ),
+        modelOption(
+          "deep",
+          "Amp Deep mode enables the highest-capability reasoning path.",
+          ["default"],
+          "Amp Deep"
+        ),
       ],
     },
     defaultModelByAccess: {
@@ -776,13 +863,13 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
           "claude-sonnet-4-6",
           "Balanced Claude Code model for day-to-day coding tasks.",
           ["pro", "max", "api"],
-          "Claude Sonnet 4.6",
+          "Claude Sonnet 4.6"
         ),
         modelOption(
           "claude-haiku-4-5",
           "Fast Claude model for lightweight tasks.",
           ["pro", "max", "api"],
-          "Claude Haiku 4.5",
+          "Claude Haiku 4.5"
         ),
       ],
       max: [
@@ -790,19 +877,19 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
           "claude-sonnet-4-6",
           "Balanced Claude Code model for day-to-day coding tasks.",
           ["pro", "max", "api"],
-          "Claude Sonnet 4.6",
+          "Claude Sonnet 4.6"
         ),
         modelOption(
           "claude-opus-4-6",
           "Highest-capability Claude Code model for deeper reasoning.",
           ["max", "api"],
-          "Claude Opus 4.6",
+          "Claude Opus 4.6"
         ),
         modelOption(
           "claude-haiku-4-5",
           "Fast Claude model for lightweight tasks.",
           ["pro", "max", "api"],
-          "Claude Haiku 4.5",
+          "Claude Haiku 4.5"
         ),
       ],
       api: [
@@ -810,19 +897,19 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
           "claude-sonnet-4-6",
           "Balanced Claude Code model for day-to-day coding tasks.",
           ["pro", "max", "api"],
-          "Claude Sonnet 4.6",
+          "Claude Sonnet 4.6"
         ),
         modelOption(
           "claude-opus-4-6",
           "Highest-capability Claude Code model for deeper reasoning.",
           ["max", "api"],
-          "Claude Opus 4.6",
+          "Claude Opus 4.6"
         ),
         modelOption(
           "claude-haiku-4-5",
           "Fast Claude model for lightweight tasks.",
           ["pro", "max", "api"],
-          "Claude Haiku 4.5",
+          "Claude Haiku 4.5"
         ),
       ],
     },
@@ -845,19 +932,74 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
   codex: {
     modelsByAccess: {
       chatgpt: [
-        modelOption("gpt-5.4", "Latest frontier coding model exposed by Codex.", ["chatgpt", "api"], "GPT-5.4"),
-        modelOption("gpt-5.3-codex", "Balanced Codex coding model.", ["chatgpt", "api"], "GPT-5.3-Codex"),
-        modelOption("gpt-5.3-codex-spark", "Fast Codex model optimized for rapid iteration.", ["chatgpt"], "GPT-5.3-Codex-Spark"),
-        modelOption("gpt-5.2-codex", "Previous generation Codex coding model.", ["chatgpt", "api"], "GPT-5.2-Codex"),
-        modelOption("gpt-5.1-codex-max", "High-capability legacy Codex model.", ["chatgpt", "api"], "GPT-5.1-Codex-Max"),
-        modelOption("gpt-5.1-codex-mini", "Smaller Codex model for quick tasks.", ["chatgpt", "api"], "GPT-5.1-Codex-Mini"),
+        modelOption(
+          "gpt-5.4",
+          "Latest frontier coding model exposed by Codex.",
+          ["chatgpt", "api"],
+          "GPT-5.4"
+        ),
+        modelOption(
+          "gpt-5.3-codex",
+          "Balanced Codex coding model.",
+          ["chatgpt", "api"],
+          "GPT-5.3-Codex"
+        ),
+        modelOption(
+          "gpt-5.3-codex-spark",
+          "Fast Codex model optimized for rapid iteration.",
+          ["chatgpt"],
+          "GPT-5.3-Codex-Spark"
+        ),
+        modelOption(
+          "gpt-5.2-codex",
+          "Previous generation Codex coding model.",
+          ["chatgpt", "api"],
+          "GPT-5.2-Codex"
+        ),
+        modelOption(
+          "gpt-5.1-codex-max",
+          "High-capability legacy Codex model.",
+          ["chatgpt", "api"],
+          "GPT-5.1-Codex-Max"
+        ),
+        modelOption(
+          "gpt-5.1-codex-mini",
+          "Smaller Codex model for quick tasks.",
+          ["chatgpt", "api"],
+          "GPT-5.1-Codex-Mini"
+        ),
       ],
       api: [
-        modelOption("gpt-5.4", "Latest frontier coding model exposed by Codex.", ["chatgpt", "api"], "GPT-5.4"),
-        modelOption("gpt-5.3-codex", "Balanced Codex coding model.", ["chatgpt", "api"], "GPT-5.3-Codex"),
-        modelOption("gpt-5.2-codex", "Previous generation Codex coding model.", ["chatgpt", "api"], "GPT-5.2-Codex"),
-        modelOption("gpt-5.1-codex-max", "High-capability legacy Codex model.", ["chatgpt", "api"], "GPT-5.1-Codex-Max"),
-        modelOption("gpt-5.1-codex-mini", "Smaller Codex model for quick tasks.", ["chatgpt", "api"], "GPT-5.1-Codex-Mini"),
+        modelOption(
+          "gpt-5.4",
+          "Latest frontier coding model exposed by Codex.",
+          ["chatgpt", "api"],
+          "GPT-5.4"
+        ),
+        modelOption(
+          "gpt-5.3-codex",
+          "Balanced Codex coding model.",
+          ["chatgpt", "api"],
+          "GPT-5.3-Codex"
+        ),
+        modelOption(
+          "gpt-5.2-codex",
+          "Previous generation Codex coding model.",
+          ["chatgpt", "api"],
+          "GPT-5.2-Codex"
+        ),
+        modelOption(
+          "gpt-5.1-codex-max",
+          "High-capability legacy Codex model.",
+          ["chatgpt", "api"],
+          "GPT-5.1-Codex-Max"
+        ),
+        modelOption(
+          "gpt-5.1-codex-mini",
+          "Smaller Codex model for quick tasks.",
+          ["chatgpt", "api"],
+          "GPT-5.1-Codex-Mini"
+        ),
       ],
     },
     defaultModelByAccess: {
@@ -876,9 +1018,24 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
   "cursor-cli": {
     modelsByAccess: {
       default: [
-        modelOption("gpt-5", "Cursor Agent's GPT-5 preset alias.", ["default"], "GPT-5"),
-        modelOption("sonnet-4", "Cursor Agent's Sonnet preset alias.", ["default"], "Sonnet 4"),
-        modelOption("opus", "Cursor Agent's Opus preset alias.", ["default"], "Opus"),
+        modelOption(
+          "gpt-5",
+          "Cursor Agent's GPT-5 preset alias.",
+          ["default"],
+          "GPT-5"
+        ),
+        modelOption(
+          "sonnet-4",
+          "Cursor Agent's Sonnet preset alias.",
+          ["default"],
+          "Sonnet 4"
+        ),
+        modelOption(
+          "opus",
+          "Cursor Agent's Opus preset alias.",
+          ["default"],
+          "Opus"
+        ),
       ],
     },
     defaultModelByAccess: {
@@ -894,12 +1051,32 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
   gemini: {
     modelsByAccess: {
       oauth: [
-        modelOption("gemini-3.1-pro-preview", "High-capability Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3.1 Pro Preview"),
-        modelOption("gemini-3-flash-preview", "Fast Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3 Flash Preview"),
+        modelOption(
+          "gemini-3.1-pro-preview",
+          "High-capability Gemini model discovered in local Gemini sessions.",
+          ["oauth", "api"],
+          "Gemini 3.1 Pro Preview"
+        ),
+        modelOption(
+          "gemini-3-flash-preview",
+          "Fast Gemini model discovered in local Gemini sessions.",
+          ["oauth", "api"],
+          "Gemini 3 Flash Preview"
+        ),
       ],
       api: [
-        modelOption("gemini-3.1-pro-preview", "High-capability Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3.1 Pro Preview"),
-        modelOption("gemini-3-flash-preview", "Fast Gemini model discovered in local Gemini sessions.", ["oauth", "api"], "Gemini 3 Flash Preview"),
+        modelOption(
+          "gemini-3.1-pro-preview",
+          "High-capability Gemini model discovered in local Gemini sessions.",
+          ["oauth", "api"],
+          "Gemini 3.1 Pro Preview"
+        ),
+        modelOption(
+          "gemini-3-flash-preview",
+          "Fast Gemini model discovered in local Gemini sessions.",
+          ["oauth", "api"],
+          "Gemini 3 Flash Preview"
+        ),
       ],
     },
     defaultModelByAccess: {
@@ -922,10 +1099,20 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
   "qwen-code": {
     modelsByAccess: {
       oauth: [
-        modelOption("coder-model", "Model discovered in the local Qwen Code installation.", ["oauth", "api"], "Coder Model"),
+        modelOption(
+          "coder-model",
+          "Model discovered in the local Qwen Code installation.",
+          ["oauth", "api"],
+          "Coder Model"
+        ),
       ],
       api: [
-        modelOption("coder-model", "Model discovered in the local Qwen Code installation.", ["oauth", "api"], "Coder Model"),
+        modelOption(
+          "coder-model",
+          "Model discovered in the local Qwen Code installation.",
+          ["oauth", "api"],
+          "Coder Model"
+        ),
       ],
     },
     defaultModelByAccess: {
@@ -940,19 +1127,19 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<SupportedModelAgent, StaticAgentModelC
           "claude-sonnet-4-6",
           "Balanced Claude model exposed through Claude Code Router.",
           ["default"],
-          "Claude Sonnet 4.6",
+          "Claude Sonnet 4.6"
         ),
         modelOption(
           "claude-opus-4-6",
           "Highest-capability Claude model exposed through Claude Code Router.",
           ["default"],
-          "Claude Opus 4.6",
+          "Claude Opus 4.6"
         ),
         modelOption(
           "claude-haiku-4-5",
           "Fast Claude model exposed through Claude Code Router.",
           ["default"],
-          "Claude Haiku 4.5",
+          "Claude Haiku 4.5"
         ),
       ],
     },
@@ -974,7 +1161,7 @@ function normalizeModelAgent(agent: string): SupportedModelAgent | null {
     .toLowerCase()
     .replace(/[_\s]+/g, "-");
   return SUPPORTED_MODEL_AGENTS.includes(normalized as SupportedModelAgent)
-    ? normalized as SupportedModelAgent
+    ? (normalized as SupportedModelAgent)
     : null;
 }
 
@@ -982,7 +1169,9 @@ export function getDefaultModelAccessPreferences(): Required<ModelAccessPreferen
   return { ...DEFAULT_MODEL_ACCESS_PREFERENCES };
 }
 
-export function supportsAgentModelSelection(agent: string): agent is SupportedModelAgent {
+export function supportsAgentModelSelection(
+  agent: string
+): agent is SupportedModelAgent {
   return normalizeModelAgent(agent) !== null;
 }
 
@@ -994,7 +1183,7 @@ export function getAgentModelCatalog(agent: string): AgentModelCatalog | null {
 
 export function resolveAgentModelAccess(
   agent: string,
-  preferences?: ModelAccessPreferences | null,
+  preferences?: ModelAccessPreferences | null
 ): AgentModelAccess | null {
   const catalog = getAgentModelCatalog(agent);
   if (!catalog) return null;
@@ -1016,7 +1205,7 @@ export function resolveAgentModelAccess(
  */
 export function getAvailableAgentModels(
   agent: string,
-  preferences?: ModelAccessPreferences | null,
+  preferences?: ModelAccessPreferences | null
 ): AgentModelOption[] {
   const normalized = normalizeModelAgent(agent);
   if (!normalized) return [];
@@ -1041,35 +1230,45 @@ export function getAvailableAgentModels(
 
 export function getDefaultAgentModel(
   agent: string,
-  preferences?: ModelAccessPreferences | null,
+  preferences?: ModelAccessPreferences | null
 ): string | null {
   const normalized = normalizeModelAgent(agent);
   if (!normalized) return null;
   const access = resolveAgentModelAccess(normalized, preferences);
   if (!access) return null;
-  return STATIC_AGENT_MODEL_CATALOGS[normalized].defaultModelByAccess[access] ?? null;
+  return (
+    STATIC_AGENT_MODEL_CATALOGS[normalized].defaultModelByAccess[access] ?? null
+  );
 }
 
 export function getAvailableAgentReasoningEfforts(
   agent: string,
-  preferences?: ModelAccessPreferences | null,
+  preferences?: ModelAccessPreferences | null
 ): AgentReasoningOption[] {
   const normalized = normalizeModelAgent(agent);
   if (!normalized) return [];
   const access = resolveAgentModelAccess(normalized, preferences);
   if (!access) return [];
-  return STATIC_AGENT_MODEL_CATALOGS[normalized].reasoningOptionsByAccess?.[access] ?? [];
+  return (
+    STATIC_AGENT_MODEL_CATALOGS[normalized].reasoningOptionsByAccess?.[
+      access
+    ] ?? []
+  );
 }
 
 export function getDefaultAgentReasoningEffort(
   agent: string,
-  preferences?: ModelAccessPreferences | null,
+  preferences?: ModelAccessPreferences | null
 ): string | null {
   const normalized = normalizeModelAgent(agent);
   if (!normalized) return null;
   const access = resolveAgentModelAccess(normalized, preferences);
   if (!access) return null;
-  return STATIC_AGENT_MODEL_CATALOGS[normalized].defaultReasoningByAccess?.[access] ?? null;
+  return (
+    STATIC_AGENT_MODEL_CATALOGS[normalized].defaultReasoningByAccess?.[
+      access
+    ] ?? null
+  );
 }
 
 export interface UserPreferences {
@@ -1269,8 +1468,13 @@ export interface AgentSpecificConfig {
 // === PLUGIN SYSTEM ===
 
 export type PluginSlot =
-  | "runtime" | "agent" | "workspace"
-  | "tracker" | "scm" | "notifier" | "terminal";
+  | "runtime"
+  | "agent"
+  | "workspace"
+  | "tracker"
+  | "scm"
+  | "notifier"
+  | "terminal";
 
 export interface PluginManifest {
   name: string;
@@ -1290,7 +1494,6 @@ export interface SessionMetadata {
   worktree: string;
   branch: string;
   status: string;
-  tmuxName?: string;
   issue?: string;
   pr?: string;
   summary?: string;
@@ -1386,7 +1589,10 @@ export interface SessionManager {
   taskGraph(taskId: string): Promise<TaskGraph | null>;
   submitFeedback(sessionId: SessionId, feedback: string): Promise<void>;
   kill(sessionId: SessionId): Promise<void>;
-  cleanup(projectId?: string, options?: { dryRun?: boolean }): Promise<CleanupResult>;
+  cleanup(
+    projectId?: string,
+    options?: { dryRun?: boolean }
+  ): Promise<CleanupResult>;
   send(
     sessionId: SessionId,
     message: string,
@@ -1394,7 +1600,7 @@ export interface SessionManager {
       attachments?: string[];
       model?: string;
       reasoningEffort?: string;
-    },
+    }
   ): Promise<void>;
   restore(sessionId: SessionId): Promise<Session>;
   getConversation(sessionId: SessionId): Promise<ConversationEntry[]>;
@@ -1421,7 +1627,7 @@ export interface PluginRegistry {
   list(slot: PluginSlot): PluginManifest[];
   loadBuiltins(
     config?: OrchestratorConfig,
-    importFn?: (pkg: string) => Promise<unknown>,
+    importFn?: (pkg: string) => Promise<unknown>
   ): Promise<void>;
 }
 
@@ -1455,7 +1661,7 @@ export function isIssueNotFoundError(err: unknown): boolean {
 export class SessionNotRestorableError extends Error {
   constructor(
     public readonly sessionId: string,
-    public readonly reason: string,
+    public readonly reason: string
   ) {
     super(`Session ${sessionId} cannot be restored: ${reason}`);
     this.name = "SessionNotRestorableError";
@@ -1464,10 +1670,7 @@ export class SessionNotRestorableError extends Error {
 
 /** Thrown when a workspace is missing and cannot be recreated. */
 export class WorkspaceMissingError extends Error {
-  constructor(
-    public readonly path: string,
-    public readonly detail?: string,
-  ) {
+  constructor(public readonly path: string, public readonly detail?: string) {
     super(`Workspace missing at ${path}${detail ? `: ${detail}` : ""}`);
     this.name = "WorkspaceMissingError";
   }

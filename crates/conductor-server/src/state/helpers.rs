@@ -1,4 +1,5 @@
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::iter::Peekable;
 use std::path::Path;
 
@@ -13,7 +14,79 @@ const RECOVERY_ACTION_METADATA_KEY: &str = "recoveryAction";
 const RECOVERY_COUNT_METADATA_KEY: &str = "restartRecoveryCount";
 const RECOVERED_AT_METADATA_KEY: &str = "lastRecoveredAt";
 const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
-const TMUX_SESSION_METADATA_KEY: &str = "tmuxSession";
+const DASHBOARD_METADATA_MAX_VALUE_BYTES: usize = 2048;
+
+fn dashboard_metadata_allowlist() -> &'static [&'static str] {
+    &[
+        "agent",
+        "agentCwd",
+        "briefPath",
+        "ciStatus",
+        "cost",
+        "devServerLog",
+        "devServerPort",
+        "devServerUrl",
+        "finishedAt",
+        "lastStderr",
+        "mergeReadiness",
+        "model",
+        "parentTaskId",
+        "prBaseRef",
+        "prDraft",
+        "prHeadRef",
+        "prState",
+        "prTitle",
+        "previewUrl",
+        "queueDepth",
+        "queuePosition",
+        "reasoningEffort",
+        "recoveryAction",
+        "recoveryState",
+        "reviewDecision",
+        "startedAt",
+        "summary",
+        "taskId",
+        "taskRef",
+        "worktree",
+    ]
+}
+
+fn trim_dashboard_metadata_value(value: &str) -> String {
+    if value.len() <= DASHBOARD_METADATA_MAX_VALUE_BYTES {
+        return value.to_string();
+    }
+
+    let mut end = 0usize;
+    for (index, _) in value.char_indices() {
+        if index > DASHBOARD_METADATA_MAX_VALUE_BYTES {
+            break;
+        }
+        end = index;
+    }
+    if end == 0 {
+        end = DASHBOARD_METADATA_MAX_VALUE_BYTES.min(value.len());
+    }
+
+    let mut trimmed = value[..end].to_string();
+    trimmed.push_str("...");
+    trimmed
+}
+
+pub(crate) fn dashboard_session_metadata(
+    metadata: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut filtered = HashMap::new();
+    for key in dashboard_metadata_allowlist() {
+        let Some(value) = metadata.get(*key) else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
+        }
+        filtered.insert((*key).to_string(), trim_dashboard_metadata_value(value));
+    }
+    filtered
+}
 
 pub fn session_to_dashboard_value(session: &SessionRecord) -> Value {
     json!({
@@ -31,7 +104,7 @@ pub fn session_to_dashboard_value(session: &SessionRecord) -> Value {
         "model": session.model,
         "reasoningEffort": session.reasoning_effort,
         "pr": session.pr,
-        "metadata": session.metadata,
+        "metadata": dashboard_session_metadata(&session.metadata),
     })
 }
 
@@ -939,16 +1012,6 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
             .get("worktree")
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false);
-    let is_tmux_runtime = session
-        .metadata
-        .get(RUNTIME_MODE_METADATA_KEY)
-        .map(|value| value == "tmux")
-        .unwrap_or(false)
-        && session
-            .metadata
-            .get(TMUX_SESSION_METADATA_KEY)
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false);
     let now = chrono::Utc::now().to_rfc3339();
 
     if session.status == SessionStatus::Queued {
@@ -990,38 +1053,26 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
     let is_active_activity =
         normalized_activity == "active" && !is_terminal_status(&session.status);
 
-    if is_tmux_runtime && (is_active_status || is_active_activity) {
-        let mut changed = false;
-        if session
+    if session
+        .metadata
+        .get(RUNTIME_MODE_METADATA_KEY)
+        .map(|value| value == "tmux")
+        .unwrap_or(false)
+    {
+        session.status = SessionStatus::Archived;
+        session.activity = Some("exited".to_string());
+        session.last_activity_at = now.clone();
+        session.summary =
+            Some("Archived legacy tmux session after tmux runtime removal".to_string());
+        session.metadata.insert(
+            "summary".to_string(),
+            "Archived legacy tmux session after tmux runtime removal".to_string(),
+        );
+        session
             .metadata
-            .get(RECOVERY_STATE_METADATA_KEY)
-            .map(|value| value != "reattach_pending")
-            .unwrap_or(true)
-        {
-            session.metadata.insert(
-                RECOVERY_STATE_METADATA_KEY.to_string(),
-                "reattach_pending".to_string(),
-            );
-            session.metadata.insert(
-                RECOVERY_ACTION_METADATA_KEY.to_string(),
-                "reattach".to_string(),
-            );
-            changed = true;
-        }
-        if session
-            .summary
-            .as_ref()
-            .map(|value| value.trim().is_empty())
-            .unwrap_or(true)
-        {
-            session.summary = Some("Reattaching tmux runtime after backend restart".to_string());
-            session.metadata.insert(
-                "summary".to_string(),
-                "Reattaching tmux runtime after backend restart".to_string(),
-            );
-            changed = true;
-        }
-        return changed;
+            .insert("archivedAt".to_string(), now.clone());
+        session.pid = None;
+        return true;
     }
 
     if is_active_status && has_spawn_request && !has_workspace && session.pid.unwrap_or(0) == 0 {
@@ -1401,6 +1452,31 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_session_metadata_filters_internal_keys_and_caps_large_values() {
+        let oversized = "x".repeat(DASHBOARD_METADATA_MAX_VALUE_BYTES + 128);
+        let mut metadata = HashMap::from([
+            ("agent".to_string(), "codex".to_string()),
+            ("summary".to_string(), oversized),
+            (
+                "spawnRequest".to_string(),
+                "{\"prompt\":\"very large\"}".to_string(),
+            ),
+        ]);
+        metadata.insert("taskId".to_string(), "task-123".to_string());
+
+        let filtered = dashboard_session_metadata(&metadata);
+
+        assert_eq!(filtered.get("agent").map(String::as_str), Some("codex"));
+        assert_eq!(filtered.get("taskId").map(String::as_str), Some("task-123"));
+        assert!(!filtered.contains_key("spawnRequest"));
+        let summary = filtered
+            .get("summary")
+            .expect("summary should be preserved");
+        assert!(summary.len() <= DASHBOARD_METADATA_MAX_VALUE_BYTES + 3);
+        assert!(summary.ends_with("..."));
+    }
+
+    #[test]
     fn normalize_loaded_session_marks_active_sessions_stuck_when_runtime_is_gone() {
         let mut session = SessionRecord::new(
             "session-2".to_string(),
@@ -1430,6 +1506,39 @@ mod tests {
                 .map(String::as_str),
             Some("resume_required")
         );
+    }
+
+    #[test]
+    fn normalize_loaded_session_archives_legacy_tmux_runtime_sessions() {
+        let mut session = SessionRecord::new(
+            "legacy-session".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(42),
+        );
+        session.status = SessionStatus::Working;
+        session.activity = Some("active".to_string());
+        session
+            .metadata
+            .insert(RUNTIME_MODE_METADATA_KEY.to_string(), "tmux".to_string());
+
+        let changed = normalize_loaded_session(&mut session);
+
+        assert!(changed);
+        assert_eq!(session.status, SessionStatus::Archived);
+        assert_eq!(session.activity.as_deref(), Some("exited"));
+        assert_eq!(
+            session.summary.as_deref(),
+            Some("Archived legacy tmux session after tmux runtime removal")
+        );
+        assert!(session.metadata.contains_key("archivedAt"));
+        assert_eq!(session.pid, None);
     }
 
     #[test]

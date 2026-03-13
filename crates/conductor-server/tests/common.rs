@@ -116,16 +116,16 @@ impl Executor for TestExecutor {
     }
 }
 
-pub struct TmuxResumeExecutor;
+pub struct ResumeExecutor;
 
 #[async_trait]
-impl Executor for TmuxResumeExecutor {
+impl Executor for ResumeExecutor {
     fn kind(&self) -> AgentKind {
         AgentKind::Codex
     }
 
     fn name(&self) -> &str {
-        "Tmux Resume Executor"
+        "Resume Executor"
     }
 
     fn binary_path(&self) -> &Path {

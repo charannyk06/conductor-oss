@@ -5,9 +5,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::sync::Arc;
 
-use super::config::{
-    access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole,
-};
+use super::config::{access_control_enabled, resolve_access_identity, AccessRole};
 use crate::state::AppState;
 
 pub async fn require_auth_when_remote(
@@ -27,7 +25,7 @@ pub async fn require_auth_when_remote(
 
     let headers = request.headers().clone();
     let identity = resolve_access_identity(&headers, &access).await;
-    if !proxy_request_authorized(&headers) && !identity.authenticated {
+    if !identity.authenticated {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -54,6 +52,10 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
 
     if path.starts_with("/api/sessions/") && path.ends_with("/terminal/control/ws") {
         return None;
+    }
+
+    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/stream-token") {
+        return Some(AccessRole::Viewer);
     }
 
     if path.starts_with("/api/sessions/") && path.ends_with("/terminal/token") {
@@ -272,7 +274,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn middleware_allows_proxy_authorized_requests_even_when_runtime_auth_is_required() {
+    async fn middleware_allows_authenticated_proxy_requests_even_when_runtime_auth_is_required() {
+        let state = build_state(DashboardAccessConfig {
+            require_auth: true,
+            ..DashboardAccessConfig::default()
+        })
+        .await;
+
+        let app = Router::new()
+            .route(
+                "/api/preferences",
+                get(|| async { StatusCode::OK.into_response() }),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_auth_when_remote,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/preferences")
+                    .header("x-conductor-proxy-authorized", "true")
+                    .header("x-conductor-access-authenticated", "true")
+                    .header("x-conductor-access-role", "viewer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn middleware_rejects_proxy_requests_without_proxy_authentication() {
         let state = build_state(DashboardAccessConfig {
             require_auth: true,
             ..DashboardAccessConfig::default()
@@ -303,7 +340,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

@@ -5,13 +5,18 @@
  * - Config location determines hash: sha256(dirname(configPath)).slice(0, 12)
  * - Each project gets directory: ~/.conductor/{hash}-{projectId}/
  * - Sessions inside: sessions/{sessionName} (no hash prefix, already namespaced)
- * - Tmux names include hash for global uniqueness: {hash}-{prefix}-{num}
  */
 
 import { createHash } from "node:crypto";
 import { dirname, basename, join } from "node:path";
 import { homedir } from "node:os";
-import { realpathSync, existsSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import {
+  realpathSync,
+  existsSync,
+  writeFileSync,
+  readFileSync,
+  mkdirSync,
+} from "node:fs";
 
 /** Runtime data directory for Conductor. */
 const CONDUCTOR_DATA_DIR = "~/.conductor";
@@ -40,7 +45,10 @@ export function generateProjectId(projectPath: string): string {
  * Format: {hash}-{projectId}
  * Example: "a3b4c5d6e7f8-my-app"
  */
-export function generateInstanceId(configPath: string, projectPath: string): string {
+export function generateInstanceId(
+  configPath: string,
+  projectPath: string
+): string {
   const hash = generateConfigHash(configPath);
   const projectId = generateProjectId(projectPath);
   return `${hash}-${projectId}`;
@@ -84,7 +92,10 @@ export function generateSessionPrefix(projectId: string): string {
  * Get the project base directory for a given config and project.
  * Format: ~/.conductor/{hash}-{projectId}
  */
-export function getProjectBaseDir(configPath: string, projectPath: string): string {
+export function getProjectBaseDir(
+  configPath: string,
+  projectPath: string
+): string {
   const instanceId = generateInstanceId(configPath, projectPath);
   return join(expandHome(CONDUCTOR_DATA_DIR), instanceId);
 }
@@ -93,7 +104,10 @@ export function getProjectBaseDir(configPath: string, projectPath: string): stri
  * Get the sessions directory for a project.
  * Format: ~/.conductor/{hash}-{projectId}/sessions
  */
-export function getSessionsDir(configPath: string, projectPath: string): string {
+export function getSessionsDir(
+  configPath: string,
+  projectPath: string
+): string {
   return join(getProjectBaseDir(configPath, projectPath), "sessions");
 }
 
@@ -101,7 +115,10 @@ export function getSessionsDir(configPath: string, projectPath: string): string 
  * Get the worktrees directory for a project.
  * Format: ~/.conductor/{hash}-{projectId}/worktrees
  */
-export function getWorktreesDir(configPath: string, projectPath: string): string {
+export function getWorktreesDir(
+  configPath: string,
+  projectPath: string
+): string {
   return join(getProjectBaseDir(configPath, projectPath), "worktrees");
 }
 
@@ -117,7 +134,10 @@ export function getArchiveDir(configPath: string, projectPath: string): string {
  * Get the .origin file path for a project.
  * This file stores the config path for collision detection.
  */
-export function getOriginFilePath(configPath: string, projectPath: string): string {
+export function getOriginFilePath(
+  configPath: string,
+  projectPath: string
+): string {
   return join(getProjectBaseDir(configPath, projectPath), ".origin");
 }
 
@@ -128,35 +148,6 @@ export function getOriginFilePath(configPath: string, projectPath: string): stri
  */
 export function generateSessionName(prefix: string, num: number): string {
   return `${prefix}-${num}`;
-}
-
-/**
- * Generate tmux session name (globally unique).
- * Format: {hash}-{prefix}-{num}
- * Example: "a3b4c5d6e7f8-int-1"
- */
-export function generateTmuxName(configPath: string, prefix: string, num: number): string {
-  const hash = generateConfigHash(configPath);
-  return `${hash}-${prefix}-${num}`;
-}
-
-/**
- * Parse a tmux session name to extract components.
- * Returns null if the name doesn't match the expected format.
- */
-export function parseTmuxName(tmuxName: string): {
-  hash: string;
-  prefix: string;
-  num: number;
-} | null {
-  const match = tmuxName.match(/^([a-f0-9]{12})-([a-zA-Z0-9_-]+)-(\d+)$/);
-  if (!match) return null;
-
-  return {
-    hash: match[1],
-    prefix: match[2],
-    num: parseInt(match[3], 10),
-  };
 }
 
 /**
@@ -173,7 +164,10 @@ export function expandHome(filepath: string): string {
  * Validate and store the .origin file for a project.
  * Throws if a hash collision is detected (different config, same hash).
  */
-export function validateAndStoreOrigin(configPath: string, projectPath: string): void {
+export function validateAndStoreOrigin(
+  configPath: string,
+  projectPath: string
+): void {
   const originPath = getOriginFilePath(configPath, projectPath);
   const resolvedConfigPath = realpathSync(configPath);
 
@@ -185,7 +179,7 @@ export function validateAndStoreOrigin(configPath: string, projectPath: string):
           `Directory: ${getProjectBaseDir(configPath, projectPath)}\n` +
           `Expected config: ${resolvedConfigPath}\n` +
           `Actual config: ${stored}\n` +
-          `This is a rare hash collision. Please move one of the configs to a different directory.`,
+          `This is a rare hash collision. Please move one of the configs to a different directory.`
       );
     }
   } else {

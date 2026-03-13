@@ -1,4 +1,5 @@
 import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import { forwardedAccessAuthenticated } from "@/lib/guardedRustProxy";
 import { hasRustBackend } from "@/lib/rustBackendProxy";
 import { NextResponse } from "next/server";
 
@@ -33,10 +34,11 @@ export async function GET(request: Request): Promise<Response> {
     "Accept": "text/event-stream",
     "Cache-Control": "no-cache",
     "x-conductor-proxy-authorized": "true",
-    "x-conductor-access-authenticated": access.authenticated ? "true" : "false",
+    "x-conductor-access-authenticated": forwardedAccessAuthenticated(access) ? "true" : "false",
   });
   if (access.role) headers.set("x-conductor-access-role", access.role);
   if (access.email) headers.set("x-conductor-access-email", access.email);
+  if (access.provider) headers.set("x-conductor-access-provider", access.provider);
 
   const upstream = await fetch(target, {
     method: "GET",

@@ -80,7 +80,7 @@ packages/
 ## Architecture Constraints
 
 - **Local-first:** No cloud relay, no credential proxying, no hosted state
-- **tmux-based:** Runtime currently requires tmux for session management
+- **direct-pty:** Runtime defaults to direct PTY sessions; tmux is legacy compatibility-only
 - **SQLite-only:** No external database dependencies
 - **Agent-agnostic:** Conductor orchestrates; agents do their own auth and billing
 - **Markdown-native:** Board state lives in `CONDUCTOR.md`, readable by humans and Obsidian

@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn build_args_structured_output_uses_exec_json_in_tmux_mode() {
+    fn build_args_structured_output_uses_exec_json_in_interactive_mode() {
         let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
         let args = executor.build_args(&SpawnOptions {
             cwd: PathBuf::from("/tmp/demo"),

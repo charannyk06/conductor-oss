@@ -33,8 +33,6 @@ export {
   getArchiveDir,
   getOriginFilePath,
   generateSessionName,
-  generateTmuxName,
-  parseTmuxName,
   expandHome,
   validateAndStoreOrigin,
 } from "./paths.js";

@@ -1,5 +1,6 @@
 import type { DashboardRole } from "@conductor-oss/core/types";
 import { NextRequest } from "next/server";
+import type { DashboardAccess } from "@/lib/auth";
 import { getDashboardAccess, guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
 
@@ -14,11 +15,15 @@ const PROXY_ROLE_HEADER = "x-conductor-access-role";
 const PROXY_EMAIL_HEADER = "x-conductor-access-email";
 const PROXY_PROVIDER_HEADER = "x-conductor-access-provider";
 
+export function forwardedAccessAuthenticated(access: DashboardAccess): boolean {
+  return access.authenticated || access.provider === "local";
+}
+
 export async function buildForwardedAccessHeaders(request: Request): Promise<Headers> {
   const access = await getDashboardAccess(request);
   const headers = new Headers({
     [PROXY_AUTHORIZED_HEADER]: "true",
-    [PROXY_AUTHENTICATED_HEADER]: access.authenticated ? "true" : "false",
+    [PROXY_AUTHENTICATED_HEADER]: forwardedAccessAuthenticated(access) ? "true" : "false",
   });
 
   if (access.role) {

@@ -9,6 +9,24 @@ const listeners = new Set<SnapshotListener>();
 const appUpdateListeners = new Set<AppUpdateListener>();
 let eventSource: EventSource | null = null;
 let refreshInFlight: Promise<void> | null = null;
+let focusHandler: (() => void) | null = null;
+let visibilityHandler: (() => void) | null = null;
+
+function hasSubscribers() {
+  return listeners.size > 0 || appUpdateListeners.size > 0;
+}
+
+function pageVisible() {
+  return typeof document === "undefined" || document.visibilityState === "visible";
+}
+
+function closeEventSource() {
+  if (!eventSource) {
+    return;
+  }
+  eventSource.close();
+  eventSource = null;
+}
 
 function normalizeSessionArray(value: unknown): SSESessionEvent | null {
   if (Array.isArray(value)) {
@@ -96,7 +114,7 @@ async function refreshSessions() {
 }
 
 function ensureEventSource() {
-  if (eventSource || typeof EventSource === "undefined") {
+  if (eventSource || typeof EventSource === "undefined" || !hasSubscribers() || !pageVisible()) {
     return;
   }
 
@@ -120,35 +138,87 @@ function ensureEventSource() {
   });
 
   eventSource.onerror = () => {
-    if (listeners.size === 0 && appUpdateListeners.size === 0) {
-      eventSource?.close();
-      eventSource = null;
+    if (!hasSubscribers() || !pageVisible()) {
+      closeEventSource();
     }
   };
 }
 
+function attachLifecycleListeners() {
+  if (focusHandler || visibilityHandler || typeof window === "undefined") {
+    return;
+  }
+
+  focusHandler = () => {
+    if (!hasSubscribers() || !pageVisible()) {
+      return;
+    }
+    ensureEventSource();
+    if (!refreshInFlight) {
+      void refreshSessions();
+    }
+  };
+
+  visibilityHandler = () => {
+    if (!hasSubscribers()) {
+      closeEventSource();
+      return;
+    }
+    if (!pageVisible()) {
+      closeEventSource();
+      return;
+    }
+    ensureEventSource();
+    if (!refreshInFlight) {
+      void refreshSessions();
+    }
+  };
+
+  window.addEventListener("focus", focusHandler);
+  document.addEventListener("visibilitychange", visibilityHandler);
+}
+
+function detachLifecycleListeners() {
+  if (focusHandler) {
+    window.removeEventListener("focus", focusHandler);
+    focusHandler = null;
+  }
+  if (visibilityHandler) {
+    document.removeEventListener("visibilitychange", visibilityHandler);
+    visibilityHandler = null;
+  }
+}
+
+function syncLifecycleState() {
+  if (!hasSubscribers()) {
+    closeEventSource();
+    detachLifecycleListeners();
+    return;
+  }
+  attachLifecycleListeners();
+  if (!pageVisible()) {
+    closeEventSource();
+    return;
+  }
+  ensureEventSource();
+}
+
 export function subscribeToSnapshotEvents(listener: SnapshotListener): () => void {
   listeners.add(listener);
-  ensureEventSource();
+  syncLifecycleState();
 
   return () => {
     listeners.delete(listener);
-    if (listeners.size === 0 && appUpdateListeners.size === 0 && eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
+    syncLifecycleState();
   };
 }
 
 export function subscribeToAppUpdateEvents(listener: AppUpdateListener): () => void {
   appUpdateListeners.add(listener);
-  ensureEventSource();
+  syncLifecycleState();
 
   return () => {
     appUpdateListeners.delete(listener);
-    if (listeners.size === 0 && appUpdateListeners.size === 0 && eventSource) {
-      eventSource.close();
-      eventSource = null;
-    }
+    syncLifecycleState();
   };
 }

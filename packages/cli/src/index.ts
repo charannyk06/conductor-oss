@@ -14,7 +14,6 @@ import { registerList } from "./commands/list.js";
 import { registerStatus } from "./commands/status.js";
 import { registerSend } from "./commands/send.js";
 import { registerKill } from "./commands/kill.js";
-import { registerAttach } from "./commands/attach.js";
 import { registerCleanup } from "./commands/cleanup.js";
 import { registerRestore } from "./commands/restore.js";
 import { registerDashboard } from "./commands/dashboard.js";
@@ -28,7 +27,7 @@ import { registerFeedback } from "./commands/feedback.js";
 import { registerSetup } from "./commands/setup.js";
 
 const cliPackage = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  readFileSync(new URL("../package.json", import.meta.url), "utf8")
 ) as { version?: string };
 
 const program = new Command();
@@ -43,7 +42,6 @@ registerList(program);
 registerStatus(program);
 registerSend(program);
 registerKill(program);
-registerAttach(program);
 registerCleanup(program);
 registerRestore(program);
 registerDashboard(program);

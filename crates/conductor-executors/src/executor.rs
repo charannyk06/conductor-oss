@@ -55,7 +55,7 @@ pub struct SpawnOptions {
     pub interactive: bool,
 
     /// Request structured (JSON/stream-json) output even in interactive mode.
-    /// Used by tmux runtime to get parseable output while maintaining session persistence.
+    /// Used when the runtime needs parseable events alongside terminal output.
     pub structured_output: bool,
 
     /// Native CLI session target to resume instead of launching a fresh session.

@@ -26,7 +26,7 @@ type TerminalSnapshot = {
   restored: boolean;
 };
 
-const READ_ONLY_SCROLLBACK = 50000;
+const READ_ONLY_SCROLLBACK = 4000;
 const LIVE_TERMINAL_SNAPSHOT_LINES = 1200;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 6000;
 const RECONNECT_BASE_DELAY_MS = 300;

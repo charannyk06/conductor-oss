@@ -867,7 +867,7 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
       "  streaming-smoke:",
       `    path: ${repoDir}`,
       "    agent: codex",
-      "    runtime: tmux",
+      "    runtime: direct",
       "    defaultBranch: main",
       "",
     ].join("\n"),

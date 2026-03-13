@@ -5,13 +5,6 @@ use std::path::{Path, PathBuf};
 
 pub const CONDUCTOR_DATA_DIR: &str = "~/.conductor";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedTmuxName {
-    pub hash: String,
-    pub prefix: String,
-    pub num: u32,
-}
-
 pub fn generate_config_hash(config_path: &Path) -> Result<String> {
     let resolved = fs::canonicalize(config_path)
         .with_context(|| format!("failed to canonicalize {}", config_path.display()))?;
@@ -94,35 +87,6 @@ pub fn generate_session_name(prefix: &str, num: u32) -> String {
     format!("{prefix}-{num}")
 }
 
-pub fn generate_tmux_name(config_path: &Path, prefix: &str, num: u32) -> Result<String> {
-    Ok(format!(
-        "{}-{prefix}-{num}",
-        generate_config_hash(config_path)?
-    ))
-}
-
-pub fn parse_tmux_name(tmux_name: &str) -> Option<ParsedTmuxName> {
-    let (head, num_text) = tmux_name.rsplit_once('-')?;
-    let num = num_text.parse().ok()?;
-    let (hash, prefix) = head.split_once('-')?;
-    if hash.len() != 12 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return None;
-    }
-    if prefix.is_empty()
-        || !prefix
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-    {
-        return None;
-    }
-
-    Some(ParsedTmuxName {
-        hash: hash.to_string(),
-        prefix: prefix.to_string(),
-        num,
-    })
-}
-
 pub fn expand_home(path: &Path) -> PathBuf {
     let as_text = path.to_string_lossy();
     if let Some(rest) = as_text.strip_prefix("~/") {
@@ -167,25 +131,6 @@ pub fn validate_and_store_origin(config_path: &Path, project_path: &Path) -> Res
 
 pub fn get_workspace_artifacts_dir(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".conductor").join("rust-backend")
-}
-
-pub fn get_tmux_runtime_dir(workspace_path: &Path) -> PathBuf {
-    get_workspace_artifacts_dir(workspace_path).join("tmux")
-}
-
-pub fn get_tmux_log_path(workspace_path: &Path, session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(get_tmux_runtime_dir(workspace_path).join(format!("{session_id}.log")))
-}
-
-pub fn get_tmux_exit_path(workspace_path: &Path, session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(get_tmux_runtime_dir(workspace_path).join(format!("{session_id}.exit")))
-}
-
-pub fn get_tmux_ready_path(workspace_path: &Path, session_id: &str) -> Result<PathBuf> {
-    validate_session_id(session_id)?;
-    Ok(get_tmux_runtime_dir(workspace_path).join(format!("{session_id}.ready")))
 }
 
 pub fn get_dev_server_logs_dir(workspace_path: &Path) -> PathBuf {
@@ -535,15 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_tmux_name_handles_valid_and_invalid_values() {
-        let parsed = parse_tmux_name("a3b4c5d6e7f8-int-42").unwrap();
-        assert_eq!(parsed.hash, "a3b4c5d6e7f8");
-        assert_eq!(parsed.prefix, "int");
-        assert_eq!(parsed.num, 42);
-        assert!(parse_tmux_name("not-a-valid-name").is_none());
-    }
-
-    #[test]
     fn update_metadata_merges_sanitizes_and_removes_values() {
         let temp_dir = TestDir::new();
         let data_dir = temp_dir.path().join("sessions");
@@ -576,14 +512,6 @@ mod tests {
         assert_eq!(
             get_workspace_artifacts_dir(workspace),
             PathBuf::from("/tmp/workspace/.conductor/rust-backend")
-        );
-        assert_eq!(
-            get_tmux_runtime_dir(workspace),
-            PathBuf::from("/tmp/workspace/.conductor/rust-backend/tmux")
-        );
-        assert_eq!(
-            get_tmux_log_path(workspace, "abc-1").unwrap(),
-            PathBuf::from("/tmp/workspace/.conductor/rust-backend/tmux/abc-1.log")
         );
         assert_eq!(
             get_dev_server_log_path(workspace, "My Project"),

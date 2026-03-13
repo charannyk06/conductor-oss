@@ -28,6 +28,8 @@ type ApiResponse = (StatusCode, Json<Value>);
 /// Allows `SPAWN_RATE_LIMIT` requests per `SPAWN_RATE_WINDOW_SECS` window.
 const SPAWN_RATE_LIMIT: u64 = 10;
 const SPAWN_RATE_WINDOW_SECS: u64 = 60;
+const DEFAULT_FEED_WINDOW_LIMIT: usize = 120;
+const MAX_FEED_WINDOW_LIMIT: usize = 240;
 
 static SPAWN_RATE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SPAWN_RATE_WINDOW_START: AtomicU64 = AtomicU64::new(0);
@@ -189,6 +191,9 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
         return json!({
             "type": "append",
             "entries": next_entries.into_iter().skip(previous_entries.len()).collect::<Vec<_>>(),
+            "totalEntries": next.get("totalEntries").cloned().unwrap_or(Value::Null),
+            "windowLimit": next.get("windowLimit").cloned().unwrap_or(Value::Null),
+            "truncated": next.get("truncated").cloned().unwrap_or(Value::Null),
             "sessionStatus": next.get("sessionStatus").cloned().unwrap_or(Value::Null),
             "parserState": next.get("parserState").cloned().unwrap_or(Value::Null),
             "runtimeStatus": next.get("runtimeStatus").cloned().unwrap_or(Value::Null),
@@ -206,6 +211,17 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     project: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FeedQuery {
+    limit: Option<usize>,
+}
+
+fn resolve_feed_window_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(DEFAULT_FEED_WINDOW_LIMIT)
+        .clamp(1, MAX_FEED_WINDOW_LIMIT)
 }
 
 async fn list_sessions(
@@ -305,9 +321,14 @@ async fn get_conversation(
     }
 }
 
-async fn get_feed(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> ApiResponse {
+async fn get_feed(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<FeedQuery>,
+) -> ApiResponse {
+    let window_limit = resolve_feed_window_limit(query.limit);
     match state.get_session(&id).await {
-        Some(session) => ok(session_feed_payload(&state, &session).await),
+        Some(session) => ok(session_feed_payload(&state, &session, window_limit).await),
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
 }
@@ -315,7 +336,9 @@ async fn get_feed(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
 async fn feed_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<FeedQuery>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
+    let window_limit = resolve_feed_window_limit(query.limit);
     let initial_signature = state
         .get_session(&id)
         .await
@@ -331,10 +354,13 @@ async fn feed_stream(
         })
         .unwrap_or_else(|| "missing".to_string());
     let initial_payload = match state.get_session(&id).await {
-        Some(session) => session_feed_payload(&state, &session).await,
+        Some(session) => session_feed_payload(&state, &session, window_limit).await,
         None => {
             json!({
                 "entries": [],
+                "totalEntries": 0,
+                "windowLimit": window_limit,
+                "truncated": false,
                 "sessionStatus": Value::Null,
                 "parserState": Value::Null,
                 "runtimeStatus": Value::Null,
@@ -369,9 +395,14 @@ async fn feed_stream(
                         }
                         feed_state.0 = next_signature;
                         let next_payload = match state.get_session(&session_id).await {
-                            Some(session) => session_feed_payload(&state, &session).await,
+                            Some(session) => {
+                                session_feed_payload(&state, &session, window_limit).await
+                            }
                             None => json!({
                                 "entries": [],
+                                "totalEntries": 0,
+                                "windowLimit": window_limit,
+                                "truncated": false,
                                 "sessionStatus": Value::Null,
                                 "parserState": Value::Null,
                                 "runtimeStatus": Value::Null,
@@ -399,8 +430,12 @@ async fn feed_stream(
     Sse::new(initial_stream.chain(updates)).keep_alive(KeepAlive::default())
 }
 
-async fn session_feed_payload(state: &AppState, session: &SessionRecord) -> Value {
-    if let Some(payload) = state.cached_feed_payload(&session.id).await {
+async fn session_feed_payload(
+    state: &AppState,
+    session: &SessionRecord,
+    window_limit: usize,
+) -> Value {
+    if let Some(payload) = state.cached_feed_payload(&session.id, window_limit).await {
         return payload;
     }
 
@@ -419,15 +454,31 @@ async fn session_feed_payload(state: &AppState, session: &SessionRecord) -> Valu
         });
     let runtime_status = state.session_runtime_status(session).await;
 
+    let all_entries = build_normalized_chat_feed(session);
+    let total_entries = all_entries.len();
+    let entries = if total_entries > window_limit {
+        all_entries
+            .into_iter()
+            .skip(total_entries - window_limit)
+            .collect::<Vec<_>>()
+    } else {
+        all_entries
+    };
+
     let payload = json!({
-        "entries": build_normalized_chat_feed(session),
+        "entries": entries,
+        "totalEntries": total_entries,
+        "windowLimit": window_limit,
+        "truncated": total_entries > window_limit,
         "sessionStatus": session.status,
         "parserState": parser_state,
         "runtimeStatus": runtime_status,
         "source": if session.output.is_empty() { "conversation-only" } else { "runtime-output" },
     });
 
-    state.store_feed_payload(&session.id, payload.clone()).await;
+    state
+        .store_feed_payload(&session.id, window_limit, payload.clone())
+        .await;
     payload
 }
 
@@ -870,8 +921,9 @@ async fn send_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::session_cleanup_eligible;
+    use super::{build_feed_delta_event, resolve_feed_window_limit, session_cleanup_eligible};
     use crate::state::{SessionRecord, SessionStatus};
+    use serde_json::json;
 
     fn build_session(id: &str, status: SessionStatus, activity: Option<&str>) -> SessionRecord {
         let mut session = SessionRecord::new(
@@ -917,5 +969,49 @@ mod tests {
     fn cleanup_skips_active_working_sessions() {
         let session = build_session("working", SessionStatus::Working, Some("active"));
         assert!(!session_cleanup_eligible(&session));
+    }
+
+    #[test]
+    fn feed_window_limit_is_clamped() {
+        assert_eq!(resolve_feed_window_limit(None), 120);
+        assert_eq!(resolve_feed_window_limit(Some(0)), 1);
+        assert_eq!(resolve_feed_window_limit(Some(999)), 240);
+    }
+
+    #[test]
+    fn feed_delta_append_keeps_window_metadata() {
+        let previous = json!({
+            "entries": [{ "id": "1" }],
+            "totalEntries": 1,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+        });
+        let next = json!({
+            "entries": [{ "id": "1" }, { "id": "2" }],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+        });
+
+        let delta = build_feed_delta_event(&previous, &next);
+
+        assert_eq!(
+            delta.get("type").and_then(|value| value.as_str()),
+            Some("append")
+        );
+        assert_eq!(
+            delta.get("totalEntries").and_then(|value| value.as_u64()),
+            Some(2)
+        );
+        assert_eq!(
+            delta.get("windowLimit").and_then(|value| value.as_u64()),
+            Some(120)
+        );
+        assert_eq!(
+            delta.get("truncated").and_then(|value| value.as_bool()),
+            Some(false)
+        );
     }
 }

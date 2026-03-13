@@ -146,8 +146,15 @@ export default function SessionPageClient() {
           }}
           sessions={dashboardSessions}
           selectedSessionId={params.id}
-          onSelectSession={(sessionId) => {
-            router.push(`/sessions/${encodeURIComponent(sessionId)}`);
+          onSelectSession={(sessionId, options) => {
+            const params = new URLSearchParams();
+            if (options?.tab) {
+              params.set("tab", options.tab);
+            }
+            const query = params.toString();
+            router.push(query.length > 0
+              ? `/sessions/${encodeURIComponent(sessionId)}?${query}`
+              : `/sessions/${encodeURIComponent(sessionId)}`);
             closeSidebarOnMobile();
           }}
           onArchiveSession={handleArchiveSession}
@@ -162,7 +169,7 @@ export default function SessionPageClient() {
           title={topBarTitle}
         />
       )}
-      <div className={`min-h-0 flex-1 overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
+      <div className={`flex min-h-0 flex-1 flex-col overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
         <SessionDetail
           key={params.id}
           sessionId={params.id}

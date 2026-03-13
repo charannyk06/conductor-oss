@@ -25,10 +25,9 @@ use crate::routes::config::{
     access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole,
 };
 use crate::state::{
-    capture_tmux_pane, sanitize_terminal_text, tmux_runtime_metadata, tmux_session_exists,
-    trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot, TerminalStreamChunk,
-    TerminalStreamEvent, DETACHED_LOG_PATH_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TMUX_LOG_PATH_METADATA_KEY,
+    sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
+    TerminalStreamChunk, TerminalStreamEvent, DETACHED_LOG_PATH_METADATA_KEY,
+    TERMINAL_RESTORE_SNAPSHOT_FORMAT,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -39,8 +38,8 @@ const DEFAULT_TERMINAL_ROWS: u16 = 32;
 const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 1200;
 const MAX_TERMINAL_SNAPSHOT_LINES: usize = 12000;
 const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
-const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 128 * 1024;
-const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 384 * 1024;
+const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 96 * 1024;
+const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 192 * 1024;
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
 const TERMINAL_FRAME_PROTOCOL_VERSION: u8 = 2;
@@ -57,6 +56,21 @@ const TERMINAL_RESIZE_COLS_HEADER: &str = "x-conductor-terminal-resize-cols";
 const TERMINAL_RESIZE_ROWS_HEADER: &str = "x-conductor-terminal-resize-rows";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum TerminalTokenScope {
+    Stream,
+    Control,
+}
+
+impl TerminalTokenScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stream => "stream",
+            Self::Control => "control",
+        }
+    }
+}
 
 #[derive(Copy, Clone)]
 enum TerminalSnapshotReason {
@@ -86,6 +100,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/sessions/{id}/terminal/control/ws",
             get(terminal_control_websocket),
+        )
+        .route(
+            "/api/sessions/{id}/terminal/stream-token",
+            get(terminal_stream_token),
         )
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
         .route(
@@ -233,7 +251,9 @@ async fn terminal_websocket(
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     }
 
-    if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
+    if let Err(err) =
+        authorize_terminal_stream_socket_access(&state, &id, query.token.as_deref()).await
+    {
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
 
@@ -265,6 +285,21 @@ async fn terminal_control_websocket(
 }
 
 async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    build_terminal_token_response(state, id, TerminalTokenScope::Control).await
+}
+
+async fn terminal_stream_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    build_terminal_token_response(state, id, TerminalTokenScope::Stream).await
+}
+
+async fn build_terminal_token_response(
+    state: Arc<AppState>,
+    id: String,
+    scope: TerminalTokenScope,
+) -> Response {
     if state.get_session(&id).await.is_none() {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     }
@@ -272,7 +307,7 @@ async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<Strin
     let access = state.config.read().await.access.clone();
     let token_required = should_issue_terminal_token(&access);
     let token = if token_required {
-        create_terminal_token(&id).ok()
+        create_scoped_terminal_token(&id, scope).ok()
     } else {
         None
     };
@@ -498,24 +533,6 @@ async fn build_terminal_snapshot(
         }));
     }
 
-    if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(session) {
-        if tmux_session_exists(&socket_path, &tmux_session)
-            .await
-            .unwrap_or(false)
-        {
-            if let Ok(snapshot) = capture_tmux_pane(&socket_path, &tmux_session, lines).await {
-                if !snapshot.trim().is_empty() {
-                    return Ok(json!({
-                        "snapshot": snapshot,
-                        "source": "tmux_live",
-                        "live": true,
-                        "restored": true,
-                    }));
-                }
-            }
-        }
-    }
-
     let terminal_capture_path = state.session_terminal_capture_path(&session.id);
     if let Some(snapshot) = read_terminal_log_tail(&terminal_capture_path, lines, max_bytes).await?
     {
@@ -526,21 +543,6 @@ async fn build_terminal_snapshot(
             "live": live,
             "restored": true,
         }));
-    }
-
-    if let Some(log_path) = session
-        .metadata
-        .get(TMUX_LOG_PATH_METADATA_KEY)
-        .map(PathBuf::from)
-    {
-        if let Some(snapshot) = read_terminal_log_tail(&log_path, lines, max_bytes).await? {
-            return Ok(json!({
-                "snapshot": snapshot,
-                "source": "tmux_log",
-                "live": false,
-                "restored": true,
-            }));
-        }
     }
 
     let snapshot = trim_utf8_tail_string(trim_lines_tail(&session.output, lines), max_bytes);
@@ -560,16 +562,6 @@ async fn terminal_snapshot_transcript_fallback(
     if let Some(path) = session
         .metadata
         .get(DETACHED_LOG_PATH_METADATA_KEY)
-        .map(PathBuf::from)
-    {
-        if let Some(transcript) = read_terminal_log_transcript(&path, lines, max_bytes).await? {
-            return Ok(transcript);
-        }
-    }
-
-    if let Some(path) = session
-        .metadata
-        .get(TMUX_LOG_PATH_METADATA_KEY)
         .map(PathBuf::from)
     {
         if let Some(transcript) = read_terminal_log_transcript(&path, lines, max_bytes).await? {
@@ -1145,6 +1137,24 @@ async fn authorize_terminal_access(
     Err(anyhow!("Invalid terminal token"))
 }
 
+async fn authorize_terminal_stream_socket_access(
+    state: &Arc<AppState>,
+    session_id: &str,
+    token: Option<&str>,
+) -> Result<()> {
+    let access = state.config.read().await.access.clone();
+    if !access_control_enabled(&access) {
+        return Ok(());
+    }
+
+    let token = token.ok_or_else(|| anyhow!("Terminal token is required"))?;
+    if verify_terminal_stream_token(session_id, token)? {
+        return Ok(());
+    }
+
+    Err(anyhow!("Invalid terminal token"))
+}
+
 async fn authorize_terminal_stream_access(
     state: &Arc<AppState>,
     session_id: &str,
@@ -1157,21 +1167,52 @@ async fn authorize_terminal_stream_access(
     }
 
     let identity = resolve_access_identity(headers, &access).await;
-    if proxy_request_authorized(headers)
-        && matches!(identity.role, Some(role) if role.allows(AccessRole::Viewer))
-    {
-        return Ok(());
+    if proxy_request_authorized(headers) {
+        if !identity.authenticated {
+            return Err(anyhow!("Proxy access is not authenticated"));
+        }
+
+        if matches!(identity.role, Some(role) if role.allows(AccessRole::Viewer)) {
+            return Ok(());
+        }
     }
 
-    authorize_terminal_access(state, session_id, token).await
+    authorize_terminal_stream_socket_access(state, session_id, token).await
 }
 
-fn verify_terminal_token(session_id: &str, token: &str) -> Result<bool> {
+fn verify_scoped_terminal_token(
+    session_id: &str,
+    token: &str,
+    accepted_scopes: &[TerminalTokenScope],
+) -> Result<bool> {
     let secret = terminal_token_secret();
 
-    let (expires_at_raw, provided_signature) = token
+    let (raw_payload, provided_signature) = token
         .split_once('.')
         .ok_or_else(|| anyhow!("Malformed terminal token"))?;
+    let (scope, expires_at_raw, payload) =
+        if let Some((scope_raw, expires_at_raw)) = raw_payload.split_once(':') {
+            let scope = match scope_raw {
+                "stream" => TerminalTokenScope::Stream,
+                "control" => TerminalTokenScope::Control,
+                _ => return Ok(false),
+            };
+            (
+                scope,
+                expires_at_raw,
+                format!("{session_id}:{scope_raw}:{expires_at_raw}"),
+            )
+        } else {
+            (
+                TerminalTokenScope::Control,
+                raw_payload,
+                format!("{session_id}:{raw_payload}"),
+            )
+        };
+    if !accepted_scopes.contains(&scope) {
+        return Ok(false);
+    }
+
     let expires_at = expires_at_raw
         .parse::<i64>()
         .context("Invalid terminal token expiry")?;
@@ -1179,7 +1220,6 @@ fn verify_terminal_token(session_id: &str, token: &str) -> Result<bool> {
         return Ok(false);
     }
 
-    let payload = format!("{session_id}:{expires_at_raw}");
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())?;
     mac.update(payload.as_bytes());
     let expected_signature = hex::encode(mac.finalize().into_bytes());
@@ -1189,14 +1229,26 @@ fn verify_terminal_token(session_id: &str, token: &str) -> Result<bool> {
     ))
 }
 
-fn create_terminal_token(session_id: &str) -> Result<String> {
+fn verify_terminal_token(session_id: &str, token: &str) -> Result<bool> {
+    verify_scoped_terminal_token(session_id, token, &[TerminalTokenScope::Control])
+}
+
+fn verify_terminal_stream_token(session_id: &str, token: &str) -> Result<bool> {
+    verify_scoped_terminal_token(
+        session_id,
+        token,
+        &[TerminalTokenScope::Stream, TerminalTokenScope::Control],
+    )
+}
+
+fn create_scoped_terminal_token(session_id: &str, scope: TerminalTokenScope) -> Result<String> {
     let secret = terminal_token_secret();
     let expires_at = chrono::Utc::now().timestamp() + TERMINAL_TOKEN_TTL_SECONDS;
-    let payload = format!("{session_id}:{expires_at}");
+    let payload = format!("{session_id}:{}:{expires_at}", scope.as_str());
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())?;
     mac.update(payload.as_bytes());
     let signature = hex::encode(mac.finalize().into_bytes());
-    Ok(format!("{expires_at}.{signature}"))
+    Ok(format!("{}:{expires_at}.{signature}", scope.as_str()))
 }
 
 fn terminal_token_secret() -> String {
@@ -1400,7 +1452,10 @@ mod tests {
                         keys: Some("abc".to_string()),
                         special: None,
                     },
-                    TerminalControlBatchOperation::Resize { cols: 120, rows: 40 },
+                    TerminalControlBatchOperation::Resize {
+                        cols: 120,
+                        rows: 40
+                    },
                 ],
             }
         );
@@ -1622,7 +1677,8 @@ mod tests {
             std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
         }
 
-        let token = create_terminal_token("session-123").expect("token should be created");
+        let token = create_scoped_terminal_token("session-123", TerminalTokenScope::Control)
+            .expect("token should be created");
         assert!(verify_terminal_token("session-123", &token).expect("token should verify"));
     }
 

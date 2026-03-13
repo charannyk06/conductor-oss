@@ -304,31 +304,38 @@ impl AppState {
         if workspace_root == project_root {
             return Ok(());
         }
+        let cleanup_script = project.cleanup_script.clone();
+        let archive_script = project.archive_script.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            run_workspace_commands_best_effort(
+                &cleanup_script,
+                &workspace_root,
+                "cleanup",
+                WORKSPACE_COMMAND_TIMEOUT,
+            )
+            .await;
+            run_workspace_commands_best_effort(
+                &archive_script,
+                &workspace_root,
+                "archive",
+                WORKSPACE_COMMAND_TIMEOUT,
+            )
+            .await;
 
-        run_workspace_commands_best_effort(
-            &project.cleanup_script,
-            &workspace_root,
-            "cleanup",
-            WORKSPACE_COMMAND_TIMEOUT,
-        )
-        .await;
-        run_workspace_commands_best_effort(
-            &project.archive_script,
-            &workspace_root,
-            "archive",
-            WORKSPACE_COMMAND_TIMEOUT,
-        )
-        .await;
-
-        remove_worktree(&project_root, &workspace_root)
-            .await
-            .or_else(|_| remove_directory(&workspace_root))
-            .with_context(|| {
-                format!(
-                    "Failed to remove archived workspace for session {session_id} at {}",
-                    workspace_root.display()
-                )
-            })?;
+            if let Err(err) = remove_worktree(&project_root, &workspace_root)
+                .await
+                .or_else(|_| remove_directory(&workspace_root))
+                .with_context(|| {
+                    format!(
+                        "Failed to remove archived workspace for session {session_id} at {}",
+                        workspace_root.display()
+                    )
+                })
+            {
+                tracing::warn!(session_id, error = %err, "Failed to archive workspace");
+            }
+        });
 
         Ok(())
     }
@@ -595,6 +602,13 @@ pub(crate) fn terminate_process(pid: u32) -> bool {
         }
 
         let pid = pid as libc::pid_t;
+        let host_pgid = unsafe { libc::getpgrp() };
+        let pgid = unsafe { libc::getpgid(pid) };
+        let target_pgid = (pgid > 0 && pgid != host_pgid).then_some(pgid);
+
+        if let Some(pgid) = target_pgid {
+            let _ = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+        }
         // SAFETY: libc::kill sends a termination signal to an explicit pid.
         let terminated = unsafe { libc::kill(pid, libc::SIGTERM) };
         if terminated != 0 {
@@ -612,6 +626,9 @@ pub(crate) fn terminate_process(pid: u32) -> bool {
             }
         }
 
+        if let Some(pgid) = target_pgid {
+            let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        }
         // SAFETY: SIGKILL is the final fallback after a bounded SIGTERM wait.
         let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
         killed == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)

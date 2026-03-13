@@ -316,7 +316,10 @@ async function resolveTailscaleAccess(
   loopbackRequest: boolean,
 ): Promise<DashboardAccess | null> {
   const runtimeState = readRemoteAccessRuntimeState();
-  if (runtimeState?.provider !== "tailscale" || runtimeState.status !== "ready") {
+  const tailscaleRuntimeAvailable = runtimeState?.provider === "tailscale"
+    && (runtimeState.status === "ready" || runtimeState.status === "starting")
+    && Boolean(runtimeState.publicUrl);
+  if (!tailscaleRuntimeAvailable) {
     return null;
   }
 
