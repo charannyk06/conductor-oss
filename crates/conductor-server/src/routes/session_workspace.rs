@@ -563,9 +563,8 @@ fn sanitize_relative_path(value: &str) -> anyhow::Result<String> {
         .trim()
         .trim_start_matches('/')
         .to_string();
-    anyhow::ensure!(!cleaned.is_empty(), "Path cannot be empty");
     anyhow::ensure!(
-        !cleaned.contains("../"),
+        !cleaned.contains("../") && !cleaned.starts_with(".."),
         "Path must stay within the session workspace"
     );
     Ok(cleaned)
