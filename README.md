@@ -49,7 +49,7 @@ If you already use tools like Claude Code, Codex, Gemini, Qwen Code, Cursor Agen
 - Markdown-native planning: boards remain readable outside the app.
 - Multi-agent support with adapter-based discovery and launch logic.
 - Worktree-aware execution for parallel changes in the same repository.
-- Session recovery after backend restarts, including tmux reattach for live runtimes.
+- Session recovery after backend restarts, including direct PTY terminal restore for live runtimes.
 - GitHub-aware flows for repository import, PR metadata, checks, and project syncing.
 - MCP server mode for integrating Conductor with external clients.
 
@@ -76,7 +76,6 @@ Availability still depends on what is installed and authenticated on your machin
 
 - Node.js `>= 18`
 - `git`
-- `tmux`
 - at least one supported coding-agent CLI installed and authenticated
 
 ### Launch Conductor
@@ -155,7 +154,7 @@ Common launcher commands:
 - `co list` - list sessions
 - `co status` - summarize session state
 - `co send` - send a follow-up to a session
-- `co attach` - attach your terminal to a session's tmux pane
+- `co attach` - legacy command kept only to explain the direct-terminal migration
 - `co restore` - restore an exited session
 - `co retry` - create a new attempt from an earlier task or session
 - `co kill` - terminate a session
@@ -176,8 +175,8 @@ Conductor uses a small set of local files:
   Markdown kanban board used for planning and dispatch.
 - `.conductor/conductor.db`
   SQLite persistence for sessions, metadata, and runtime state.
-- `.conductor/rust-backend/tmux/`
-  Runtime artifacts for tmux-backed sessions.
+- `.conductor/rust-backend/detached/`
+  Runtime artifacts for direct PTY-backed sessions.
 - `attachments/...`
   Uploaded session files and generated artifacts.
 
@@ -202,7 +201,7 @@ The Rust backend is the orchestration core. It handles:
 
 - session lifecycle and spawn queueing
 - executor discovery and agent adapters
-- tmux-backed runtime management
+- direct PTY runtime management
 - workspace and worktree preparation
 - SQLite persistence
 - SSE event streaming
@@ -245,7 +244,7 @@ Key runtime properties:
 
 - local-first
 - SQLite-only persistence
-- tmux-backed interactive sessions
+- direct PTY-backed interactive sessions
 - agent-agnostic execution
 - Markdown-native board state
 
@@ -256,8 +255,6 @@ Requirements:
 - Bun `>= 1.2`
 - Node.js `>= 18`
 - Rust toolchain
-- `tmux`
-
 Install dependencies:
 
 ```bash
@@ -289,7 +286,7 @@ bun run typecheck
 
 ## Current Constraints
 
-- `tmux` is effectively required for the interactive runtime.
+- The interactive runtime is direct PTY-backed; old tmux sessions are treated as legacy compatibility data.
 - Agent behavior and output quality depend on the upstream CLI you install.
 - GitHub-heavy flows work best with `gh` installed and authenticated.
 - Preview tooling is strongest when a repo exposes a local dev server or preview URL.
