@@ -1425,6 +1425,23 @@ impl AppState {
                 let deadline = exit_deadline.get_or_insert_with(|| {
                     tokio::time::Instant::now() + DETACHED_EXIT_WAIT_TIMEOUT
                 });
+                // Catch up on any output written to the log file that the stream
+                // forwarder missed (e.g. when the agent exits before the stream
+                // connection is fully established).
+                if let Ok(Some((next_offset, chunk))) =
+                    read_detached_log_chunk(&metadata.log_path, offset).await
+                {
+                    self.emit_terminal_bytes(&session_id, &chunk).await;
+                    let lines = split_detached_log_lines(&mut partial, &chunk);
+                    for line in lines {
+                        if output_tx.send(ExecutorOutput::Stdout(line)).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    offset = next_offset;
+                    self.update_detached_output_offset(&session_id, offset)
+                        .await?;
+                }
                 flush_detached_partial_line(&output_tx, &mut partial).await?;
                 if let Some(exit_code) = read_detached_exit_code(&metadata.exit_path).await? {
                     emit_detached_runtime_exit(&self, &session_id, &output_tx, exit_code).await;
