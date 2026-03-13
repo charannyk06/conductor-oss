@@ -10,7 +10,6 @@ import ora from "ora";
 import type { Command } from "commander";
 import {
   apiCall,
-  sessionTmuxTarget,
   sessionWorktree,
   type BackendSession,
   type SessionResponse,
@@ -42,8 +41,7 @@ export function registerRestore(program: Command): void {
           console.log(chalk.dim(`  Branch:   ${session.branch}`));
         }
 
-        const tmuxTarget = sessionTmuxTarget(session);
-        console.log(chalk.dim(`  Attach:   tmux attach -t ${tmuxTarget}`));
+        console.log(chalk.dim("  Terminal: Open the session in the dashboard terminal"));
       } catch (err) {
         spinner.fail("Failed to restore session");
         console.error(chalk.red(String(err)));

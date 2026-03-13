@@ -358,14 +358,6 @@ function buildBaseChecks(
       install: !commandExists("git") ? buildPackageInstall("Install Git", "git", "git") : undefined,
     },
     {
-      id: "tmux",
-      label: "tmux",
-      description: "Keeps long-running work alive even if the dashboard closes.",
-      installed: commandExists("tmux"),
-      detail: commandExists("tmux") ? "Ready" : "Missing. Conductor can install it for you.",
-      install: !commandExists("tmux") ? buildPackageInstall("Install tmux", "tmux", "tmux") : undefined,
-    },
-    {
       id: "gh",
       label: "GitHub CLI",
       description: "Needed for repository discovery, pull requests, and CI integration.",
