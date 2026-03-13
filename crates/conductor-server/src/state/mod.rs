@@ -7,7 +7,6 @@ mod session_manager;
 mod session_store;
 mod spawn_queue;
 mod terminal_hosts;
-mod tmux_runtime;
 pub mod types;
 mod workspace;
 
@@ -21,9 +20,6 @@ pub use helpers::{
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
 pub(crate) use session_manager::OutputConsumerConfig;
-pub(crate) use tmux_runtime::{
-    capture_tmux_pane, tmux_runtime_metadata, tmux_session_exists, TMUX_LOG_PATH_METADATA_KEY,
-};
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
     SpawnRequest, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
@@ -79,6 +75,7 @@ struct DashboardSnapshotCache {
 
 struct FeedPayloadCacheEntry {
     payload: Value,
+    window_limit: usize,
 }
 
 const RUNTIME_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
@@ -372,19 +369,32 @@ impl AppState {
         self.feed_payload_cache.lock().await.remove(session_id);
     }
 
-    pub(crate) async fn cached_feed_payload(&self, session_id: &str) -> Option<Value> {
+    pub(crate) async fn cached_feed_payload(
+        &self,
+        session_id: &str,
+        window_limit: usize,
+    ) -> Option<Value> {
         self.feed_payload_cache
             .lock()
             .await
             .get(session_id)
+            .filter(|entry| entry.window_limit == window_limit)
             .map(|entry| entry.payload.clone())
     }
 
-    pub(crate) async fn store_feed_payload(&self, session_id: &str, payload: Value) {
-        self.feed_payload_cache
-            .lock()
-            .await
-            .insert(session_id.to_string(), FeedPayloadCacheEntry { payload });
+    pub(crate) async fn store_feed_payload(
+        &self,
+        session_id: &str,
+        window_limit: usize,
+        payload: Value,
+    ) {
+        self.feed_payload_cache.lock().await.insert(
+            session_id.to_string(),
+            FeedPayloadCacheEntry {
+                payload,
+                window_limit,
+            },
+        );
     }
 
     pub(crate) fn start_terminal_host_watchdog(self: &Arc<Self>) {

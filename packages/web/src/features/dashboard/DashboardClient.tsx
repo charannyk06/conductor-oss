@@ -71,6 +71,7 @@ import {
 } from "@/lib/runtimeAgentModelsShared";
 
 const DEFAULT_AGENT = "claude-code";
+const SESSION_DETAIL_KEEPALIVE_LIMIT = 1;
 type DashboardWorkspaceView = "chat" | "board";
 
 function normalizeDashboardQueryValue(value: string | null): string | null {
@@ -1177,6 +1178,7 @@ export default function DashboardClient() {
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
   const [preferencesDialogOpen, setPreferencesDialogOpen] = useState(false);
   const [pendingWorkspaceSetup, setPendingWorkspaceSetup] = useState(false);
+  const [mountedSessionIds, setMountedSessionIds] = useState<string[]>(() => selectedSessionId ? [selectedSessionId] : []);
 
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const sessionsById = useMemo(
@@ -1309,6 +1311,26 @@ export default function DashboardClient() {
     sessionsError,
     sessionsLoading,
   ]);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setMountedSessionIds([]);
+      return;
+    }
+
+    setMountedSessionIds((current) => {
+      const next = [selectedSessionId, ...current.filter((sessionId) => sessionId !== selectedSessionId)];
+      return next.slice(0, SESSION_DETAIL_KEEPALIVE_LIMIT);
+    });
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !needsSessionsList || sessionsLoading || sessionsError) {
+      return;
+    }
+
+    setMountedSessionIds((current) => current.filter((sessionId) => sessionId === selectedSessionId || sessionsById.has(sessionId)));
+  }, [needsSessionsList, selectedSessionId, sessionsById, sessionsError, sessionsLoading]);
 
   const selectedSession = useMemo(
     () => selectedSessionRecord,
@@ -1754,13 +1776,13 @@ export default function DashboardClient() {
     closeSidebarOnMobile();
   }, [closeSidebarOnMobile, navigateDashboard, preferences?.codingAgent, workspaceView]);
 
-  const handleSelectSession = useCallback((id: string) => {
+  const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" }) => {
     const matchedSession = sessionsById.get(id) ?? null;
     navigateDashboard(
       {
         projectId: matchedSession?.projectId ?? selectedProjectId ?? null,
         sessionId: id,
-        tab: null,
+        tab: options?.tab ?? null,
       },
       "push",
     );
@@ -1937,7 +1959,25 @@ export default function DashboardClient() {
 
   const workspaceContent = useMemo(() => {
     if (selectedSessionId) {
-      return <SessionDetail key={selectedSessionId} sessionId={selectedSessionId} initialSession={selectedSession} />;
+      return (
+        <div className="relative min-h-0 h-full flex-1 overflow-hidden">
+          {mountedSessionIds.map((sessionId) => {
+            const sessionActive = sessionId === selectedSessionId;
+            const initialSession = sessionActive ? selectedSession : sessionsById.get(sessionId) ?? null;
+            return (
+              <div
+                key={sessionId}
+                aria-hidden={!sessionActive}
+                className={sessionActive
+                  ? "relative h-full"
+                  : "pointer-events-none absolute inset-0 overflow-hidden invisible"}
+              >
+                <SessionDetail sessionId={sessionId} initialSession={initialSession} active={sessionActive} />
+              </div>
+            );
+          })}
+        </div>
+      );
     }
 
     if (selectedProjectId !== null) {
@@ -1960,12 +2000,15 @@ export default function DashboardClient() {
     );
   }, [
     dashboardSessions,
+    mountedSessionIds,
     projectWorkspaceContent,
+    selectedSession,
     selectedSessionId,
     handleSelectSession,
     openWorkspaceDialog,
     projects,
     selectedProjectId,
+    sessionsById,
   ]);
 
   return (
@@ -1981,7 +2024,7 @@ export default function DashboardClient() {
           onOpenPreferences={handleOpenPreferences}
         />
 
-        <div className="min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {workspaceContent}
         </div>
       </AppShell>

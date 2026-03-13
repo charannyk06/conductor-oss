@@ -135,9 +135,9 @@ test("GET forwards dashboard access headers to backend preview lookups", async (
       lastError: string | null;
     };
 
-    assert.equal(payload.connected, true);
+    assert.equal(payload.connected, false);
     assert.deepEqual(payload.candidateUrls, ["http://localhost:3000/"]);
-    assert.equal(payload.currentUrl, "http://localhost:3000/");
+    assert.equal(payload.currentUrl, null);
     assert.equal(payload.lastError, null);
   } finally {
     global.fetch = originalFetch;

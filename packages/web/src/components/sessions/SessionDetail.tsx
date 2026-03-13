@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   FileCode,
@@ -16,15 +17,47 @@ import { Badge } from "@/components/ui/Badge";
 import { useSession } from "@/hooks/useSession";
 import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
-import { SessionDiff } from "./SessionDiff";
-import { SessionPreview } from "./SessionPreview";
 import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
-import { SessionTerminal } from "./SessionTerminal";
+import type { TerminalInsertRequest } from "./terminalInsert";
+
+const SessionTerminal = dynamic(
+  () => import("./SessionTerminal").then((mod) => mod.SessionTerminal),
+  {
+    loading: () => (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading terminal...
+      </div>
+    ),
+  },
+);
+
+const SessionPreview = dynamic(
+  () => import("./SessionPreview").then((mod) => mod.SessionPreview),
+  {
+    loading: () => (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading preview...
+      </div>
+    ),
+  },
+);
+
+const SessionDiff = dynamic(
+  () => import("./SessionDiff").then((mod) => mod.SessionDiff),
+  {
+    loading: () => (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading diff...
+      </div>
+    ),
+  },
+);
 
 interface SessionDetailProps {
   sessionId: string;
   initialSession?: DashboardSession | null;
   immersiveMobileMode?: boolean;
+  active?: boolean;
 }
 
 type SessionTab = "overview" | "terminal" | "diff" | "preview";
@@ -57,11 +90,15 @@ export function SessionDetail({
   sessionId,
   initialSession = null,
   immersiveMobileMode = false,
+  active = true,
 }: SessionDetailProps) {
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { session, loading, error } = useSession(sessionId, initialSession);
+  const { session, loading, error } = useSession(sessionId, initialSession, { enabled: active });
+  const terminalInsertNonceRef = useRef(0);
+  const autoPreviewOpenedRef = useRef(false);
+  const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
   const [mobileTerminalPanelOpen, setMobileTerminalPanelOpen] = useState(false);
   const activeTab = useMemo(
     () => resolveSessionTab(searchParams.get("tab")),
@@ -80,11 +117,35 @@ export function SessionDetail({
     const nextUrl = nextQuery.length > 0 ? `${pathname}?${nextQuery}` : pathname;
     router.replace(nextUrl, { scroll: false });
   }, [pathname, router, searchParams]);
+  const queueTerminalInsert = useCallback((request: Omit<TerminalInsertRequest, "nonce">) => {
+    terminalInsertNonceRef.current += 1;
+    setPendingTerminalInsert({
+      nonce: terminalInsertNonceRef.current,
+      ...request,
+    });
+  }, []);
+  useEffect(() => {
+    autoPreviewOpenedRef.current = false;
+    terminalInsertNonceRef.current = 0;
+    setPendingTerminalInsert(null);
+  }, [sessionId]);
   useEffect(() => {
     if (!immersiveMobileMode || activeTab !== "terminal") {
       setMobileTerminalPanelOpen(false);
     }
   }, [activeTab, immersiveMobileMode, sessionId]);
+  useEffect(() => {
+    if (!active) {
+      setMobileTerminalPanelOpen(false);
+    }
+  }, [active]);
+  const handlePreviewConnectionChange = useCallback((connected: boolean) => {
+    if (!connected || !active || activeTab !== "terminal" || autoPreviewOpenedRef.current) {
+      return;
+    }
+    autoPreviewOpenedRef.current = true;
+    handleTabChange("preview");
+  }, [active, activeTab, handleTabChange]);
 
   if (loading) {
     return (
@@ -128,7 +189,9 @@ export function SessionDetail({
   const sessionReasoningEffort = session.metadata["reasoningEffort"]?.trim() ?? "";
   const compactStatusLabel = getCompactSessionStatusLabel(status);
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
-  const immersiveTerminalActive = immersiveMobileMode && activeTab === "terminal";
+  const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
+  const terminalTabActive = active && activeTab === "terminal";
+  const previewTabActive = active && activeTab === "preview";
   const sessionTabs = (
     <TabsList className={immersiveTerminalActive ? "grid w-full grid-cols-4" : "grid w-full grid-cols-4 sm:w-fit sm:inline-flex"}>
       <TabsTrigger value="overview" className="justify-center px-2 text-[11px] sm:px-2.5 sm:text-[12px]">
@@ -207,46 +270,51 @@ export function SessionDetail({
               </div>
             </div>
           ) : null}
-          <TabsContent value="overview" className="min-h-0 h-full overflow-auto">
-            <SessionOverview key={sessionId} session={session} />
+          <TabsContent value="overview" className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
+            <SessionOverview session={session} />
           </TabsContent>
 
           <TabsContent
             value="terminal"
-            forceMount
             className={immersiveTerminalActive
-              ? "min-h-0 h-full overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-              : "min-h-0 h-full overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
+              ? "flex min-h-0 h-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+              : "flex min-h-0 h-full flex-col overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
           >
-            <SessionTerminal
-              key={sessionId}
-              sessionId={sessionId}
-              agentName={agentName}
-              projectId={session.projectId}
-              sessionModel={sessionModel}
+            {terminalTabActive ? (
+              <SessionTerminal
+                key={sessionId}
+                sessionId={sessionId}
+                agentName={agentName}
+                projectId={session.projectId}
+                sessionModel={sessionModel}
               sessionReasoningEffort={sessionReasoningEffort}
               sessionState={status}
-              active={activeTab === "terminal"}
-              pendingInsert={null}
+              active={terminalTabActive}
+              pendingInsert={pendingTerminalInsert}
               immersiveMobileMode={immersiveTerminalActive}
             />
+          ) : null}
           </TabsContent>
 
           <TabsContent
             value="preview"
             className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
           >
-            {activeTab === "preview" ? (
+            {previewTabActive ? (
               <SessionPreview
                 key={sessionId}
                 sessionId={sessionId}
-                active
+                active={previewTabActive}
+                onQueueTerminalInsert={queueTerminalInsert}
+                onConnectionChange={handlePreviewConnectionChange}
               />
             ) : null}
           </TabsContent>
 
-          <TabsContent value="diff" className="min-h-0 h-full overflow-auto">
-            <SessionDiff key={sessionId} sessionId={sessionId} />
+          <TabsContent value="diff" className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
+            {activeTab === "diff" ? (
+              <SessionDiff key={sessionId} sessionId={sessionId} active={active && activeTab === "diff"} />
+            ) : null}
           </TabsContent>
         </div>
       </Tabs>

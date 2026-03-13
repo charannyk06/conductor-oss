@@ -1,45 +1,49 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { diffLines } from "diff";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
   FileCode2,
-  FilePlus2,
-  Folder,
-  FolderOpen,
   GitCompare,
-  Minus,
-  Plus,
+  LoaderCircle,
   RefreshCw,
   Search,
-  WrapText,
-  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { cn } from "@/lib/cn";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import { TERMINAL_STATUSES, type SSESessionEvent } from "@/lib/types";
 
-type ReviewDiffKind = "meta" | "hunk" | "context" | "add" | "remove" | "info";
 type ReviewDiffSource = "working-tree" | "remote-pr" | "not-found";
-type ReviewDiffStatus = "modified" | "added" | "deleted" | "renamed" | "copy" | "binary" | "unknown";
+type ReviewDiffStatus =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "copy"
+  | "binary"
+  | "untracked"
+  | "unknown";
+type DiffCategory = "against-base" | "staged" | "unstaged" | "untracked";
+type DiffViewMode = "side-by-side" | "inline";
+type DiffSideKind = "context" | "add" | "remove" | "empty";
 
-interface ReviewDiffLine {
-  kind: ReviewDiffKind;
-  oldLine: number | null;
-  newLine: number | null;
-  text: string;
-}
-
-interface ReviewDiffFile {
+interface ChangedFileSummary {
   path: string;
+  oldPath?: string | null;
   status: ReviewDiffStatus;
   additions: number;
   deletions: number;
-  lines: ReviewDiffLine[];
-  untracked?: boolean;
+}
+
+interface ReviewDiffSections {
+  againstBase: ChangedFileSummary[];
+  staged: ChangedFileSummary[];
+  unstaged: ChangedFileSummary[];
+  untracked: ChangedFileSummary[];
 }
 
 interface ReviewDiffPayload {
@@ -47,68 +51,111 @@ interface ReviewDiffPayload {
   generatedAt: string;
   source: ReviewDiffSource;
   truncated: boolean;
-  files: ReviewDiffFile[];
-  untracked: string[];
+  branch?: string;
+  defaultBranch?: string;
+  files?: ChangedFileSummary[];
+  untracked?: string[];
+  sections?: Partial<ReviewDiffSections>;
 }
 
-interface WorkspaceFilesPayload {
-  workspacePath: string;
-  files: string[];
-  truncated: boolean;
-}
-
-interface WorkspaceFileContentPayload {
-  workspacePath: string;
+interface FileContentsPayload {
   path: string;
-  content: string | null;
-  size: number;
+  oldPath?: string | null;
+  status: ReviewDiffStatus;
+  category: DiffCategory;
+  baseBranch?: string;
   binary: boolean;
   truncated: boolean;
+  originalSize: number;
+  modifiedSize: number;
+  original: string | null;
+  modified: string | null;
 }
 
-interface FileTreeFileNode {
-  kind: "file";
-  name: string;
-  path: string;
-  additions: number;
-  deletions: number;
-  status: ReviewDiffStatus;
-  untracked: boolean;
-}
-
-interface FileTreeDirNode {
-  kind: "dir";
-  name: string;
-  path: string;
-  additions: number;
-  deletions: number;
-  fileCount: number;
-  children: FileTreeNode[];
-}
-
-type FileTreeNode = FileTreeFileNode | FileTreeDirNode;
-
-interface MutableDirNode {
-  name: string;
-  path: string;
-  dirs: Map<string, MutableDirNode>;
-  files: FileTreeFileNode[];
+interface FileContentsState {
+  loading: boolean;
+  loaded: boolean;
+  error: string | null;
+  data: FileContentsPayload | null;
 }
 
 interface SessionDiffProps {
   sessionId: string;
+  active: boolean;
 }
+
+interface FileEntry {
+  category: DiffCategory;
+  file: ChangedFileSummary;
+  fileKey: string;
+}
+
+interface SplitDiffRow {
+  kind: "content" | "skip";
+  oldKind: DiffSideKind;
+  newKind: DiffSideKind;
+  oldLine: number | null;
+  newLine: number | null;
+  oldText: string;
+  newText: string;
+  message?: string;
+}
+
+interface InlineDiffRow {
+  kind: "content" | "skip";
+  lineKind: "context" | "add" | "remove";
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+  message?: string;
+}
+
+const EMPTY_FILE_STATE: FileContentsState = {
+  loading: false,
+  loaded: false,
+  error: null,
+  data: null,
+};
+
+const EMPTY_SECTIONS: ReviewDiffSections = {
+  againstBase: [],
+  staged: [],
+  unstaged: [],
+  untracked: [],
+};
 
 const EMPTY_PAYLOAD: ReviewDiffPayload = {
   hasDiff: false,
   generatedAt: "",
   source: "not-found",
   truncated: false,
+  branch: "",
+  defaultBranch: "",
   files: [],
   untracked: [],
+  sections: EMPTY_SECTIONS,
 };
+
 const ACTIVE_DIFF_REFRESH_MS = 15_000;
 const HIDDEN_DIFF_REFRESH_MS = 30_000;
+const CONTEXT_RADIUS = 3;
+const STORAGE_KEYS = {
+  viewMode: "conductor-session-diff-view-mode",
+  hideUnchanged: "conductor-session-diff-hide-unchanged",
+};
+const SECTION_ORDER: DiffCategory[] = ["against-base", "staged", "unstaged", "untracked"];
+const SECTION_TITLES: Record<DiffCategory, string> = {
+  "against-base": "Against base",
+  staged: "Staged",
+  unstaged: "Unstaged",
+  untracked: "Untracked",
+};
+
+function normalizePath(path: unknown): string {
+  if (typeof path !== "string") return "";
+  const compact = path.trim().replace(/^\/+/, "").replace(/\/+/g, "/");
+  return compact;
+}
 
 function coerceStatus(value: unknown): ReviewDiffStatus {
   if (
@@ -117,207 +164,81 @@ function coerceStatus(value: unknown): ReviewDiffStatus {
     value === "deleted" ||
     value === "renamed" ||
     value === "copy" ||
-    value === "binary"
+    value === "binary" ||
+    value === "untracked"
   ) {
     return value;
   }
   return "unknown";
 }
 
-function coerceKind(value: unknown): ReviewDiffKind {
-  if (
-    value === "meta" ||
-    value === "hunk" ||
-    value === "context" ||
-    value === "add" ||
-    value === "remove" ||
-    value === "info"
-  ) {
-    return value;
-  }
-  return "context";
-}
-
-function normalizePath(path: unknown): string {
-  if (typeof path !== "string") return "";
-  const compact = path.trim().replace(/^\/+/, "").replace(/\/+/g, "/");
-  return compact || "unknown-file";
-}
-
-function normalizeDiffFiles(payload: ReviewDiffPayload): ReviewDiffFile[] {
-  const fileMap = new Map<string, ReviewDiffFile>();
-
-  for (const raw of payload.files ?? []) {
-    const path = normalizePath(raw.path);
-    const normalized: ReviewDiffFile = {
-      path,
-      status: coerceStatus(raw.status),
-      additions: Number.isFinite(raw.additions) ? Math.max(0, raw.additions) : 0,
-      deletions: Number.isFinite(raw.deletions) ? Math.max(0, raw.deletions) : 0,
-      lines: Array.isArray(raw.lines)
-        ? raw.lines.map((line) => ({
-            kind: coerceKind(line.kind),
-            oldLine: typeof line.oldLine === "number" && Number.isFinite(line.oldLine) ? line.oldLine : null,
-            newLine: typeof line.newLine === "number" && Number.isFinite(line.newLine) ? line.newLine : null,
-            text: typeof line.text === "string" ? line.text : "",
-          }))
-        : [],
-      untracked: Boolean(raw.untracked),
-    };
-    fileMap.set(path, normalized);
-  }
-
-  for (const path of payload.untracked ?? []) {
-    const normalizedPath = normalizePath(path);
-    if (fileMap.has(normalizedPath)) continue;
-    fileMap.set(normalizedPath, {
-      path: normalizedPath,
-      status: "added",
-      additions: 0,
-      deletions: 0,
-      lines: [],
-      untracked: true,
-    });
-  }
-
-  return [...fileMap.values()].sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
-}
-
-function createMutableDir(name: string, path: string): MutableDirNode {
+function normalizeChangedFile(value: Partial<ChangedFileSummary>): ChangedFileSummary | null {
+  const path = normalizePath(value.path);
+  if (!path) return null;
   return {
-    name,
     path,
-    dirs: new Map<string, MutableDirNode>(),
-    files: [],
+    oldPath: normalizePath(value.oldPath ?? "") || null,
+    status: coerceStatus(value.status),
+    additions: Number.isFinite(value.additions) ? Math.max(0, Number(value.additions)) : 0,
+    deletions: Number.isFinite(value.deletions) ? Math.max(0, Number(value.deletions)) : 0,
   };
 }
 
-function toTreeNode(node: MutableDirNode): FileTreeDirNode {
-  const dirChildren = [...node.dirs.values()]
-    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }))
-    .map(toTreeNode);
+function normalizeSections(payload: ReviewDiffPayload): ReviewDiffSections {
+  const normalizeList = (files: unknown): ChangedFileSummary[] => {
+    if (!Array.isArray(files)) return [];
+    return files
+      .map((file) => normalizeChangedFile(file as Partial<ChangedFileSummary>))
+      .filter((file): file is ChangedFileSummary => file !== null);
+  };
 
-  const fileChildren = [...node.files].sort((a, b) =>
-    a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+  const againstBase = normalizeList(payload.sections?.againstBase ?? payload.files ?? []);
+  const staged = normalizeList(payload.sections?.staged ?? []);
+  const unstaged = normalizeList(payload.sections?.unstaged ?? []);
+  const untracked = normalizeList(payload.sections?.untracked ?? []).concat(
+    Array.isArray(payload.untracked)
+      ? payload.untracked
+        .map((path) => normalizeChangedFile({
+          path,
+          status: "untracked",
+          additions: 0,
+          deletions: 0,
+        }))
+        .filter((file): file is ChangedFileSummary => file !== null)
+      : [],
   );
 
-  const children: FileTreeNode[] = [...dirChildren, ...fileChildren];
-  let additions = 0;
-  let deletions = 0;
-  let fileCount = 0;
-
-  for (const child of children) {
-    if (child.kind === "dir") {
-      additions += child.additions;
-      deletions += child.deletions;
-      fileCount += child.fileCount;
-      continue;
+  const dedupe = (files: ChangedFileSummary[]) => {
+    const map = new Map<string, ChangedFileSummary>();
+    for (const file of files) {
+      map.set(`${file.path}:${file.oldPath ?? ""}:${file.status}`, file);
     }
-    additions += child.additions;
-    deletions += child.deletions;
-    fileCount += 1;
-  }
+    return [...map.values()].sort((left, right) => left.path.localeCompare(right.path, undefined, { sensitivity: "base" }));
+  };
 
   return {
-    kind: "dir",
-    name: node.name,
-    path: node.path,
-    additions,
-    deletions,
-    fileCount,
-    children,
+    againstBase: dedupe(againstBase),
+    staged: dedupe(staged),
+    unstaged: dedupe(unstaged),
+    untracked: dedupe(untracked),
   };
 }
 
-function buildFileTree(files: ReviewDiffFile[]): FileTreeDirNode {
-  const root = createMutableDir("", "");
-
-  for (const file of files) {
-    const segments = file.path.split("/").filter((segment) => segment.length > 0);
-    const fileName = segments.pop() ?? file.path;
-    let cursor = root;
-    let currentPath = "";
-
-    for (const segment of segments) {
-      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
-      const existing = cursor.dirs.get(segment);
-      if (existing) {
-        cursor = existing;
-        continue;
-      }
-      const next = createMutableDir(segment, currentPath);
-      cursor.dirs.set(segment, next);
-      cursor = next;
-    }
-
-    cursor.files.push({
-      kind: "file",
-      name: fileName,
-      path: file.path,
-      additions: file.additions,
-      deletions: file.deletions,
-      status: file.status,
-      untracked: Boolean(file.untracked),
-    });
+function getSectionFiles(sections: ReviewDiffSections, category: DiffCategory): ChangedFileSummary[] {
+  if (category === "against-base") {
+    return sections.againstBase;
   }
-
-  return toTreeNode(root);
+  return sections[category];
 }
 
-function statusLabel(file: ReviewDiffFile): string {
-  if (file.untracked) return "Untracked";
-  if (file.status === "added") return "Added";
-  if (file.status === "deleted") return "Deleted";
-  if (file.status === "renamed") return "Renamed";
-  if (file.status === "copy") return "Copied";
-  if (file.status === "binary") return "Binary";
-  if (file.status === "modified") return "Modified";
-  return "Changed";
+function createFileKey(category: DiffCategory, file: ChangedFileSummary): string {
+  return `${category}:${file.oldPath ?? ""}:${file.path}`;
 }
 
 function sourceLabel(source: ReviewDiffSource): string {
-  if (source === "working-tree") return "Working Tree";
+  if (source === "working-tree") return "Working tree";
   if (source === "remote-pr") return "Remote PR";
-  return "Not Found";
-}
-
-function markerForLine(kind: ReviewDiffKind): string {
-  if (kind === "add") return "+";
-  if (kind === "remove") return "-";
-  if (kind === "hunk") return "@";
-  if (kind === "info") return "i";
-  return "";
-}
-
-function lineTone(kind: ReviewDiffKind): string {
-  if (kind === "add") return "bg-[rgba(84,176,79,0.18)]";
-  if (kind === "remove") return "bg-[rgba(210,81,81,0.18)]";
-  if (kind === "hunk") return "bg-[rgba(108,168,255,0.12)]";
-  return "";
-}
-
-function lineTextTone(kind: ReviewDiffKind): string {
-  if (kind === "add") return "text-[var(--vk-green)]";
-  if (kind === "remove") return "text-[var(--vk-red)]";
-  if (kind === "hunk") return "text-[var(--status-working)]";
-  if (kind === "meta" || kind === "info") return "text-[var(--vk-text-muted)]";
-  return "text-[var(--vk-text-normal)]";
-}
-
-function statusPillClass(file: ReviewDiffFile): string {
-  if (file.untracked || file.status === "added") {
-    return "border-[rgba(84,176,79,0.35)] text-[var(--vk-green)]";
-  }
-  if (file.status === "deleted") {
-    return "border-[rgba(210,81,81,0.35)] text-[var(--vk-red)]";
-  }
-  if (file.status === "renamed" || file.status === "copy") {
-    return "border-[rgba(108,168,255,0.35)] text-[var(--status-working)]";
-  }
-  if (file.status === "binary") {
-    return "border-[rgba(210,160,59,0.35)] text-[var(--status-attention)]";
-  }
-  return "border-[var(--vk-border)] text-[var(--vk-text-muted)]";
+  return "Not found";
 }
 
 function formatGeneratedAt(value: string): string {
@@ -332,93 +253,384 @@ function formatGeneratedAt(value: string): string {
   });
 }
 
-function stringArrayEqual(left: string[], right: string[]): boolean {
-  if (left === right) return true;
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    if (left[index] !== right[index]) return false;
-  }
-  return true;
+function statusLabel(file: ChangedFileSummary): string {
+  if (file.status === "added") return "Added";
+  if (file.status === "deleted") return "Deleted";
+  if (file.status === "renamed") return "Renamed";
+  if (file.status === "copy") return "Copied";
+  if (file.status === "binary") return "Binary";
+  if (file.status === "untracked") return "Untracked";
+  if (file.status === "modified") return "Modified";
+  return "Changed";
 }
 
-function diffPayloadEqual(left: ReviewDiffPayload, right: ReviewDiffPayload): boolean {
-  if (
-    left.hasDiff !== right.hasDiff ||
-    left.generatedAt !== right.generatedAt ||
-    left.source !== right.source ||
-    left.truncated !== right.truncated ||
-    !stringArrayEqual(left.untracked, right.untracked) ||
-    left.files.length !== right.files.length
-  ) {
-    return false;
+function statusPillClass(file: ChangedFileSummary): string {
+  if (file.status === "added" || file.status === "untracked") {
+    return "border-[rgba(84,176,79,0.35)] bg-[rgba(84,176,79,0.08)] text-[var(--vk-green)]";
   }
+  if (file.status === "deleted") {
+    return "border-[rgba(210,81,81,0.35)] bg-[rgba(210,81,81,0.08)] text-[var(--vk-red)]";
+  }
+  if (file.status === "renamed" || file.status === "copy") {
+    return "border-[rgba(108,168,255,0.35)] bg-[rgba(108,168,255,0.08)] text-[var(--status-working)]";
+  }
+  if (file.status === "binary") {
+    return "border-[rgba(210,160,59,0.35)] bg-[rgba(210,160,59,0.08)] text-[var(--status-attention)]";
+  }
+  return "border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] text-[var(--vk-text-muted)]";
+}
 
-  for (let fileIndex = 0; fileIndex < left.files.length; fileIndex += 1) {
-    const leftFile = left.files[fileIndex];
-    const rightFile = right.files[fileIndex];
-    if (
-      leftFile.path !== rightFile.path ||
-      leftFile.status !== rightFile.status ||
-      leftFile.additions !== rightFile.additions ||
-      leftFile.deletions !== rightFile.deletions ||
-      Boolean(leftFile.untracked) !== Boolean(rightFile.untracked) ||
-      leftFile.lines.length !== rightFile.lines.length
-    ) {
-      return false;
-    }
+function readStoredViewMode(): DiffViewMode {
+  if (typeof window === "undefined") return "side-by-side";
+  const value = window.localStorage.getItem(STORAGE_KEYS.viewMode);
+  return value === "inline" ? "inline" : "side-by-side";
+}
 
-    for (let lineIndex = 0; lineIndex < leftFile.lines.length; lineIndex += 1) {
-      const leftLine = leftFile.lines[lineIndex];
-      const rightLine = rightFile.lines[lineIndex];
-      if (
-        leftLine.kind !== rightLine.kind ||
-        leftLine.oldLine !== rightLine.oldLine ||
-        leftLine.newLine !== rightLine.newLine ||
-        leftLine.text !== rightLine.text
-      ) {
-        return false;
+function readStoredHideUnchanged(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(STORAGE_KEYS.hideUnchanged) === "true";
+}
+
+function formatSize(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function toDiffLines(value: string): string[] {
+  if (!value) return [];
+  const normalized = value.replace(/\r\n/g, "\n");
+  if (normalized.length === 0) return [];
+  const lines = normalized.split("\n");
+  if (normalized.endsWith("\n")) {
+    lines.pop();
+  }
+  return lines;
+}
+
+function createContentRow(
+  oldKind: DiffSideKind,
+  newKind: DiffSideKind,
+  oldLine: number | null,
+  newLine: number | null,
+  oldText: string,
+  newText: string,
+): SplitDiffRow {
+  return {
+    kind: "content",
+    oldKind,
+    newKind,
+    oldLine,
+    newLine,
+    oldText,
+    newText,
+  };
+}
+
+function buildSplitDiffRows(original: string, modified: string): SplitDiffRow[] {
+  const changes = diffLines(original, modified);
+  const rows: SplitDiffRow[] = [];
+  let oldLine = 1;
+  let newLine = 1;
+
+  for (let index = 0; index < changes.length; index += 1) {
+    const change = changes[index];
+    const lines = toDiffLines(change.value);
+
+    if (change.removed) {
+      const next = changes[index + 1];
+      const nextLines = next?.added ? toDiffLines(next.value) : [];
+      const pairCount = Math.max(lines.length, nextLines.length);
+
+      for (let lineIndex = 0; lineIndex < pairCount; lineIndex += 1) {
+        const oldText = lines[lineIndex] ?? "";
+        const newText = nextLines[lineIndex] ?? "";
+        const hasOld = lineIndex < lines.length;
+        const hasNew = lineIndex < nextLines.length;
+        rows.push(createContentRow(
+          hasOld ? "remove" : "empty",
+          hasNew ? "add" : "empty",
+          hasOld ? oldLine + lineIndex : null,
+          hasNew ? newLine + lineIndex : null,
+          oldText,
+          newText,
+        ));
       }
+
+      oldLine += lines.length;
+      if (next?.added) {
+        newLine += nextLines.length;
+        index += 1;
+      }
+      continue;
+    }
+
+    if (change.added) {
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+        rows.push(createContentRow("empty", "add", null, newLine, "", lines[lineIndex] ?? ""));
+        newLine += 1;
+      }
+      continue;
+    }
+
+    for (const text of lines) {
+      rows.push(createContentRow("context", "context", oldLine, newLine, text, text));
+      oldLine += 1;
+      newLine += 1;
     }
   }
 
-  return true;
+  return rows;
 }
 
-export function SessionDiff({ sessionId }: SessionDiffProps) {
+function collapseSplitRows(rows: SplitDiffRow[]): SplitDiffRow[] {
+  if (rows.length === 0) return rows;
+  const collapsed: SplitDiffRow[] = [];
+  let index = 0;
+
+  while (index < rows.length) {
+    const row = rows[index];
+    const isContext = row.kind === "content" && row.oldKind === "context" && row.newKind === "context";
+    if (!isContext) {
+      collapsed.push(row);
+      index += 1;
+      continue;
+    }
+
+    let end = index;
+    while (end < rows.length) {
+      const candidate = rows[end];
+      const candidateIsContext = candidate.kind === "content" && candidate.oldKind === "context" && candidate.newKind === "context";
+      if (!candidateIsContext) {
+        break;
+      }
+      end += 1;
+    }
+
+    const block = rows.slice(index, end);
+    if (block.length <= CONTEXT_RADIUS * 2 + 1) {
+      collapsed.push(...block);
+    } else {
+      collapsed.push(...block.slice(0, CONTEXT_RADIUS));
+      collapsed.push({
+        kind: "skip",
+        oldKind: "empty",
+        newKind: "empty",
+        oldLine: null,
+        newLine: null,
+        oldText: "",
+        newText: "",
+        message: `${block.length - CONTEXT_RADIUS * 2} unchanged lines hidden`,
+      });
+      collapsed.push(...block.slice(-CONTEXT_RADIUS));
+    }
+
+    index = end;
+  }
+
+  return collapsed;
+}
+
+function toInlineRows(rows: SplitDiffRow[]): InlineDiffRow[] {
+  const inlineRows: InlineDiffRow[] = [];
+
+  for (const row of rows) {
+    if (row.kind === "skip") {
+      inlineRows.push({
+        kind: "skip",
+        lineKind: "context",
+        oldLine: null,
+        newLine: null,
+        text: "",
+        message: row.message,
+      });
+      continue;
+    }
+
+    if (row.oldKind === "context" && row.newKind === "context") {
+      inlineRows.push({
+        kind: "content",
+        lineKind: "context",
+        oldLine: row.oldLine,
+        newLine: row.newLine,
+        text: row.oldText,
+      });
+      continue;
+    }
+
+    if (row.oldKind === "remove") {
+      inlineRows.push({
+        kind: "content",
+        lineKind: "remove",
+        oldLine: row.oldLine,
+        newLine: null,
+        text: row.oldText,
+      });
+    }
+
+    if (row.newKind === "add") {
+      inlineRows.push({
+        kind: "content",
+        lineKind: "add",
+        oldLine: null,
+        newLine: row.newLine,
+        text: row.newText,
+      });
+    }
+  }
+
+  return inlineRows;
+}
+
+function sideClasses(kind: DiffSideKind): string {
+  if (kind === "add") {
+    return "bg-[rgba(84,176,79,0.12)] text-[var(--vk-green)]";
+  }
+  if (kind === "remove") {
+    return "bg-[rgba(210,81,81,0.12)] text-[var(--vk-red)]";
+  }
+  if (kind === "context") {
+    return "text-[var(--vk-text-normal)]";
+  }
+  return "text-[var(--vk-text-muted)]";
+}
+
+function inlineRowClasses(kind: InlineDiffRow["lineKind"]): string {
+  if (kind === "add") {
+    return "bg-[rgba(84,176,79,0.12)] text-[var(--vk-green)]";
+  }
+  if (kind === "remove") {
+    return "bg-[rgba(210,81,81,0.12)] text-[var(--vk-red)]";
+  }
+  return "text-[var(--vk-text-normal)]";
+}
+
+function markerForInlineRow(kind: InlineDiffRow["lineKind"]): string {
+  if (kind === "add") return "+";
+  if (kind === "remove") return "-";
+  return " ";
+}
+
+function SplitDiffView({ rows }: { rows: SplitDiffRow[] }) {
+  return (
+    <div className="min-w-[720px] overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
+      <div className="grid grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+        <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
+        <div className="border-r border-[var(--vk-border)] px-3 py-2">Before</div>
+        <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
+        <div className="px-3 py-2">After</div>
+      </div>
+      <div className="font-mono text-[12px] leading-6">
+        {rows.map((row, index) => {
+          if (row.kind === "skip") {
+            return (
+              <div
+                key={`skip-${index}`}
+                className="border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-center text-[11px] text-[var(--vk-text-muted)] last:border-b-0"
+              >
+                {row.message}
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
+              className="grid grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0"
+            >
+              <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.oldKind))}>
+                {row.oldLine ?? ""}
+              </div>
+              <div className={cn("border-r border-[var(--vk-border)] px-3 py-1 whitespace-pre", sideClasses(row.oldKind))}>
+                {row.oldText || " "}
+              </div>
+              <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.newKind))}>
+                {row.newLine ?? ""}
+              </div>
+              <div className={cn("px-3 py-1 whitespace-pre", sideClasses(row.newKind))}>
+                {row.newText || " "}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function InlineDiffView({ rows }: { rows: InlineDiffRow[] }) {
+  return (
+    <div className="overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
+      <div className="grid grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+        <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
+        <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
+        <div className="border-r border-[var(--vk-border)] px-2 py-2">Op</div>
+        <div className="px-3 py-2">Content</div>
+      </div>
+      <div className="font-mono text-[12px] leading-6">
+        {rows.map((row, index) => {
+          if (row.kind === "skip") {
+            return (
+              <div
+                key={`skip-${index}`}
+                className="border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-center text-[11px] text-[var(--vk-text-muted)] last:border-b-0"
+              >
+                {row.message}
+              </div>
+            );
+          }
+
+          return (
+            <div
+              key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
+              className={cn(
+                "grid grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0",
+                inlineRowClasses(row.lineKind),
+              )}
+            >
+              <div className="border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]">
+                {row.oldLine ?? ""}
+              </div>
+              <div className="border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]">
+                {row.newLine ?? ""}
+              </div>
+              <div className="border-r border-[var(--vk-border)] px-2 py-1 text-center">
+                {markerForInlineRow(row.lineKind)}
+              </div>
+              <div className="px-3 py-1 whitespace-pre">
+                {row.text || " "}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function SessionDiff({ sessionId, active }: SessionDiffProps) {
   const encodedSessionId = encodeURIComponent(sessionId);
   const [payload, setPayload] = useState<ReviewDiffPayload>(EMPTY_PAYLOAD);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [sidebarView, setSidebarView] = useState<"changes" | "files">("changes");
-
+  const [viewMode, setViewMode] = useState<DiffViewMode>(() => readStoredViewMode());
+  const [hideUnchangedRegions, setHideUnchangedRegions] = useState(() => readStoredHideUnchanged());
   const [fileSearch, setFileSearch] = useState("");
-  const [workspaceSearch, setWorkspaceSearch] = useState("");
-  const [wrapLines, setWrapLines] = useState(false);
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [selectedWorkspacePath, setSelectedWorkspacePath] = useState<string | null>(null);
-
-  const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({});
-  const [collapsedDirs, setCollapsedDirs] = useState<Record<string, boolean>>({});
-
-  const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
-  const [workspaceFilesLoaded, setWorkspaceFilesLoaded] = useState(false);
-  const [workspaceFilesLoading, setWorkspaceFilesLoading] = useState(false);
-  const [workspaceFilesError, setWorkspaceFilesError] = useState<string | null>(null);
-  const [workspaceFilesTruncated, setWorkspaceFilesTruncated] = useState(false);
-
-  const [workspaceFileContent, setWorkspaceFileContent] = useState<string>("");
-  const [workspaceFileBinary, setWorkspaceFileBinary] = useState(false);
-  const [workspaceFileTruncated, setWorkspaceFileTruncated] = useState(false);
-  const [workspaceFileSize, setWorkspaceFileSize] = useState(0);
-  const [workspaceFileLoading, setWorkspaceFileLoading] = useState(false);
-  const [workspaceFileError, setWorkspaceFileError] = useState<string | null>(null);
+  const [collapsedSections, setCollapsedSections] = useState<Record<DiffCategory, boolean>>({
+    "against-base": false,
+    staged: false,
+    unstaged: false,
+    untracked: false,
+  });
+  const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
+  const [fileContents, setFileContents] = useState<Record<string, FileContentsState>>({});
 
   const mountedRef = useRef(true);
-  const fileRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const payloadSignatureRef = useRef<string>("");
   const snapshotSignatureRef = useRef<string | null>(null);
   const terminalRef = useRef(false);
-
-  const parsedFiles = useCallback((data: ReviewDiffPayload) => normalizeDiffFiles(data), []);
+  const deferredFileSearch = useDeferredValue(fileSearch.trim().toLowerCase());
 
   const fetchDiff = useCallback(async () => {
     try {
@@ -428,6 +640,7 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
           if (!mountedRef.current) return;
           setPayload(EMPTY_PAYLOAD);
           setError(null);
+          setFileContents({});
           return;
         }
 
@@ -438,15 +651,13 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
             message = data.error;
           }
         } catch {
-          // keep fallback message
+          // Keep fallback message.
         }
         throw new Error(message);
       }
 
       const data = (await res.json()) as Partial<ReviewDiffPayload> & { error?: string };
-
       if (!mountedRef.current) return;
-
       if (data.error) throw new Error(data.error);
 
       const nextPayload: ReviewDiffPayload = {
@@ -454,146 +665,119 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
         generatedAt: typeof data.generatedAt === "string" ? data.generatedAt : "",
         source: data.source === "working-tree" || data.source === "remote-pr" ? data.source : "not-found",
         truncated: Boolean(data.truncated),
-        files: Array.isArray(data.files)
-          ? data.files.map((file) => ({
-              path: normalizePath(file.path),
-              status: coerceStatus(file.status),
-              additions: Number.isFinite(file.additions) ? Math.max(0, Number(file.additions)) : 0,
-              deletions: Number.isFinite(file.deletions) ? Math.max(0, Number(file.deletions)) : 0,
-              lines: Array.isArray(file.lines)
-                ? file.lines.map((line) => ({
-                    kind: coerceKind(line.kind),
-                    oldLine: typeof line.oldLine === "number" && Number.isFinite(line.oldLine) ? line.oldLine : null,
-                    newLine: typeof line.newLine === "number" && Number.isFinite(line.newLine) ? line.newLine : null,
-                    text: typeof line.text === "string" ? line.text : "",
-                  }))
-                : [],
-            }))
-          : [],
-        untracked: Array.isArray(data.untracked)
-          ? data.untracked.filter((path): path is string => typeof path === "string")
-          : [],
+        branch: typeof data.branch === "string" ? data.branch : "",
+        defaultBranch: typeof data.defaultBranch === "string" ? data.defaultBranch : "",
+        files: Array.isArray(data.files) ? data.files : [],
+        untracked: Array.isArray(data.untracked) ? data.untracked.filter((item): item is string => typeof item === "string") : [],
+        sections: data.sections,
       };
-
-      const nextFiles = parsedFiles(nextPayload);
-      setPayload((current) => (diffPayloadEqual(current, nextPayload) ? current : nextPayload));
-      setSelectedPath((current) =>
-        current && nextFiles.some((file) => file.path === current)
-          ? current
-          : (nextFiles[0]?.path ?? null),
-      );
-      setExpandedFiles((current) => {
-        const next = { ...current };
-        for (const file of nextFiles.slice(0, 10)) {
-          if (next[file.path] == null) {
-            next[file.path] = false;
-          }
-        }
-        return next;
+      const nextSignature = JSON.stringify({
+        hasDiff: nextPayload.hasDiff,
+        source: nextPayload.source,
+        truncated: nextPayload.truncated,
+        branch: nextPayload.branch,
+        defaultBranch: nextPayload.defaultBranch,
+        files: nextPayload.files,
+        untracked: nextPayload.untracked,
+        sections: nextPayload.sections,
       });
+
+      setPayload(nextPayload);
+      if (payloadSignatureRef.current !== nextSignature) {
+        payloadSignatureRef.current = nextSignature;
+        setFileContents({});
+      }
       setError(null);
     } catch (err) {
+      if (!mountedRef.current) return;
+      setPayload(EMPTY_PAYLOAD);
+      setError(err instanceof Error ? err.message : "Failed to load diff");
+    } finally {
       if (mountedRef.current) {
-        setPayload(EMPTY_PAYLOAD);
-        setError(err instanceof Error ? err.message : "Failed to load diff");
+        setLoading(false);
       }
-    } finally {
-      if (mountedRef.current) setLoading(false);
-    }
-  }, [encodedSessionId, parsedFiles]);
-
-  const fetchWorkspaceFiles = useCallback(async () => {
-    setWorkspaceFilesLoading(true);
-    try {
-      const res = await fetch(`/api/sessions/${encodedSessionId}/files`, { cache: "no-store" });
-      if (!res.ok) {
-        if (res.status === 404) {
-          if (!mountedRef.current) return;
-          setWorkspaceFiles([]);
-          setWorkspaceFilesLoaded(true);
-          setWorkspaceFilesTruncated(false);
-          setWorkspaceFilesError(null);
-          return;
-        }
-
-        let message = `Failed to load workspace files (${res.status})`;
-        try {
-          const data = (await res.json()) as { error?: string };
-          if (typeof data.error === "string" && data.error.length > 0) {
-            message = data.error;
-          }
-        } catch {
-          // keep fallback
-        }
-        throw new Error(message);
-      }
-
-      const data = (await res.json()) as Partial<WorkspaceFilesPayload>;
-      if (!mountedRef.current) return;
-
-      const files = Array.isArray(data.files)
-        ? data.files.filter((file): file is string => typeof file === "string" && file.trim().length > 0)
-        : [];
-      setWorkspaceFiles(files);
-      setWorkspaceFilesLoaded(true);
-      setWorkspaceFilesTruncated(Boolean(data.truncated));
-      setWorkspaceFilesError(null);
-      setSelectedWorkspacePath((current) => (current && files.includes(current) ? current : (files[0] ?? null)));
-    } catch (err) {
-      if (!mountedRef.current) return;
-      setWorkspaceFiles([]);
-      setWorkspaceFilesLoaded(false);
-      setWorkspaceFilesError(err instanceof Error ? err.message : "Failed to load workspace files");
-    } finally {
-      if (mountedRef.current) setWorkspaceFilesLoading(false);
     }
   }, [encodedSessionId]);
 
-  const fetchWorkspaceFileContent = useCallback(async (path: string) => {
-    setWorkspaceFileLoading(true);
-    try {
-      const query = encodeURIComponent(path);
-      const res = await fetch(`/api/sessions/${encodedSessionId}/files?path=${query}`, { cache: "no-store" });
-      if (!res.ok) {
-        if (res.status === 404) {
-          if (!mountedRef.current) return;
-          setWorkspaceFileContent("");
-          setWorkspaceFileBinary(false);
-          setWorkspaceFileTruncated(false);
-          setWorkspaceFileSize(0);
-          setWorkspaceFileError("File no longer exists in this workspace.");
-          return;
-        }
+  const loadFileContents = useCallback(async (entry: FileEntry, baseBranch: string) => {
+    const { category, file, fileKey } = entry;
 
-        let message = `Failed to load file content (${res.status})`;
+    setFileContents((current) => {
+      const existing = current[fileKey];
+      if (existing?.loading || existing?.loaded) {
+        return current;
+      }
+      return {
+        ...current,
+        [fileKey]: { loading: true, loaded: false, error: null, data: null },
+      };
+    });
+
+    try {
+      const params = new URLSearchParams({
+        path: file.path,
+        category,
+        status: file.status,
+      });
+      if (file.oldPath) {
+        params.set("oldPath", file.oldPath);
+      }
+      if (baseBranch) {
+        params.set("baseBranch", baseBranch);
+      }
+
+      const res = await fetch(`/api/sessions/${encodedSessionId}/diff?${params.toString()}`, { cache: "no-store" });
+      if (!res.ok) {
+        let message = `Failed to load diff contents (${res.status})`;
         try {
           const data = (await res.json()) as { error?: string };
           if (typeof data.error === "string" && data.error.length > 0) {
             message = data.error;
           }
         } catch {
-          // keep fallback
+          // Keep fallback message.
         }
         throw new Error(message);
       }
 
-      const data = (await res.json()) as Partial<WorkspaceFileContentPayload>;
+      const data = (await res.json()) as Partial<FileContentsPayload> & { error?: string };
       if (!mountedRef.current) return;
+      if (data.error) throw new Error(data.error);
 
-      setWorkspaceFileContent(typeof data.content === "string" ? data.content : "");
-      setWorkspaceFileBinary(Boolean(data.binary));
-      setWorkspaceFileTruncated(Boolean(data.truncated));
-      setWorkspaceFileSize(typeof data.size === "number" && Number.isFinite(data.size) ? Math.max(0, data.size) : 0);
-      setWorkspaceFileError(null);
+      setFileContents((current) => ({
+        ...current,
+        [fileKey]: {
+          loading: false,
+          loaded: true,
+          error: null,
+          data: {
+            path: typeof data.path === "string" ? data.path : file.path,
+            oldPath: typeof data.oldPath === "string" ? data.oldPath : null,
+            status: coerceStatus(data.status),
+            category: data.category === "staged" || data.category === "unstaged" || data.category === "untracked"
+              ? data.category
+              : "against-base",
+            baseBranch: typeof data.baseBranch === "string" ? data.baseBranch : baseBranch,
+            binary: Boolean(data.binary),
+            truncated: Boolean(data.truncated),
+            originalSize: Number.isFinite(data.originalSize) ? Math.max(0, Number(data.originalSize)) : 0,
+            modifiedSize: Number.isFinite(data.modifiedSize) ? Math.max(0, Number(data.modifiedSize)) : 0,
+            original: typeof data.original === "string" || data.original === null ? data.original : "",
+            modified: typeof data.modified === "string" || data.modified === null ? data.modified : "",
+          },
+        },
+      }));
     } catch (err) {
       if (!mountedRef.current) return;
-      setWorkspaceFileContent("");
-      setWorkspaceFileBinary(false);
-      setWorkspaceFileTruncated(false);
-      setWorkspaceFileSize(0);
-      setWorkspaceFileError(err instanceof Error ? err.message : "Failed to load file content");
-    } finally {
-      if (mountedRef.current) setWorkspaceFileLoading(false);
+      setFileContents((current) => ({
+        ...current,
+        [fileKey]: {
+          loading: false,
+          loaded: true,
+          error: err instanceof Error ? err.message : "Failed to load diff contents",
+          data: null,
+        },
+      }));
     }
   }, [encodedSessionId]);
 
@@ -601,7 +785,13 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
     mountedRef.current = true;
     snapshotSignatureRef.current = null;
     terminalRef.current = false;
+    if (!active) {
+      return () => {
+        mountedRef.current = false;
+      };
+    }
     void fetchDiff();
+
     const unsubscribe = subscribeToSnapshotEvents((event: SSESessionEvent) => {
       if (!mountedRef.current) return;
       const matchingSession = event.sessions.find((value) => value.id === sessionId);
@@ -652,545 +842,400 @@ export function SessionDiff({ sessionId }: SessionDiffProps) {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [fetchDiff, sessionId]);
+  }, [active, fetchDiff, sessionId]);
 
   useEffect(() => {
-    snapshotSignatureRef.current = null;
-    terminalRef.current = false;
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEYS.viewMode, viewMode);
+  }, [viewMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(STORAGE_KEYS.hideUnchanged, hideUnchangedRegions ? "true" : "false");
+  }, [hideUnchangedRegions]);
+
+  useEffect(() => {
     setLoading(true);
-    setSidebarView("changes");
-    setWorkspaceSearch("");
-    setSelectedWorkspacePath(null);
-    setWorkspaceFiles([]);
-    setWorkspaceFilesLoaded(false);
-    setWorkspaceFilesLoading(false);
-    setWorkspaceFilesError(null);
-    setWorkspaceFilesTruncated(false);
-    setWorkspaceFileContent("");
-    setWorkspaceFileBinary(false);
-    setWorkspaceFileTruncated(false);
-    setWorkspaceFileSize(0);
-    setWorkspaceFileLoading(false);
-    setWorkspaceFileError(null);
+    setError(null);
+    payloadSignatureRef.current = "";
+    setFileSearch("");
+    setSelectedFileKey(null);
+    setFileContents({});
+    setCollapsedSections({
+      "against-base": false,
+      staged: false,
+      unstaged: false,
+      untracked: false,
+    });
   }, [sessionId]);
 
-  useEffect(() => {
-    if (sidebarView !== "files") return;
-    if (workspaceFilesLoaded || workspaceFilesLoading) return;
-    void fetchWorkspaceFiles();
-  }, [fetchWorkspaceFiles, sidebarView, workspaceFilesLoaded, workspaceFilesLoading]);
-
-  useEffect(() => {
-    if (sidebarView !== "files") return;
-    if (!selectedWorkspacePath) return;
-    void fetchWorkspaceFileContent(selectedWorkspacePath);
-  }, [fetchWorkspaceFileContent, selectedWorkspacePath, sidebarView]);
-
-  const allFiles = useMemo(() => normalizeDiffFiles(payload), [payload]);
-  const fileSearchValue = fileSearch.trim().toLowerCase();
-  const filteredFiles = useMemo(
-    () => (fileSearchValue.length === 0
-      ? allFiles
-      : allFiles.filter((file) => file.path.toLowerCase().includes(fileSearchValue))),
-    [allFiles, fileSearchValue],
-  );
-  const tree = useMemo(() => buildFileTree(filteredFiles), [filteredFiles]);
-  const totalAdds = useMemo(
-    () => allFiles.reduce((sum, file) => sum + Math.max(0, file.additions), 0),
-    [allFiles],
-  );
-  const totalDeletes = useMemo(
-    () => allFiles.reduce((sum, file) => sum + Math.max(0, file.deletions), 0),
-    [allFiles],
-  );
-  const selectedFile = useMemo(
-    () => (selectedPath
-      ? allFiles.find((file) => file.path === selectedPath) ?? null
-      : (allFiles[0] ?? null)),
-    [allFiles, selectedPath],
-  );
-  const workspaceSearchValue = workspaceSearch.trim().toLowerCase();
-  const filteredWorkspaceFiles = useMemo(
-    () => (workspaceSearchValue.length === 0
-      ? workspaceFiles
-      : workspaceFiles.filter((path) => path.toLowerCase().includes(workspaceSearchValue))),
-    [workspaceFiles, workspaceSearchValue],
-  );
-
-  function handleSelectFile(path: string) {
-    setSelectedPath(path);
-    setExpandedFiles((current) => ({ ...current, [path]: true }));
-    window.requestAnimationFrame(() => {
-      fileRefs.current[path]?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  }
-
-  function toggleFile(path: string) {
-    setExpandedFiles((current) => {
-      const currentlyExpanded = current[path] ?? false;
-      return { ...current, [path]: !currentlyExpanded };
-    });
-  }
-
-  function toggleDir(path: string) {
-    setCollapsedDirs((current) => ({ ...current, [path]: !current[path] }));
-  }
-
-  function renderTree(nodes: FileTreeNode[], depth = 0): ReactNode[] {
-    const rows: ReactNode[] = [];
-
-    for (const node of nodes) {
-      if (node.kind === "dir") {
-        const collapsed = Boolean(collapsedDirs[node.path]);
-        rows.push(
-          <button
-            key={`dir-${node.path}`}
-            type="button"
-            onClick={() => toggleDir(node.path)}
-            className="flex h-[26px] w-full items-center gap-1.5 pr-2 text-left text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-            style={{ paddingLeft: `${8 + depth * 14}px` }}
-          >
-            {collapsed ? (
-              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
-            ) : (
-              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
-            )}
-            {collapsed ? (
-              <Folder className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
-            ) : (
-              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
-            )}
-            <span className="min-w-0 flex-1 truncate">{node.name}</span>
-            <span className="shrink-0 font-mono text-[11px] text-[var(--vk-text-muted)]">
-              {node.fileCount}
-            </span>
-          </button>,
-        );
-
-        if (!collapsed) {
-          rows.push(...renderTree(node.children, depth + 1));
-        }
-        continue;
-      }
-
-      const active = node.path === selectedPath;
-      rows.push(
-        <button
-          key={`file-${node.path}`}
-          type="button"
-          onClick={() => handleSelectFile(node.path)}
-          className={`flex h-[26px] w-full items-center gap-1.5 pr-2 text-left text-[12px] transition-colors ${
-            active
-              ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-              : "text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-          }`}
-          style={{ paddingLeft: `${8 + depth * 14}px` }}
-        >
-          <span className="inline-flex w-4 shrink-0 justify-center">
-            {node.untracked ? (
-              <FilePlus2 className="h-3.5 w-3.5 text-[var(--vk-green)]" />
-            ) : (
-              <FileCode2 className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
-            )}
-          </span>
-          <span className="min-w-0 flex-1 truncate">{node.name}</span>
-          {node.additions > 0 && (
-            <span className="shrink-0 font-mono text-[11px] text-[var(--vk-green)]">+{node.additions}</span>
-          )}
-          {node.deletions > 0 && (
-            <span className="shrink-0 font-mono text-[11px] text-[var(--vk-red)]">-{node.deletions}</span>
-          )}
-        </button>,
-      );
+  const sections = useMemo(() => normalizeSections(payload), [payload]);
+  const filteredSections = useMemo(() => {
+    if (!deferredFileSearch) {
+      return sections;
     }
 
-    return rows;
-  }
+    const filterFiles = (files: ChangedFileSummary[]) =>
+      files.filter((file) => {
+        const oldPath = file.oldPath ?? "";
+        return file.path.toLowerCase().includes(deferredFileSearch) || oldPath.toLowerCase().includes(deferredFileSearch);
+      });
+
+    return {
+      againstBase: filterFiles(sections.againstBase),
+      staged: filterFiles(sections.staged),
+      unstaged: filterFiles(sections.unstaged),
+      untracked: filterFiles(sections.untracked),
+    };
+  }, [deferredFileSearch, sections]);
+
+  const totals = useMemo(() => {
+    const fileMap = new Map<string, ChangedFileSummary>();
+    for (const category of SECTION_ORDER) {
+      for (const file of getSectionFiles(sections, category)) {
+        const key = createFileKey(category, file);
+        if (!fileMap.has(key)) {
+          fileMap.set(key, file);
+        }
+      }
+    }
+
+    let additions = 0;
+    let deletions = 0;
+    for (const file of fileMap.values()) {
+      additions += file.additions;
+      deletions += file.deletions;
+    }
+
+    return {
+      files: fileMap.size,
+      additions,
+      deletions,
+    };
+  }, [sections]);
+
+  const visibleEntries = useMemo(() => {
+    const entries: FileEntry[] = [];
+    for (const category of SECTION_ORDER) {
+      for (const file of getSectionFiles(filteredSections, category)) {
+        entries.push({
+          category,
+          file,
+          fileKey: createFileKey(category, file),
+        });
+      }
+    }
+    return entries;
+  }, [filteredSections]);
+
+  const allEntries = useMemo(() => {
+    const entries = new Map<string, FileEntry>();
+    for (const category of SECTION_ORDER) {
+      for (const file of getSectionFiles(sections, category)) {
+        const fileKey = createFileKey(category, file);
+        entries.set(fileKey, { category, file, fileKey });
+      }
+    }
+    return entries;
+  }, [sections]);
+
+  useEffect(() => {
+    if (visibleEntries.length === 0) {
+      setSelectedFileKey(null);
+      return;
+    }
+
+    setSelectedFileKey((current) => (
+      current && visibleEntries.some((entry) => entry.fileKey === current)
+        ? current
+        : visibleEntries[0]?.fileKey ?? null
+    ));
+  }, [visibleEntries]);
+
+  const selectedEntry = selectedFileKey ? allEntries.get(selectedFileKey) ?? null : null;
+  const selectedState = selectedEntry ? (fileContents[selectedEntry.fileKey] ?? EMPTY_FILE_STATE) : EMPTY_FILE_STATE;
+  const hasVisibleChanges = visibleEntries.length > 0;
+  const activeBaseBranch = payload.defaultBranch?.trim() || "main";
+
+  useEffect(() => {
+    if (!active || !selectedEntry) return;
+    const state = fileContents[selectedEntry.fileKey];
+    if (state?.loading || state?.loaded) return;
+    void loadFileContents(selectedEntry, activeBaseBranch);
+  }, [active, activeBaseBranch, fileContents, loadFileContents, selectedEntry]);
+
+  const splitRows = useMemo(() => {
+    const diffData = selectedState.data;
+    if (!diffData || diffData.binary) return [];
+    const original = diffData.original ?? "";
+    const modified = diffData.modified ?? "";
+    const rows = buildSplitDiffRows(original, modified);
+    return hideUnchangedRegions ? collapseSplitRows(rows) : rows;
+  }, [hideUnchangedRegions, selectedState.data]);
+
+  const inlineRows = useMemo(() => toInlineRows(splitRows), [splitRows]);
+
+  const handleToggleSection = useCallback((category: DiffCategory) => {
+    setCollapsedSections((current) => ({
+      ...current,
+      [category]: !current[category],
+    }));
+  }, []);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
-      <div className="flex h-[32px] shrink-0 items-center border-b border-[var(--vk-border)] px-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <GitCompare className="h-[15px] w-[15px] text-[var(--vk-text-muted)]" />
-          <span className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">Review Diff</span>
-          <Badge variant="outline" className="h-[20px] px-1.5 text-[10px]">
-            {sourceLabel(payload.source)}
-          </Badge>
-        </div>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+      <div className="flex min-h-[42px] shrink-0 items-center gap-2 border-b border-[var(--vk-border)] px-3">
+        <GitCompare className="h-[15px] w-[15px] text-[var(--vk-text-muted)]" />
+        <span className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">Review Diff</span>
+        <Badge variant="outline">{sourceLabel(payload.source)}</Badge>
+        {payload.branch ? <Badge variant="outline">{payload.branch}</Badge> : null}
+        {payload.defaultBranch ? <Badge variant="outline">base {payload.defaultBranch}</Badge> : null}
         <div className="ml-auto flex items-center gap-2">
-          <span className="hidden text-[11px] text-[var(--vk-text-muted)] md:inline">
+          <span className="hidden text-[11px] text-[var(--vk-text-muted)] lg:inline">
             {formatGeneratedAt(payload.generatedAt)}
           </span>
           <button
             type="button"
             onClick={() => void fetchDiff()}
             disabled={loading}
-            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
+            className="inline-flex h-[24px] w-[24px] items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-60"
             aria-label="Refresh diff"
           >
-            <RefreshCw className={`h-[14px] w-[14px] ${loading ? "animate-spin" : ""}`} />
-          </button>
-          <button
-            type="button"
-            onClick={() => setWrapLines((value) => !value)}
-            className={`inline-flex h-[22px] items-center gap-1 rounded-[3px] px-1.5 text-[11px] ${
-              wrapLines
-                ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-            }`}
-            aria-label="Toggle wrapped lines"
-          >
-            <WrapText className="h-[14px] w-[14px]" />
-            Wrap
+            <RefreshCw className={cn("h-[14px] w-[14px]", loading && "animate-spin")} />
           </button>
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col border-b border-[var(--vk-border)] xl:border-b-0 xl:border-r">
-          <div className="flex h-[30px] shrink-0 items-center gap-2 border-b border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)]">
-            <span>{allFiles.length} files changed</span>
-            <span className="inline-flex items-center gap-0.5 text-[var(--vk-green)]">
-              <Plus className="h-[12px] w-[12px]" />
-              {totalAdds}
-            </span>
-            <span className="inline-flex items-center gap-0.5 text-[var(--vk-red)]">
-              <Minus className="h-[12px] w-[12px]" />
-              {totalDeletes}
-            </span>
-            {payload.truncated && (
-              <span className="ml-auto text-[var(--status-attention)]">Output truncated</span>
+      <div className="sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-3 text-[12px] text-[var(--vk-text-muted)]">
+          <span>{totals.files} files</span>
+          <span className="font-mono text-[var(--vk-green)]">+{totals.additions}</span>
+          <span className="font-mono text-[var(--vk-red)]">-{totals.deletions}</span>
+          {payload.truncated ? <span className="text-[var(--status-attention)]">Summary truncated</span> : null}
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setViewMode("side-by-side")}
+            className={cn(
+              "rounded-[6px] px-2 py-1 text-[11px]",
+              viewMode === "side-by-side"
+                ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
             )}
+          >
+            Split
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("inline")}
+            className={cn(
+              "rounded-[6px] px-2 py-1 text-[11px]",
+              viewMode === "inline"
+                ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
+            )}
+          >
+            Inline
+          </button>
+          <button
+            type="button"
+            onClick={() => setHideUnchangedRegions((current) => !current)}
+            className={cn(
+              "rounded-[6px] px-2 py-1 text-[11px]",
+              hideUnchangedRegions
+                ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
+            )}
+          >
+            {hideUnchangedRegions ? "Show all" : "Hide unchanged"}
+          </button>
+        </div>
+      </div>
+
+      <div className="shrink-0 border-b border-[var(--vk-border)] p-2">
+        <label className="flex items-center gap-2 rounded-[8px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-2.5 py-2">
+          <Search className="h-4 w-4 text-[var(--vk-text-muted)]" />
+          <input
+            type="text"
+            value={fileSearch}
+            onChange={(event) => setFileSearch(event.target.value)}
+            placeholder="Search changed files..."
+            className="w-full bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+          />
+        </label>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {loading && !payload.hasDiff && !error ? (
+          <div className="flex h-full items-center justify-center p-8 text-[13px] text-[var(--vk-text-muted)]">
+            Loading session diff...
           </div>
+        ) : null}
 
-          <div className="min-h-0 flex-1 overflow-auto bg-[var(--vk-bg-panel)]">
-            {loading && allFiles.length === 0 && !error && (
-              <div className="flex h-full items-center justify-center p-8 text-[13px] text-[var(--vk-text-muted)]">
-                Loading session diff...
-              </div>
-            )}
+        {error ? (
+          <div className="flex h-full items-center justify-center p-8 text-center text-[13px] text-[var(--status-error)]">
+            {error}
+          </div>
+        ) : null}
 
-            {error && (
-              <div className="flex h-full items-center justify-center p-8 text-center text-[13px] text-[var(--status-error)]">
-                {error}
-              </div>
-            )}
+        {!loading && !error && !hasVisibleChanges ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
+            <CircleAlert className="h-7 w-7 text-[var(--vk-text-muted)]" />
+            <p className="text-[13px] text-[var(--vk-text-muted)]">
+              {deferredFileSearch ? "No files match the current search." : "No changed files in this session yet."}
+            </p>
+          </div>
+        ) : null}
 
-            {!loading && !error && allFiles.length === 0 && (
-              <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
-                <CircleAlert className="h-7 w-7 text-[var(--vk-text-muted)]" />
-                <p className="text-[13px] text-[var(--vk-text-muted)]">No changed files in this session yet.</p>
-              </div>
-            )}
+        {!error && hasVisibleChanges ? (
+          <div className="grid h-full min-h-0 grid-rows-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[320px_minmax(0,1fr)] lg:grid-rows-1">
+            <div className="min-h-0 overflow-y-auto border-b border-[var(--vk-border)] lg:border-b-0 lg:border-r">
+              {SECTION_ORDER.map((category) => {
+                const files = getSectionFiles(filteredSections, category);
+                if (files.length === 0) {
+                  return null;
+                }
 
-            {!error &&
-              allFiles.length > 0 &&
-              allFiles.map((file) => {
-                const expanded = expandedFiles[file.path] ?? false;
-                const selected = selectedFile?.path === file.path;
-
+                const collapsed = collapsedSections[category];
                 return (
-                  <div
-                    key={file.path}
-                    ref={(node) => {
-                      fileRefs.current[file.path] = node;
-                    }}
-                    className={`border-b border-[var(--vk-border)] ${selected ? "bg-[var(--vk-bg-active)]/40" : "bg-[var(--vk-bg-panel)]"}`}
-                  >
-                    <div className="flex min-h-[40px] items-center gap-2 px-2">
-                      <button
-                        type="button"
-                        onClick={() => toggleFile(file.path)}
-                        className="inline-flex h-[20px] w-[20px] items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                        aria-label={expanded ? `Collapse ${file.path}` : `Expand ${file.path}`}
-                      >
-                        {expanded ? (
-                          <ChevronDown className="h-[15px] w-[15px]" />
-                        ) : (
-                          <ChevronRight className="h-[15px] w-[15px]" />
-                        )}
-                      </button>
-
-                      <span
-                        className={`inline-flex h-[23px] min-w-[58px] items-center justify-center rounded-[3px] border px-1.5 text-[11px] ${statusPillClass(file)}`}
-                      >
-                        {statusLabel(file)}
-                      </span>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSelectFile(file.path)}
-                        className={`min-w-0 flex-1 truncate text-left font-mono text-[12px] ${
-                          selected ? "text-[var(--vk-text-strong)]" : "text-[var(--vk-text-normal)]"
-                        }`}
-                      >
-                        {file.path}
-                      </button>
-
-                      <div className="flex items-center gap-2 font-mono text-[11px]">
-                        {file.additions > 0 && <span className="text-[var(--vk-green)]">+{file.additions}</span>}
-                        {file.deletions > 0 && <span className="text-[var(--vk-red)]">-{file.deletions}</span>}
-                        {file.additions === 0 && file.deletions === 0 && (
-                          <span className="text-[var(--vk-text-muted)]">0</span>
-                        )}
+                  <section key={category} className="border-b border-[var(--vk-border)] last:border-b-0">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleSection(category)}
+                      className="sticky top-0 z-[5] flex w-full items-center gap-2 bg-[var(--vk-bg-panel)] px-3 py-2 text-left text-[12px] text-[var(--vk-text-muted)]"
+                    >
+                      {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                      <span className="font-medium text-[var(--vk-text-normal)]">{SECTION_TITLES[category]}</span>
+                      <span className="font-mono text-[var(--vk-text-muted)]">{files.length}</span>
+                    </button>
+                    {!collapsed ? (
+                      <div className="py-1">
+                        {files.map((file) => {
+                          const fileKey = createFileKey(category, file);
+                          const isSelected = fileKey === selectedFileKey;
+                          return (
+                            <button
+                              key={fileKey}
+                              type="button"
+                              onClick={() => setSelectedFileKey(fileKey)}
+                              className={cn(
+                                "flex w-full items-start gap-2 border-l-2 px-3 py-2.5 text-left transition",
+                                isSelected
+                                  ? "border-l-[var(--status-working)] bg-[rgba(108,168,255,0.08)]"
+                                  : "border-l-transparent hover:bg-[var(--vk-bg-hover)]",
+                              )}
+                            >
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate font-mono text-[12px] text-[var(--vk-text-strong)]">
+                                  {file.path}
+                                </span>
+                                <span className="mt-0.5 flex items-center gap-2">
+                                  <span className={cn("inline-flex h-[20px] items-center rounded-[6px] border px-1.5 text-[10px]", statusPillClass(file))}>
+                                    {statusLabel(file)}
+                                  </span>
+                                  {file.oldPath ? (
+                                    <span className="truncate font-mono text-[10px] text-[var(--vk-text-muted)]">
+                                      {file.oldPath}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-[var(--vk-text-muted)]">{SECTION_TITLES[category]}</span>
+                                  )}
+                                </span>
+                              </span>
+                              <span className="shrink-0 font-mono text-[11px]">
+                                {file.additions > 0 ? <span className="block text-right text-[var(--vk-green)]">+{file.additions}</span> : null}
+                                {file.deletions > 0 ? <span className="block text-right text-[var(--vk-red)]">-{file.deletions}</span> : null}
+                                {file.additions === 0 && file.deletions === 0 ? (
+                                  <span className="block text-right text-[var(--vk-text-muted)]">0</span>
+                                ) : null}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
-                    </div>
-
-                    {expanded && (
-                      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-outer)]/30">
-                        {file.lines.length === 0 ? (
-                          <div className="px-2 py-2 font-mono text-[11px] text-[var(--vk-text-muted)]">
-                            {file.untracked
-                              ? "Untracked file (line-level diff unavailable until staged)."
-                              : "No line-level diff output for this file."}
-                          </div>
-                        ) : (
-                          <div className={wrapLines ? "" : "overflow-x-auto"}>
-                            <div className={wrapLines ? "" : "min-w-[760px]"}>
-                              <div className="grid grid-cols-[56px_56px_20px_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-1 font-mono text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">
-                                <div>Old</div>
-                                <div>New</div>
-                                <div />
-                                <div>Line</div>
-                              </div>
-
-                              {file.lines.map((line, index) => (
-                                <div
-                                  key={`${file.path}-${index}-${line.oldLine ?? "x"}-${line.newLine ?? "y"}`}
-                                  className={`grid grid-cols-[56px_56px_20px_minmax(0,1fr)] border-b border-[var(--vk-border)] px-2 py-[2px] font-mono text-[11px] last:border-b-0 ${lineTone(line.kind)}`}
-                                >
-                                  <div className="text-[var(--vk-text-muted)]">{line.oldLine ?? ""}</div>
-                                  <div className="text-[var(--vk-text-muted)]">{line.newLine ?? ""}</div>
-                                  <div className={lineTextTone(line.kind)}>{markerForLine(line.kind)}</div>
-                                  <div className={`${lineTextTone(line.kind)} ${wrapLines ? "whitespace-pre-wrap break-words" : "whitespace-pre"}`}>
-                                    {line.text}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
+                    ) : null}
+                  </section>
                 );
               })}
-          </div>
-        </section>
+            </div>
 
-        <aside className="flex min-h-0 w-full shrink-0 flex-col bg-[var(--vk-bg-panel)] xl:w-[299px]">
-          <div className="flex h-[32px] items-center gap-1 border-b border-[var(--vk-border)] p-1">
-            <button
-              type="button"
-              onClick={() => setSidebarView("changes")}
-              className={`inline-flex h-[24px] items-center rounded-[3px] px-2 text-[12px] ${
-                sidebarView === "changes"
-                  ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                  : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-              }`}
-            >
-              Changes
-            </button>
-            <button
-              type="button"
-              onClick={() => setSidebarView("files")}
-              className={`inline-flex h-[24px] items-center rounded-[3px] px-2 text-[12px] ${
-                sidebarView === "files"
-                  ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                  : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-              }`}
-            >
-              Files
-            </button>
-          </div>
-
-          {sidebarView === "changes" ? (
-            <>
-              <div className="border-b border-[var(--vk-border)] p-2">
-                <div className="flex items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-[5px]">
-                  <Search className="h-[15px] w-[15px] text-[var(--vk-text-muted)]" />
-                  <input
-                    type="text"
-                    value={fileSearch}
-                    onChange={(event) => setFileSearch(event.target.value)}
-                    placeholder="Search files..."
-                    className="h-[20px] w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
-                  />
-                  {fileSearch.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setFileSearch("")}
-                      className="inline-flex h-[17px] w-[17px] items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                      aria-label="Clear file search"
-                    >
-                      <X className="h-[12px] w-[12px]" />
-                    </button>
-                  )}
+            <div className="min-h-0 overflow-hidden">
+              {!selectedEntry ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+                  <FileCode2 className="h-8 w-8 text-[var(--vk-text-muted)]" />
+                  <p className="text-[13px] text-[var(--vk-text-muted)]">Select a file to inspect its diff.</p>
                 </div>
-              </div>
-
-              <div className="min-h-0 flex-1 overflow-auto">
-                {filteredFiles.length === 0 ? (
-                  <div className="px-3 py-3 text-[13px] text-[var(--vk-text-muted)]">
-                    {fileSearchValue.length > 0 ? "No files match the current search." : "No changed files."}
-                  </div>
-                ) : (
-                  <div className="py-1">{renderTree(tree.children)}</div>
-                )}
-              </div>
-
-              <div className="border-t border-[var(--vk-border)] p-2">
-                <div className="text-[16px] font-medium text-[var(--vk-text-normal)]">Git</div>
-                <div className="mt-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2 py-2">
-                  <div className="flex items-center justify-between text-[12px] text-[var(--vk-text-muted)]">
-                    <span>Files</span>
-                    <span className="font-mono text-[var(--vk-text-normal)]">{allFiles.length}</span>
-                  </div>
-                  <div className="mt-1 flex items-center justify-between text-[12px]">
-                    <span className="text-[var(--vk-text-muted)]">Added</span>
-                    <span className="font-mono text-[var(--vk-green)]">+{totalAdds}</span>
-                  </div>
-                  <div className="mt-1 flex items-center justify-between text-[12px]">
-                    <span className="text-[var(--vk-text-muted)]">Deleted</span>
-                    <span className="font-mono text-[var(--vk-red)]">-{totalDeletes}</span>
-                  </div>
-                  <div className="mt-1 flex items-center justify-between text-[12px]">
-                    <span className="text-[var(--vk-text-muted)]">Source</span>
-                    <span className="font-mono text-[var(--vk-text-normal)]">{sourceLabel(payload.source)}</span>
-                  </div>
-                </div>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="border-b border-[var(--vk-border)] p-2">
-                <div className="flex items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-[5px]">
-                  <Search className="h-[15px] w-[15px] text-[var(--vk-text-muted)]" />
-                  <input
-                    type="text"
-                    value={workspaceSearch}
-                    onChange={(event) => setWorkspaceSearch(event.target.value)}
-                    placeholder="Search all files..."
-                    className="h-[20px] w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
-                  />
-                  {workspaceSearch.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setWorkspaceSearch("")}
-                      className="inline-flex h-[17px] w-[17px] items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                      aria-label="Clear workspace file search"
-                    >
-                      <X className="h-[12px] w-[12px]" />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex min-h-0 flex-1 flex-col">
-                <div className="min-h-0 flex-1 overflow-auto border-b border-[var(--vk-border)]">
-                  {workspaceFilesLoading && (
-                    <div className="px-3 py-3 text-[13px] text-[var(--vk-text-muted)]">
-                      Loading workspace files...
-                    </div>
-                  )}
-
-                  {workspaceFilesError && (
-                    <div className="px-3 py-3 text-[13px] text-[var(--status-error)]">
-                      {workspaceFilesError}
-                    </div>
-                  )}
-
-                  {!workspaceFilesLoading && !workspaceFilesError && filteredWorkspaceFiles.length === 0 && (
-                    <div className="px-3 py-3 text-[13px] text-[var(--vk-text-muted)]">
-                      {workspaceSearchValue.length > 0 ? "No files match the current search." : "No files found."}
-                    </div>
-                  )}
-
-                  {!workspaceFilesLoading && !workspaceFilesError && filteredWorkspaceFiles.length > 0 && (
-                    <div className="py-1">
-                      {filteredWorkspaceFiles.map((path) => {
-                        const selected = path === selectedWorkspacePath;
-                        const fileName = path.split("/").pop() ?? path;
-                        return (
-                          <button
-                            key={path}
-                            type="button"
-                            onClick={() => setSelectedWorkspacePath(path)}
-                            className={`flex h-[26px] w-full items-center gap-1.5 px-2 text-left text-[12px] ${
-                              selected
-                                ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                                : "text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-                            }`}
-                          >
-                            <FileCode2 className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
-                            <span className="truncate">{fileName}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-
-                <div className="min-h-0 flex-1 overflow-auto bg-[var(--vk-bg-main)] p-2">
-                  <div className="flex items-center justify-between border-b border-[var(--vk-border)] pb-2">
-                    <span className="truncate font-mono text-[11px] text-[var(--vk-text-normal)]">
-                      {selectedWorkspacePath ?? "Select a file"}
-                    </span>
-                    {workspaceFileSize > 0 && (
-                      <span className="ml-2 shrink-0 font-mono text-[10px] text-[var(--vk-text-muted)]">
-                        {workspaceFileSize.toLocaleString()} bytes
+              ) : (
+                <div className="flex h-full min-h-0 flex-col">
+                  <div className="border-b border-[var(--vk-border)] px-4 py-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={cn("inline-flex h-[24px] items-center rounded-[6px] border px-2 text-[11px]", statusPillClass(selectedEntry.file))}>
+                        {statusLabel(selectedEntry.file)}
                       </span>
-                    )}
+                      <span className="truncate font-mono text-[13px] text-[var(--vk-text-strong)]">
+                        {selectedEntry.file.path}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--vk-text-muted)]">
+                      <span>{SECTION_TITLES[selectedEntry.category]}</span>
+                      {selectedEntry.file.oldPath ? <span className="font-mono">{selectedEntry.file.oldPath} -&gt; {selectedEntry.file.path}</span> : null}
+                      <span className="font-mono text-[var(--vk-green)]">+{selectedEntry.file.additions}</span>
+                      <span className="font-mono text-[var(--vk-red)]">-{selectedEntry.file.deletions}</span>
+                    </div>
                   </div>
 
-                  {workspaceFilesTruncated && (
-                    <p className="pt-2 text-[11px] text-[var(--status-attention)]">
-                      File list truncated to the first 4000 files.
-                    </p>
-                  )}
+                  <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
+                    {selectedState.loading ? (
+                      <div className="flex h-full min-h-[240px] items-center justify-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
+                        <LoaderCircle className="h-4 w-4 animate-spin" />
+                        <span>Loading diff...</span>
+                      </div>
+                    ) : null}
 
-                  {workspaceFileLoading && (
-                    <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">Loading file content...</p>
-                  )}
+                    {selectedState.error ? (
+                      <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[13px] text-[var(--status-error)]">
+                        {selectedState.error}
+                      </div>
+                    ) : null}
 
-                  {workspaceFileError && (
-                    <p className="pt-2 text-[12px] text-[var(--status-error)]">{workspaceFileError}</p>
-                  )}
+                    {!selectedState.loading && !selectedState.error && selectedState.data?.binary ? (
+                      <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[12px] text-[var(--vk-text-muted)]">
+                        Binary file preview is not available for {sessionId.slice(0, 6)}.
+                      </div>
+                    ) : null}
 
-                  {!workspaceFileLoading && !workspaceFileError && selectedWorkspacePath && workspaceFileBinary && (
-                    <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">
-                      Binary file preview is not available.
-                    </p>
-                  )}
+                    {!selectedState.loading && !selectedState.error && selectedState.data && !selectedState.data.binary ? (
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-[var(--vk-text-muted)]">
+                          <span>Base: {selectedState.data.baseBranch || activeBaseBranch}</span>
+                          <span>Original: {formatSize(selectedState.data.originalSize)}</span>
+                          <span>Modified: {formatSize(selectedState.data.modifiedSize)}</span>
+                          {selectedState.data.truncated ? (
+                            <span className="text-[var(--status-attention)]">Preview truncated to 1 MB.</span>
+                          ) : null}
+                        </div>
+                        <div className="overflow-auto pb-4">
+                          {viewMode === "side-by-side" ? (
+                            <SplitDiffView rows={splitRows} />
+                          ) : (
+                            <InlineDiffView rows={inlineRows} />
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
 
-                  {!workspaceFileLoading &&
-                    !workspaceFileError &&
-                    selectedWorkspacePath &&
-                    !workspaceFileBinary &&
-                    workspaceFileContent.length > 0 && (
-                      <pre className="pt-2 whitespace-pre-wrap break-words font-mono text-[11px] text-[var(--vk-text-normal)]">
-                        {workspaceFileContent}
-                      </pre>
-                    )}
-
-                  {!workspaceFileLoading &&
-                    !workspaceFileError &&
-                    selectedWorkspacePath &&
-                    !workspaceFileBinary &&
-                    workspaceFileContent.length === 0 && (
-                      <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">File is empty.</p>
-                    )}
-
-                  {workspaceFileTruncated && (
-                    <p className="pt-2 text-[11px] text-[var(--status-attention)]">
-                      Preview truncated to 1 MB.
-                    </p>
-                  )}
+                    {!selectedState.loading && !selectedState.error && !selectedState.data ? (
+                      <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[12px] text-[var(--vk-text-muted)]">
+                        No diff content available for this file.
+                      </div>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
-            </>
-          )}
-        </aside>
+              )}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

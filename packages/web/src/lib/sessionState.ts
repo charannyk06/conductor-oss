@@ -12,14 +12,18 @@ import {
 } from "@/lib/types";
 
 const ACTIVE_SESSIONS_POLL_INTERVAL_MS = 15_000;
-const HIDDEN_SESSIONS_POLL_INTERVAL_MS = 45_000;
 const ACTIVE_FEED_POLL_INTERVAL_MS = 4_000;
-const HIDDEN_FEED_POLL_INTERVAL_MS = 15_000;
+const FEED_RECORD_EVICTION_DELAY_MS = 15_000;
+const DEFAULT_FEED_WINDOW_LIMIT = 120;
+const MAX_FEED_WINDOW_LIMIT = 240;
 
 type Listener = () => void;
 
 type SessionFeedResponse = {
   entries?: NormalizedChatEntry[];
+  totalEntries?: number | null;
+  windowLimit?: number | null;
+  truncated?: boolean | null;
   sessionStatus?: string | null;
   error?: string | null;
   parserState?: {
@@ -35,6 +39,9 @@ type SessionFeedStreamMessage =
   | {
     type: "append";
     entries?: NormalizedChatEntry[];
+    totalEntries?: number | null;
+    windowLimit?: number | null;
+    truncated?: boolean | null;
     sessionStatus?: string | null;
     error?: string | null;
     parserState?: SessionFeedResponse["parserState"];
@@ -58,14 +65,19 @@ type SessionsStoreState = {
   loading: boolean;
   error: string | null;
   listInitialized: boolean;
-  snapshotsSubscribed: boolean;
   refreshPromise: Promise<void> | null;
   unsubscribeSnapshots: (() => void) | null;
-  visibilityHandlerAttached: boolean;
+  activeConsumers: number;
+  pollTimer: number | null;
+  focusHandler: (() => void) | null;
+  visibilityHandler: (() => void) | null;
 };
 
 type FeedRecord = {
   entries: NormalizedChatEntry[];
+  totalEntries: number;
+  windowLimit: number;
+  truncated: boolean;
   loading: boolean;
   error: string | null;
   sessionStatus: string | null;
@@ -77,6 +89,7 @@ type FeedRecord = {
   pending: boolean;
   eventSource: EventSource | null;
   pollTimer: number | null;
+  disposeTimer: number | null;
   listeners: Set<Listener>;
 };
 
@@ -87,14 +100,19 @@ const sessionsStore: SessionsStoreState = {
   loading: true,
   error: null,
   listInitialized: false,
-  snapshotsSubscribed: false,
   refreshPromise: null,
   unsubscribeSnapshots: null,
-  visibilityHandlerAttached: false,
+  activeConsumers: 0,
+  pollTimer: null,
+  focusHandler: null,
+  visibilityHandler: null,
 };
 
 const sessionListeners = new Set<Listener>();
 const feedStore = new Map<string, FeedRecord>();
+let activeFeedConsumers = 0;
+let feedFocusHandler: (() => void) | null = null;
+let feedVisibilityHandler: (() => void) | null = null;
 
 function emitSessionChange() {
   for (const listener of sessionListeners) {
@@ -205,44 +223,115 @@ async function refreshSessionsStore(): Promise<void> {
 }
 
 function ensureSessionsSnapshotSubscription() {
-  if (sessionsStore.snapshotsSubscribed) {
+  if (sessionsStore.unsubscribeSnapshots) {
     return;
   }
-  sessionsStore.snapshotsSubscribed = true;
   sessionsStore.unsubscribeSnapshots = subscribeToSnapshotEvents((event) => {
     applySessionEvent(event);
   });
 }
 
-function ensureSessionsStoreInitialized() {
-  ensureSessionsSnapshotSubscription();
-  if (sessionsStore.listInitialized) {
+function sessionsPollDelay(): number {
+  return ACTIVE_SESSIONS_POLL_INTERVAL_MS;
+}
+
+function sessionsRealtimeEnabled(): boolean {
+  return document.visibilityState === "visible";
+}
+
+function clearSessionsPolling() {
+  if (sessionsStore.pollTimer !== null) {
+    window.clearTimeout(sessionsStore.pollTimer);
+    sessionsStore.pollTimer = null;
+  }
+}
+
+function scheduleSessionsPolling() {
+  clearSessionsPolling();
+  if (sessionsStore.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
     return;
   }
-  sessionsStore.listInitialized = true;
-  void refreshSessionsStore();
 
-  if (!sessionsStore.visibilityHandlerAttached) {
-    sessionsStore.visibilityHandlerAttached = true;
-    window.addEventListener("focus", () => {
-      void refreshSessionsStore();
-    });
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        void refreshSessionsStore();
-      }
-    });
-    window.setInterval(() => {
-      void refreshSessionsStore();
-    }, document.visibilityState === "visible"
-      ? ACTIVE_SESSIONS_POLL_INTERVAL_MS
-      : HIDDEN_SESSIONS_POLL_INTERVAL_MS);
+  sessionsStore.pollTimer = window.setTimeout(async () => {
+    if (sessionsStore.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
+      return;
+    }
+    await refreshSessionsStore();
+    scheduleSessionsPolling();
+  }, sessionsPollDelay());
+}
+
+function attachSessionsLifecycleListeners() {
+  if (sessionsStore.focusHandler || sessionsStore.visibilityHandler) {
+    return;
   }
+
+  const handleFocus = () => {
+    if (sessionsStore.activeConsumers === 0) {
+      return;
+    }
+    void refreshSessionsStore();
+    scheduleSessionsPolling();
+  };
+  const handleVisibilityChange = () => {
+    if (sessionsStore.activeConsumers === 0) {
+      return;
+    }
+    if (document.visibilityState === "visible") {
+      void refreshSessionsStore();
+    }
+    clearSessionsPolling();
+    scheduleSessionsPolling();
+  };
+
+  sessionsStore.focusHandler = handleFocus;
+  sessionsStore.visibilityHandler = handleVisibilityChange;
+  window.addEventListener("focus", handleFocus);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+}
+
+function detachSessionsLifecycleListeners() {
+  if (sessionsStore.focusHandler) {
+    window.removeEventListener("focus", sessionsStore.focusHandler);
+    sessionsStore.focusHandler = null;
+  }
+  if (sessionsStore.visibilityHandler) {
+    document.removeEventListener("visibilitychange", sessionsStore.visibilityHandler);
+    sessionsStore.visibilityHandler = null;
+  }
+}
+
+function activateSessionsStore() {
+  sessionsStore.activeConsumers += 1;
+  if (sessionsStore.activeConsumers > 1) {
+    return;
+  }
+
+  ensureSessionsSnapshotSubscription();
+  if (!sessionsStore.listInitialized) {
+    sessionsStore.listInitialized = true;
+  }
+  attachSessionsLifecycleListeners();
+  if (sessionsRealtimeEnabled()) {
+    void refreshSessionsStore();
+  }
+  scheduleSessionsPolling();
+}
+
+function deactivateSessionsStore() {
+  sessionsStore.activeConsumers = Math.max(0, sessionsStore.activeConsumers - 1);
+  if (sessionsStore.activeConsumers > 0) {
+    return;
+  }
+
+  clearSessionsPolling();
+  detachSessionsLifecycleListeners();
+  sessionsStore.unsubscribeSnapshots?.();
+  sessionsStore.unsubscribeSnapshots = null;
 }
 
 function subscribeSessions(listener: Listener): () => void {
   sessionListeners.add(listener);
-  ensureSessionsSnapshotSubscription();
   return () => {
     sessionListeners.delete(listener);
   };
@@ -313,8 +402,12 @@ export function useSharedSessions(projectId?: string | null, options?: SharedSes
     if (!enabled) {
       return undefined;
     }
-    ensureSessionsStoreInitialized();
-    return subscribeSessions(() => forceRender());
+    activateSessionsStore();
+    const unsubscribe = subscribeSessions(() => forceRender());
+    return () => {
+      unsubscribe();
+      deactivateSessionsStore();
+    };
   }, [enabled]);
 
   const sessions = useMemo(
@@ -355,6 +448,16 @@ export function useSharedSession(
       return undefined;
     }
     return subscribeSessions(() => forceRender());
+  }, [enabled, normalizedId]);
+
+  useEffect(() => {
+    if (!enabled || normalizedId === null) {
+      return undefined;
+    }
+    activateSessionsStore();
+    return () => {
+      deactivateSessionsStore();
+    };
   }, [enabled, normalizedId]);
 
   useEffect(() => {
@@ -431,6 +534,9 @@ function ensureFeedRecord(sessionId: string): FeedRecord {
 
   const created: FeedRecord = {
     entries: [],
+    totalEntries: 0,
+    windowLimit: DEFAULT_FEED_WINDOW_LIMIT,
+    truncated: false,
     loading: true,
     error: null,
     sessionStatus: null,
@@ -442,6 +548,7 @@ function ensureFeedRecord(sessionId: string): FeedRecord {
     pending: false,
     eventSource: null,
     pollTimer: null,
+    disposeTimer: null,
     listeners: new Set(),
   };
   feedStore.set(sessionId, created);
@@ -449,9 +556,11 @@ function ensureFeedRecord(sessionId: string): FeedRecord {
 }
 
 function feedPollDelay(): number {
-  return document.visibilityState === "visible"
-    ? ACTIVE_FEED_POLL_INTERVAL_MS
-    : HIDDEN_FEED_POLL_INTERVAL_MS;
+  return ACTIVE_FEED_POLL_INTERVAL_MS;
+}
+
+function feedsRealtimeEnabled(): boolean {
+  return document.visibilityState === "visible";
 }
 
 function clearFeedPolling(record: FeedRecord) {
@@ -461,8 +570,59 @@ function clearFeedPolling(record: FeedRecord) {
   }
 }
 
+function clearFeedDisposal(record: FeedRecord) {
+  if (record.disposeTimer !== null) {
+    window.clearTimeout(record.disposeTimer);
+    record.disposeTimer = null;
+  }
+}
+
+function scheduleFeedDisposal(sessionId: string, record: FeedRecord) {
+  clearFeedDisposal(record);
+  if (record.activeConsumers > 0 || record.listeners.size > 0) {
+    return;
+  }
+
+  record.disposeTimer = window.setTimeout(() => {
+    if (record.activeConsumers > 0 || record.listeners.size > 0) {
+      return;
+    }
+    clearFeedPolling(record);
+    record.eventSource?.close();
+    record.eventSource = null;
+    feedStore.delete(sessionId);
+  }, FEED_RECORD_EVICTION_DELAY_MS);
+}
+
+function closeFeedTransport(record: FeedRecord) {
+  clearFeedPolling(record);
+  record.eventSource?.close();
+  record.eventSource = null;
+}
+
+function clampFeedWindowLimit(value: number | null | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_FEED_WINDOW_LIMIT;
+  }
+  return Math.min(MAX_FEED_WINDOW_LIMIT, Math.max(1, Math.trunc(value)));
+}
+
+function trimFeedEntries(entries: NormalizedChatEntry[], windowLimit: number): NormalizedChatEntry[] {
+  if (entries.length <= windowLimit) {
+    return entries;
+  }
+  return entries.slice(entries.length - windowLimit);
+}
+
 function applyFeedPayload(record: FeedRecord, payload: SessionFeedResponse) {
-  record.entries = Array.isArray(payload.entries) ? payload.entries : [];
+  const windowLimit = clampFeedWindowLimit(payload.windowLimit);
+  const entries = Array.isArray(payload.entries) ? payload.entries : [];
+  record.entries = trimFeedEntries(entries, windowLimit);
+  record.totalEntries = typeof payload.totalEntries === "number" && Number.isFinite(payload.totalEntries)
+    ? Math.max(record.entries.length, Math.trunc(payload.totalEntries))
+    : record.entries.length;
+  record.windowLimit = windowLimit;
+  record.truncated = payload.truncated === true || record.totalEntries > record.entries.length;
   record.sessionStatus = typeof payload.sessionStatus === "string" ? payload.sessionStatus : null;
   record.parserState = normalizeParserState(payload.parserState);
   record.runtimeStatus = payload.runtimeStatus && typeof payload.runtimeStatus === "object"
@@ -479,9 +639,15 @@ function applyFeedPayload(record: FeedRecord, payload: SessionFeedResponse) {
 function applyFeedStreamMessage(record: FeedRecord, message: SessionFeedStreamMessage) {
   if (message && typeof message === "object" && "type" in message && message.type === "append") {
     const appendedEntries = Array.isArray(message.entries) ? message.entries : [];
+    const nextWindowLimit = clampFeedWindowLimit(message.windowLimit ?? record.windowLimit);
     record.entries = appendedEntries.length > 0
-      ? [...record.entries, ...appendedEntries]
+      ? trimFeedEntries([...record.entries, ...appendedEntries], nextWindowLimit)
       : record.entries;
+    record.totalEntries = typeof message.totalEntries === "number" && Number.isFinite(message.totalEntries)
+      ? Math.max(record.entries.length, Math.trunc(message.totalEntries))
+      : record.totalEntries + appendedEntries.length;
+    record.windowLimit = nextWindowLimit;
+    record.truncated = message.truncated === true || record.totalEntries > record.entries.length;
     record.sessionStatus = typeof message.sessionStatus === "string" ? message.sessionStatus : record.sessionStatus;
     record.parserState = normalizeParserState(message.parserState) ?? record.parserState;
     record.runtimeStatus = message.runtimeStatus && typeof message.runtimeStatus === "object"
@@ -514,7 +680,10 @@ async function refreshFeedRecord(sessionId: string, record = ensureFeedRecord(se
   do {
     record.pending = false;
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/feed`, {
+      const search = new URLSearchParams({
+        limit: String(DEFAULT_FEED_WINDOW_LIMIT),
+      });
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/feed?${search.toString()}`, {
         cache: "no-store",
       });
       if (!response.ok) {
@@ -532,29 +701,43 @@ async function refreshFeedRecord(sessionId: string, record = ensureFeedRecord(se
 
 function scheduleFeedPolling(sessionId: string, record: FeedRecord) {
   clearFeedPolling(record);
-  if (record.activeConsumers === 0 || record.eventSource) {
+  if (record.activeConsumers === 0 || record.eventSource || !feedsRealtimeEnabled()) {
     return;
   }
   record.pollTimer = window.setTimeout(async () => {
+    if (record.activeConsumers === 0 || !feedsRealtimeEnabled()) {
+      return;
+    }
     await refreshFeedRecord(sessionId, record);
     scheduleFeedPolling(sessionId, record);
   }, feedPollDelay());
 }
 
-function activateFeedRecord(sessionId: string) {
-  const record = ensureFeedRecord(sessionId);
-  record.activeConsumers += 1;
-  if (record.activeConsumers > 1) {
+function ensureFeedRecordTransport(sessionId: string, record: FeedRecord) {
+  if (record.activeConsumers === 0) {
+    closeFeedTransport(record);
     return;
   }
 
-  if (!record.initialized) {
+  if (!feedsRealtimeEnabled()) {
+    closeFeedTransport(record);
+    return;
+  }
+
+  if (!record.initialized && !record.inFlight) {
     record.loading = true;
     emitFeedChange(record);
     void refreshFeedRecord(sessionId, record);
   }
 
-  const source = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/feed/stream`);
+  if (record.eventSource) {
+    return;
+  }
+
+  const search = new URLSearchParams({
+    limit: String(DEFAULT_FEED_WINDOW_LIMIT),
+  });
+  const source = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/feed/stream?${search.toString()}`);
   source.onmessage = (event) => {
     try {
       applyFeedStreamMessage(record, JSON.parse(event.data as string) as SessionFeedStreamMessage);
@@ -578,22 +761,98 @@ function activateFeedRecord(sessionId: string) {
   clearFeedPolling(record);
 }
 
-function deactivateFeedRecord(sessionId: string) {
+function syncFeedRecords(options?: { refreshVisible?: boolean }) {
+  for (const [sessionId, record] of feedStore) {
+    if (record.activeConsumers === 0) {
+      continue;
+    }
+    if (feedsRealtimeEnabled()) {
+      if (options?.refreshVisible) {
+        void refreshFeedRecord(sessionId, record);
+      }
+      ensureFeedRecordTransport(sessionId, record);
+      continue;
+    }
+    closeFeedTransport(record);
+  }
+}
+
+function attachFeedLifecycleListeners() {
+  if (feedFocusHandler || feedVisibilityHandler) {
+    return;
+  }
+
+  feedFocusHandler = () => {
+    if (activeFeedConsumers === 0 || !feedsRealtimeEnabled()) {
+      return;
+    }
+    syncFeedRecords({ refreshVisible: true });
+  };
+
+  feedVisibilityHandler = () => {
+    if (activeFeedConsumers === 0) {
+      return;
+    }
+    if (feedsRealtimeEnabled()) {
+      syncFeedRecords({ refreshVisible: true });
+      return;
+    }
+    syncFeedRecords();
+  };
+
+  window.addEventListener("focus", feedFocusHandler);
+  document.addEventListener("visibilitychange", feedVisibilityHandler);
+}
+
+function detachFeedLifecycleListeners() {
+  if (feedFocusHandler) {
+    window.removeEventListener("focus", feedFocusHandler);
+    feedFocusHandler = null;
+  }
+  if (feedVisibilityHandler) {
+    document.removeEventListener("visibilitychange", feedVisibilityHandler);
+    feedVisibilityHandler = null;
+  }
+}
+
+function activateFeedRecord(sessionId: string) {
   const record = ensureFeedRecord(sessionId);
+  clearFeedDisposal(record);
+  activeFeedConsumers += 1;
+  record.activeConsumers += 1;
+  if (activeFeedConsumers === 1) {
+    attachFeedLifecycleListeners();
+  }
+  if (record.activeConsumers > 1) {
+    return;
+  }
+  ensureFeedRecordTransport(sessionId, record);
+}
+
+function deactivateFeedRecord(sessionId: string) {
+  const record = feedStore.get(sessionId);
+  if (!record) {
+    return;
+  }
+  activeFeedConsumers = Math.max(0, activeFeedConsumers - 1);
   record.activeConsumers = Math.max(0, record.activeConsumers - 1);
   if (record.activeConsumers > 0) {
     return;
   }
-  clearFeedPolling(record);
-  record.eventSource?.close();
-  record.eventSource = null;
+  closeFeedTransport(record);
+  scheduleFeedDisposal(sessionId, record);
+  if (activeFeedConsumers === 0) {
+    detachFeedLifecycleListeners();
+  }
 }
 
 function subscribeFeedRecord(sessionId: string, listener: Listener): () => void {
   const record = ensureFeedRecord(sessionId);
+  clearFeedDisposal(record);
   record.listeners.add(listener);
   return () => {
     record.listeners.delete(listener);
+    scheduleFeedDisposal(sessionId, record);
   };
 }
 
@@ -605,11 +864,11 @@ export function useSharedSessionFeed(
   const [, forceRender] = useReducer((value) => value + 1, 0);
 
   useEffect(() => {
-    if (!sessionId) {
+    if (!sessionId || !enabled) {
       return;
     }
     return subscribeFeedRecord(sessionId, () => forceRender());
-  }, [sessionId]);
+  }, [enabled, sessionId]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -624,9 +883,12 @@ export function useSharedSessionFeed(
     };
   }, [enabled, sessionId]);
 
-  if (!sessionId) {
+  if (!sessionId || !enabled) {
     return {
       entries: [] as NormalizedChatEntry[],
+      totalEntries: 0,
+      windowLimit: DEFAULT_FEED_WINDOW_LIMIT,
+      truncated: false,
       loading: false,
       error: null,
       sessionStatus: null,
@@ -639,6 +901,9 @@ export function useSharedSessionFeed(
   const record = ensureFeedRecord(sessionId);
   return {
     entries: record.entries,
+    totalEntries: record.totalEntries,
+    windowLimit: record.windowLimit,
+    truncated: record.truncated,
     loading: record.loading,
     error: record.error,
     sessionStatus: record.sessionStatus,

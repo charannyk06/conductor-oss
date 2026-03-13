@@ -1,13 +1,15 @@
+use anyhow::Context;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{read, read_dir};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
+use tokio::process::Command;
 
 use crate::state::AppState;
 
@@ -31,6 +33,46 @@ pub fn router() -> Router<Arc<AppState>> {
 #[derive(Debug, Deserialize)]
 struct FilesQuery {
     path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiffQuery {
+    path: Option<String>,
+    category: Option<String>,
+    #[serde(rename = "oldPath")]
+    old_path: Option<String>,
+    status: Option<String>,
+    #[serde(rename = "baseBranch")]
+    base_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChangedFileSummary {
+    path: String,
+    #[serde(rename = "oldPath", skip_serializing_if = "Option::is_none")]
+    old_path: Option<String>,
+    status: String,
+    additions: usize,
+    deletions: usize,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DiffCategory {
+    AgainstBase,
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+impl DiffCategory {
+    fn from_query(value: Option<&str>) -> Self {
+        match value.unwrap_or("against-base") {
+            "staged" => Self::Staged,
+            "unstaged" => Self::Unstaged,
+            "untracked" => Self::Untracked,
+            _ => Self::AgainstBase,
+        }
+    }
 }
 
 async fn get_session_files(
@@ -66,6 +108,7 @@ async fn get_session_files(
 async fn get_session_diff(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<DiffQuery>,
 ) -> ApiResponse {
     let Some(session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found"));
@@ -74,7 +117,14 @@ async fn get_session_diff(
         return error(StatusCode::NOT_FOUND, "Session workspace is unavailable");
     };
 
-    match load_diff_payload(FsPath::new(&workspace_path)).await {
+    let workspace = FsPath::new(&workspace_path);
+    let payload = if query.path.as_deref().is_some() {
+        load_diff_file_contents(workspace, query).await
+    } else {
+        load_diff_payload(workspace).await
+    };
+
+    match payload {
         Ok(payload) => ok(payload),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
@@ -183,49 +233,405 @@ fn read_workspace_file(workspace: &FsPath, relative_path: &str) -> Option<Value>
 }
 
 async fn load_diff_payload(workspace: &FsPath) -> anyhow::Result<Value> {
-    let diff_output = tokio::process::Command::new("git")
-        .args([
-            "-C",
-            workspace.to_string_lossy().as_ref(),
+    let default_branch = resolve_default_branch(workspace).await?;
+    let branch = resolve_current_branch(workspace).await?;
+
+    let diff_output = run_git(
+        workspace,
+        &[
             "diff",
             "--no-color",
             "--no-ext-diff",
-        ])
-        .output()
-        .await?;
-    let status_output = tokio::process::Command::new("git")
-        .args([
-            "-C",
-            workspace.to_string_lossy().as_ref(),
-            "status",
-            "--short",
-            "--untracked-files=all",
-        ])
-        .output()
-        .await?;
+            default_branch.as_str(),
+            "--",
+        ],
+    )
+    .await?;
+    let status_output = run_git(workspace, &["status", "--short", "--untracked-files=all"]).await?;
 
     let raw_diff = String::from_utf8_lossy(&diff_output.stdout).to_string();
     let raw_status = String::from_utf8_lossy(&status_output.stdout).to_string();
-    let untracked = raw_status
-        .lines()
-        .filter(|line| line.trim_start().starts_with("??"))
-        .map(|line| {
-            line.trim_start()
-                .trim_start_matches("??")
-                .trim()
-                .to_string()
+    let untracked = collect_untracked_paths(&raw_status);
+    let against_base =
+        collect_diff_summary(workspace, DiffCategory::AgainstBase, &default_branch).await?;
+    let staged = collect_diff_summary(workspace, DiffCategory::Staged, &default_branch).await?;
+    let unstaged = collect_diff_summary(workspace, DiffCategory::Unstaged, &default_branch).await?;
+    let untracked_entries = untracked
+        .iter()
+        .map(|path| ChangedFileSummary {
+            path: path.clone(),
+            old_path: None,
+            status: "untracked".to_string(),
+            additions: 0,
+            deletions: 0,
         })
         .collect::<Vec<_>>();
-
     let files = parse_git_diff(&raw_diff);
+
     Ok(json!({
-        "hasDiff": !files.is_empty() || !untracked.is_empty(),
+        "hasDiff": !against_base.is_empty() || !staged.is_empty() || !unstaged.is_empty() || !untracked.is_empty(),
         "generatedAt": chrono::Utc::now().to_rfc3339(),
         "source": "working-tree",
         "truncated": false,
+        "branch": branch,
+        "defaultBranch": default_branch,
         "files": files,
         "untracked": untracked,
+        "sections": {
+            "againstBase": against_base,
+            "staged": staged,
+            "unstaged": unstaged,
+            "untracked": untracked_entries,
+        },
     }))
+}
+
+async fn load_diff_file_contents(workspace: &FsPath, query: DiffQuery) -> anyhow::Result<Value> {
+    let path = sanitize_relative_path(query.path.as_deref().unwrap_or_default())
+        .context("A diff file path is required")?;
+    let old_path = query
+        .old_path
+        .as_deref()
+        .map(sanitize_relative_path)
+        .transpose()?;
+    let category = DiffCategory::from_query(query.category.as_deref());
+    let status = normalize_changed_status(query.status.as_deref());
+    let default_branch = match query.base_branch.as_deref() {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => resolve_default_branch(workspace).await?,
+    };
+
+    let original_bytes = match category {
+        DiffCategory::AgainstBase => {
+            read_git_revision_content(
+                workspace,
+                &default_branch,
+                old_path.as_deref().unwrap_or(&path),
+            )
+            .await?
+        }
+        DiffCategory::Staged => {
+            if matches!(status.as_str(), "added" | "untracked") {
+                None
+            } else {
+                read_git_revision_content(workspace, "HEAD", old_path.as_deref().unwrap_or(&path))
+                    .await?
+            }
+        }
+        DiffCategory::Unstaged => {
+            if status == "untracked" {
+                None
+            } else {
+                read_git_index_content(workspace, old_path.as_deref().unwrap_or(&path)).await?
+            }
+        }
+        DiffCategory::Untracked => None,
+    };
+
+    let modified_bytes = match category {
+        DiffCategory::Staged => {
+            if status == "deleted" {
+                None
+            } else {
+                read_git_index_content(workspace, &path).await?
+            }
+        }
+        DiffCategory::AgainstBase | DiffCategory::Unstaged | DiffCategory::Untracked => {
+            if status == "deleted" {
+                None
+            } else {
+                read_workspace_bytes(workspace, &path)?
+            }
+        }
+    };
+
+    let binary = original_bytes.as_deref().is_some_and(is_binary_content)
+        || modified_bytes.as_deref().is_some_and(is_binary_content);
+    let (original, original_truncated, original_size) =
+        stringify_diff_content(original_bytes, binary);
+    let (modified, modified_truncated, modified_size) =
+        stringify_diff_content(modified_bytes, binary);
+
+    Ok(json!({
+        "path": path,
+        "oldPath": old_path,
+        "status": status,
+        "category": match category {
+            DiffCategory::AgainstBase => "against-base",
+            DiffCategory::Staged => "staged",
+            DiffCategory::Unstaged => "unstaged",
+            DiffCategory::Untracked => "untracked",
+        },
+        "baseBranch": default_branch,
+        "binary": binary,
+        "truncated": original_truncated || modified_truncated,
+        "originalSize": original_size,
+        "modifiedSize": modified_size,
+        "original": original,
+        "modified": modified,
+    }))
+}
+
+async fn run_git(workspace: &FsPath, args: &[&str]) -> anyhow::Result<std::process::Output> {
+    Command::new("git")
+        .args(["-C", workspace.to_string_lossy().as_ref()])
+        .args(args)
+        .output()
+        .await
+        .with_context(|| format!("Failed to run git {}", args.join(" ")))
+}
+
+async fn resolve_current_branch(workspace: &FsPath) -> anyhow::Result<String> {
+    let output = run_git(workspace, &["branch", "--show-current"]).await?;
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        return Ok("HEAD".to_string());
+    }
+    Ok(branch)
+}
+
+async fn resolve_default_branch(workspace: &FsPath) -> anyhow::Result<String> {
+    let remote_head = run_git(
+        workspace,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .await?;
+    let value = String::from_utf8_lossy(&remote_head.stdout)
+        .trim()
+        .to_string();
+    if let Some(branch) = value
+        .strip_prefix("origin/")
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(branch.to_string());
+    }
+
+    for candidate in ["main", "master"] {
+        let output = run_git(
+            workspace,
+            &["show-ref", "--verify", &format!("refs/heads/{candidate}")],
+        )
+        .await?;
+        if output.status.success() {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    resolve_current_branch(workspace).await
+}
+
+async fn collect_diff_summary(
+    workspace: &FsPath,
+    category: DiffCategory,
+    default_branch: &str,
+) -> anyhow::Result<Vec<ChangedFileSummary>> {
+    let name_status_args = match category {
+        DiffCategory::AgainstBase => vec!["diff", "--name-status", default_branch, "--"],
+        DiffCategory::Staged => vec!["diff", "--name-status", "--cached", "--"],
+        DiffCategory::Unstaged => vec!["diff", "--name-status", "--"],
+        DiffCategory::Untracked => return Ok(Vec::new()),
+    };
+    let numstat_args = match category {
+        DiffCategory::AgainstBase => vec!["diff", "--numstat", default_branch, "--"],
+        DiffCategory::Staged => vec!["diff", "--numstat", "--cached", "--"],
+        DiffCategory::Unstaged => vec!["diff", "--numstat", "--"],
+        DiffCategory::Untracked => return Ok(Vec::new()),
+    };
+
+    let name_status = run_git(workspace, &name_status_args).await?;
+    let numstat = run_git(workspace, &numstat_args).await?;
+    let name_status_stdout = String::from_utf8_lossy(&name_status.stdout);
+    let numstat_stdout = String::from_utf8_lossy(&numstat.stdout);
+
+    let mut files = BTreeMap::<String, ChangedFileSummary>::new();
+
+    for line in name_status_stdout.lines() {
+        let Some(file) = parse_name_status_line(line) else {
+            continue;
+        };
+        files.insert(file.path.clone(), file);
+    }
+
+    for line in numstat_stdout.lines() {
+        let Some((path, old_path, additions, deletions)) = parse_numstat_line(line) else {
+            continue;
+        };
+        let old_path_for_entry = old_path.clone();
+        let entry = files
+            .entry(path.clone())
+            .or_insert_with(|| ChangedFileSummary {
+                path,
+                old_path: old_path_for_entry,
+                status: "modified".to_string(),
+                additions: 0,
+                deletions: 0,
+            });
+        entry.additions = additions;
+        entry.deletions = deletions;
+        if entry.old_path.is_none() {
+            entry.old_path = old_path;
+        }
+    }
+
+    Ok(files.into_values().collect())
+}
+
+fn parse_name_status_line(line: &str) -> Option<ChangedFileSummary> {
+    let mut parts = line.split('\t');
+    let status_code = parts.next()?.trim();
+    let status = normalize_changed_status(Some(status_code));
+
+    if matches!(status.as_str(), "renamed" | "copy") {
+        let old_path = sanitize_relative_path(parts.next()?).ok()?;
+        let path = sanitize_relative_path(parts.next()?).ok()?;
+        return Some(ChangedFileSummary {
+            path,
+            old_path: Some(old_path),
+            status,
+            additions: 0,
+            deletions: 0,
+        });
+    }
+
+    let path = sanitize_relative_path(parts.next()?).ok()?;
+    Some(ChangedFileSummary {
+        path,
+        old_path: None,
+        status,
+        additions: 0,
+        deletions: 0,
+    })
+}
+
+fn parse_numstat_line(line: &str) -> Option<(String, Option<String>, usize, usize)> {
+    let mut parts = line.split('\t');
+    let additions = parts.next()?.parse::<usize>().ok().unwrap_or(0);
+    let deletions = parts.next()?.parse::<usize>().ok().unwrap_or(0);
+    let third = parts.next()?;
+    let fourth = parts.next();
+    if let Some(new_path) = fourth {
+        return Some((
+            sanitize_relative_path(new_path).ok()?,
+            Some(sanitize_relative_path(third).ok()?),
+            additions,
+            deletions,
+        ));
+    }
+    Some((
+        sanitize_relative_path(third).ok()?,
+        None,
+        additions,
+        deletions,
+    ))
+}
+
+fn collect_untracked_paths(raw_status: &str) -> Vec<String> {
+    raw_status
+        .lines()
+        .filter_map(|line| {
+            line.trim_start()
+                .strip_prefix("??")
+                .map(str::trim)
+                .and_then(|path| sanitize_relative_path(path).ok())
+        })
+        .collect()
+}
+
+fn normalize_changed_status(value: Option<&str>) -> String {
+    let normalized = value.unwrap_or("modified").trim();
+    let first = normalized.chars().next().unwrap_or('M');
+    match first {
+        'A' => "added",
+        'D' => "deleted",
+        'R' => "renamed",
+        'C' => "copy",
+        '?' => "untracked",
+        'T' => "binary",
+        _ => "modified",
+    }
+    .to_string()
+}
+
+fn sanitize_relative_path(value: &str) -> anyhow::Result<String> {
+    let cleaned = value
+        .replace('\\', "/")
+        .trim()
+        .trim_start_matches('/')
+        .to_string();
+    anyhow::ensure!(!cleaned.is_empty(), "Path cannot be empty");
+    anyhow::ensure!(
+        !cleaned.contains("../"),
+        "Path must stay within the session workspace"
+    );
+    Ok(cleaned)
+}
+
+async fn read_git_revision_content(
+    workspace: &FsPath,
+    revision: &str,
+    path: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let spec = format!("{revision}:{path}");
+    let output = run_git(workspace, &["show", &spec]).await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(output.stdout))
+}
+
+async fn read_git_index_content(workspace: &FsPath, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    let spec = format!(":{path}");
+    let output = run_git(workspace, &["show", &spec]).await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(output.stdout))
+}
+
+fn read_workspace_bytes(
+    workspace: &FsPath,
+    relative_path: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let resolved = workspace.join(relative_path);
+    let canonical_workspace = workspace.canonicalize().ok();
+    let canonical_resolved = resolved.canonicalize().ok();
+    let Some(canonical_workspace) = canonical_workspace else {
+        return Ok(None);
+    };
+    let Some(canonical_resolved) = canonical_resolved else {
+        return Ok(None);
+    };
+    if !canonical_resolved.starts_with(&canonical_workspace) || !canonical_resolved.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(read(&resolved)?))
+}
+
+fn is_binary_content(bytes: &[u8]) -> bool {
+    bytes.iter().take(8000).any(|byte| *byte == 0)
+}
+
+fn stringify_diff_content(bytes: Option<Vec<u8>>, binary: bool) -> (Value, bool, usize) {
+    const MAX_DIFF_BYTES: usize = 1024 * 1024;
+    let Some(bytes) = bytes else {
+        return (Value::String(String::new()), false, 0);
+    };
+    let size = bytes.len();
+    if binary {
+        return (Value::Null, false, size);
+    }
+    let truncated = size > MAX_DIFF_BYTES;
+    let slice = &bytes[..bytes.len().min(MAX_DIFF_BYTES)];
+    (
+        Value::String(String::from_utf8_lossy(slice).to_string()),
+        truncated,
+        size,
+    )
 }
 
 fn parse_git_diff(raw: &str) -> Vec<Value> {
