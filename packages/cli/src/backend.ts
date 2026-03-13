@@ -167,7 +167,10 @@ async function resolveBackendBaseUrl(): Promise<string> {
     "4749",
     "4748",
   ]
-    .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index)
+    .filter(
+      (value, index, values): value is string =>
+        Boolean(value) && values.indexOf(value) === index
+    )
     .map((port) => `http://127.0.0.1:${port}`);
 
   for (const candidate of candidates) {
@@ -205,7 +208,7 @@ async function readErrorMessage(response: Response): Promise<string> {
 export async function apiCall<T = JsonValue>(
   method: string,
   path: string,
-  body?: unknown,
+  body?: unknown
 ): Promise<T> {
   const baseUrl = await resolveBackendBaseUrl();
 
@@ -218,7 +221,9 @@ export async function apiCall<T = JsonValue>(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to reach Conductor backend at ${baseUrl}: ${message}. Run \`co start\`.`);
+    throw new Error(
+      `Failed to reach Conductor backend at ${baseUrl}: ${message}. Run \`co start\`.`
+    );
   }
 
   if (!response.ok) {
@@ -237,22 +242,18 @@ export async function apiCall<T = JsonValue>(
   return JSON.parse(text) as T;
 }
 
-export async function fetchConfiguredProjects(): Promise<Map<string, ConfigProject>> {
+export async function fetchConfiguredProjects(): Promise<
+  Map<string, ConfigProject>
+> {
   const response = await apiCall<ConfigResponse>("GET", "/api/config");
   return new Map(response.projects.map((project) => [project.id, project]));
 }
 
 export async function fetchProjects(): Promise<Map<string, BackendProject>> {
   const projects = await apiCall<BackendProject[]>("GET", "/api/projects");
-  return new Map(
-    projects.map((project) => [project.id, project]),
-  );
+  return new Map(projects.map((project) => [project.id, project]));
 }
 
 export function sessionWorktree(session: BackendSession): string | null {
   return session.workspacePath ?? session.metadata["worktree"] ?? null;
-}
-
-export function sessionTmuxTarget(session: BackendSession): string {
-  return session.metadata["tmuxSession"] ?? session.id;
 }

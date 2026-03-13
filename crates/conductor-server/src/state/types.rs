@@ -38,8 +38,11 @@ pub struct TerminalStateUpdate {
 
 const DEFAULT_TERMINAL_STORE_COLS: u16 = 120;
 const DEFAULT_TERMINAL_STORE_ROWS: u16 = 32;
-const DEFAULT_TERMINAL_STORE_SCROLLBACK: usize = 4000;
-const DEFAULT_TERMINAL_HISTORY_BYTES: usize = 512 * 1024;
+// Keep the live per-session terminal store near a 1-2 MB working set. Durable
+// capture and replay live on disk, so the in-memory store only needs enough
+// short scrollback for attach/reconnect smoothness.
+const DEFAULT_TERMINAL_STORE_SCROLLBACK: usize = 768;
+const DEFAULT_TERMINAL_HISTORY_BYTES: usize = 192 * 1024;
 const MAX_TERMINAL_OSC_PENDING_BYTES: usize = 4096;
 
 pub const TERMINAL_RESTORE_SNAPSHOT_VERSION: u8 = 1;
@@ -259,7 +262,8 @@ impl TerminalStateStore {
             };
             let start = cursor + relative_start;
             let body_start = start + 2;
-            let Some((body_end, terminator_len)) = find_osc_terminator(&merged[body_start..]) else {
+            let Some((body_end, terminator_len)) = find_osc_terminator(&merged[body_start..])
+            else {
                 pending_start = Some(start);
                 break;
             };

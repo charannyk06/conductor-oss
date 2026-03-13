@@ -2,7 +2,7 @@
  * `co cleanup [project]`
  *
  * Kills all sessions that are in a terminal state (merged, done, killed, etc.).
- * Reclaims worktrees and tmux sessions.
+ * Reclaims worktrees and runtime artifacts.
  */
 
 import chalk from "chalk";
@@ -26,21 +26,33 @@ export function registerCleanup(program: Command): void {
 
         if (project && !configuredProjects.has(project)) {
           console.error(
-            chalk.red(`Unknown project: ${project}\nAvailable: ${[...configuredProjects.keys()].join(", ")}`),
+            chalk.red(
+              `Unknown project: ${project}\nAvailable: ${[
+                ...configuredProjects.keys(),
+              ].join(", ")}`
+            )
           );
           process.exit(1);
         }
 
         if (opts.dryRun) {
-          console.log(chalk.bold("Dry run -- checking for cleanable sessions...\n"));
+          console.log(
+            chalk.bold("Dry run -- checking for cleanable sessions...\n")
+          );
         }
 
-        const spinner = opts.dryRun ? null : ora("Cleaning up sessions").start();
+        const spinner = opts.dryRun
+          ? null
+          : ora("Cleaning up sessions").start();
 
-        const result = await apiCall<CleanupResponse>("POST", "/api/sessions/cleanup", {
-          projectId: project,
-          dryRun: Boolean(opts.dryRun),
-        });
+        const result = await apiCall<CleanupResponse>(
+          "POST",
+          "/api/sessions/cleanup",
+          {
+            projectId: project,
+            dryRun: Boolean(opts.dryRun),
+          }
+        );
 
         spinner?.stop();
 
@@ -75,14 +87,18 @@ export function registerCleanup(program: Command): void {
         if (opts.dryRun) {
           console.log(
             chalk.dim(
-              `${result.killed.length} session${result.killed.length !== 1 ? "s" : ""} would be cleaned.`,
-            ),
+              `${result.killed.length} session${
+                result.killed.length !== 1 ? "s" : ""
+              } would be cleaned.`
+            )
           );
         } else {
           console.log(
             chalk.green(
-              `Cleanup complete. ${result.killed.length} session${result.killed.length !== 1 ? "s" : ""} cleaned.`,
-            ),
+              `Cleanup complete. ${result.killed.length} session${
+                result.killed.length !== 1 ? "s" : ""
+              } cleaned.`
+            )
           );
         }
       } catch (err) {

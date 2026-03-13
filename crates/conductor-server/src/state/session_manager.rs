@@ -8,18 +8,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::AppState;
 use super::helpers::{
     append_output, is_runtime_status_line, merge_assistant_fragment, runtime_tool_metadata,
     sanitize_terminal_text,
 };
 use super::runtime_status::resolve_native_resume_target;
-use super::tmux_runtime::{tmux_compatibility_mode, tmux_runtime_metadata, tmux_session_exists};
 use super::types::{
-    ConversationEntry, DEFAULT_SESSION_HISTORY_LIMIT, SessionRecord, SessionStatus, SpawnRequest,
-    TerminalStreamEvent,
+    ConversationEntry, SessionRecord, SessionStatus, SpawnRequest, TerminalStreamEvent,
+    DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
+use super::AppState;
 
 const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
@@ -89,6 +88,20 @@ fn detached_runtime_pid(session: &SessionRecord) -> Option<u32> {
         .get(DETACHED_PID_METADATA_KEY)
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|pid| *pid > 0)
+}
+
+fn runtime_pids(session: &SessionRecord) -> Vec<u32> {
+    let mut pids = Vec::with_capacity(2);
+    if let Some(pid) = session.pid.filter(|pid| *pid > 1) {
+        pids.push(pid);
+    }
+    if let Some(pid) = detached_runtime_pid(session)
+        .filter(|pid| *pid > 1)
+        .filter(|pid| !pids.contains(pid))
+    {
+        pids.push(pid);
+    }
+    pids
 }
 
 /// Shared Stdout event handler used by both `append_and_apply` and `apply_runtime_event`.
@@ -383,6 +396,53 @@ impl AppState {
         let updated = session.clone();
         drop(sessions);
         self.persist_session(&updated).await
+    }
+
+    async fn terminate_session_runtime(&self, session_id: &str) -> Result<()> {
+        self.flush_terminal_capture(session_id).await;
+        self.flush_terminal_restore_snapshot(session_id).await;
+
+        let live_handle = self.terminal_hosts.get(session_id).await;
+        let signaled_live_runtime = if let Some(handle) = live_handle {
+            if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
+                kill_tx.send(()).is_ok()
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !signaled_live_runtime {
+            let _ = self.kill_detached_runtime(session_id).await;
+        }
+
+        if signaled_live_runtime {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+
+        let mut termination_error = None;
+        if let Some(session) = self.get_session(session_id).await {
+            for pid in runtime_pids(&session) {
+                if !is_process_alive(pid) {
+                    continue;
+                }
+                if !terminate_process(pid) && is_process_alive(pid) {
+                    termination_error = Some(anyhow::anyhow!(
+                        "Failed to terminate process for session {session_id} (pid {pid})"
+                    ));
+                    break;
+                }
+            }
+        }
+
+        self.detach_terminal_runtime(session_id).await;
+
+        if let Some(error) = termination_error {
+            return Err(error);
+        }
+
+        Ok(())
     }
 
     async fn update_launch_stage(&self, session_id: &str, summary: &str) -> Result<()> {
@@ -760,14 +820,9 @@ impl AppState {
         record
             .metadata
             .insert("startedAt".to_string(), started_at.clone());
-        record.metadata.insert(
-            "launchState".to_string(),
-            if tmux_compatibility_mode(&project) {
-                "attached".to_string()
-            } else {
-                "running".to_string()
-            },
-        );
+        record
+            .metadata
+            .insert("launchState".to_string(), "running".to_string());
         record.metadata.insert(
             "taskId".to_string(),
             request
@@ -870,7 +925,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: !tmux_compatibility_mode(&project),
+                mirror_terminal_output: true,
                 output_is_parsed: true,
                 timeout: project
                     .agent_config
@@ -1070,7 +1125,9 @@ impl AppState {
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
-                if let Some(action) = requested_termination {
+                if session.status.is_terminal() {
+                    session.metadata.remove("terminationRequested");
+                } else if let Some(action) = requested_termination {
                     Self::apply_requested_termination(session, action);
                 } else if exit_code == 0 {
                     session.metadata.remove("terminationRequested");
@@ -1121,7 +1178,9 @@ impl AppState {
             }
             ExecutorOutput::Failed { error, exit_code } => {
                 let parser_state_detected = detect_parser_state(session, &error);
-                if let Some(action) = requested_termination {
+                if session.status.is_terminal() {
+                    session.metadata.remove("terminationRequested");
+                } else if let Some(action) = requested_termination {
                     Self::apply_requested_termination(session, action);
                 } else {
                     let requested_kill = error == "killed";
@@ -1364,8 +1423,7 @@ impl AppState {
         let skip_permissions = project_defaults_to_skip_permissions(&project);
         let native_resume_target =
             resolve_native_resume_target(agent_kind.clone(), workspace_path.clone()).await;
-        let terminal_follow_up = tmux_compatibility_mode(&project);
-        let send_follow_up_after_spawn = native_resume_target.is_some() || terminal_follow_up;
+        let send_follow_up_after_spawn = native_resume_target.is_some();
 
         // Apply the same environment overrides as initial spawn to avoid
         // leaking ANTHROPIC_API_KEY on resumed sessions.
@@ -1467,7 +1525,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: !tmux_compatibility_mode(&project),
+                mirror_terminal_output: true,
                 output_is_parsed: true,
                 timeout: project
                     .agent_config
@@ -1535,68 +1593,8 @@ impl AppState {
     }
 
     pub async fn kill_session(&self, session_id: &str) -> Result<()> {
-        self.flush_terminal_capture(session_id).await;
-        self.flush_terminal_restore_snapshot(session_id).await;
-        let live_handle = self.terminal_hosts.get(session_id).await;
         self.mark_termination_requested(session_id, "kill").await?;
-        let had_live_handle = if let Some(handle) = live_handle {
-            if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
-                let _ = kill_tx.send(());
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if !had_live_handle {
-            if let Some(session) = self.get_session(session_id).await {
-                if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&session) {
-                    if tmux_session_exists(&socket_path, &tmux_session).await? {
-                        super::tmux_runtime::kill_tmux_session(&socket_path, &tmux_session).await?;
-                    }
-                }
-            }
-            let _ = self.kill_detached_runtime(session_id).await;
-        }
-
-        if had_live_handle {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            if let Some(pid) = self
-                .get_session(session_id)
-                .await
-                .and_then(|session| session.pid)
-                .filter(|&pid| pid > 1 && is_process_alive(pid))
-            {
-                tracing::warn!(
-                    session_id,
-                    pid,
-                    "Process still alive after kill signal, sending SIGKILL"
-                );
-                if !terminate_process(pid) && is_process_alive(pid) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to terminate process for session {session_id} (pid {pid})"
-                    ));
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-        } else {
-            if let Some(pid) = self
-                .get_session(session_id)
-                .await
-                .and_then(|session| detached_runtime_pid(&session))
-                .filter(|&pid| pid > 1 && is_process_alive(pid))
-            {
-                if !terminate_process(pid) && is_process_alive(pid) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to terminate detached runtime for session {session_id} (pid {pid})"
-                    ));
-                }
-            }
-        }
-
-        self.detach_terminal_runtime(session_id).await;
+        self.terminate_session_runtime(session_id).await?;
 
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
@@ -1609,69 +1607,9 @@ impl AppState {
     }
 
     pub async fn archive_session(&self, session_id: &str) -> Result<()> {
-        self.flush_terminal_capture(session_id).await;
-        self.flush_terminal_restore_snapshot(session_id).await;
-        let live_handle = self.terminal_hosts.get(session_id).await;
         self.mark_termination_requested(session_id, "archive")
             .await?;
-        let had_live_handle = if let Some(handle) = live_handle {
-            if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
-                let _ = kill_tx.send(());
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        if !had_live_handle {
-            if let Some(session) = self.get_session(session_id).await {
-                if let Some((socket_path, tmux_session)) = tmux_runtime_metadata(&session) {
-                    if tmux_session_exists(&socket_path, &tmux_session).await? {
-                        super::tmux_runtime::kill_tmux_session(&socket_path, &tmux_session).await?;
-                    }
-                }
-            }
-            let _ = self.kill_detached_runtime(session_id).await;
-        }
-
-        if had_live_handle {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            if let Some(pid) = self
-                .get_session(session_id)
-                .await
-                .and_then(|session| session.pid)
-                .filter(|&pid| pid > 1 && is_process_alive(pid))
-            {
-                tracing::warn!(
-                    session_id,
-                    pid,
-                    "Process still alive after kill signal, sending SIGKILL"
-                );
-                if !terminate_process(pid) && is_process_alive(pid) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to terminate process for session {session_id} (pid {pid})"
-                    ));
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-        } else {
-            if let Some(pid) = self
-                .get_session(session_id)
-                .await
-                .and_then(|session| detached_runtime_pid(&session))
-                .filter(|&pid| pid > 1 && is_process_alive(pid))
-            {
-                if !terminate_process(pid) && is_process_alive(pid) {
-                    return Err(anyhow::anyhow!(
-                        "Failed to terminate detached runtime for session {session_id} (pid {pid})"
-                    ));
-                }
-            }
-        }
-
-        self.detach_terminal_runtime(session_id).await;
+        self.terminate_session_runtime(session_id).await?;
 
         let mut sessions = self.sessions.write().await;
         let session = sessions
@@ -1684,14 +1622,14 @@ impl AppState {
 
         let updated = session.clone();
         drop(sessions);
+        if !already_archived {
+            self.replace_session(updated.clone()).await?;
+        }
         let config = self.config.read().await.clone();
         if let Some(project) = config.projects.get(&updated.project_id) {
             if let Err(err) = self.archive_workspace(session_id, &updated, project).await {
                 tracing::warn!(session_id, error = %err, "Failed to archive workspace");
             }
-        }
-        if !already_archived {
-            self.replace_session(updated).await?;
         }
         Ok(())
     }
@@ -1757,14 +1695,14 @@ mod tests {
     use conductor_core::config::{ConductorConfig, ProjectConfig};
     use conductor_db::Database;
     use conductor_executors::executor::{Executor, ExecutorHandle};
-    use conductor_executors::process::{PtyDimensions, spawn_process};
+    use conductor_executors::process::{spawn_process, PtyDimensions};
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command as StdCommand};
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
     struct TestExecutor {
@@ -1854,16 +1792,16 @@ mod tests {
         }
     }
 
-    struct TmuxResumeExecutor;
+    struct ResumeExecutor;
 
     #[async_trait]
-    impl Executor for TmuxResumeExecutor {
+    impl Executor for ResumeExecutor {
         fn kind(&self) -> AgentKind {
             AgentKind::Codex
         }
 
         fn name(&self) -> &str {
-            "Tmux Resume Executor"
+            "Resume Executor"
         }
 
         fn binary_path(&self) -> &Path {
@@ -2450,6 +2388,21 @@ mod tests {
 
         state.archive_session(&session.id).await.unwrap();
 
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let cleanup_done =
+                    fs::read_to_string(&cleanup_log).ok().as_deref() == Some("cleanup");
+                let archive_done =
+                    fs::read_to_string(&archive_log).ok().as_deref() == Some("archive");
+                if cleanup_done && archive_done && !worktree.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+
         assert_eq!(fs::read_to_string(&cleanup_log).unwrap(), "cleanup");
         assert_eq!(fs::read_to_string(&archive_log).unwrap(), "archive");
         assert!(!worktree.exists());
@@ -2521,7 +2474,7 @@ mod tests {
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
             agent: Some("codex".to_string()),
-            runtime: Some(crate::state::tmux_runtime::TMUX_RUNTIME_MODE.to_string()),
+            runtime: Some("tmux".to_string()),
             default_branch: "main".to_string(),
             ..ProjectConfig::default()
         };
@@ -2530,7 +2483,7 @@ mod tests {
             .executors
             .write()
             .await
-            .insert(AgentKind::Codex, Arc::new(TmuxResumeExecutor));
+            .insert(AgentKind::Codex, Arc::new(ResumeExecutor));
 
         let mut session = SessionRecord::new(
             "resume-tmux-session".to_string(),
@@ -3060,9 +3013,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_output_consumer_sanitizes_tmux_output_before_parsing() {
-        let root =
-            std::env::temp_dir().join(format!("conductor-tmux-output-test-{}", Uuid::new_v4()));
+    async fn start_output_consumer_sanitizes_unstructured_output_before_parsing() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-unstructured-output-test-{}",
+            Uuid::new_v4()
+        ));
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
@@ -3075,9 +3030,9 @@ mod tests {
         let state = build_state(&root, project, "demo").await;
 
         let mut session = SessionRecord::new(
-            "tmux-output".to_string(),
+            "unstructured-output".to_string(),
             "demo".to_string(),
-            Some("session/tmux-output".to_string()),
+            Some("session/unstructured-output".to_string()),
             None,
             Some(repo.to_string_lossy().to_string()),
             "codex".to_string(),
@@ -3091,7 +3046,7 @@ mod tests {
 
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
         state.start_output_consumer(
-            "tmux-output".to_string(),
+            "unstructured-output".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
             OutputConsumerConfig {
@@ -3111,7 +3066,7 @@ mod tests {
 
         let updated = timeout(Duration::from_secs(3), async {
             loop {
-                let current = state.get_session("tmux-output").await.unwrap();
+                let current = state.get_session("unstructured-output").await.unwrap();
                 if current
                     .conversation
                     .iter()

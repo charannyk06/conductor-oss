@@ -1,7 +1,7 @@
 use anyhow::Result;
 #[cfg(unix)]
 use nix::libc;
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::collections::HashSet;
@@ -499,10 +499,10 @@ fn drain_terminal_lines(buffer: &mut Vec<u8>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutorOutput, is_process_alive, spawn_process};
+    use super::{is_process_alive, spawn_process, ExecutorOutput};
     use std::collections::HashMap;
     use std::path::Path;
-    use tokio::time::{Duration, timeout};
+    use tokio::time::{timeout, Duration};
 
     #[cfg(unix)]
     #[tokio::test]

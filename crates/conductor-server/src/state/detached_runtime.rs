@@ -3,9 +3,10 @@ use anyhow::Context;
 use anyhow::{anyhow, Result};
 #[cfg(unix)]
 use chrono::Utc;
-use conductor_executors::executor::{Executor, SpawnOptions};
+use conductor_core::types::AgentKind;
+use conductor_executors::executor::{Executor, ExecutorHandle, SpawnOptions};
 #[cfg(unix)]
-use conductor_executors::executor::{ExecutorHandle, ExecutorInput, ExecutorOutput};
+use conductor_executors::executor::{ExecutorInput, ExecutorOutput};
 #[cfg(unix)]
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 #[cfg(unix)]
@@ -35,14 +36,15 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 use tokio::sync::{mpsc, oneshot};
 
-use super::tmux_runtime::RuntimeLaunch;
 #[cfg(unix)]
 use super::types::TerminalStreamEvent;
 use crate::state::AppState;
+use crate::state::SessionStatus;
 #[cfg(unix)]
-use crate::state::{OutputConsumerConfig, SessionRecord, SessionStatus};
+use crate::state::{OutputConsumerConfig, SessionRecord};
 
 pub(crate) const DIRECT_RUNTIME_MODE: &str = "direct";
+pub(crate) const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
 pub(crate) const DETACHED_CONTROL_SOCKET_METADATA_KEY: &str = "detachedControlSocket";
 pub(crate) const DETACHED_STREAM_SOCKET_METADATA_KEY: &str = "detachedStreamSocket";
 pub(crate) const DETACHED_CONTROL_TOKEN_METADATA_KEY: &str = "detachedControlToken";
@@ -55,6 +57,7 @@ pub(crate) const DETACHED_BACKPRESSURE_METADATA_KEY: &str = "detachedBackpressur
 pub(crate) const DETACHED_BATCH_INTERVAL_METADATA_KEY: &str = "detachedBatchIntervalMs";
 pub(crate) const DETACHED_BATCH_BYTES_METADATA_KEY: &str = "detachedBatchBytes";
 pub(crate) const DETACHED_ISOLATION_METADATA_KEY: &str = "detachedIsolation";
+pub(crate) const DETACHED_OUTPUT_OFFSET_METADATA_KEY: &str = "detachedOutputOffset";
 const TERMINAL_DAEMON_CONTROL_SOCKET_ENV: &str = "CONDUCTOR_TERMINAL_DAEMON_CONTROL_SOCKET";
 const TERMINAL_DAEMON_TOKEN_ENV: &str = "CONDUCTOR_TERMINAL_DAEMON_TOKEN";
 const TERMINAL_DAEMON_PROTOCOL_VERSION_ENV: &str = "CONDUCTOR_TERMINAL_DAEMON_PROTOCOL_VERSION";
@@ -79,6 +82,107 @@ const DETACHED_PTY_TRANSPORT: &str = "dual_socket_control_json_stream_binary_v1"
 const DETACHED_PTY_TERMINAL_EMULATOR: &str = "vt100_restore_v1";
 const DETACHED_PTY_BACKPRESSURE_MODE: &str = "bounded_channel_pause_pty_read_v2";
 const DETACHED_PTY_ISOLATION_MODE: &str = "portable_pty_subprocess_v1";
+
+fn prepare_detached_runtime_env(
+    kind: AgentKind,
+    interactive: bool,
+    env: &mut HashMap<String, String>,
+) {
+    if kind == AgentKind::QwenCode && interactive {
+        // Qwen's TUI currently crashes if its active theme resolves to a
+        // gradient with fewer than two stops. Force the no-color theme for
+        // detached interactive launches until the upstream CLI fixes that path.
+        env.entry("NO_COLOR".to_string())
+            .or_insert_with(|| "1".to_string());
+    }
+}
+
+pub(crate) struct RuntimeLaunch {
+    pub(crate) handle: ExecutorHandle,
+    pub(crate) metadata: HashMap<String, String>,
+}
+
+impl AppState {
+    pub(crate) async fn spawn_with_runtime(
+        self: &Arc<Self>,
+        _project: &conductor_core::config::ProjectConfig,
+        executor: Arc<dyn Executor>,
+        session_id: &str,
+        options: SpawnOptions,
+    ) -> Result<RuntimeLaunch> {
+        self.spawn_detached_runtime_or_legacy(executor, session_id, options)
+            .await
+    }
+
+    pub(crate) async fn restore_runtime_sessions(self: &Arc<Self>) {
+        let session_ids = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|session| !session.status.is_terminal())
+                .filter(|session| {
+                    session
+                        .metadata
+                        .get(RUNTIME_MODE_METADATA_KEY)
+                        .map(|value| value == DIRECT_RUNTIME_MODE)
+                        .unwrap_or(false)
+                })
+                .map(|session| session.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        for session_id in session_ids {
+            if let Err(err) = self.restore_detached_runtime(&session_id).await {
+                tracing::warn!(session_id, error = %err, "Failed to restore runtime session");
+            }
+        }
+    }
+
+    pub(crate) async fn ensure_session_live(self: &Arc<Self>, session_id: &str) -> Result<bool> {
+        if self.terminal_runtime_attached(session_id).await {
+            return Ok(true);
+        }
+
+        let Some(session) = self.get_session(session_id).await else {
+            return Ok(false);
+        };
+
+        if matches!(
+            session.status,
+            SessionStatus::Archived | SessionStatus::Killed
+        ) {
+            return Ok(false);
+        }
+
+        let is_direct_runtime = session
+            .metadata
+            .get(RUNTIME_MODE_METADATA_KEY)
+            .map(|value| value == DIRECT_RUNTIME_MODE)
+            .unwrap_or(false);
+        if !is_direct_runtime {
+            return Ok(false);
+        }
+
+        self.restore_detached_runtime(session_id).await?;
+        Ok(self.terminal_runtime_attached(session_id).await)
+    }
+
+    pub(crate) async fn resize_live_terminal(
+        &self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
+        self.resize_terminal_store(session_id, cols, rows).await;
+        let handle = self.ensure_terminal_host(session_id).await;
+        if let Some(resize_tx) = handle.resize_tx.read().await.clone() {
+            let _ = resize_tx
+                .send(conductor_executors::process::PtyDimensions { cols, rows })
+                .await;
+        }
+        Ok(())
+    }
+}
 
 fn detached_protocol_version() -> u16 {
     DETACHED_PTY_PROTOCOL_VERSION
@@ -156,7 +260,10 @@ async fn send_detached_runtime_request_over_connection(
         token: metadata.control_token.clone(),
         command,
     };
-    reader.get_mut().write_all(&serde_json::to_vec(&request)?).await?;
+    reader
+        .get_mut()
+        .write_all(&serde_json::to_vec(&request)?)
+        .await?;
     reader.get_mut().write_all(b"\n").await?;
     reader.get_mut().flush().await?;
 
@@ -205,7 +312,13 @@ async fn run_detached_runtime_control_queue(
                 break;
             };
 
-            match send_detached_runtime_request_over_connection(reader, &metadata, next_command.clone()).await {
+            match send_detached_runtime_request_over_connection(
+                reader,
+                &metadata,
+                next_command.clone(),
+            )
+            .await
+            {
                 Ok(_) => break,
                 Err(err) if retries == 0 && detached_runtime_unreachable(&err) => {
                     connection = None;
@@ -355,6 +468,7 @@ struct DetachedRuntimeAttachment {
     session_id: String,
     child_pid: u32,
     metadata: DetachedRuntimeMetadata,
+    start_offset: u64,
 }
 
 struct DetachedOutputForwarder {
@@ -744,6 +858,7 @@ impl AppState {
         }
         options.interactive = executor.supports_direct_terminal_ui();
         options.structured_output = false;
+        prepare_detached_runtime_env(executor.kind(), options.interactive, &mut options.env);
         let _spawn_permit = self
             .acquire_detached_runtime_spawn_limit()
             .acquire_owned()
@@ -843,6 +958,7 @@ impl AppState {
                 log_path: log_path.clone(),
                 exit_path: exit_path.clone(),
             },
+            start_offset: 0,
         };
         let handle = self.attach_detached_runtime_handle(attachment).await?;
         let _ = tokio::fs::remove_file(&spec_path).await;
@@ -852,7 +968,7 @@ impl AppState {
             handle,
             metadata: HashMap::from([
                 (
-                    super::tmux_runtime::RUNTIME_MODE_METADATA_KEY.to_string(),
+                    RUNTIME_MODE_METADATA_KEY.to_string(),
                     DIRECT_RUNTIME_MODE.to_string(),
                 ),
                 (
@@ -910,6 +1026,10 @@ impl AppState {
                 (
                     DETACHED_ISOLATION_METADATA_KEY.to_string(),
                     DETACHED_PTY_ISOLATION_MODE.to_string(),
+                ),
+                (
+                    DETACHED_OUTPUT_OFFSET_METADATA_KEY.to_string(),
+                    "0".to_string(),
                 ),
             ]),
         })
@@ -979,6 +1099,7 @@ impl AppState {
                 session_id: session_id.to_string(),
                 child_pid: response.child_pid.unwrap_or(session.pid.unwrap_or(0)),
                 metadata: metadata.clone(),
+                start_offset: Self::detached_output_offset(&session),
             })
             .await?;
         let (_pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
@@ -1046,10 +1167,11 @@ impl AppState {
         )
     }
 
-    async fn detached_replay_offset(&self, session_id: &str) -> u64 {
-        tokio::fs::metadata(self.session_terminal_capture_path(session_id))
-            .await
-            .map(|metadata| metadata.len())
+    fn detached_output_offset(session: &SessionRecord) -> u64 {
+        session
+            .metadata
+            .get(DETACHED_OUTPUT_OFFSET_METADATA_KEY)
+            .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0)
     }
 
@@ -1062,6 +1184,9 @@ impl AppState {
         };
         let response =
             send_detached_runtime_request(&metadata, DetachedPtyHostCommand::Kill).await?;
+        if response.ok {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         Ok(response.ok)
     }
 
@@ -1076,7 +1201,7 @@ impl AppState {
         Ok(RuntimeLaunch {
             handle,
             metadata: HashMap::from([(
-                super::tmux_runtime::RUNTIME_MODE_METADATA_KEY.to_string(),
+                RUNTIME_MODE_METADATA_KEY.to_string(),
                 DIRECT_RUNTIME_MODE.to_string(),
             )]),
         })
@@ -1091,8 +1216,8 @@ impl AppState {
             session_id,
             child_pid,
             metadata,
+            start_offset,
         } = attachment;
-        let replay_offset = self.detached_replay_offset(&session_id).await;
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
         let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(64);
         let (resize_tx, mut resize_rx) =
@@ -1102,8 +1227,12 @@ impl AppState {
         let metadata_for_control = metadata.clone();
         let session_id_for_control = session_id.clone();
         tokio::spawn(async move {
-            run_detached_runtime_control_queue(metadata_for_control, session_id_for_control, control_rx)
-                .await;
+            run_detached_runtime_control_queue(
+                metadata_for_control,
+                session_id_for_control,
+                control_rx,
+            )
+            .await;
         });
 
         let control_tx_for_input = control_tx.clone();
@@ -1160,7 +1289,7 @@ impl AppState {
                     DetachedOutputForwarder {
                         session_id: session_id.clone(),
                         metadata,
-                        offset: replay_offset,
+                        offset: start_offset,
                     },
                     output_tx,
                 )
@@ -1238,6 +1367,8 @@ impl AppState {
                                     let skip = offset.saturating_sub(frame.offset) as usize;
                                     if skip >= frame.payload.len() {
                                         offset = next_offset;
+                                        self.update_detached_output_offset(&session_id, offset)
+                                            .await?;
                                         continue;
                                     }
                                     let chunk = frame.payload[skip..].to_vec();
@@ -1253,6 +1384,8 @@ impl AppState {
                                         }
                                     }
                                     offset = next_offset;
+                                    self.update_detached_output_offset(&session_id, offset)
+                                        .await?;
                                 }
                                 DetachedPtyStreamFrameKind::Exit => {
                                     flush_detached_partial_line(&output_tx, &mut partial).await?;
@@ -1342,6 +1475,8 @@ impl AppState {
                     }
                 }
                 offset = next_offset;
+                self.update_detached_output_offset(&session_id, offset)
+                    .await?;
             }
 
             if !crate::state::workspace::is_process_alive(metadata.host_pid) {
@@ -1379,6 +1514,28 @@ impl AppState {
                 _ = tokio::time::sleep(DETACHED_LOG_WATCH_FALLBACK_INTERVAL) => {}
             }
         }
+    }
+
+    async fn update_detached_output_offset(&self, session_id: &str, offset: u64) -> Result<()> {
+        let mut sessions = self.sessions.write().await;
+        let Some(current) = sessions.get_mut(session_id) else {
+            return Ok(());
+        };
+
+        let current_offset = current
+            .metadata
+            .get(DETACHED_OUTPUT_OFFSET_METADATA_KEY)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        if current_offset == offset {
+            return Ok(());
+        }
+
+        current.metadata.insert(
+            DETACHED_OUTPUT_OFFSET_METADATA_KEY.to_string(),
+            offset.to_string(),
+        );
+        Ok(())
     }
 }
 
@@ -1418,7 +1575,7 @@ impl AppState {
         Ok(RuntimeLaunch {
             handle,
             metadata: HashMap::from([(
-                super::tmux_runtime::RUNTIME_MODE_METADATA_KEY.to_string(),
+                RUNTIME_MODE_METADATA_KEY.to_string(),
                 DIRECT_RUNTIME_MODE.to_string(),
             )]),
         })
@@ -1440,70 +1597,80 @@ async fn handle_detached_host_connection(
         }
         let request = serde_json::from_slice::<DetachedPtyHostRequest>(&line)
             .context("Failed to parse detached PTY host request")?;
-        let response = if let Err(error) = ensure_detached_protocol_version(request.protocol_version) {
-            DetachedPtyHostResponse {
-                protocol_version: state.protocol_version,
-                ok: false,
-                child_pid: Some(state.child_pid),
-                error: Some(error.to_string()),
-            }
-        } else if request.token != state.token {
-            DetachedPtyHostResponse {
-                protocol_version: state.protocol_version,
-                ok: false,
-                child_pid: Some(state.child_pid),
-                error: Some("Unauthorized detached PTY host request".to_string()),
-            }
-        } else {
-            match request.command {
-                DetachedPtyHostCommand::Ping => DetachedPtyHostResponse {
+        let mut kill_after_response = false;
+        let response =
+            if let Err(error) = ensure_detached_protocol_version(request.protocol_version) {
+                DetachedPtyHostResponse {
                     protocol_version: state.protocol_version,
-                    ok: true,
+                    ok: false,
                     child_pid: Some(state.child_pid),
-                    error: None,
-                },
-                DetachedPtyHostCommand::Text { text } => {
-                    write_detached_host_input(&state.writer, &text, true).await?;
-                    DetachedPtyHostResponse {
+                    error: Some(error.to_string()),
+                }
+            } else if request.token != state.token {
+                DetachedPtyHostResponse {
+                    protocol_version: state.protocol_version,
+                    ok: false,
+                    child_pid: Some(state.child_pid),
+                    error: Some("Unauthorized detached PTY host request".to_string()),
+                }
+            } else {
+                match request.command {
+                    DetachedPtyHostCommand::Ping => DetachedPtyHostResponse {
                         protocol_version: state.protocol_version,
                         ok: true,
                         child_pid: Some(state.child_pid),
                         error: None,
+                    },
+                    DetachedPtyHostCommand::Text { text } => {
+                        write_detached_host_input(&state.writer, &text, true).await?;
+                        DetachedPtyHostResponse {
+                            protocol_version: state.protocol_version,
+                            ok: true,
+                            child_pid: Some(state.child_pid),
+                            error: None,
+                        }
+                    }
+                    DetachedPtyHostCommand::Raw { data } => {
+                        write_detached_host_input(&state.writer, &data, false).await?;
+                        DetachedPtyHostResponse {
+                            protocol_version: state.protocol_version,
+                            ok: true,
+                            child_pid: Some(state.child_pid),
+                            error: None,
+                        }
+                    }
+                    DetachedPtyHostCommand::Resize { cols, rows } => {
+                        resize_detached_host(&state.master, cols, rows).await?;
+                        DetachedPtyHostResponse {
+                            protocol_version: state.protocol_version,
+                            ok: true,
+                            child_pid: Some(state.child_pid),
+                            error: None,
+                        }
+                    }
+                    DetachedPtyHostCommand::Kill => {
+                        kill_after_response = true;
+                        DetachedPtyHostResponse {
+                            protocol_version: state.protocol_version,
+                            ok: true,
+                            child_pid: Some(state.child_pid),
+                            error: None,
+                        }
                     }
                 }
-                DetachedPtyHostCommand::Raw { data } => {
-                    write_detached_host_input(&state.writer, &data, false).await?;
-                    DetachedPtyHostResponse {
-                        protocol_version: state.protocol_version,
-                        ok: true,
-                        child_pid: Some(state.child_pid),
-                        error: None,
-                    }
-                }
-                DetachedPtyHostCommand::Resize { cols, rows } => {
-                    resize_detached_host(&state.master, cols, rows).await?;
-                    DetachedPtyHostResponse {
-                        protocol_version: state.protocol_version,
-                        ok: true,
-                        child_pid: Some(state.child_pid),
-                        error: None,
-                    }
-                }
-                DetachedPtyHostCommand::Kill => {
-                    kill_detached_host_child(&state.child).await?;
-                    DetachedPtyHostResponse {
-                        protocol_version: state.protocol_version,
-                        ok: true,
-                        child_pid: Some(state.child_pid),
-                        error: None,
-                    }
-                }
-            }
-        };
+            };
 
-        reader.get_mut().write_all(&serde_json::to_vec(&response)?).await?;
+        reader
+            .get_mut()
+            .write_all(&serde_json::to_vec(&response)?)
+            .await?;
         reader.get_mut().write_all(b"\n").await?;
         reader.get_mut().flush().await?;
+
+        if kill_after_response {
+            kill_detached_host_child(&state.child).await?;
+            return Ok(());
+        }
     }
 }
 
@@ -2091,13 +2258,9 @@ async fn kill_detached_host_child(
         #[cfg(unix)]
         {
             if let Some(pid) = child.process_id() {
-                let _ = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                for _ in 0..50 {
-                    std::thread::sleep(Duration::from_millis(100));
-                    if let Ok(Some(_)) = child.try_wait() {
-                        return Ok(());
-                    }
-                }
+                terminate_detached_host_process_tree(pid, Duration::from_secs(1));
+                let _ = child.wait();
+                return Ok(());
             }
         }
         let _ = child.kill();
@@ -2106,6 +2269,54 @@ async fn kill_detached_host_child(
     })
     .await??;
     Ok(())
+}
+
+#[cfg(unix)]
+fn terminate_detached_host_process_tree(root_pid: u32, timeout: Duration) {
+    if root_pid == 0 || root_pid > i32::MAX as u32 {
+        return;
+    }
+
+    let pid = root_pid as libc::pid_t;
+    let host_pgid = unsafe { libc::getpgrp() };
+    let pgid = unsafe { libc::getpgid(pid) };
+    let target_pgid = (pgid > 0 && pgid != host_pgid).then_some(pgid);
+
+    if let Some(pgid) = target_pgid {
+        let _ = send_detached_host_signal(-pgid, libc::SIGTERM);
+    }
+    let _ = send_detached_host_signal(pid, libc::SIGTERM);
+
+    if wait_for_detached_host_exit(root_pid, timeout) {
+        return;
+    }
+
+    if let Some(pgid) = target_pgid {
+        let _ = send_detached_host_signal(-pgid, libc::SIGKILL);
+    }
+    let _ = send_detached_host_signal(pid, libc::SIGKILL);
+    let _ = wait_for_detached_host_exit(root_pid, Duration::from_millis(250));
+}
+
+#[cfg(unix)]
+fn wait_for_detached_host_exit(pid: u32, timeout: Duration) -> bool {
+    let poll_interval = Duration::from_millis(50);
+    let iterations = (timeout.as_millis() / poll_interval.as_millis()).max(1) as usize;
+
+    for _ in 0..iterations {
+        if !crate::state::workspace::is_process_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(poll_interval);
+    }
+
+    !crate::state::workspace::is_process_alive(pid)
+}
+
+#[cfg(unix)]
+fn send_detached_host_signal(pid: libc::pid_t, signal: libc::c_int) -> bool {
+    let result = unsafe { libc::kill(pid, signal) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(unix)]
@@ -2476,8 +2687,6 @@ async fn read_detached_exit_code(path: &Path) -> Result<Option<i32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conductor_core::config::ConductorConfig;
-    use conductor_db::Database;
     use uuid::Uuid;
 
     #[test]
@@ -2550,6 +2759,20 @@ mod tests {
             DetachedPtyHostCommand::Raw { data } => assert_eq!(data, "xyz"),
             other => panic!("expected trailing raw command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prepare_detached_runtime_env_disables_qwen_gradient_theme() {
+        let mut env = HashMap::new();
+        prepare_detached_runtime_env(AgentKind::QwenCode, true, &mut env);
+        assert_eq!(env.get("NO_COLOR").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn prepare_detached_runtime_env_preserves_non_qwen_agents() {
+        let mut env = HashMap::new();
+        prepare_detached_runtime_env(AgentKind::Codex, true, &mut env);
+        assert!(!env.contains_key("NO_COLOR"));
     }
 
     #[tokio::test]
@@ -2747,22 +2970,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detached_replay_offset_uses_terminal_capture_length() {
-        let root = std::env::temp_dir().join(format!(
-            "conductor-detached-replay-offset-test-{}",
-            Uuid::new_v4()
-        ));
-        tokio::fs::create_dir_all(&root).await.unwrap();
-        let state = build_test_state(&root).await;
+    async fn detached_output_offset_reads_metadata() {
+        let mut session = SessionRecord::new(
+            "session-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "Prompt".to_string(),
+            None,
+        );
+        session.metadata.insert(
+            DETACHED_OUTPUT_OFFSET_METADATA_KEY.to_string(),
+            "12".to_string(),
+        );
+        let empty = SessionRecord::new(
+            "session-2".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "Prompt".to_string(),
+            None,
+        );
 
-        state
-            .emit_terminal_bytes("session-1", b"hello\r\nworld")
-            .await;
-        state.flush_terminal_capture("session-1").await;
-
-        assert_eq!(state.detached_replay_offset("session-1").await, 12);
-
-        let _ = tokio::fs::remove_dir_all(&root).await;
+        assert_eq!(AppState::detached_output_offset(&session), 12);
+        assert_eq!(AppState::detached_output_offset(&empty), 0);
     }
 
     #[tokio::test]
@@ -2841,18 +3080,5 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
-    }
-
-    async fn build_test_state(root: &Path) -> Arc<AppState> {
-        let config = ConductorConfig {
-            workspace: root.to_path_buf(),
-            ..ConductorConfig::default()
-        };
-        AppState::new(
-            root.join("conductor.yaml"),
-            config,
-            Database::in_memory().await.unwrap(),
-        )
-        .await
     }
 }

@@ -78,7 +78,7 @@ projects:
     #   https: false              # optional; set true for local HTTPS dev servers
     #   url: https://preview.example.com
     workspace: worktree            # git worktree isolation per task
-    runtime: tmux                  # tmux session runner
+    runtime: direct                # direct PTY runner (legacy tmux is compatibility-only)
     scm: github                    # GitHub PR/CI integration
     # Optional: MCP servers for this project (merged with defaults, project wins)
     # mcpServers:

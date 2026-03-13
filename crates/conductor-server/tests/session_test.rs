@@ -1,5 +1,5 @@
 mod common;
-use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness, TmuxResumeExecutor};
+use common::{spawn_request, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use std::sync::Arc;
@@ -110,6 +110,11 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
     })
     .await;
     assert_eq!(archived.summary.as_deref(), Some("Archived"));
+    wait_for_condition("archived worktree removal", || {
+        let worktree = worktree.clone();
+        async move { (!std::path::Path::new(&worktree).exists()).then_some(()) }
+    })
+    .await;
     assert!(!std::path::Path::new(&worktree).exists());
 
     let restored = harness.state.restore_session(&archived.id).await.unwrap();
@@ -131,14 +136,14 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
 }
 
 #[tokio::test]
-async fn resume_session_uses_direct_runtime_even_when_project_requests_tmux() {
+async fn resume_session_uses_direct_runtime_even_when_project_requests_legacy_tmux() {
     let harness = TestHarness::new("conductor-session-resume-test", "tmux").await;
     harness
         .state
         .executors
         .write()
         .await
-        .insert(AgentKind::Codex, Arc::new(TmuxResumeExecutor));
+        .insert(AgentKind::Codex, Arc::new(ResumeExecutor));
 
     let queued = harness
         .state
@@ -183,7 +188,7 @@ async fn resume_session_uses_direct_runtime_even_when_project_requests_tmux() {
             state.get_session(&session_id).await.and_then(|session| {
                 (session.metadata.get("runtimeMode").map(String::as_str) == Some("direct")
                     && session.pid.is_some())
-                    .then_some(session)
+                .then_some(session)
             })
         }
     })

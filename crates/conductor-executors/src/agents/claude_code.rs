@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process_no_stdin;
+use crate::process::{spawn_process, spawn_process_no_stdin};
 
 /// Claude Code CLI executor.
 #[derive(Clone)]
@@ -51,10 +51,17 @@ impl Executor for ClaudeCodeExecutor {
         Ok(version)
     }
 
+    fn supports_direct_terminal_ui(&self) -> bool {
+        true
+    }
+
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle =
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle = if options.interactive {
+            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+        } else {
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
 
         Ok(ExecutorHandle::new(
@@ -63,7 +70,8 @@ impl Executor for ClaudeCodeExecutor {
             output_rx,
             handle.input_tx,
             handle.kill_tx,
-        ))
+        )
+        .with_terminal_io(handle.terminal_rx, handle.resize_tx))
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
@@ -430,5 +438,26 @@ mod tests {
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--effort".to_string()));
         assert!(!args.contains(&"continue".to_string()));
+    }
+
+    #[test]
+    fn build_args_interactive_direct_terminal_omits_structured_flags() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: None,
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert_eq!(args, vec!["hello".to_string()]);
     }
 }

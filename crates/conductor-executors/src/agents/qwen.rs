@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use conductor_core::types::AgentKind;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -20,6 +21,18 @@ impl QwenCodeExecutor {
 
     pub fn discover() -> Option<Self> {
         discover_binary(&["qwen", "qwen-code"]).map(Self::new)
+    }
+
+    fn runtime_env(&self, options: &SpawnOptions) -> HashMap<String, String> {
+        let mut env = options.env.clone();
+        if options.interactive {
+            // Qwen's TUI can crash when a custom theme exposes fewer than two
+            // gradient stops. NO_COLOR forces its no-color theme and avoids the
+            // invalid gradient path while keeping the session usable.
+            env.entry("NO_COLOR".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
+        env
     }
 }
 
@@ -49,10 +62,11 @@ impl Executor for QwenCodeExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
+        let env = self.runtime_env(&options);
         let handle = if options.interactive {
-            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+            spawn_process(&self.binary, &args, &options.cwd, &env).await?
         } else {
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &env).await?
         };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
         Ok(ExecutorHandle::new(
@@ -105,7 +119,6 @@ impl Executor for QwenCodeExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn build_args_interactive_uses_prompt_interactive_flag() {
@@ -165,5 +178,47 @@ mod tests {
                 .map(|pair| pair[1].as_str()),
             Some("generate a plan")
         );
+    }
+
+    #[test]
+    fn interactive_runtime_env_disables_qwen_gradient_theme() {
+        let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
+        let env = executor.runtime_env(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "review the workspace".to_string(),
+            model: None,
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert_eq!(env.get("NO_COLOR").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn headless_runtime_env_preserves_existing_color_behavior() {
+        let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
+        let env = executor.runtime_env(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "generate a plan".to_string(),
+            model: None,
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(!env.contains_key("NO_COLOR"));
     }
 }
