@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono, Tomorrow } from "next/font/google";
+import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { TooltipProvider } from "@/components/ui/Tooltip";
@@ -7,9 +8,9 @@ import "./globals.css";
 
 const tomorrow = Tomorrow({
   subsets: ["latin"],
-  variable: "--font-sans",
+  variable: "--font-tomorrow",
   display: "swap",
-  weight: ["400", "500", "600", "700"],
+  weight: ["700"],
 });
 
 const jetbrainsMono = JetBrains_Mono({
@@ -19,7 +20,7 @@ const jetbrainsMono = JetBrains_Mono({
   weight: ["400", "500"],
 });
 
-const rootClass = `${tomorrow.variable} ${jetbrainsMono.variable}`;
+const rootClass = `${GeistSans.variable} ${tomorrow.variable} ${jetbrainsMono.variable}`;
 
 export const metadata: Metadata = {
   title: "Conductor",

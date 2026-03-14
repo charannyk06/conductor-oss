@@ -79,7 +79,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
       <div className="flex h-full min-h-0 w-full flex-col bg-[var(--vk-bg-panel)]">
         <section className="border-b border-[var(--vk-border)] px-4 py-4">
           <div className="flex justify-center text-center">
-            <p className="text-[22px] font-bold leading-none uppercase tracking-[0.32em] text-[var(--vk-text-strong)]">
+            <p className="font-brand-header text-[22px] font-bold leading-none uppercase tracking-[0.32em] text-[var(--vk-text-strong)]">
               Conductor
             </p>
           </div>
