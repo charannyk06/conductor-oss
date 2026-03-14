@@ -50,6 +50,7 @@ pub(super) const DETACHED_PTY_TRANSPORT: &str = "dual_socket_control_json_stream
 pub(super) const DETACHED_PTY_TERMINAL_EMULATOR: &str = "vt100_restore_v1";
 pub(super) const DETACHED_PTY_BACKPRESSURE_MODE: &str = "bounded_channel_pause_pty_read_v2";
 pub(super) const DETACHED_PTY_ISOLATION_MODE: &str = "portable_pty_subprocess_v1";
+pub(super) const DETACHED_PTY_SUBPROCESS_ISOLATION_MODE: &str = "subprocess_isolation_v1";
 
 pub(super) fn detached_protocol_version() -> u16 {
     DETACHED_PTY_PROTOCOL_VERSION
@@ -84,6 +85,11 @@ pub struct DetachedPtyHostSpec {
     pub stream_flush_interval_ms: u64,
     #[serde(default = "detached_stream_max_batch_bytes")]
     pub stream_max_batch_bytes: usize,
+    /// Optional isolation mode override.  When set to
+    /// [`DETACHED_PTY_SUBPROCESS_ISOLATION_MODE`] the PTY child is placed in
+    /// its own process group and monitored for crash resilience.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

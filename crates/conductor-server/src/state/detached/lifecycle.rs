@@ -88,6 +88,7 @@ impl AppState {
             ready_path: ready_path.clone(),
             stream_flush_interval_ms: detached_stream_flush_interval_ms(),
             stream_max_batch_bytes: detached_stream_max_batch_bytes(),
+            isolation_mode: None,
         };
         tokio::fs::write(&spec_path, serde_json::to_vec(&spec)?).await?;
 

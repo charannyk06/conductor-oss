@@ -5,6 +5,7 @@ mod helpers;
 mod lifecycle;
 mod log_tail;
 pub mod pty_host;
+mod pty_subprocess;
 mod stream;
 #[cfg(test)]
 mod tests;

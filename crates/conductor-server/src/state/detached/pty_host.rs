@@ -25,6 +25,8 @@ use super::frame::{write_detached_stream_frame, DetachedPtyStreamFrameKind};
 #[cfg(unix)]
 use super::helpers::ensure_detached_protocol_version;
 #[cfg(unix)]
+use super::pty_subprocess::spawn_isolated_pty;
+#[cfg(unix)]
 use super::stream::detached_log_len;
 #[cfg(unix)]
 use super::types::*;
@@ -63,32 +65,17 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     let stream_listener = UnixListener::bind(&spec.stream_socket_path)
         .context("Failed to bind detached PTY stream listener")?;
 
-    let pty_system = native_pty_system();
-    let pair = pty_system.openpty(PtySize {
-        rows: spec.rows.max(1),
-        cols: spec.cols.max(1),
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-
-    let mut cmd = CommandBuilder::new(&spec.binary);
-    cmd.cwd(&spec.cwd);
-    for arg in &spec.args {
-        cmd.arg(arg);
-    }
-    for (key, value) in &spec.env {
-        cmd.env(key, value);
-    }
-
-    let child = pair.slave.spawn_command(cmd)?;
-    drop(pair.slave);
-
-    let child_pid = child.process_id().unwrap_or(0);
-    let reader = pair.master.try_clone_reader()?;
-    let writer = Arc::new(StdMutex::new(pair.master.take_writer()?));
-    let master: Arc<StdMutex<Option<Box<dyn MasterPty + Send>>>> =
-        Arc::new(StdMutex::new(Some(pair.master)));
-    let child = Arc::new(StdMutex::new(child));
+    // Determine whether subprocess isolation is requested.  This is opt-in
+    // via the spec's `isolation_mode` field or the environment variable
+    // `CONDUCTOR_PTY_SUBPROCESS_ISOLATION=1`.
+    let use_subprocess_isolation = spec
+        .isolation_mode
+        .as_deref()
+        .map(|m| m == DETACHED_PTY_SUBPROCESS_ISOLATION_MODE)
+        .unwrap_or(false)
+        || std::env::var("CONDUCTOR_PTY_SUBPROCESS_ISOLATION")
+            .map(|v| v.trim().eq_ignore_ascii_case("1") || v.trim().eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
     let (capture_tx, capture_rx) = mpsc::channel(DETACHED_CAPTURE_CHANNEL_CAPACITY);
     tokio::spawn(run_detached_capture_writer(
@@ -97,6 +84,95 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     ));
 
     let (stream_tx, _) = broadcast::channel(2048);
+    let log_offset = Arc::new(AtomicU64::new(0));
+
+    let (child_pid, writer, master, child) = if use_subprocess_isolation {
+        tracing::debug!("detached PTY host: using subprocess isolation mode");
+        let handle = spawn_isolated_pty(
+            &spec,
+            stream_tx.clone(),
+            capture_tx.clone(),
+            log_offset.clone(),
+        )
+        .await?;
+        (handle.child_pid, handle.writer, handle.master, handle.child)
+    } else {
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(PtySize {
+            rows: spec.rows.max(1),
+            cols: spec.cols.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        let mut cmd = CommandBuilder::new(&spec.binary);
+        cmd.cwd(&spec.cwd);
+        for arg in &spec.args {
+            cmd.arg(arg);
+        }
+        for (key, value) in &spec.env {
+            cmd.env(key, value);
+        }
+
+        let child = pair.slave.spawn_command(cmd)?;
+        drop(pair.slave);
+
+        let child_pid = child.process_id().unwrap_or(0);
+        let reader = pair.master.try_clone_reader()?;
+        let writer: Arc<StdMutex<Box<dyn std::io::Write + Send>>> =
+            Arc::new(StdMutex::new(pair.master.take_writer()?));
+        let master: Arc<StdMutex<Option<Box<dyn MasterPty + Send>>>> =
+            Arc::new(StdMutex::new(Some(pair.master)));
+        let child: Arc<StdMutex<Box<dyn portable_pty::Child + Send + Sync>>> =
+            Arc::new(StdMutex::new(child));
+
+        // Spawn the output reader thread for the in-process (non-isolated) path.
+        let stream_tx_for_output = stream_tx.clone();
+        let capture_tx_for_output = capture_tx.clone();
+        let log_offset_for_output = log_offset.clone();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match std::io::Read::read(&mut reader, &mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        let offset = log_offset_for_output
+                            .fetch_add(read as u64, Ordering::Relaxed);
+                        let chunk = DetachedPtyOutputChunk {
+                            offset,
+                            bytes: Arc::<[u8]>::from(buffer[..read].to_vec()),
+                        };
+                        // Prioritize the live stream before durable capture so reconnect safety
+                        // does not add avoidable latency to the active terminal path.
+                        let _ = stream_tx_for_output
+                            .send(DetachedPtyHostStreamMessage::Data(chunk.clone()));
+                        if capture_tx_for_output
+                            .try_send(DetachedPtyHostCaptureMessage::Data(chunk.clone()))
+                            .or_else(|error| match error {
+                                mpsc::error::TrySendError::Full(message) => capture_tx_for_output
+                                    .blocking_send(message)
+                                    .map_err(|_| {
+                                        mpsc::error::TrySendError::Closed(
+                                            DetachedPtyHostCaptureMessage::Shutdown,
+                                        )
+                                    }),
+                                mpsc::error::TrySendError::Closed(message) => {
+                                    Err(mpsc::error::TrySendError::Closed(message))
+                                }
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (child_pid, writer, master, child)
+    };
 
     let shared = Arc::new(DetachedHostState {
         protocol_version: spec.protocol_version,
@@ -107,58 +183,17 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
         child,
         capture_tx: capture_tx.clone(),
         stream_tx,
-        log_offset: AtomicU64::new(0),
+        log_offset: {
+            // Transfer the Arc<AtomicU64> value into the owned AtomicU64 in
+            // DetachedHostState.  Both paths have been writing through the Arc
+            // so we read the current count here.
+            AtomicU64::new(log_offset.load(Ordering::Relaxed))
+        },
         log_path: spec.log_path.clone(),
         stream_batch: DetachedStreamBatchConfig {
             flush_interval: Duration::from_millis(spec.stream_flush_interval_ms.max(1)),
             max_batch_bytes: spec.stream_max_batch_bytes.max(1024),
         },
-    });
-
-    let shared_for_output = shared.clone();
-    std::thread::spawn(move || {
-        let mut reader = reader;
-        let mut buffer = [0_u8; 4096];
-        loop {
-            match std::io::Read::read(&mut reader, &mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    let offset = shared_for_output
-                        .log_offset
-                        .fetch_add(read as u64, Ordering::Relaxed);
-                    let chunk = DetachedPtyOutputChunk {
-                        offset,
-                        bytes: Arc::<[u8]>::from(buffer[..read].to_vec()),
-                    };
-                    // Prioritize the live stream before durable capture so reconnect safety
-                    // does not add avoidable latency to the active terminal path.
-                    let _ = shared_for_output
-                        .stream_tx
-                        .send(DetachedPtyHostStreamMessage::Data(chunk.clone()));
-                    if shared_for_output
-                        .capture_tx
-                        .try_send(DetachedPtyHostCaptureMessage::Data(chunk.clone()))
-                        .or_else(|error| match error {
-                            mpsc::error::TrySendError::Full(message) => shared_for_output
-                                .capture_tx
-                                .blocking_send(message)
-                                .map_err(|_| {
-                                    mpsc::error::TrySendError::Closed(
-                                        DetachedPtyHostCaptureMessage::Shutdown,
-                                    )
-                                }),
-                            mpsc::error::TrySendError::Closed(message) => {
-                                Err(mpsc::error::TrySendError::Closed(message))
-                            }
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
     });
 
     let ready = DetachedPtyHostReady {
@@ -172,6 +207,10 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
     let shutdown_for_wait = shutdown.clone();
     let exit_path = spec.exit_path.clone();
     let shared_for_wait = shared.clone();
+    // When subprocess isolation is active the monitor task in `pty_subprocess`
+    // already emits Error/Exit stream frames and sends the Capture::Shutdown
+    // message.  The waiter below is still responsible for writing the exit
+    // file and triggering the host-level shutdown notification.
     tokio::spawn(async move {
         let result = wait_for_detached_child(shared_for_wait.child.clone()).await;
         if let Ok(mut guard) = shared_for_wait.master.lock() {
@@ -185,24 +224,29 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
         let _ = flush_detached_capture(&shared_for_wait.capture_tx).await;
         let _ = tokio::fs::write(&exit_path, exit_code.to_string()).await;
 
-        if let Some(message) = stream_error {
+        if !use_subprocess_isolation {
+            // Subprocess isolation mode: the monitor task in pty_subprocess.rs
+            // already sent these frames; skip them here to avoid duplicates.
+            if let Some(message) = stream_error {
+                let _ = shared_for_wait
+                    .stream_tx
+                    .send(DetachedPtyHostStreamMessage::Error {
+                        offset: stream_offset,
+                        message,
+                    });
+            }
             let _ = shared_for_wait
                 .stream_tx
-                .send(DetachedPtyHostStreamMessage::Error {
+                .send(DetachedPtyHostStreamMessage::Exit {
                     offset: stream_offset,
-                    message,
+                    exit_code,
                 });
+            let _ = shared_for_wait
+                .capture_tx
+                .send(DetachedPtyHostCaptureMessage::Shutdown)
+                .await;
         }
-        let _ = shared_for_wait
-            .stream_tx
-            .send(DetachedPtyHostStreamMessage::Exit {
-                offset: stream_offset,
-                exit_code,
-            });
-        let _ = shared_for_wait
-            .capture_tx
-            .send(DetachedPtyHostCaptureMessage::Shutdown)
-            .await;
+
         shutdown_for_wait.notify_waiters();
     });
 
