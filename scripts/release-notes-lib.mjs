@@ -59,12 +59,15 @@ function normalizeHeading(value) {
 
 function stripTemplateNoise(markdown) {
   let result = normalizeNewlines(markdown);
-  // Loop until stable to handle nested/overlapping comment markers
-  let previous;
-  do {
-    previous = result;
-    result = result.replace(CODE_RABBIT_BLOCK_RE, "").replace(HTML_COMMENT_RE, "");
-  } while (result !== previous);
+  // Loop until stable to handle nested/overlapping comment markers.
+  // A single replace pass can leave partial markers when CodeRabbit blocks
+  // contain inner HTML comments; the loop guarantees full removal.
+  const MAX_STRIP_ITERATIONS = 20;
+  for (let i = 0; i < MAX_STRIP_ITERATIONS; i++) {
+    const next = result.replace(CODE_RABBIT_BLOCK_RE, "").replace(HTML_COMMENT_RE, "");
+    if (next === result) break;
+    result = next;
+  }
   return result;
 }
 

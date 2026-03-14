@@ -269,13 +269,28 @@ function slugifyProjectId(value: string): string {
   const bounded = value.length > MAX_PROJECT_ID_INPUT_LENGTH
     ? value.slice(0, MAX_PROJECT_ID_INPUT_LENGTH)
     : value;
-  const normalized = bounded
-    .trim()
-    .toLowerCase()
-    .replace(/\.git$/i, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return normalized || "project";
+  let normalized = bounded.trim().toLowerCase();
+  if (normalized.endsWith(".git")) {
+    normalized = normalized.slice(0, -4);
+  }
+  // Build slug character-by-character to avoid polynomial regex on
+  // uncontrolled input (CodeQL js/polynomial-redos).
+  let slug = "";
+  let lastWasDash = true;
+  for (const ch of normalized) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9")) {
+      slug += ch;
+      lastWasDash = false;
+    } else if (!lastWasDash) {
+      slug += "-";
+      lastWasDash = true;
+    }
+  }
+  // Trim trailing dash
+  if (slug.endsWith("-")) {
+    slug = slug.slice(0, -1);
+  }
+  return slug || "project";
 }
 
 function ensureUniqueProjectKey(baseKey: string, usedKeys: Set<string>): string {

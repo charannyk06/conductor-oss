@@ -179,7 +179,11 @@ function buildNavigationCandidates(value: string): string[] {
     if (error instanceof Error && error.message.startsWith("Navigation blocked:")) {
       throw error;
     }
-    return [normalizedInput];
+    // SECURITY: If we can't parse the URL, reject it rather than passing an
+    // unvalidated string to page.goto() which could cause SSRF.
+    throw new Error(
+      `Navigation blocked: could not parse "${normalizedInput}" as a valid localhost URL.`,
+    );
   }
 }
 
