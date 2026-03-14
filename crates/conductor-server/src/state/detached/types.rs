@@ -164,6 +164,10 @@ pub(super) enum TerminalDaemonRequest {
         spec_path: PathBuf,
         ready_path: PathBuf,
     },
+    ListSessions {
+        protocol_version: u16,
+        token: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +179,16 @@ pub(super) struct TerminalDaemonResponse {
     pub(super) daemon_pid: Option<u32>,
     pub(super) host_pid: Option<u32>,
     pub(super) child_pid: Option<u32>,
+    pub(super) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TerminalDaemonSessionsResponse {
+    #[serde(default = "detached_protocol_version")]
+    pub(super) protocol_version: u16,
+    pub(super) ok: bool,
+    pub(super) sessions: Vec<String>,
     pub(super) error: Option<String>,
 }
 

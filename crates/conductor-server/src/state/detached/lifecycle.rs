@@ -24,7 +24,9 @@ use super::control::{
     send_detached_runtime_request,
 };
 #[cfg(unix)]
-use super::daemon::{resolve_terminal_daemon_metadata, spawn_detached_runtime_via_daemon};
+use super::daemon::{
+    check_daemon_health, resolve_terminal_daemon_metadata, spawn_detached_runtime_via_daemon,
+};
 #[cfg(unix)]
 use super::helpers::{
     configure_detached_process_group, detached_runtime_disabled, ensure_detached_protocol_version,
@@ -93,6 +95,15 @@ impl AppState {
         tokio::fs::write(&spec_path, serde_json::to_vec(&spec)?).await?;
 
         let daemon_metadata = resolve_terminal_daemon_metadata();
+        if let Some(ref meta) = daemon_metadata {
+            let healthy = check_daemon_health(meta).await;
+            tracing::debug!(
+                session_id,
+                daemon_socket = %meta.control_socket_path.display(),
+                healthy,
+                "Terminal daemon health check before spawn"
+            );
+        }
         let (ready, host_pid) = match spawn_detached_runtime_via_daemon(
             daemon_metadata.as_ref(),
             session_id,
