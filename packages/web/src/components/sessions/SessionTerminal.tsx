@@ -116,7 +116,8 @@ const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
 // Keep enough scrollback so users can scroll through recent output without
 // losing context on tab switch or mobile scroll. The backend still owns the
 // durable capture; this only sizes the browser-side xterm ring buffer.
-const LIVE_TERMINAL_SCROLLBACK = 5_000;
+// 1 000 lines balances usable history (~4–8 MB) with mobile memory limits.
+const LIVE_TERMINAL_SCROLLBACK = 1_000;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 1200;
 const TERMINAL_CONNECTION_CACHE_MAX_TTL_MS = 5_000;
 const TERMINAL_CONNECTION_CACHE_MAX_ENTRIES = 2;
@@ -2389,9 +2390,11 @@ export function SessionTerminal({
       if (deltaLines === 0) {
         return;
       }
-      touchScrolled = true;
-      // Only intercept when there is scrollback to scroll through
+      // Only mark as scrolled and intercept when there is scrollback to
+      // scroll through.  When baseY === 0 the swipe is a no-op and we must
+      // NOT suppress the subsequent tap-to-focus in onTouchEnd.
       if (term.buffer.active.baseY > 0) {
+        touchScrolled = true;
         term.scrollLines(deltaLines);
         updateScrollState();
         event.preventDefault();
