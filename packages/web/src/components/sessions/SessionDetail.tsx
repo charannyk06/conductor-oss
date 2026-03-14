@@ -280,20 +280,18 @@ export function SessionDetail({
               ? "flex min-h-0 h-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
               : "flex min-h-0 h-full flex-col overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
           >
-            {terminalTabActive ? (
-              <SessionTerminal
-                key={sessionId}
-                sessionId={sessionId}
-                agentName={agentName}
-                projectId={session.projectId}
-                sessionModel={sessionModel}
+            <SessionTerminal
+              key={sessionId}
+              sessionId={sessionId}
+              agentName={agentName}
+              projectId={session.projectId}
+              sessionModel={sessionModel}
               sessionReasoningEffort={sessionReasoningEffort}
               sessionState={status}
               active={terminalTabActive}
               pendingInsert={pendingTerminalInsert}
               immersiveMobileMode={immersiveTerminalActive}
             />
-          ) : null}
           </TabsContent>
 
           <TabsContent
