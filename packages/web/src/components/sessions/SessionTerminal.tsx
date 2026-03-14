@@ -111,7 +111,7 @@ const RESUMABLE_STATUSES = new Set(["done", "needs_input", "stuck", "errored", "
 const RECONNECT_BASE_DELAY_MS = 300;
 const RECONNECT_MAX_DELAY_MS = 1600;
 const RENDERER_RECOVERY_THROTTLE_MS = 120;
-const TERMINAL_WRITE_BATCH_MAX_DELAY_MS = 10;
+const TERMINAL_WRITE_BATCH_MAX_DELAY_MS = 16;
 const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
 // Keep enough scrollback so users can scroll through recent output without
 // losing context on tab switch or mobile scroll. The backend owns the full
@@ -177,6 +177,9 @@ const terminalSnapshotCache = new Map<string, CachedTerminalSnapshot>();
 const terminalUiStateCache = new Map<string, CachedTerminalUiState>();
 let terminalCoreClientModulesPromise: Promise<TerminalCoreClientModules> | null = null;
 let terminalSearchAddonModulePromise: Promise<typeof import("@xterm/addon-search")> | null = null;
+let terminalWebglAddonModulePromise: Promise<typeof import("@xterm/addon-webgl")> | null = null;
+let terminalUnicode11AddonModulePromise: Promise<typeof import("@xterm/addon-unicode11")> | null = null;
+let terminalWebLinksAddonModulePromise: Promise<typeof import("@xterm/addon-web-links")> | null = null;
 
 function trimTerminalCache(cache: Map<string, unknown>, maxEntries: number): void {
   while (cache.size > maxEntries) {
@@ -301,6 +304,36 @@ function loadTerminalSearchAddonModule(): Promise<typeof import("@xterm/addon-se
     });
   }
   return terminalSearchAddonModulePromise;
+}
+
+function loadTerminalWebglAddonModule(): Promise<typeof import("@xterm/addon-webgl")> {
+  if (!terminalWebglAddonModulePromise) {
+    terminalWebglAddonModulePromise = import("@xterm/addon-webgl").catch((error) => {
+      terminalWebglAddonModulePromise = null;
+      throw error;
+    });
+  }
+  return terminalWebglAddonModulePromise;
+}
+
+function loadTerminalUnicode11AddonModule(): Promise<typeof import("@xterm/addon-unicode11")> {
+  if (!terminalUnicode11AddonModulePromise) {
+    terminalUnicode11AddonModulePromise = import("@xterm/addon-unicode11").catch((error) => {
+      terminalUnicode11AddonModulePromise = null;
+      throw error;
+    });
+  }
+  return terminalUnicode11AddonModulePromise;
+}
+
+function loadTerminalWebLinksAddonModule(): Promise<typeof import("@xterm/addon-web-links")> {
+  if (!terminalWebLinksAddonModulePromise) {
+    terminalWebLinksAddonModulePromise = import("@xterm/addon-web-links").catch((error) => {
+      terminalWebLinksAddonModulePromise = null;
+      throw error;
+    });
+  }
+  return terminalWebLinksAddonModulePromise;
 }
 
 function shellEscapePath(path: string): string {
@@ -975,7 +1008,10 @@ export function SessionTerminal({
       window.clearTimeout(terminalWriteTimerRef.current);
       terminalWriteTimerRef.current = null;
     }
-    terminalWriteFrameRef.current = null;
+    if (terminalWriteFrameRef.current !== null) {
+      window.cancelAnimationFrame(terminalWriteFrameRef.current);
+      terminalWriteFrameRef.current = null;
+    }
   }, []);
 
   const flushTerminalWrites = useCallback(() => {
@@ -1058,9 +1094,22 @@ export function SessionTerminal({
       return;
     }
 
-    terminalWriteTimerRef.current = window.setTimeout(() => {
+    // Align flushes to the next animation frame (~16ms cadence) so batched
+    // writes land once per paint instead of thrashing the renderer.
+    terminalWriteFrameRef.current = window.requestAnimationFrame(() => {
+      terminalWriteFrameRef.current = null;
       flushTerminalWrites();
-    }, 0);
+    });
+    // Fallback timer ensures writes still land if rAF is throttled (e.g.
+    // background tabs on some browsers).
+    terminalWriteTimerRef.current = window.setTimeout(() => {
+      terminalWriteTimerRef.current = null;
+      if (terminalWriteFrameRef.current !== null) {
+        window.cancelAnimationFrame(terminalWriteFrameRef.current);
+        terminalWriteFrameRef.current = null;
+      }
+      flushTerminalWrites();
+    }, TERMINAL_WRITE_BATCH_MAX_DELAY_MS);
   }, [flushTerminalWrites]);
 
   const queueTerminalWrite = useCallback((chunk: TerminalWriteChunk, restoreFocus = false) => {
@@ -1701,21 +1750,25 @@ export function SessionTerminal({
 
       const isLight = document.documentElement.classList.contains("light");
       const viewportOptions = getSessionTerminalViewportOptions(window.innerWidth);
+      const isMobileViewport = shouldShowTerminalAccessoryBar();
       const terminalOptions: ITerminalOptions & { scrollbar?: { showScrollbar: boolean } } = {
         allowTransparency: false,
         cursorBlink: true,
         cursorStyle: "block",
+        cursorInactiveStyle: "outline",
         disableStdin: !expectsLiveTerminalRef.current,
         drawBoldTextInBrightColors: true,
         fontFamily: viewportOptions.fontFamily,
         fontSize: viewportOptions.fontSize,
+        fontWeight: "400",
+        fontWeightBold: "700",
         fastScrollSensitivity: 4,
         lineHeight: viewportOptions.lineHeight,
         scrollSensitivity: 1.1,
         scrollback: LIVE_TERMINAL_SCROLLBACK,
         theme: getTerminalTheme(isLight),
         scrollbar: {
-          showScrollbar: false,
+          showScrollbar: !isMobileViewport,
         },
       };
       term = new xtermMod.Terminal(terminalOptions);
@@ -1724,6 +1777,44 @@ export function SessionTerminal({
 
       term.open(containerRef.current);
       fit.fit();
+
+      // Load WebGL renderer for significantly better rendering performance.
+      // Falls back to the default canvas renderer if WebGL is unavailable.
+      void loadTerminalWebglAddonModule()
+        .then((webglMod) => {
+          if (!mounted || termRef.current !== term) return;
+          const webglAddon = new webglMod.WebglAddon();
+          webglAddon.onContextLoss(() => {
+            webglAddon.dispose();
+          });
+          term!.loadAddon(webglAddon);
+        })
+        .catch(() => {
+          // WebGL unavailable — canvas renderer continues to work.
+        });
+
+      // Load Unicode11 addon for proper CJK and emoji rendering.
+      void loadTerminalUnicode11AddonModule()
+        .then((unicode11Mod) => {
+          if (!mounted || termRef.current !== term) return;
+          const unicode11Addon = new unicode11Mod.Unicode11Addon();
+          term!.loadAddon(unicode11Addon);
+          term!.unicode.activeVersion = "11";
+        })
+        .catch(() => {
+          // Unicode11 unavailable — default unicode handling continues.
+        });
+
+      // Load Web Links addon so URLs in terminal output are clickable.
+      void loadTerminalWebLinksAddonModule()
+        .then((webLinksMod) => {
+          if (!mounted || termRef.current !== term) return;
+          const webLinksAddon = new webLinksMod.WebLinksAddon();
+          term!.loadAddon(webLinksAddon);
+        })
+        .catch(() => {
+          // Web links unavailable — URLs remain plain text.
+        });
 
       termRef.current = term;
       fitRef.current = fit;
