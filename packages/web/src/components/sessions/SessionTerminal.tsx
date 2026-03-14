@@ -114,11 +114,16 @@ const RENDERER_RECOVERY_THROTTLE_MS = 120;
 const TERMINAL_WRITE_BATCH_MAX_DELAY_MS = 10;
 const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
 // Keep enough scrollback so users can scroll through recent output without
-// losing context on tab switch or mobile scroll. The backend still owns the
-// durable capture; this only sizes the browser-side xterm ring buffer.
-// 1 000 lines balances usable history (~4–8 MB) with mobile memory limits.
-const LIVE_TERMINAL_SCROLLBACK = 1_000;
-const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 1200;
+// losing context on tab switch or mobile scroll. The backend owns the full
+// durable capture (2 MB / 10 000 lines); the browser scrollback is sized per
+// device class to avoid excessive memory on mobile.
+const DESKTOP_TERMINAL_SCROLLBACK = 10_000;
+const MOBILE_TERMINAL_SCROLLBACK = 2_000;
+const LIVE_TERMINAL_SCROLLBACK =
+  typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)
+    ? MOBILE_TERMINAL_SCROLLBACK
+    : DESKTOP_TERMINAL_SCROLLBACK;
+const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 10_000;
 const TERMINAL_CONNECTION_CACHE_MAX_TTL_MS = 5_000;
 const TERMINAL_CONNECTION_CACHE_MAX_ENTRIES = 2;
 const TERMINAL_SNAPSHOT_CACHE_MAX_ENTRIES = 8;
