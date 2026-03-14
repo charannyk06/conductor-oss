@@ -4,7 +4,6 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex as StdMutex};
-#[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -226,17 +225,20 @@ pub(super) struct DetachedOutputForwarder {
 }
 
 #[derive(Clone)]
+#[cfg(unix)]
 pub(super) struct DetachedPtyOutputChunk {
     pub(super) offset: u64,
     pub(super) bytes: Arc<[u8]>,
 }
 
+#[cfg(unix)]
 pub(super) enum DetachedPtyHostCaptureMessage {
     Data(DetachedPtyOutputChunk),
     Flush { ack: oneshot::Sender<()> },
     Shutdown,
 }
 
+#[cfg(unix)]
 #[derive(Clone)]
 pub(super) enum DetachedPtyHostStreamMessage {
     Data(DetachedPtyOutputChunk),
