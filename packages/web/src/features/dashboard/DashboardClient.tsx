@@ -2287,9 +2287,9 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     if (!selectedModelValue) return "Default";
     return modelMenuOptions.find((option) => option.id === selectedModelValue)?.label ?? selectedModelValue;
   }, [modelMenuOptions, selectedAgentState, selectedModelValue]);
-  const lightMenuClass = "z-50 min-w-[240px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
+  const lightMenuClass = "z-50 min-w-[240px] max-w-[calc(100vw-32px)] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)] sm:max-w-none";
   const scrollMenuClass = `${lightMenuClass} max-h-[min(360px,50vh)] overflow-y-auto`;
-  const lightMenuItemClass = "flex min-h-[36px] cursor-default items-center gap-2 rounded-[3px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
+  const lightMenuItemClass = "flex min-h-[44px] cursor-default items-center gap-2 rounded-[3px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)] sm:min-h-[36px]";
   const permissionOptions: Array<{ id: CreatePermissionMode; label: string; icon: LucideIcon }> = [
     { id: "default", label: "Default", icon: SlidersHorizontal },
     { id: "auto", label: "Auto", icon: ChevronsRight },

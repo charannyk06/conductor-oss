@@ -196,7 +196,7 @@ export function WorkspaceOverview({
           </div>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
           {statCards.map(({ label, value, icon: Icon }) => (
             <Card
               key={label}
@@ -236,7 +236,7 @@ export function WorkspaceOverview({
                   key={session.id}
                   type="button"
                   onClick={() => onSelectSession(session.id)}
-                  className="flex w-full items-center gap-3 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3 text-left transition-colors hover:bg-[var(--vk-bg-hover)] [content-visibility:auto] [contain-intrinsic-size:82px]"
+                  className="flex w-full items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2.5 py-3 text-left transition-colors hover:bg-[var(--vk-bg-hover)] [content-visibility:auto] [contain-intrinsic-size:82px] sm:gap-3 sm:px-3"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">

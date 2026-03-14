@@ -2733,7 +2733,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
         role="presentation"
       >
         <div
-          className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[1120px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(92vh,760px)] sm:flex-row"
+          className="flex h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_24px_80px_rgba(0,0,0,0.55)] sm:h-[min(92vh,760px)] sm:max-h-[calc(100dvh-1.5rem)] sm:max-w-[1120px] sm:rounded-[6px] sm:border sm:flex-row"
           onClick={(event) => event.stopPropagation()}
         >
           <aside className="flex w-full shrink-0 flex-col border-b border-[var(--vk-border)] bg-[rgba(28,28,28,0.8)] sm:w-[224px] sm:border-b-0 sm:border-r">
@@ -2742,7 +2742,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                 {isOnboarding ? "Setup" : "Settings"}
               </h2>
             </header>
-            <nav className="flex gap-1 overflow-x-auto p-2 sm:block sm:space-y-1 sm:overflow-auto">
+            <nav className="-mx-0.5 flex gap-1 overflow-x-auto px-2 py-2 sm:mx-0 sm:block sm:space-y-1 sm:overflow-auto sm:px-2">
               {visibleTabs.map((tab) => {
                 const Icon = tab.icon;
                 const selected = activeTabItem.id === tab.id;
@@ -2752,7 +2752,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     type="button"
                     onClick={() => setActiveTab(tab.id)}
                     disabled={isBusy}
-                    className={`flex shrink-0 items-center gap-3 rounded-[3px] px-3 py-2 text-left text-[14px] leading-[21px] transition-colors sm:w-full ${
+                    className={`flex min-h-[44px] shrink-0 items-center gap-3 rounded-[3px] px-3 py-2 text-left text-[14px] leading-[21px] transition-colors sm:min-h-0 sm:w-full ${
                       selected
                         ? "bg-[rgba(234,122,42,0.1)] text-[var(--vk-orange)]"
                         : "text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"

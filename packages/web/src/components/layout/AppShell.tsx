@@ -125,7 +125,7 @@ export function AppShell({
           <button
             type="button"
             onClick={onToggleSidebar}
-            className="absolute left-2 top-2 z-40 inline-flex h-8 w-8 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_10px_24px_rgba(0,0,0,0.28)] hover:bg-[var(--vk-bg-hover)] lg:hidden"
+            className="absolute left-2 top-2 z-40 inline-flex h-11 w-11 items-center justify-center rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] shadow-[0_10px_24px_rgba(0,0,0,0.28)] hover:bg-[var(--vk-bg-hover)] sm:h-8 sm:w-8 lg:hidden"
             aria-label="Open workspace panel"
           >
             <PanelLeftOpen className="h-5 w-5" />

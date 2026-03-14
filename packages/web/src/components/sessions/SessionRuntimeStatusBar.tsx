@@ -226,21 +226,23 @@ export function SessionRuntimeStatusBar({
             className="flex w-full items-center gap-3 overflow-hidden bg-[linear-gradient(135deg,color-mix(in_srgb,var(--bg-panel)_88%,transparent),color-mix(in_srgb,var(--bg-surface)_76%,transparent))] px-3 py-2.5 text-left text-[12px] leading-[18px] text-[var(--text-normal)] transition hover:bg-[linear-gradient(135deg,color-mix(in_srgb,var(--bg-panel)_96%,transparent),color-mix(in_srgb,var(--bg-surface)_88%,transparent))] sm:text-[13px] sm:leading-[19px]"
           >
             <UsageRing percentUsed={percentUsed} />
-            <span className="min-w-0 flex-1 overflow-hidden whitespace-nowrap font-sans">
-              <span className="text-[13px] font-medium tracking-[0.02em] text-[var(--text-strong)] sm:text-[14px]">
-                {primaryLabel}
-              </span>
-              {usageSummary ? (
-                <>
-                  <span className="px-2 text-[var(--text-faint)]">·</span>
-                  <span style={{ color: usageTone.ring }}>{usageSummary}</span>
-                </>
-              ) : null}
-              <span className="px-2 text-[var(--text-faint)]">·</span>
-              <span className="text-[var(--text-muted)]">{activeContextLabel}</span>
-              <span className="px-2 text-[var(--text-faint)]">·</span>
-              <span className="truncate font-mono text-[11px] text-[var(--text-faint)] sm:text-[12px]">
-                {cwdLabel}
+            <span className="min-w-0 flex-1 overflow-hidden font-sans">
+              <span className="flex flex-wrap items-center gap-x-0 gap-y-1 sm:inline">
+                <span className="text-[13px] font-medium tracking-[0.02em] text-[var(--text-strong)] sm:text-[14px]">
+                  {primaryLabel}
+                </span>
+                {usageSummary ? (
+                  <>
+                    <span className="hidden px-2 text-[var(--text-faint)] sm:inline">·</span>
+                    <span className="ml-2 sm:ml-0" style={{ color: usageTone.ring }}>{usageSummary}</span>
+                  </>
+                ) : null}
+                <span className="hidden px-2 text-[var(--text-faint)] sm:inline">·</span>
+                <span className="hidden text-[var(--text-muted)] sm:inline">{activeContextLabel}</span>
+                <span className="hidden px-2 text-[var(--text-faint)] sm:inline">·</span>
+                <span className="hidden truncate font-mono text-[11px] text-[var(--text-faint)] sm:inline sm:text-[12px]">
+                  {cwdLabel}
+                </span>
               </span>
             </span>
           </button>

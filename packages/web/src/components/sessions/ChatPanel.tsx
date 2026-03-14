@@ -1818,14 +1818,14 @@ export function ChatPanel({
                         setReasoningMenuOpen(false);
                         setModelMenuOpen((open) => !open);
                       }}
-                      className="inline-flex min-h-[31px] items-center gap-2 rounded-[3px] border border-[#333] bg-[#1c1c1c] px-[9px] py-[5px] text-[14px] leading-[21px] text-[#c4c4c4] transition hover:bg-[#292929]"
+                      className="inline-flex min-h-[38px] sm:min-h-[31px] items-center gap-2 rounded-[3px] border border-[#333] bg-[#1c1c1c] px-[9px] py-[5px] text-[14px] leading-[21px] text-[#c4c4c4] transition hover:bg-[#292929]"
                     >
                       <span className="max-w-[140px] truncate">{selectedModelLabel}</span>
                       <ChevronDown className="h-[10px] w-[10px] text-[#8f8f8f]" strokeWidth={1.8} />
                     </button>
 
                     {modelMenuOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[320px] overflow-hidden rounded-[4px] border border-[#333] bg-[#1c1c1c] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[calc(100vw-2rem)] max-w-[320px] sm:w-[320px] overflow-hidden rounded-[4px] border border-[#333] bg-[#1c1c1c] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
                         <div className="border-b border-[#333] px-3 py-2">
                           <p className="text-[12px] font-medium uppercase tracking-[0.16em] text-[#8f8f8f]">Model</p>
                           <p className="mt-1 text-[12px] leading-[18px] text-[#6f6f6f]">
@@ -1909,14 +1909,14 @@ export function ChatPanel({
                         setModelMenuOpen(false);
                         setReasoningMenuOpen((open) => !open);
                       }}
-                      className="inline-flex min-h-[31px] items-center gap-2 rounded-[3px] border border-[#333] bg-[#1c1c1c] px-[9px] py-[5px] text-[14px] leading-[21px] text-[#c4c4c4] transition hover:bg-[#292929]"
+                      className="inline-flex min-h-[38px] sm:min-h-[31px] items-center gap-2 rounded-[3px] border border-[#333] bg-[#1c1c1c] px-[9px] py-[5px] text-[14px] leading-[21px] text-[#c4c4c4] transition hover:bg-[#292929]"
                     >
                       <span className="max-w-[120px] truncate">{selectedReasoningLabel}</span>
                       <ChevronDown className="h-[10px] w-[10px] text-[#8f8f8f]" strokeWidth={1.8} />
                     </button>
 
                     {reasoningMenuOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[260px] overflow-hidden rounded-[4px] border border-[#333] bg-[#1c1c1c] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[calc(100vw-2rem)] max-w-[260px] sm:w-[260px] overflow-hidden rounded-[4px] border border-[#333] bg-[#1c1c1c] shadow-[0_18px_50px_rgba(0,0,0,0.35)]">
                         <div className="border-b border-[#333] px-3 py-2">
                           <p className="text-[12px] font-medium uppercase tracking-[0.16em] text-[#8f8f8f]">Reasoning</p>
                           <p className="mt-1 text-[12px] leading-[18px] text-[#6f6f6f]">
@@ -1984,11 +1984,11 @@ export function ChatPanel({
                 />
 
                 {showSlashCommandMenu ? (
-                  <div className="mt-3 overflow-hidden rounded-[3px] border border-[#333] bg-[#171717]">
+                  <div className="mt-3 max-w-full overflow-hidden rounded-[3px] border border-[#333] bg-[#171717]">
                     <div className="border-b border-[#333] px-3 py-2 text-[11px] uppercase tracking-[0.18em] text-[#8f8f8f]">
                       Slash commands
                     </div>
-                    <div className="max-h-[220px] overflow-y-auto py-1">
+                    <div className="max-h-[min(220px,40vh)] max-w-full overflow-y-auto py-1">
                       {slashCommandOptions.map((option, index) => (
                         <button
                           key={option.command}
@@ -2032,7 +2032,7 @@ export function ChatPanel({
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      className="inline-flex h-[29px] w-[33px] items-center justify-center rounded-[3px] border border-[#333] bg-[#1c1c1c] text-[#c4c4c4] transition hover:bg-[#292929]"
+                      className="inline-flex h-[38px] w-[38px] sm:h-[29px] sm:w-[33px] items-center justify-center rounded-[3px] border border-[#333] bg-[#1c1c1c] text-[#c4c4c4] transition hover:bg-[#292929]"
                       aria-label="Add attachment"
                     >
                       <Paperclip className="h-[15px] w-[15px]" strokeWidth={1.7} />
@@ -2054,7 +2054,7 @@ export function ChatPanel({
                     type="button"
                     onClick={() => void (isSessionRunning ? handleInterrupt() : handleSend())}
                     disabled={interrupting || (!isSessionRunning && (sending || (!message.trim() && attachments.length === 0)))}
-                    className={`inline-flex min-h-[29px] items-center justify-center rounded-[3px] px-4 py-[6px] text-[16px] leading-[16px] transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                    className={`inline-flex min-h-[38px] sm:min-h-[29px] items-center justify-center rounded-[3px] px-4 py-[6px] text-[16px] leading-[16px] transition disabled:cursor-not-allowed disabled:opacity-40 ${
                       isSessionRunning
                         ? "border border-[#603535] bg-[rgba(210,81,81,0.12)] text-[#f0b5b5] hover:bg-[rgba(210,81,81,0.18)]"
                         : "bg-[#292929] text-[#c4c4c4] hover:bg-[#313131]"

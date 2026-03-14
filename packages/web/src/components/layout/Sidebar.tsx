@@ -335,7 +335,7 @@ export function Sidebar({
           !showHeader && "pt-1.5"
         )}
       >
-        <label className="flex h-[30px] flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2">
+        <label className="flex h-[38px] flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:h-[30px]">
           <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
           <input
             value={search}
@@ -445,7 +445,7 @@ export function Sidebar({
                       onClick={(event) => void handleArchive(event, session.id)}
                       disabled={isArchiving}
                       className={cn(
-                        "mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] transition",
+                        "mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[6px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] transition sm:h-7 sm:w-7",
                         "opacity-70 group-hover:opacity-100 focus-visible:opacity-100",
                         "hover:border-[var(--vk-border)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]",
                         isArchiving && "cursor-wait opacity-100"

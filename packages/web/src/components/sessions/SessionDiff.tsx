@@ -514,14 +514,14 @@ function markerForInlineRow(kind: InlineDiffRow["lineKind"]): string {
 
 function SplitDiffView({ rows }: { rows: SplitDiffRow[] }) {
   return (
-    <div className="min-w-[720px] overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
-      <div className="grid grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+    <div className="min-w-[480px] sm:min-w-[720px] overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
+      <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem_minmax(0,1fr)] sm:grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
         <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
         <div className="border-r border-[var(--vk-border)] px-3 py-2">Before</div>
         <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
         <div className="px-3 py-2">After</div>
       </div>
-      <div className="font-mono text-[12px] leading-6">
+      <div className="font-mono text-[11px] sm:text-[12px] leading-6">
         {rows.map((row, index) => {
           if (row.kind === "skip") {
             return (
@@ -537,18 +537,18 @@ function SplitDiffView({ rows }: { rows: SplitDiffRow[] }) {
           return (
             <div
               key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
-              className="grid grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0"
+              className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem_minmax(0,1fr)] sm:grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0"
             >
               <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.oldKind))}>
                 {row.oldLine ?? ""}
               </div>
-              <div className={cn("border-r border-[var(--vk-border)] px-3 py-1 whitespace-pre", sideClasses(row.oldKind))}>
+              <div className={cn("border-r border-[var(--vk-border)] px-3 py-1 whitespace-pre overflow-x-auto", sideClasses(row.oldKind))}>
                 {row.oldText || " "}
               </div>
               <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.newKind))}>
                 {row.newLine ?? ""}
               </div>
-              <div className={cn("px-3 py-1 whitespace-pre", sideClasses(row.newKind))}>
+              <div className={cn("px-3 py-1 whitespace-pre overflow-x-auto", sideClasses(row.newKind))}>
                 {row.newText || " "}
               </div>
             </div>
@@ -562,13 +562,13 @@ function SplitDiffView({ rows }: { rows: SplitDiffRow[] }) {
 function InlineDiffView({ rows }: { rows: InlineDiffRow[] }) {
   return (
     <div className="overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
-      <div className="grid grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
+      <div className="grid grid-cols-[2rem_2rem_1rem_minmax(0,1fr)] sm:grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
         <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
         <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
         <div className="border-r border-[var(--vk-border)] px-2 py-2">Op</div>
         <div className="px-3 py-2">Content</div>
       </div>
-      <div className="font-mono text-[12px] leading-6">
+      <div className="font-mono text-[11px] sm:text-[12px] leading-6">
         {rows.map((row, index) => {
           if (row.kind === "skip") {
             return (
@@ -585,7 +585,7 @@ function InlineDiffView({ rows }: { rows: InlineDiffRow[] }) {
             <div
               key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
               className={cn(
-                "grid grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0",
+                "grid grid-cols-[2rem_2rem_1rem_minmax(0,1fr)] sm:grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0",
                 inlineRowClasses(row.lineKind),
               )}
             >
@@ -598,7 +598,7 @@ function InlineDiffView({ rows }: { rows: InlineDiffRow[] }) {
               <div className="border-r border-[var(--vk-border)] px-2 py-1 text-center">
                 {markerForInlineRow(row.lineKind)}
               </div>
-              <div className="px-3 py-1 whitespace-pre">
+              <div className="px-3 py-1 whitespace-pre overflow-x-auto">
                 {row.text || " "}
               </div>
             </div>
@@ -1048,7 +1048,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
                 : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
             )}
           >
-            {hideUnchangedRegions ? "Show all" : "Hide unchanged"}
+            {hideUnchangedRegions ? "Show all" : (<><span className="hidden sm:inline">Hide unchanged</span><span className="sm:hidden">Hide</span></>)}
           </button>
         </div>
       </div>
@@ -1089,7 +1089,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
         ) : null}
 
         {!error && hasVisibleChanges ? (
-          <div className="grid h-full min-h-0 grid-rows-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[320px_minmax(0,1fr)] lg:grid-rows-1">
+          <div className="grid h-full min-h-0 grid-rows-[minmax(10rem,14rem)_minmax(0,1fr)] sm:grid-rows-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[320px_minmax(0,1fr)] lg:grid-rows-1">
             <div className="min-h-0 overflow-y-auto border-b border-[var(--vk-border)] lg:border-b-0 lg:border-r">
               {SECTION_ORDER.map((category) => {
                 const files = getSectionFiles(filteredSections, category);
