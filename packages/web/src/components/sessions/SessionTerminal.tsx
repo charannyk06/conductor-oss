@@ -3,30 +3,74 @@
 import React, { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
-import type { SearchAddon as XSearchAddon } from "@xterm/addon-search";
 import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xterm/xterm";
 import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { getTerminalTheme } from "@/components/terminal/xtermTheme";
 import { extractLocalFileTransferPath, uploadProjectAttachments } from "./attachmentUploads";
-import { captureTerminalViewport, restoreTerminalViewport, type TerminalViewportState } from "./terminalViewport";
+import { captureTerminalViewport, type TerminalViewportState } from "./terminalViewport";
 import {
   buildTerminalSnapshotPayload,
-  buildTerminalWriteBatch,
   buildTerminalSocketUrl,
   calculateMobileTerminalViewportMetrics,
-  coalesceTerminalHttpControlOperations,
   decodeTerminalBase64Payload,
-  detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
   prependTerminalModes,
   sanitizeRemoteTerminalSnapshot,
-  stripBrowserTerminalResponses,
   type TerminalModeState,
-  type TerminalHttpControlOperation,
   type TerminalWriteChunk,
 } from "./sessionTerminalUtils";
 import type { TerminalInsertRequest } from "./terminalInsert";
+
+// --- Extracted modules ---
+import {
+  LIVE_TERMINAL_STATUSES,
+  RESUMABLE_STATUSES,
+  LIVE_TERMINAL_SCROLLBACK,
+  READ_ONLY_TERMINAL_SNAPSHOT_LINES,
+  LIVE_TERMINAL_HELPER_KEYS,
+} from "./terminal/terminalConstants";
+import type {
+  TerminalSnapshot,
+  TerminalServerEvent,
+  TerminalStreamEventMessage,
+} from "./terminal/terminalTypes";
+import {
+  readCachedTerminalSnapshot,
+  storeCachedTerminalSnapshot,
+  clearCachedTerminalSnapshot,
+  readCachedTerminalUiState,
+  storeCachedTerminalUiState,
+  clearCachedTerminalConnection,
+} from "./terminal/terminalCache";
+import {
+  fetchTerminalConnection,
+  fetchTerminalSnapshot,
+  fetchSessionStatus,
+} from "./terminal/terminalApi";
+import {
+  decodeTerminalPayloadToString,
+  shellEscapePath,
+  shellEscapePaths,
+  extractClipboardFiles,
+  localFileTransferError,
+  buildReadableSnapshotPayload,
+  terminalHasRenderedContent,
+  shouldShowTerminalAccessoryBar,
+} from "./terminal/terminalHelpers";
+import {
+  loadTerminalCoreClientModules,
+  loadTerminalWebglAddonModule,
+  loadTerminalUnicode11AddonModule,
+  loadTerminalWebLinksAddonModule,
+} from "./terminal/useTerminalAddons";
+import { useTerminalSearch } from "./terminal/useTerminalSearch";
+import { useTerminalInput } from "./terminal/useTerminalInput";
+import { useTerminalConnection } from "./terminal/useTerminalConnection";
+import { useTerminalResize } from "./terminal/useTerminalResize";
+import { useTerminalSnapshot } from "./terminal/useTerminalSnapshot";
+
+// ---------------------------------------------------------------------------
 
 interface SessionTerminalProps {
   sessionId: string;
@@ -38,546 +82,6 @@ interface SessionTerminalProps {
   active: boolean;
   pendingInsert: TerminalInsertRequest | null;
   immersiveMobileMode?: boolean;
-}
-
-declare global {
-  interface Window {
-    __conductorSessionTerminalDebug?: {
-      sessionId: string;
-      getState: () => Record<string, unknown>;
-    };
-  }
-}
-
-type TerminalConnectionInfo = {
-  stream: {
-    transport: "eventstream";
-    wsUrl: string | null;
-  };
-  control: {
-    transport: "http";
-    interactive: boolean;
-    fallbackReason: string | null;
-  };
-};
-
-type TerminalSnapshot = {
-  snapshot: string;
-  transcript: string;
-  source: string;
-  live: boolean;
-  restored: boolean;
-  sequence: number | null;
-  modes?: TerminalModeState;
-};
-
-type TerminalServerEvent =
-  | { type: "control"; event: "ready" | "ack" | "pong" | "exit"; sessionId: string; action?: string; exitCode?: number }
-  | {
-      type: "recovery";
-      sessionId: string;
-      reason: "lagged";
-      skipped: number;
-      sequence: number;
-      snapshotVersion: number;
-      cols: number;
-      rows: number;
-      modes?: TerminalSnapshot["modes"];
-    }
-  | { type: "error"; sessionId: string; error: string };
-
-type TerminalStreamEventMessage =
-  | TerminalServerEvent
-  | {
-      type: "restore";
-      sessionId: string;
-      sequence: number;
-      snapshotVersion: number;
-      reason: "attach" | "lagged" | "unknown";
-      cols: number;
-      rows: number;
-      modes?: TerminalSnapshot["modes"];
-      payload: string;
-    }
-  | {
-      type: "stream";
-      sessionId: string;
-      sequence: number;
-      payload: string;
-    };
-
-const LIVE_TERMINAL_STATUSES = new Set(["queued", "spawning", "running", "working", "needs_input", "stuck"]);
-const RESUMABLE_STATUSES = new Set(["done", "needs_input", "stuck", "errored", "terminated", "killed"]);
-const RECONNECT_BASE_DELAY_MS = 300;
-const RECONNECT_MAX_DELAY_MS = 1600;
-const RENDERER_RECOVERY_THROTTLE_MS = 120;
-const TERMINAL_WRITE_BATCH_MAX_DELAY_MS = 16;
-const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
-// Keep enough scrollback so users can scroll through recent output without
-// losing context on tab switch or mobile scroll. The backend owns the full
-// durable capture (2 MB / 10 000 lines); the browser scrollback is sized per
-// device class to avoid excessive memory on mobile.
-const DESKTOP_TERMINAL_SCROLLBACK = 10_000;
-const MOBILE_TERMINAL_SCROLLBACK = 2_000;
-const LIVE_TERMINAL_SCROLLBACK =
-  typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)
-    ? MOBILE_TERMINAL_SCROLLBACK
-    : DESKTOP_TERMINAL_SCROLLBACK;
-const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 10_000;
-const TERMINAL_CONNECTION_CACHE_MAX_TTL_MS = 5_000;
-const TERMINAL_CONNECTION_CACHE_MAX_ENTRIES = 2;
-const TERMINAL_SNAPSHOT_CACHE_MAX_ENTRIES = 8;
-const TERMINAL_UI_STATE_CACHE_MAX_ENTRIES = 4;
-const TERMINAL_SNAPSHOT_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
-const TERMINAL_UI_STATE_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
-const LIVE_TERMINAL_HELPER_KEYS = [
-  { label: "Enter", special: "Enter" },
-  { label: "Tab", special: "Tab" },
-  { label: "Esc", special: "Escape" },
-  { label: "Bksp", special: "Backspace" },
-  { label: "Left", special: "ArrowLeft" },
-  { label: "Right", special: "ArrowRight" },
-  { label: "Up", special: "ArrowUp" },
-  { label: "Down", special: "ArrowDown" },
-  { label: "Ctrl+C", special: "C-c" },
-  { label: "Ctrl+D", special: "C-d" },
-] as const;
-
-type PreferredFocusTarget = "none" | "terminal" | "resume";
-type PendingTerminalHttpControlOperation = TerminalHttpControlOperation & {
-  reject: (error: unknown) => void;
-  resolve: () => void;
-};
-
-type CachedTerminalConnection = {
-  value: TerminalConnectionInfo;
-  expiresAt: number;
-};
-
-type CachedTerminalSnapshot = TerminalSnapshot & {
-  updatedAt: number;
-};
-
-type CachedTerminalUiState = {
-  message: string;
-  searchOpen: boolean;
-  searchQuery: string;
-  helperPanelOpen: boolean;
-  viewport: TerminalViewportState | null;
-  updatedAt: number;
-};
-
-type TerminalCoreClientModules = [
-  typeof import("@xterm/xterm"),
-  typeof import("@xterm/addon-fit"),
-];
-
-const terminalConnectionCache = new Map<string, CachedTerminalConnection>();
-const terminalSnapshotCache = new Map<string, CachedTerminalSnapshot>();
-const terminalUiStateCache = new Map<string, CachedTerminalUiState>();
-let terminalCoreClientModulesPromise: Promise<TerminalCoreClientModules> | null = null;
-let terminalSearchAddonModulePromise: Promise<typeof import("@xterm/addon-search")> | null = null;
-let terminalWebglAddonModulePromise: Promise<typeof import("@xterm/addon-webgl")> | null = null;
-let terminalUnicode11AddonModulePromise: Promise<typeof import("@xterm/addon-unicode11")> | null = null;
-let terminalWebLinksAddonModulePromise: Promise<typeof import("@xterm/addon-web-links")> | null = null;
-
-function trimTerminalCache(cache: Map<string, unknown>, maxEntries: number): void {
-  while (cache.size > maxEntries) {
-    const oldestKey = cache.keys().next().value;
-    if (!oldestKey) {
-      break;
-    }
-    cache.delete(oldestKey);
-  }
-}
-
-function readCachedTerminalConnection(sessionId: string): TerminalConnectionInfo | null {
-  const cached = terminalConnectionCache.get(sessionId);
-  if (!cached) {
-    return null;
-  }
-  if (cached.expiresAt <= Date.now()) {
-    terminalConnectionCache.delete(sessionId);
-    return null;
-  }
-  return cached.value;
-}
-
-function storeCachedTerminalConnection(sessionId: string, value: TerminalConnectionInfo): void {
-  terminalConnectionCache.delete(sessionId);
-  terminalConnectionCache.set(sessionId, {
-    value,
-    expiresAt: Date.now() + TERMINAL_CONNECTION_CACHE_MAX_TTL_MS,
-  });
-  trimTerminalCache(terminalConnectionCache, TERMINAL_CONNECTION_CACHE_MAX_ENTRIES);
-}
-
-function clearCachedTerminalConnection(sessionId: string): void {
-  terminalConnectionCache.delete(sessionId);
-}
-
-function readCachedTerminalSnapshot(sessionId: string): TerminalSnapshot | null {
-  const cached = terminalSnapshotCache.get(sessionId);
-  if (!cached) {
-    return null;
-  }
-  if (Date.now() - cached.updatedAt > TERMINAL_SNAPSHOT_CACHE_MAX_AGE_MS) {
-    terminalSnapshotCache.delete(sessionId);
-    return null;
-  }
-  return {
-    snapshot: cached.snapshot,
-    transcript: cached.transcript,
-    source: cached.source,
-    live: cached.live,
-    restored: cached.restored,
-    sequence: cached.sequence,
-    modes: cached.modes,
-  };
-}
-
-function storeCachedTerminalSnapshot(sessionId: string, snapshot: TerminalSnapshot): void {
-  terminalSnapshotCache.delete(sessionId);
-  terminalSnapshotCache.set(sessionId, {
-    ...snapshot,
-    updatedAt: Date.now(),
-  });
-  trimTerminalCache(terminalSnapshotCache, TERMINAL_SNAPSHOT_CACHE_MAX_ENTRIES);
-}
-
-function clearCachedTerminalSnapshot(sessionId: string): void {
-  terminalSnapshotCache.delete(sessionId);
-}
-
-function readCachedTerminalUiState(sessionId: string): CachedTerminalUiState | null {
-  const cached = terminalUiStateCache.get(sessionId);
-  if (!cached) {
-    return null;
-  }
-  if (Date.now() - cached.updatedAt > TERMINAL_UI_STATE_CACHE_MAX_AGE_MS) {
-    terminalUiStateCache.delete(sessionId);
-    return null;
-  }
-  return cached;
-}
-
-function storeCachedTerminalUiState(
-  sessionId: string,
-  value: Omit<CachedTerminalUiState, "updatedAt">,
-): void {
-  terminalUiStateCache.delete(sessionId);
-  terminalUiStateCache.set(sessionId, {
-    ...value,
-    updatedAt: Date.now(),
-  });
-  trimTerminalCache(terminalUiStateCache, TERMINAL_UI_STATE_CACHE_MAX_ENTRIES);
-}
-
-function decodeTerminalPayloadToString(payload: Uint8Array): string {
-  if (payload.length === 0) {
-    return "";
-  }
-  if (typeof TextDecoder === "undefined") {
-    return String.fromCharCode(...payload);
-  }
-  return new TextDecoder().decode(payload);
-}
-
-function loadTerminalCoreClientModules(): Promise<TerminalCoreClientModules> {
-  if (!terminalCoreClientModulesPromise) {
-    terminalCoreClientModulesPromise = Promise.all([
-      import("@xterm/xterm"),
-      import("@xterm/addon-fit"),
-    ]).catch((error) => {
-      terminalCoreClientModulesPromise = null;
-      throw error;
-    }) as Promise<TerminalCoreClientModules>;
-  }
-  return terminalCoreClientModulesPromise;
-}
-
-function loadTerminalSearchAddonModule(): Promise<typeof import("@xterm/addon-search")> {
-  if (!terminalSearchAddonModulePromise) {
-    terminalSearchAddonModulePromise = import("@xterm/addon-search").catch((error) => {
-      terminalSearchAddonModulePromise = null;
-      throw error;
-    });
-  }
-  return terminalSearchAddonModulePromise;
-}
-
-function loadTerminalWebglAddonModule(): Promise<typeof import("@xterm/addon-webgl")> {
-  if (!terminalWebglAddonModulePromise) {
-    terminalWebglAddonModulePromise = import("@xterm/addon-webgl").catch((error) => {
-      terminalWebglAddonModulePromise = null;
-      throw error;
-    });
-  }
-  return terminalWebglAddonModulePromise;
-}
-
-function loadTerminalUnicode11AddonModule(): Promise<typeof import("@xterm/addon-unicode11")> {
-  if (!terminalUnicode11AddonModulePromise) {
-    terminalUnicode11AddonModulePromise = import("@xterm/addon-unicode11").catch((error) => {
-      terminalUnicode11AddonModulePromise = null;
-      throw error;
-    });
-  }
-  return terminalUnicode11AddonModulePromise;
-}
-
-function loadTerminalWebLinksAddonModule(): Promise<typeof import("@xterm/addon-web-links")> {
-  if (!terminalWebLinksAddonModulePromise) {
-    terminalWebLinksAddonModulePromise = import("@xterm/addon-web-links").catch((error) => {
-      terminalWebLinksAddonModulePromise = null;
-      throw error;
-    });
-  }
-  return terminalWebLinksAddonModulePromise;
-}
-
-function shellEscapePath(path: string): string {
-  return `'${path.replace(/'/g, "'\\''")}'`;
-}
-
-function shellEscapePaths(paths: string[]): string {
-  return paths.map(shellEscapePath).join(" ");
-}
-
-function extractClipboardFiles(clipboard: DataTransfer): File[] {
-  const files = Array.from(clipboard.files ?? []);
-  const seen = new Set(files.map((file) => `${file.name}:${file.size}:${file.type}:${file.lastModified}`));
-
-  for (const item of Array.from(clipboard.items ?? [])) {
-    if (item.kind !== "file") {
-      continue;
-    }
-    const file = item.getAsFile();
-    if (!file) {
-      continue;
-    }
-    const key = `${file.name}:${file.size}:${file.type}:${file.lastModified}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    files.push(file);
-  }
-
-  return files;
-}
-
-async function fetchTerminalConnection(sessionId: string): Promise<TerminalConnectionInfo> {
-  const cached = readCachedTerminalConnection(sessionId);
-  if (cached) {
-    return cached;
-  }
-
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/connection`, {
-    cache: "no-store",
-  });
-  const data = (await response.json().catch(() => null)) as
-    | {
-        transport?: string;
-        wsUrl?: string | null;
-        interactive?: boolean;
-        fallbackReason?: string | null;
-        stream?: {
-          transport?: string;
-          wsUrl?: string | null;
-        } | null;
-        control?: {
-          transport?: "http";
-          interactive?: boolean;
-          fallbackReason?: string | null;
-        } | null;
-        error?: string;
-      }
-    | null;
-  if (!response.ok) {
-    throw new Error(data?.error ?? `Failed to resolve terminal connection: ${response.status}`);
-  }
-  const rawStreamWsUrl = data?.stream?.wsUrl;
-  const rawStreamTransport = data?.stream?.transport ?? data?.transport;
-  if (typeof rawStreamTransport === "string" && rawStreamTransport !== "eventstream") {
-    throw new Error(`Unsupported terminal transport: ${rawStreamTransport}`);
-  }
-  const interactive = data?.control?.interactive === true || data?.interactive === true;
-  const fallbackReason = typeof data?.control?.fallbackReason === "string" && data.control.fallbackReason.trim().length > 0
-    ? data.control.fallbackReason.trim()
-    : (typeof data?.fallbackReason === "string" && data.fallbackReason.trim().length > 0
-      ? data.fallbackReason.trim()
-      : null);
-
-  const streamWsUrl = typeof rawStreamWsUrl === "string" && rawStreamWsUrl.trim().length > 0
-    ? rawStreamWsUrl.trim()
-    : (typeof data?.wsUrl === "string" && data.wsUrl.trim().length > 0 ? data.wsUrl.trim() : null);
-
-  if (streamWsUrl === null) {
-    throw new Error("Terminal connection did not include a live stream URL");
-  }
-
-  const connection: TerminalConnectionInfo = {
-    stream: {
-      transport: "eventstream",
-      wsUrl: streamWsUrl,
-    },
-    control: {
-      transport: "http",
-      interactive,
-      fallbackReason,
-    },
-  };
-  storeCachedTerminalConnection(sessionId, connection);
-  return connection;
-}
-
-function parseTerminalModes(value: unknown): TerminalModeState | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-
-  const candidate = value as Record<string, unknown>;
-  const mouseProtocolMode = typeof candidate["mouseProtocolMode"] === "string"
-    ? candidate["mouseProtocolMode"]
-    : "None";
-  const mouseProtocolEncoding = typeof candidate["mouseProtocolEncoding"] === "string"
-    ? candidate["mouseProtocolEncoding"]
-    : "Default";
-
-  return {
-    alternateScreen: candidate["alternateScreen"] === true,
-    applicationKeypad: candidate["applicationKeypad"] === true,
-    applicationCursor: candidate["applicationCursor"] === true,
-    hideCursor: candidate["hideCursor"] === true,
-    bracketedPaste: candidate["bracketedPaste"] === true,
-    mouseProtocolMode,
-    mouseProtocolEncoding,
-  };
-}
-
-async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}`, {
-    cache: "no-store",
-  });
-  const data = (await response.json().catch(() => null)) as
-    | { snapshot?: string; transcript?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; modes?: unknown; error?: string }
-    | null;
-  if (!response.ok) {
-    throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
-  }
-  const rawSnapshot = typeof data?.snapshot === "string" ? data.snapshot : "";
-  const transcript = typeof data?.transcript === "string" ? data.transcript : "";
-  const compactedSnapshot = transcript.trim().length > 0 ? transcript : rawSnapshot;
-  return {
-    // Keep only one readable payload in the browser for archived/read-only sessions.
-    snapshot: compactedSnapshot,
-    transcript: "",
-    source: typeof data?.source === "string" ? data.source : "empty",
-    live: data?.live === true,
-    restored: data?.restored === true,
-    sequence: typeof data?.sequence === "number" && Number.isSafeInteger(data.sequence)
-      ? data.sequence
-      : null,
-    modes: parseTerminalModes(data?.modes),
-  };
-}
-
-async function fetchSessionStatus(sessionId: string): Promise<string | null> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to load session: ${response.status}`);
-  }
-
-  const data = (await response.json().catch(() => null)) as { status?: unknown } | null;
-  return typeof data?.status === "string" && data.status.trim().length > 0
-    ? data.status.trim()
-    : null;
-}
-
-async function postSessionTerminalKeys(
-  sessionId: string,
-  body: { keys?: string; special?: string },
-): Promise<void> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  const data = (await response.json().catch(() => null)) as { error?: string } | null;
-  if (!response.ok) {
-    throw new Error(data?.error ?? `Failed to send terminal input: ${response.status}`);
-  }
-}
-
-async function postTerminalResize(sessionId: string, cols: number, rows: number): Promise<void> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/resize`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      cols: Math.max(1, Math.round(cols)),
-      rows: Math.max(1, Math.round(rows)),
-    }),
-  });
-  if (response.status === 404) {
-    // Older backends do not expose the resize endpoint yet. Keep remote terminals usable.
-    return;
-  }
-  const data = (await response.json().catch(() => null)) as { error?: string } | null;
-  if (!response.ok) {
-    throw new Error(data?.error ?? `Failed to resize terminal: ${response.status}`);
-  }
-}
-
-
-function localFileTransferError(path: string): string {
-  const normalized = path.toLowerCase();
-  if (normalized.includes("/temporaryitems/") || normalized.includes("nsird_screencaptureui")) {
-    return "macOS exposed only a temporary screenshot path. Paste the screenshot or drop the saved file from Finder so Conductor can upload it cleanly.";
-  }
-
-  return "The browser exposed only a local file path for this drop. Use paste or the attach button so Conductor can upload the file instead of injecting raw path text.";
-}
-
-function buildReadableSnapshotPayload(snapshot: string, transcript: string): Uint8Array {
-  const normalized = (transcript.trim().length > 0 ? transcript : sanitizeRemoteTerminalSnapshot(snapshot))
-    .replace(/\r?\n/g, "\r\n")
-    .replace(/\u0000/g, "");
-  return new TextEncoder().encode(normalized);
-}
-
-function terminalHasRenderedContent(term: XTerminal): boolean {
-  const buffer = term.buffer.active;
-  if (buffer.baseY > 0) {
-    return true;
-  }
-
-  for (let row = 0; row < term.rows; row += 1) {
-    const line = buffer.getLine(row);
-    if (!line) {
-      continue;
-    }
-    if (line.translateToString(true).trim().length > 0) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function shouldShowTerminalAccessoryBar(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-  return detectMobileTerminalInputRail(window.innerWidth, coarsePointer, navigator.maxTouchPoints);
 }
 
 export function SessionTerminal({
@@ -596,16 +100,7 @@ export function SessionTerminal({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerminal | null>(null);
   const fitRef = useRef<XFitAddon | null>(null);
-  const searchRef = useRef<XSearchAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimerRef = useRef<number | null>(null);
-  const terminalHttpControlQueueRef = useRef<PendingTerminalHttpControlOperation[]>([]);
-  const terminalHttpControlInFlightRef = useRef(false);
-  const terminalHttpControlFrameRef = useRef<number | null>(null);
-  const terminalHttpControlTimerRef = useRef<number | null>(null);
-  const reconnectCountRef = useRef(0);
-  const connectAttemptRef = useRef(0);
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const scrollDisposableRef = useRef<IDisposable | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -613,39 +108,11 @@ export function SessionTerminal({
   const latestStatusRef = useRef(sessionState);
   const activeRef = useRef(active);
   const pageVisibleRef = useRef(typeof document === "undefined" ? true : !document.hidden);
-  const hasConnectedOnceRef = useRef(false);
-  const reconnectNoticeWrittenRef = useRef(false);
-  const snapshotAppliedRef = useRef<string | null>(null);
-  const snapshotAnsiRef = useRef("");
-  const snapshotTranscriptRef = useRef("");
-  const snapshotModesRef = useRef<TerminalModeState | undefined>(undefined);
-  const lastTerminalSequenceRef = useRef<number | null>(null);
-  const liveOutputStartedRef = useRef(false);
   const previousLiveTerminalRef = useRef(false);
-  const recoveryFrameRef = useRef<number | null>(null);
-  const recoveryTimerRef = useRef<number | null>(null);
-  const recoveryLastRunRef = useRef(0);
-  const recoveryPendingResizeRef = useRef(false);
-  const visibilityRecoveryTimersRef = useRef<number[]>([]);
-  const terminalWriteFrameRef = useRef<number | null>(null);
-  const terminalWriteTimerRef = useRef<number | null>(null);
-  const terminalWriteQueueRef = useRef<TerminalWriteChunk[]>([]);
-  const terminalWriteInFlightRef = useRef(false);
-  const terminalWriteRestoreFocusRef = useRef(false);
-  const terminalWriteDecoderRef = useRef<TextDecoder | null>(
-    typeof TextDecoder === "undefined" ? null : new TextDecoder(),
-  );
-  const lastObservedContainerSizeRef = useRef<string | null>(null);
-  const lastViewportOptionKeyRef = useRef<string | null>(null);
   const lastAppliedInsertNonceRef = useRef<number>(0);
-  const lastSyncedTerminalSizeRef = useRef<string | null>(null);
-  const pendingResizeSyncRef = useRef(true);
-  const preferredFocusTargetRef = useRef<PreferredFocusTarget>("none");
-  const restoreFocusOnRecoveryRef = useRef(false);
   const expectsLiveTerminalRef = useRef(false);
-  const interactiveTerminalRef = useRef(true);
+
   const initialUiState = readCachedTerminalUiState(sessionId);
-  const pendingViewportRestoreRef = useRef<TerminalViewportState | null>(initialUiState?.viewport ?? null);
 
   const [terminalReady, setTerminalReady] = useState(false);
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
@@ -661,7 +128,6 @@ export function SessionTerminal({
   const [dragActive, setDragActive] = useState(false);
   const [searchOpen, setSearchOpen] = useState(() => initialUiState?.searchOpen ?? false);
   const [searchQuery, setSearchQuery] = useState(() => initialUiState?.searchQuery ?? "");
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [snapshotAnsi, setSnapshotAnsi] = useState("");
   const [snapshotTranscript, setSnapshotTranscript] = useState("");
@@ -673,6 +139,7 @@ export function SessionTerminal({
   const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
   const [mobileKeyboardVisible, setMobileKeyboardVisible] = useState(false);
 
+  // --- Derived state ---
   const normalizedSessionStatus = useMemo(
     () => {
       const candidate = typeof sessionStatusOverride === "string" && sessionStatusOverride.trim().length > 0
@@ -687,8 +154,6 @@ export function SessionTerminal({
 
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
   const shouldAttachTerminalSurface = active && pageVisible;
-  // Detach the browser terminal when the pane or page is hidden and rely on
-  // the daemon-owned restore snapshot when the user comes back.
   const shouldStreamLiveTerminal = expectsLiveTerminal && shouldAttachTerminalSurface;
   const showResumeRail = RESUMABLE_STATUSES.has(normalizedSessionStatus) && !expectsLiveTerminal;
   const showLiveHelperBar = expectsLiveTerminal && interactiveTerminal && showTerminalAccessoryBar;
@@ -716,8 +181,100 @@ export function SessionTerminal({
   const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && connectionState === "live";
   const canRenderTerminal = shouldAttachTerminalSurface;
   expectsLiveTerminalRef.current = expectsLiveTerminal;
-  interactiveTerminalRef.current = interactiveTerminal;
   pageVisibleRef.current = pageVisible;
+
+  // --- Extracted hooks ---
+  const {
+    sendResize,
+    sendTerminalKeys,
+    sendTerminalSpecial,
+    clearScheduledTerminalHttpControlFlush,
+    terminalHttpControlQueueRef,
+    terminalHttpControlInFlightRef,
+    interactiveTerminalRef: inputInteractiveRef,
+  } = useTerminalInput(sessionId);
+
+  // Keep the input hook's interactivity ref in sync
+  inputInteractiveRef.current = interactiveTerminal;
+
+  const {
+    pendingResizeSyncRef,
+    lastSyncedTerminalSizeRef,
+    lastObservedContainerSizeRef,
+    lastViewportOptionKeyRef,
+    pendingViewportRestoreRef,
+    preferredFocusTargetRef,
+    restoreFocusOnRecoveryRef,
+    showScrollToBottom,
+    setShowScrollToBottom: _setShowScrollToBottom,
+    syncTerminalDimensions,
+    scheduleRendererRecovery,
+    clearScheduledRecovery,
+    clearVisibilityRecoveryTimers,
+    applyViewportRestore,
+    updateScrollState,
+    rememberTerminalViewport,
+    rememberFocusedSurface,
+    restorePreferredFocus,
+  } = useTerminalResize(
+    sessionId,
+    termRef,
+    fitRef,
+    containerRef,
+    resumeTextareaRef,
+    sendResize,
+    setTransportError,
+    initialUiState?.viewport ?? null,
+  );
+
+  const {
+    terminalWriteQueueRef,
+    terminalWriteInFlightRef,
+    terminalWriteRestoreFocusRef,
+    terminalWriteDecoderRef,
+    snapshotAppliedRef,
+    snapshotAnsiRef,
+    snapshotTranscriptRef,
+    snapshotModesRef,
+    liveOutputStartedRef,
+    lastTerminalSequenceRef,
+    queueTerminalWrite,
+    requestSnapshotRender,
+    clearScheduledTerminalFlush,
+  } = useTerminalSnapshot(
+    sessionId,
+    termRef,
+    applyViewportRestore,
+    updateScrollState,
+    restorePreferredFocus,
+  );
+
+  const {
+    eventSourceRef,
+    reconnectCountRef,
+    connectAttemptRef,
+    hasConnectedOnceRef,
+    reconnectNoticeWrittenRef,
+    clearReconnectTimer,
+    scheduleReconnect,
+    requestReconnect,
+  } = useTerminalConnection(
+    sessionId,
+    pendingResizeSyncRef,
+    setTransportError,
+    setTransportNotice,
+    setConnectionState,
+    setSocketBaseUrl,
+    setReconnectToken,
+  );
+
+  const { searchRef, runSearch } = useTerminalSearch({
+    searchOpen,
+    searchQuery,
+    termRef,
+  });
+
+  // Keep snapshot refs in sync with React state
   snapshotAnsiRef.current = snapshotAnsi;
   snapshotTranscriptRef.current = snapshotTranscript;
   snapshotModesRef.current = snapshotModes;
@@ -738,542 +295,21 @@ export function SessionTerminal({
     };
   }, [immersiveMobileMode, mobileViewportHeight]);
 
-  const normalizeWhitespaceOnlyDraft = useCallback(() => {
-    setMessage((current) => (current.trim().length === 0 ? "" : current));
-  }, []);
-
-  const clearReconnectTimer = useCallback(() => {
-    if (reconnectTimerRef.current !== null) {
-      window.clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleReconnect = useCallback(() => {
-    clearReconnectTimer();
-    reconnectCountRef.current += 1;
-    const delay = Math.min(
-      RECONNECT_MAX_DELAY_MS,
-      RECONNECT_BASE_DELAY_MS * reconnectCountRef.current,
-    );
-    reconnectTimerRef.current = window.setTimeout(() => {
-      setReconnectToken((value) => value + 1);
-    }, delay);
-  }, [clearReconnectTimer]);
-
-  const requestReconnect = useCallback(() => {
-    clearReconnectTimer();
-    clearCachedTerminalConnection(sessionId);
-    pendingResizeSyncRef.current = true;
-    setTransportError(null);
-    setTransportNotice(null);
-    setConnectionState("connecting");
-    setSocketBaseUrl(null);
-    setReconnectToken((value) => value + 1);
-  }, [clearReconnectTimer, sessionId]);
-
-  const clearScheduledTerminalHttpControlFlush = useCallback(() => {
-    if (terminalHttpControlFrameRef.current !== null) {
-      window.cancelAnimationFrame(terminalHttpControlFrameRef.current);
-      terminalHttpControlFrameRef.current = null;
-    }
-    if (terminalHttpControlTimerRef.current !== null) {
-      window.clearTimeout(terminalHttpControlTimerRef.current);
-      terminalHttpControlTimerRef.current = null;
-    }
-  }, []);
-
-  const flushTerminalHttpControlOperations = useCallback(async () => {
-    clearScheduledTerminalHttpControlFlush();
-    if (terminalHttpControlInFlightRef.current) {
-      return;
-    }
-
-    const pendingOperations = terminalHttpControlQueueRef.current.splice(0);
-    if (pendingOperations.length === 0) {
-      return;
-    }
-
-    terminalHttpControlInFlightRef.current = true;
-    try {
-      const operations = coalesceTerminalHttpControlOperations(pendingOperations.map((operation) => {
-        if (operation.kind === "keys") {
-          return { kind: "keys", keys: operation.keys } satisfies TerminalHttpControlOperation;
-        }
-        if (operation.kind === "resize") {
-          return {
-            kind: "resize",
-            cols: operation.cols,
-            rows: operation.rows,
-          } satisfies TerminalHttpControlOperation;
-        }
-        return { kind: "special", special: operation.special } satisfies TerminalHttpControlOperation;
-      }));
-
-      for (const operation of operations) {
-        if (operation.kind === "keys") {
-          await postSessionTerminalKeys(sessionId, { keys: operation.keys });
-          continue;
-        }
-        if (operation.kind === "resize") {
-          await postTerminalResize(sessionId, operation.cols, operation.rows);
-          continue;
-        }
-        await postSessionTerminalKeys(sessionId, { special: operation.special });
-      }
-
-      for (const operation of pendingOperations) {
-        operation.resolve();
-      }
-    } catch (error) {
-      for (const operation of pendingOperations) {
-        operation.reject(error);
-      }
-    } finally {
-      terminalHttpControlInFlightRef.current = false;
-      if (terminalHttpControlQueueRef.current.length > 0) {
-        if (typeof window === "undefined") {
-          void flushTerminalHttpControlOperations();
-          return;
-        }
-        terminalHttpControlFrameRef.current = window.requestAnimationFrame(() => {
-          void flushTerminalHttpControlOperations();
-        });
-        terminalHttpControlTimerRef.current = window.setTimeout(() => {
-          void flushTerminalHttpControlOperations();
-        }, TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS);
-      }
-    }
-  }, [clearScheduledTerminalHttpControlFlush, sessionId]);
-
-  const scheduleTerminalHttpControlFlush = useCallback(() => {
-    if (terminalHttpControlInFlightRef.current || terminalHttpControlQueueRef.current.length === 0) {
-      return;
-    }
-
-    if (typeof window === "undefined") {
-      void flushTerminalHttpControlOperations();
-      return;
-    }
-
-    if (terminalHttpControlFrameRef.current !== null || terminalHttpControlTimerRef.current !== null) {
-      return;
-    }
-
-    terminalHttpControlFrameRef.current = window.requestAnimationFrame(() => {
-      void flushTerminalHttpControlOperations();
-    });
-    terminalHttpControlTimerRef.current = window.setTimeout(() => {
-      void flushTerminalHttpControlOperations();
-    }, TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS);
-  }, [flushTerminalHttpControlOperations]);
-
-  const enqueueTerminalHttpControlOperation = useCallback((
-    operation: TerminalHttpControlOperation,
-    flushNow = false,
-  ): Promise<void> => new Promise<void>((resolve, reject) => {
-    terminalHttpControlQueueRef.current.push({
-      ...operation,
-      resolve,
-      reject,
-    });
-
-    if (flushNow) {
-      void flushTerminalHttpControlOperations();
-      return;
-    }
-
-    scheduleTerminalHttpControlFlush();
-  }), [flushTerminalHttpControlOperations, scheduleTerminalHttpControlFlush]);
-
-  const sendResize = useCallback(async (cols: number, rows: number): Promise<boolean> => {
-    await enqueueTerminalHttpControlOperation({
-      kind: "resize",
-      cols,
-      rows,
-    });
-    return true;
-  }, [enqueueTerminalHttpControlOperation]);
-
-  const sendTerminalKeys = useCallback(async (data: string) => {
-    if (!interactiveTerminal) {
-      throw new Error("Operator access is required for live terminal input");
-    }
-    const keys = stripBrowserTerminalResponses(data);
-    if (keys.length === 0) {
-      return;
-    }
-
-    await enqueueTerminalHttpControlOperation({ kind: "keys", keys });
-  }, [enqueueTerminalHttpControlOperation, interactiveTerminal]);
-
-  const sendTerminalSpecial = useCallback(async (special: string) => {
-    if (!interactiveTerminal) {
-      throw new Error("Operator access is required for live terminal input");
-    }
-
-    await enqueueTerminalHttpControlOperation({ kind: "special", special }, true);
-  }, [enqueueTerminalHttpControlOperation, interactiveTerminal]);
-
-  const detectFocusedSurface = useCallback((): PreferredFocusTarget => {
-    if (typeof document === "undefined") {
-      return preferredFocusTargetRef.current;
-    }
-
-    const activeElement = document.activeElement;
-    if (!activeElement) {
-      return "none";
-    }
-
-    if (resumeTextareaRef.current && activeElement === resumeTextareaRef.current) {
-      return "resume";
-    }
-    if (containerRef.current && containerRef.current.contains(activeElement)) {
-      return "terminal";
-    }
-
-    return "none";
-  }, []);
-
-  const rememberFocusedSurface = useCallback(() => {
-    const nextTarget = detectFocusedSurface();
-    if (nextTarget === "none") {
-      restoreFocusOnRecoveryRef.current = false;
-      return nextTarget;
-    }
-
-    preferredFocusTargetRef.current = nextTarget;
-    restoreFocusOnRecoveryRef.current = true;
-    return nextTarget;
-  }, [detectFocusedSurface]);
-
-  const restorePreferredFocus = useCallback(() => {
-    if (
-      typeof document === "undefined"
-      || document.hidden
-      || !activeRef.current
-      || !restoreFocusOnRecoveryRef.current
-    ) {
-      return;
-    }
-
-    const target = preferredFocusTargetRef.current;
-    if (target === "resume") {
-      resumeTextareaRef.current?.focus();
-      return;
-    }
-
-    if (target === "terminal") {
-      try {
-        termRef.current?.focus();
-      } catch {
-        // The xterm textarea can disappear during teardown or reconnect.
-      }
-    }
-  }, []);
-
-  const rememberTerminalViewport = useCallback(() => {
-    const term = termRef.current;
-    if (!term) {
-      return;
-    }
-    if (pendingViewportRestoreRef.current && snapshotAppliedRef.current !== sessionId) {
-      return;
-    }
-    pendingViewportRestoreRef.current = captureTerminalViewport(term);
-  }, [sessionId]);
-
-  const applyViewportRestore = useCallback((term: XTerminal, fallbackViewport: TerminalViewportState) => {
-    const cachedViewport = pendingViewportRestoreRef.current;
-    if (cachedViewport) {
-      restoreTerminalViewport(term, cachedViewport);
-      pendingViewportRestoreRef.current = captureTerminalViewport(term);
-      return;
-    }
-    restoreTerminalViewport(term, fallbackViewport);
-    pendingViewportRestoreRef.current = captureTerminalViewport(term);
-  }, []);
-
-  const updateScrollState = useCallback(() => {
-    const term = termRef.current;
-    if (!term) {
-      setShowScrollToBottom(false);
-      return;
-    }
-    setShowScrollToBottom(!captureTerminalViewport(term).followOutput);
-  }, []);
-
-  const clearScheduledTerminalFlush = useCallback(() => {
-    if (terminalWriteTimerRef.current !== null) {
-      window.clearTimeout(terminalWriteTimerRef.current);
-      terminalWriteTimerRef.current = null;
-    }
-    if (terminalWriteFrameRef.current !== null) {
-      window.cancelAnimationFrame(terminalWriteFrameRef.current);
-      terminalWriteFrameRef.current = null;
-    }
-  }, []);
-
-  const flushTerminalWrites = useCallback(() => {
-    clearScheduledTerminalFlush();
-    if (terminalWriteInFlightRef.current) {
-      return;
-    }
-
-    const term = termRef.current;
-    if (!term) {
-      terminalWriteQueueRef.current = [];
-      terminalWriteRestoreFocusRef.current = false;
-      return;
-    }
-
-    const batch = buildTerminalWriteBatch(terminalWriteQueueRef.current);
-    terminalWriteQueueRef.current = [];
-    const shouldRestoreFocus = terminalWriteRestoreFocusRef.current;
-    terminalWriteRestoreFocusRef.current = false;
-
-    if (!batch.payload) {
-      if (batch.replace) {
-        const viewport = captureTerminalViewport(term);
-        snapshotAppliedRef.current = sessionId;
-        term.reset();
-        applyViewportRestore(term, viewport);
-      }
-      updateScrollState();
-      if (shouldRestoreFocus) {
-        restorePreferredFocus();
-      }
-      return;
-    }
-
-    const viewport = captureTerminalViewport(term);
-    terminalWriteInFlightRef.current = true;
-    if (batch.replace) {
-      snapshotAppliedRef.current = sessionId;
-      term.reset();
-      terminalWriteDecoderRef.current = typeof TextDecoder === "undefined" ? null : new TextDecoder();
-    }
-
-    const decodedPayload = terminalWriteDecoderRef.current
-      ? terminalWriteDecoderRef.current.decode(batch.payload, { stream: true })
-      : String.fromCharCode(...batch.payload);
-
-    term.write(decodedPayload, () => {
-      terminalWriteInFlightRef.current = false;
-      if (termRef.current !== term) {
-        return;
-      }
-      applyViewportRestore(term, viewport);
-      updateScrollState();
-      if (shouldRestoreFocus) {
-        restorePreferredFocus();
-      }
-      if (terminalWriteQueueRef.current.length > 0) {
-        if (typeof window === "undefined") {
-          flushTerminalWrites();
-          return;
-        }
-        terminalWriteTimerRef.current = window.setTimeout(() => {
-          flushTerminalWrites();
-        }, 0);
-      }
-    });
-  }, [applyViewportRestore, clearScheduledTerminalFlush, restorePreferredFocus, sessionId, updateScrollState]);
-
-  const scheduleTerminalFlush = useCallback(() => {
-    if (terminalWriteInFlightRef.current || terminalWriteQueueRef.current.length === 0) {
-      return;
-    }
-
-    if (typeof window === "undefined") {
-      flushTerminalWrites();
-      return;
-    }
-
-    if (terminalWriteFrameRef.current !== null || terminalWriteTimerRef.current !== null) {
-      return;
-    }
-
-    // Align flushes to the next animation frame (~16ms cadence) so batched
-    // writes land once per paint instead of thrashing the renderer.
-    terminalWriteFrameRef.current = window.requestAnimationFrame(() => {
-      terminalWriteFrameRef.current = null;
-      flushTerminalWrites();
-    });
-    // Fallback timer ensures writes still land if rAF is throttled (e.g.
-    // background tabs on some browsers).
-    terminalWriteTimerRef.current = window.setTimeout(() => {
-      terminalWriteTimerRef.current = null;
-      if (terminalWriteFrameRef.current !== null) {
-        window.cancelAnimationFrame(terminalWriteFrameRef.current);
-        terminalWriteFrameRef.current = null;
-      }
-      flushTerminalWrites();
-    }, TERMINAL_WRITE_BATCH_MAX_DELAY_MS);
-  }, [flushTerminalWrites]);
-
-  const queueTerminalWrite = useCallback((chunk: TerminalWriteChunk, restoreFocus = false) => {
-    terminalWriteQueueRef.current.push(chunk);
-    terminalWriteRestoreFocusRef.current ||= restoreFocus;
-    scheduleTerminalFlush();
-  }, [scheduleTerminalFlush]);
-
-  const requestSnapshotRender = useCallback(() => {
-    const term = termRef.current;
-    const currentSnapshot = snapshotAnsiRef.current;
-    if (!term || currentSnapshot.length === 0) {
-      return false;
-    }
-
-    snapshotAppliedRef.current = sessionId;
-    const payload = liveOutputStartedRef.current
-      ? buildTerminalSnapshotPayload(currentSnapshot, snapshotModesRef.current)
-      : buildReadableSnapshotPayload(currentSnapshot, snapshotTranscriptRef.current);
-    queueTerminalWrite({
-      kind: "snapshot",
-      payload,
-    });
-    return true;
-  }, [queueTerminalWrite, sessionId]);
-
+  // --- Stable callback refs for use inside useEffects ---
   const requestSnapshotRenderRef = useRef(requestSnapshotRender);
   const updateScrollStateRef = useRef(updateScrollState);
   const clearScheduledTerminalFlushRef = useRef(clearScheduledTerminalFlush);
-  const scheduleRendererRecoveryRef = useRef<(forceResize: boolean) => void>(() => {});
+  const scheduleRendererRecoveryRef = useRef<(forceResize: boolean) => void>(scheduleRendererRecovery);
 
-  useEffect(() => {
-    requestSnapshotRenderRef.current = requestSnapshotRender;
-  }, [requestSnapshotRender]);
+  useEffect(() => { requestSnapshotRenderRef.current = requestSnapshotRender; }, [requestSnapshotRender]);
+  useEffect(() => { updateScrollStateRef.current = updateScrollState; }, [updateScrollState]);
+  useEffect(() => { clearScheduledTerminalFlushRef.current = clearScheduledTerminalFlush; }, [clearScheduledTerminalFlush]);
+  useEffect(() => { scheduleRendererRecoveryRef.current = scheduleRendererRecovery; }, [scheduleRendererRecovery]);
 
-  useEffect(() => {
-    updateScrollStateRef.current = updateScrollState;
-  }, [updateScrollState]);
-
-  useEffect(() => {
-    clearScheduledTerminalFlushRef.current = clearScheduledTerminalFlush;
-  }, [clearScheduledTerminalFlush]);
-
-
-  const syncTerminalDimensions = useCallback((forceSync: boolean) => {
-    const term = termRef.current;
-    if (!term) {
-      return;
-    }
-
-    const cols = Math.max(1, term.cols);
-    const rows = Math.max(1, term.rows);
-    const sizeKey = `${cols}x${rows}`;
-    const previousKey = lastSyncedTerminalSizeRef.current;
-    if (!forceSync && !pendingResizeSyncRef.current && previousKey === sizeKey) {
-      return;
-    }
-
-    void sendResize(cols, rows)
-      .then((sent) => {
-        if (!sent) {
-          pendingResizeSyncRef.current = true;
-          return;
-        }
-        pendingResizeSyncRef.current = false;
-        lastSyncedTerminalSizeRef.current = sizeKey;
-      })
-      .catch((error: unknown) => {
-        pendingResizeSyncRef.current = true;
-        if (lastSyncedTerminalSizeRef.current === sizeKey) {
-          lastSyncedTerminalSizeRef.current = previousKey;
-        }
-        setTransportError(error instanceof Error ? error.message : "Failed to resize terminal");
-      });
-  }, [sendResize]);
-
-  const clearScheduledRecovery = useCallback(() => {
-    if (recoveryFrameRef.current !== null) {
-      window.cancelAnimationFrame(recoveryFrameRef.current);
-      recoveryFrameRef.current = null;
-    }
-    if (recoveryTimerRef.current !== null) {
-      window.clearTimeout(recoveryTimerRef.current);
-      recoveryTimerRef.current = null;
-    }
-    recoveryPendingResizeRef.current = false;
+  // --- Callbacks ---
+  const normalizeWhitespaceOnlyDraft = useCallback(() => {
+    setMessage((current) => (current.trim().length === 0 ? "" : current));
   }, []);
-
-  const clearVisibilityRecoveryTimers = useCallback(() => {
-    for (const timer of visibilityRecoveryTimersRef.current) {
-      window.clearTimeout(timer);
-    }
-    visibilityRecoveryTimersRef.current = [];
-  }, []);
-
-  const runRendererRecovery = useCallback((forceResize: boolean) => {
-    const term = termRef.current;
-    const fit = fitRef.current;
-    const container = containerRef.current;
-    if (!term || !fit || !container) {
-      return;
-    }
-
-    const style = window.getComputedStyle(container);
-    if (style.display === "none" || style.visibility === "hidden") {
-      return;
-    }
-
-    const rect = container.getBoundingClientRect();
-    if (rect.width <= 1 || rect.height <= 1) {
-      return;
-    }
-
-    const viewport = captureTerminalViewport(term);
-    const previousCols = term.cols;
-    const previousRows = term.rows;
-
-    try {
-      fit.fit();
-    } catch {
-      return;
-    }
-
-    if (forceResize) {
-      term.refresh(0, Math.max(0, term.rows - 1));
-    }
-
-    if (forceResize || term.cols !== previousCols || term.rows !== previousRows || pendingResizeSyncRef.current) {
-      syncTerminalDimensions(forceResize || pendingResizeSyncRef.current);
-    }
-
-    applyViewportRestore(term, viewport);
-    updateScrollState();
-    restorePreferredFocus();
-  }, [applyViewportRestore, restorePreferredFocus, syncTerminalDimensions, updateScrollState]);
-
-  const scheduleRendererRecovery = useCallback((forceResize: boolean) => {
-    recoveryPendingResizeRef.current ||= forceResize;
-    if (recoveryFrameRef.current !== null) {
-      return;
-    }
-
-    recoveryFrameRef.current = window.requestAnimationFrame(() => {
-      recoveryFrameRef.current = null;
-
-      const now = Date.now();
-      if (now - recoveryLastRunRef.current < RENDERER_RECOVERY_THROTTLE_MS) {
-        const remaining = RENDERER_RECOVERY_THROTTLE_MS - (now - recoveryLastRunRef.current);
-        if (recoveryTimerRef.current !== null) {
-          window.clearTimeout(recoveryTimerRef.current);
-        }
-        recoveryTimerRef.current = window.setTimeout(() => {
-          recoveryTimerRef.current = null;
-          scheduleRendererRecovery(recoveryPendingResizeRef.current);
-        }, remaining + 1);
-        return;
-      }
-
-      recoveryLastRunRef.current = now;
-      const shouldForceResize = recoveryPendingResizeRef.current;
-      recoveryPendingResizeRef.current = false;
-      runRendererRecovery(shouldForceResize);
-    });
-  }, [runRendererRecovery]);
 
   const queueResumeAttachments = useCallback((files: File[]) => {
     if (!files.length) return;
@@ -1334,7 +370,7 @@ export function SessionTerminal({
       setConnectionState("live");
       setTransportError(null);
     }
-  }, [requestSnapshotRender, sessionId]);
+  }, [lastTerminalSequenceRef, requestSnapshotRender, sessionId, snapshotAppliedRef, snapshotAnsiRef, snapshotModesRef, snapshotTranscriptRef]);
 
   const persistCachedUiState = useEffectEvent(() => {
     const term = termRef.current;
@@ -1351,6 +387,8 @@ export function SessionTerminal({
     });
   });
 
+  // --- Effects ---
+
   useEffect(() => {
     persistCachedUiState();
   }, [helperPanelOpen, message, persistCachedUiState, searchOpen, searchQuery]);
@@ -1366,7 +404,7 @@ export function SessionTerminal({
       snapshotAppliedRef.current = null;
       liveOutputStartedRef.current = false;
     }
-  }, [expectsLiveTerminal]);
+  }, [expectsLiveTerminal, liveOutputStartedRef, snapshotAppliedRef]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1445,6 +483,7 @@ export function SessionTerminal({
     setHelperPanelOpen(false);
   }, [mobileKeyboardVisible]);
 
+  // Reset state when sessionId changes
   useEffect(() => {
     const cachedSnapshot = expectsLiveTerminal ? null : readCachedTerminalSnapshot(sessionId);
     const cachedUiState = readCachedTerminalUiState(sessionId);
@@ -1487,7 +526,7 @@ export function SessionTerminal({
     setSearchOpen(cachedUiState?.searchOpen ?? false);
     setSearchQuery(cachedUiState?.searchQuery ?? "");
     setHelperPanelOpen(cachedUiState?.helperPanelOpen ?? false);
-    setShowScrollToBottom(false);
+    _setShowScrollToBottom(false);
     setSnapshotReady(cachedSnapshot !== null);
     setSnapshotAnsi(cachedSnapshot?.snapshot ?? "");
     setSnapshotTranscript(cachedSnapshot?.transcript ?? "");
@@ -1497,12 +536,14 @@ export function SessionTerminal({
     setMobileKeyboardVisible(false);
     termRef.current?.reset();
     updateScrollState();
-  }, [clearReconnectTimer, clearScheduledRecovery, clearScheduledTerminalFlush, clearScheduledTerminalHttpControlFlush, sessionId, updateScrollState]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   useEffect(() => {
     setSessionStatusOverride(null);
   }, [sessionState]);
 
+  // Snapshot fetch effect
   useEffect(() => {
     let mounted = true;
     const cachedSnapshot = expectsLiveTerminal ? null : readCachedTerminalSnapshot(sessionId);
@@ -1510,21 +551,14 @@ export function SessionTerminal({
     setSnapshotReady(hasCachedSnapshot);
 
     if (!active) {
-      return () => {
-        mounted = false;
-      };
+      return () => { mounted = false; };
     }
 
     if (expectsLiveTerminal) {
       if (!shouldStreamLiveTerminal) {
-        return () => {
-          mounted = false;
-        };
+        return () => { mounted = false; };
       }
 
-      // Direct live transports deliver their own restore payloads. Avoid
-      // racing them with an eager HTTP snapshot fetch, which adds latency and
-      // can double-apply initial terminal state.
       liveOutputStartedRef.current = false;
       lastTerminalSequenceRef.current = null;
       snapshotAppliedRef.current = null;
@@ -1536,9 +570,7 @@ export function SessionTerminal({
       setSnapshotModes(undefined);
       setSnapshotReady(true);
 
-      return () => {
-        mounted = false;
-      };
+      return () => { mounted = false; };
     }
 
     if (hasCachedSnapshot) {
@@ -1566,11 +598,10 @@ export function SessionTerminal({
       }
     })();
 
-    return () => {
-      mounted = false;
-    };
-  }, [active, applyFetchedSnapshot, expectsLiveTerminal, sessionId, shouldStreamLiveTerminal]);
+    return () => { mounted = false; };
+  }, [active, applyFetchedSnapshot, expectsLiveTerminal, lastTerminalSequenceRef, liveOutputStartedRef, sessionId, shouldStreamLiveTerminal, snapshotAppliedRef, snapshotAnsiRef, snapshotModesRef, snapshotTranscriptRef]);
 
+  // Connection resolution effect
   useEffect(() => {
     let mounted = true;
 
@@ -1578,9 +609,7 @@ export function SessionTerminal({
       setSocketBaseUrl(null);
       setConnectionState("closed");
       setTransportError(null);
-      return () => {
-        mounted = false;
-      };
+      return () => { mounted = false; };
     }
 
     void (async () => {
@@ -1601,11 +630,10 @@ export function SessionTerminal({
       }
     })();
 
-    return () => {
-      mounted = false;
-    };
+    return () => { mounted = false; };
   }, [expectsLiveTerminal, reconnectToken, sessionId, shouldStreamLiveTerminal]);
 
+  // --- Event handlers (useEffectEvent) ---
   const handleTerminalServerEvent = useEffectEvent((payload: TerminalServerEvent) => {
     if (payload.type === "error") {
       setTransportError(payload.error);
@@ -1670,10 +698,6 @@ export function SessionTerminal({
     }
   });
 
-  useEffect(() => {
-    scheduleRendererRecoveryRef.current = scheduleRendererRecovery;
-  }, [scheduleRendererRecovery]);
-
   const handleTerminalEventStreamMessage = useEffectEvent((payload: TerminalStreamEventMessage) => {
     if (payload.type === "stream" || payload.type === "restore") {
       try {
@@ -1736,6 +760,7 @@ export function SessionTerminal({
     scheduleRendererRecovery(true);
   });
 
+  // --- Terminal init effect ---
   useEffect(() => {
     let term: XTerminal | null = null;
     let fit: XFitAddon | null = null;
@@ -1778,8 +803,6 @@ export function SessionTerminal({
       term.open(containerRef.current);
       fit.fit();
 
-      // Load WebGL renderer for significantly better rendering performance.
-      // Falls back to the default canvas renderer if WebGL is unavailable.
       void loadTerminalWebglAddonModule()
         .then((webglMod) => {
           if (!mounted || termRef.current !== term) return;
@@ -1789,11 +812,8 @@ export function SessionTerminal({
           });
           term!.loadAddon(webglAddon);
         })
-        .catch(() => {
-          // WebGL unavailable — canvas renderer continues to work.
-        });
+        .catch(() => {});
 
-      // Load Unicode11 addon for proper CJK and emoji rendering.
       void loadTerminalUnicode11AddonModule()
         .then((unicode11Mod) => {
           if (!mounted || termRef.current !== term) return;
@@ -1801,20 +821,15 @@ export function SessionTerminal({
           term!.loadAddon(unicode11Addon);
           term!.unicode.activeVersion = "11";
         })
-        .catch(() => {
-          // Unicode11 unavailable — default unicode handling continues.
-        });
+        .catch(() => {});
 
-      // Load Web Links addon so URLs in terminal output are clickable.
       void loadTerminalWebLinksAddonModule()
         .then((webLinksMod) => {
           if (!mounted || termRef.current !== term) return;
           const webLinksAddon = new webLinksMod.WebLinksAddon();
           term!.loadAddon(webLinksAddon);
         })
-        .catch(() => {
-          // Web links unavailable — URLs remain plain text.
-        });
+        .catch(() => {});
 
       termRef.current = term;
       fitRef.current = fit;
@@ -1822,7 +837,7 @@ export function SessionTerminal({
       pendingResizeSyncRef.current = true;
       lastObservedContainerSizeRef.current = `${Math.round(containerRef.current.clientWidth)}x${Math.round(containerRef.current.clientHeight)}`;
       lastViewportOptionKeyRef.current = `${viewportOptions.fontFamily}:${viewportOptions.fontSize}:${viewportOptions.lineHeight}`;
-      term.options.disableStdin = !expectsLiveTerminalRef.current || !interactiveTerminalRef.current;
+      term.options.disableStdin = !expectsLiveTerminalRef.current || !inputInteractiveRef.current;
       setTerminalReady(true);
       updateScrollStateRef.current();
       window.requestAnimationFrame(() => {
@@ -1851,9 +866,7 @@ export function SessionTerminal({
 
     if (!shouldAttachTerminalSurface) {
       setTerminalReady(false);
-      return () => {
-        mounted = false;
-      };
+      return () => { mounted = false; };
     }
 
     void init();
@@ -1886,32 +899,8 @@ export function SessionTerminal({
       pendingResizeSyncRef.current = true;
       setTerminalReady(false);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, shouldAttachTerminalSurface]);
-
-  useEffect(() => {
-    if (!searchOpen || !termRef.current || searchRef.current) {
-      return;
-    }
-
-    let cancelled = false;
-    void loadTerminalSearchAddonModule()
-      .then((searchMod) => {
-        if (cancelled || !termRef.current || searchRef.current) {
-          return;
-        }
-        const searchAddon = new searchMod.SearchAddon();
-        termRef.current.loadAddon(searchAddon);
-        searchRef.current = searchAddon;
-      })
-      .catch(() => {
-        // Search stays optional; terminal rendering should not fail if the
-        // addon bundle cannot load.
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [searchOpen]);
 
   useEffect(() => {
     const term = termRef.current;
@@ -1921,6 +910,7 @@ export function SessionTerminal({
     term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal;
   }, [expectsLiveTerminal, interactiveTerminal]);
 
+  // Active pane recovery effect
   useEffect(() => {
     if (!active) {
       return;
@@ -1933,10 +923,11 @@ export function SessionTerminal({
     clearVisibilityRecoveryTimers();
     const frameHandle = window.requestAnimationFrame(() => {
       scheduleRendererRecovery(true);
-      visibilityRecoveryTimersRef.current.push(window.setTimeout(() => {
+      const timers: number[] = [];
+      timers.push(window.setTimeout(() => {
         scheduleRendererRecovery(true);
       }, 48));
-      visibilityRecoveryTimersRef.current.push(window.setTimeout(() => {
+      timers.push(window.setTimeout(() => {
         scheduleRendererRecovery(true);
       }, 140));
     });
@@ -1947,6 +938,7 @@ export function SessionTerminal({
     };
   }, [active, clearVisibilityRecoveryTimers, connectionState, expectsLiveTerminal, requestReconnect, scheduleRendererRecovery]);
 
+  // Snapshot render effect
   useEffect(() => {
     if (!terminalReady || !snapshotReady || !canRenderTerminal) {
       return;
@@ -1984,8 +976,10 @@ export function SessionTerminal({
     updateScrollState();
   }, [
     expectsLiveTerminal,
+    liveOutputStartedRef,
     sessionId,
     snapshotAnsi,
+    snapshotAppliedRef,
     snapshotTranscript,
     snapshotModes,
     snapshotReady,
@@ -1995,6 +989,7 @@ export function SessionTerminal({
     canRenderTerminal,
   ]);
 
+  // Debug state effect
   useEffect(() => {
     if (typeof window === "undefined" || process.env.NODE_ENV === "production") {
       return;
@@ -2031,13 +1026,16 @@ export function SessionTerminal({
     active,
     connectionState,
     interactiveTerminal,
+    liveOutputStartedRef,
     sessionId,
     snapshotAnsi,
+    snapshotAppliedRef,
     snapshotTranscript,
     snapshotReady,
     terminalReady,
   ]);
 
+  // Visibility/focus effect
   useEffect(() => {
     const handleVisibilityChange = () => {
       setPageVisible(!document.hidden);
@@ -2081,6 +1079,7 @@ export function SessionTerminal({
     };
   }, [rememberFocusedSurface]);
 
+  // Cleanup when not streaming
   useEffect(() => {
     if (shouldStreamLiveTerminal) {
       return;
@@ -2112,15 +1111,10 @@ export function SessionTerminal({
       setSnapshotModes(undefined);
       setSnapshotReady(false);
     }
-  }, [
-    clearReconnectTimer,
-    clearScheduledTerminalFlush,
-    clearScheduledTerminalHttpControlFlush,
-    expectsLiveTerminal,
-    sessionId,
-    shouldStreamLiveTerminal,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldStreamLiveTerminal, sessionId, expectsLiveTerminal]);
 
+  // EventSource connection effect
   useEffect(() => {
     if (
       !terminalReady
@@ -2195,6 +1189,7 @@ export function SessionTerminal({
       }
       source.close();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     clearReconnectTimer,
     sessionId,
@@ -2203,11 +1198,9 @@ export function SessionTerminal({
     terminalReady,
   ]);
 
+  // Auto-reconnect scheduling effect
   useEffect(() => {
-    if (
-      !terminalReady
-      || !shouldStreamLiveTerminal
-    ) {
+    if (!terminalReady || !shouldStreamLiveTerminal) {
       return;
     }
 
@@ -2220,13 +1213,12 @@ export function SessionTerminal({
       return;
     }
 
-    if (reconnectTimerRef.current !== null) {
-      return;
-    }
-
+    // Don't schedule if timer already pending
+    // (reconnectTimerRef not exposed, but scheduleReconnect clears existing)
     scheduleReconnect();
-  }, [connectionState, scheduleReconnect, shouldStreamLiveTerminal, terminalReady]);
+  }, [connectionState, scheduleReconnect, shouldStreamLiveTerminal, terminalReady, eventSourceRef]);
 
+  // Global cleanup effect
   useEffect(() => () => {
     clearReconnectTimer();
     clearScheduledRecovery();
@@ -2240,8 +1232,10 @@ export function SessionTerminal({
     terminalHttpControlInFlightRef.current = false;
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
-  }, [clearReconnectTimer, clearScheduledRecovery, clearScheduledTerminalFlush, clearScheduledTerminalHttpControlFlush, clearVisibilityRecoveryTimers]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
+  // Paste handling effect
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -2276,6 +1270,7 @@ export function SessionTerminal({
     };
   }, [handleIncomingFiles]);
 
+  // --- Send handler ---
   const handleSend = useCallback(async () => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && attachments.length === 0) return;
@@ -2332,6 +1327,7 @@ export function SessionTerminal({
     }
   }, [attachments, message, projectId, router, sessionId, sessionModel, sessionReasoningEffort]);
 
+  // Pending insert effect
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
       return;
@@ -2363,18 +1359,6 @@ export function SessionTerminal({
     setMessage((current) => (current.trim().length > 0 ? `${current}\n\n${draftText}` : draftText));
   }, [canSendLiveInput, expectsLiveTerminal, interactiveTerminal, pendingInsert, sendTerminalKeys, transportNotice]);
 
-  const runSearch = useCallback((direction: "next" | "prev") => {
-    const addon = searchRef.current;
-    if (!addon || searchQuery.trim().length === 0) {
-      return;
-    }
-    if (direction === "next") {
-      addon.findNext(searchQuery, { incremental: true, caseSensitive: false });
-    } else {
-      addon.findPrevious(searchQuery, { incremental: true, caseSensitive: false });
-    }
-  }, [searchQuery]);
-
   const scrollToBottom = useCallback(() => {
     const term = termRef.current;
     if (!term) {
@@ -2391,7 +1375,7 @@ export function SessionTerminal({
         return;
       }
     }
-  }, [updateScrollState]);
+  }, [preferredFocusTargetRef, restoreFocusOnRecoveryRef, updateScrollState]);
 
   const focusTerminal = useCallback(() => {
     preferredFocusTargetRef.current = "terminal";
@@ -2409,12 +1393,9 @@ export function SessionTerminal({
       return;
     }
     scheduleRendererRecovery(false);
-  }, [expectsLiveTerminal, scheduleRendererRecovery]);
+  }, [expectsLiveTerminal, preferredFocusTargetRef, restoreFocusOnRecoveryRef, scheduleRendererRecovery]);
 
   const handleTerminalPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    // On touch devices, defer focus until we know the gesture is a tap and not
-    // a scroll.  Immediate focus on pointerdown opens the virtual keyboard and
-    // steals the touch from the native scroll handler.
     if (event.pointerType === "touch") {
       return;
     }
@@ -2448,6 +1429,7 @@ export function SessionTerminal({
     event.preventDefault();
   }, [updateScrollState]);
 
+  // Touch/wheel scroll effect
   useEffect(() => {
     const container = containerRef.current;
     if (!container) {
@@ -2458,11 +1440,6 @@ export function SessionTerminal({
       handleTerminalWheel(event);
     };
 
-    // --- Smooth touch-scroll with momentum for mobile ---
-    // xterm.js line-by-line scrolling feels choppy on touch.  We accumulate
-    // fractional pixel deltas so the terminal responds to the smallest finger
-    // movement, and add momentum (inertia) on touchend so the scroll coasts
-    // to a stop like a native list view.
     let touchLastY: number | null = null;
     let touchScrolled = false;
     let touchAccumY = 0;
@@ -2470,11 +1447,7 @@ export function SessionTerminal({
     let touchLastTime = 0;
     let momentumFrame: number | null = null;
 
-    // Measured from xterm.js default cell height.  This value only converts
-    // pixel deltas into line counts; a smaller value means more responsive
-    // (sub-line) feel because we emit a scrollLines(1) sooner.
     const LINE_HEIGHT_PX = 16;
-    // Momentum tuning
     const MOMENTUM_DECAY = 0.92;
     const MOMENTUM_MIN_VELOCITY = 0.3;
     const VELOCITY_WEIGHT = 0.6;
@@ -2524,9 +1497,6 @@ export function SessionTerminal({
       const now = event.timeStamp;
       const dt = now - touchLastTime;
 
-      // Only scroll when there is scrollback to scroll through.
-      // When baseY === 0 the swipe is a no-op and we must NOT suppress
-      // the subsequent tap-to-focus in onTouchEnd.
       if (term.buffer.active.baseY > 0) {
         touchScrolled = true;
         touchAccumY += deltaY;
@@ -2537,7 +1507,6 @@ export function SessionTerminal({
           term.scrollLines(lines);
         }
 
-        // Exponential moving average for velocity (px per frame @ 16ms)
         if (dt > 0) {
           const instantVelocity = (deltaY / dt) * 16;
           touchVelocity = touchVelocity === 0
@@ -2553,10 +1522,8 @@ export function SessionTerminal({
 
     const onTouchEnd = () => {
       if (!touchScrolled && touchLastY !== null) {
-        // Short tap: focus the terminal (deferred from pointerdown)
         focusTerminal();
       } else if (touchScrolled && Math.abs(touchVelocity) >= MOMENTUM_MIN_VELOCITY) {
-        // Kick off momentum scroll
         momentumFrame = requestAnimationFrame(stepMomentum);
       }
       touchLastY = null;
@@ -2613,6 +1580,7 @@ export function SessionTerminal({
     queueResumeAttachments(files);
   }, [expectsLiveTerminal, handleIncomingFiles, queueResumeAttachments]);
 
+  // --- Render ---
   return (
     <div
       ref={surfaceRef}
@@ -2687,10 +1655,10 @@ export function SessionTerminal({
             className="h-6 w-20 min-w-0 bg-transparent px-2 text-[11px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] sm:w-28 sm:text-[12px]"
           />
           <Button type="button" size="icon" variant="ghost" className="h-6 w-6 text-[#c9c0b7]" onClick={() => runSearch("prev")} aria-label="Find previous">
-            <span className="text-[11px]">↑</span>
+            <span className="text-[11px]">&#x2191;</span>
           </Button>
           <Button type="button" size="icon" variant="ghost" className="h-6 w-6 text-[#c9c0b7]" onClick={() => runSearch("next")} aria-label="Find next">
-            <span className="text-[11px]">↓</span>
+            <span className="text-[11px]">&#x2193;</span>
           </Button>
           <Button type="button" size="icon" variant="ghost" className="h-6 w-6 text-[#c9c0b7]" onClick={closeSearch} aria-label="Close search">
             <X className="h-3.5 w-3.5" />
