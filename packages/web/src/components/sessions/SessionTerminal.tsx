@@ -2362,57 +2362,110 @@ export function SessionTerminal({
       handleTerminalWheel(event);
     };
 
-    // --- Touch-scroll support for mobile ---
-    // xterm.js captures touch events on its canvas but can fail to propagate
-    // scroll on older WebKit builds and when the xterm buffer is small.  We
-    // register a parallel touchmove handler on the outer container so that
-    // vertical swipes always translate into terminal scroll-lines, and short
-    // taps (no scroll) still focus the terminal.
-    let touchStartY: number | null = null;
+    // --- Smooth touch-scroll with momentum for mobile ---
+    // xterm.js line-by-line scrolling feels choppy on touch.  We accumulate
+    // fractional pixel deltas so the terminal responds to the smallest finger
+    // movement, and add momentum (inertia) on touchend so the scroll coasts
+    // to a stop like a native list view.
+    let touchLastY: number | null = null;
     let touchScrolled = false;
-    const TOUCH_LINE_HEIGHT_PX = 18;
+    let touchAccumY = 0;
+    let touchVelocity = 0;
+    let touchLastTime = 0;
+    let momentumFrame: number | null = null;
+
+    // Measured from xterm.js default cell height.  This value only converts
+    // pixel deltas into line counts; a smaller value means more responsive
+    // (sub-line) feel because we emit a scrollLines(1) sooner.
+    const LINE_HEIGHT_PX = 16;
+    // Momentum tuning
+    const MOMENTUM_DECAY = 0.92;
+    const MOMENTUM_MIN_VELOCITY = 0.3;
+    const VELOCITY_WEIGHT = 0.6;
+
+    const cancelMomentum = () => {
+      if (momentumFrame !== null) {
+        cancelAnimationFrame(momentumFrame);
+        momentumFrame = null;
+      }
+    };
+
+    const stepMomentum = () => {
+      const term = termRef.current;
+      if (!term || Math.abs(touchVelocity) < MOMENTUM_MIN_VELOCITY) {
+        momentumFrame = null;
+        updateScrollState();
+        return;
+      }
+      touchAccumY += touchVelocity;
+      const lines = Math.trunc(touchAccumY / LINE_HEIGHT_PX);
+      if (lines !== 0) {
+        touchAccumY -= lines * LINE_HEIGHT_PX;
+        term.scrollLines(lines);
+      }
+      touchVelocity *= MOMENTUM_DECAY;
+      momentumFrame = requestAnimationFrame(stepMomentum);
+    };
 
     const onTouchStart = (event: TouchEvent) => {
+      cancelMomentum();
       if (event.touches.length === 1) {
-        touchStartY = event.touches[0]!.clientY;
+        touchLastY = event.touches[0]!.clientY;
+        touchLastTime = event.timeStamp;
         touchScrolled = false;
+        touchAccumY = 0;
+        touchVelocity = 0;
       }
     };
 
     const onTouchMove = (event: TouchEvent) => {
       const term = termRef.current;
-      if (!term || touchStartY === null || event.touches.length !== 1) {
+      if (!term || touchLastY === null || event.touches.length !== 1) {
         return;
       }
       const currentY = event.touches[0]!.clientY;
-      const deltaY = touchStartY - currentY;
-      const deltaLines = Math.trunc(deltaY / TOUCH_LINE_HEIGHT_PX);
-      if (deltaLines === 0) {
-        return;
-      }
-      // Only mark as scrolled and intercept when there is scrollback to
-      // scroll through.  When baseY === 0 the swipe is a no-op and we must
-      // NOT suppress the subsequent tap-to-focus in onTouchEnd.
+      const deltaY = touchLastY - currentY;
+      const now = event.timeStamp;
+      const dt = now - touchLastTime;
+
+      // Only scroll when there is scrollback to scroll through.
+      // When baseY === 0 the swipe is a no-op and we must NOT suppress
+      // the subsequent tap-to-focus in onTouchEnd.
       if (term.buffer.active.baseY > 0) {
         touchScrolled = true;
-        term.scrollLines(deltaLines);
-        updateScrollState();
+        touchAccumY += deltaY;
+
+        const lines = Math.trunc(touchAccumY / LINE_HEIGHT_PX);
+        if (lines !== 0) {
+          touchAccumY -= lines * LINE_HEIGHT_PX;
+          term.scrollLines(lines);
+        }
+
+        // Exponential moving average for velocity (px per frame @ 16ms)
+        if (dt > 0) {
+          const instantVelocity = (deltaY / dt) * 16;
+          touchVelocity = touchVelocity === 0
+            ? instantVelocity
+            : VELOCITY_WEIGHT * instantVelocity + (1 - VELOCITY_WEIGHT) * touchVelocity;
+        }
+
         event.preventDefault();
-      } else {
-        // Nothing to scroll – treat this gesture as a potential tap
-        touchScrolled = false;
       }
-      touchStartY = currentY;
-      touchStartY = currentY;
+      touchLastY = currentY;
+      touchLastTime = now;
     };
 
     const onTouchEnd = () => {
-      if (!touchScrolled && touchStartY !== null) {
-        // Short tap — focus the terminal (deferred from pointerdown)
+      if (!touchScrolled && touchLastY !== null) {
+        // Short tap: focus the terminal (deferred from pointerdown)
         focusTerminal();
+      } else if (touchScrolled && Math.abs(touchVelocity) >= MOMENTUM_MIN_VELOCITY) {
+        // Kick off momentum scroll
+        momentumFrame = requestAnimationFrame(stepMomentum);
       }
-      touchStartY = null;
+      touchLastY = null;
       touchScrolled = false;
+      updateScrollState();
     };
 
     container.addEventListener("wheel", wheelListener, { passive: false });
@@ -2421,6 +2474,7 @@ export function SessionTerminal({
     container.addEventListener("touchend", onTouchEnd, { passive: true });
     container.addEventListener("touchcancel", onTouchEnd, { passive: true });
     return () => {
+      cancelMomentum();
       container.removeEventListener("wheel", wheelListener);
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
