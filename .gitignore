@@ -48,3 +48,6 @@ pnpm-lock.yaml
 /dashboard/dist
 projects/
 packages/cli/native/
+
+# Local hook configs
+.github/hooks/
