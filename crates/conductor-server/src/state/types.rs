@@ -41,8 +41,8 @@ const DEFAULT_TERMINAL_STORE_ROWS: u16 = 32;
 // Keep the live per-session terminal store near a 1-2 MB working set. Durable
 // capture and replay live on disk, so the in-memory store only needs enough
 // short scrollback for attach/reconnect smoothness.
-const DEFAULT_TERMINAL_STORE_SCROLLBACK: usize = 768;
-const DEFAULT_TERMINAL_HISTORY_BYTES: usize = 192 * 1024;
+const DEFAULT_TERMINAL_STORE_SCROLLBACK: usize = 10_000;
+const DEFAULT_TERMINAL_HISTORY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TERMINAL_OSC_PENDING_BYTES: usize = 4096;
 
 pub const TERMINAL_RESTORE_SNAPSHOT_VERSION: u8 = 1;
