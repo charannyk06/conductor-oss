@@ -789,7 +789,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex flex-col gap-2 lg:flex-row">
+          <div className="flex flex-col gap-2 sm:flex-row">
             <input
               value={urlInput}
               onChange={(event) => setUrlInput(event.target.value)}
@@ -877,7 +877,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
           </div>
         </CardHeader>
         <CardContent className="min-h-0">
-          <div className="flex h-[56vh] min-h-[280px] max-h-[620px] items-center justify-center overflow-auto rounded-[6px] border border-[var(--vk-border)] bg-[#111] p-2 sm:h-[72vh] sm:min-h-[360px] sm:max-h-[760px] sm:p-3">
+          <div className="flex h-[56vh] min-h-[200px] max-h-[620px] items-center justify-center overflow-auto rounded-[6px] border border-[var(--vk-border)] bg-[#111] p-2 sm:h-[72vh] sm:min-h-[360px] sm:max-h-[760px] sm:p-3">
             {loading ? (
               <div className="flex items-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -1066,7 +1066,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
             </div>
 
             <div className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
-              <ScrollArea className="h-[240px] sm:h-[300px] xl:h-[360px]">
+              <ScrollArea className="h-[200px] sm:h-[300px] xl:h-[360px]">
                 <div className="space-y-1 p-2">
                   {previewMode === "navigate" ? (
                     <div className="rounded-[4px] border border-dashed border-[var(--vk-border)] px-2 py-2 text-[11px] text-[var(--vk-text-muted)]">
@@ -1160,7 +1160,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               </Button>
             </CardHeader>
             <CardContent>
-              <ScrollArea className="h-[220px] sm:h-[260px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+              <ScrollArea className="h-[180px] sm:h-[260px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
                 <div className="space-y-1 p-2">
                   {status?.consoleLogs.length ? status.consoleLogs.map((entry) => (
                     <div
@@ -1204,7 +1204,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               </Button>
             </CardHeader>
             <CardContent>
-              <ScrollArea className="h-[220px] sm:h-[260px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+              <ScrollArea className="h-[180px] sm:h-[260px] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
                 <div className="space-y-1 p-2">
                   {status?.networkLogs.length ? status.networkLogs.map((entry) => (
                     <div

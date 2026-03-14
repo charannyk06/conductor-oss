@@ -250,14 +250,14 @@ export function SessionOverview({ session }: SessionOverviewProps) {
             </CardHeader>
             <CardContent className="space-y-2">
               {session.branch && (
-                <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                  <GitBranch className="h-3.5 w-3.5 text-[var(--text-faint)]" />
+                <div className="surface-panel flex items-center gap-2 overflow-hidden rounded-[var(--radius-sm)] border px-2.5 py-2">
+                  <GitBranch className="h-3.5 w-3.5 shrink-0 text-[var(--text-faint)]" />
                   <CopyText text={session.branch} />
                 </div>
               )}
               {worktree && (
-                <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
-                  <FolderGit2 className="h-3.5 w-3.5 text-[var(--text-faint)]" />
+                <div className="surface-panel flex items-center gap-2 overflow-hidden rounded-[var(--radius-sm)] border px-2.5 py-2">
+                  <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[var(--text-faint)]" />
                   <CopyText text={worktree} />
                 </div>
               )}
@@ -312,7 +312,7 @@ function Row({
   value: string;
 }) {
   return (
-    <div className="surface-panel flex items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2">
+    <div className="surface-panel flex flex-wrap items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-2 sm:flex-nowrap">
       <span className="text-[var(--text-faint)]">{icon}</span>
       <span className="min-w-[70px] text-[var(--text-faint)]">{label}</span>
       <span className="ml-auto truncate text-right font-mono text-[11px] text-[var(--text-normal)]">{value}</span>

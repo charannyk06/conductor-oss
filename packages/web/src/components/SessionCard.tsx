@@ -138,8 +138,8 @@ export function SessionCard({
       }}
     >
       {/* Row 1: Session ID + Project badge */}
-      <div className="flex items-center gap-2 px-4 pt-3.5 pb-1">
-        <span className="text-[11px] font-mono font-medium text-[var(--color-text-secondary)] truncate">
+      <div className="flex items-center gap-2 px-3 pt-3 pb-1 sm:px-4 sm:pt-3.5">
+        <span className="text-[11px] font-mono font-medium text-[var(--color-text-secondary)] truncate max-w-[40vw] sm:max-w-none">
           {session.id}
         </span>
         <span
@@ -155,7 +155,7 @@ export function SessionCard({
       </div>
 
       {/* Row 2: Status dot + status text + agent badge */}
-      <div className="flex items-center gap-2 px-4 pb-2">
+      <div className="flex items-center gap-2 px-3 pb-2 sm:px-4">
         <span
           className={`inline-block h-2 w-2 shrink-0 rounded-full ${
             level === "working" ? "animate-[activity-pulse_2s_ease-in-out_infinite]" : ""
@@ -175,7 +175,7 @@ export function SessionCard({
 
       {/* Row 3: Summary / activity text */}
       {session.summary && (
-        <div className="px-4 pb-2.5">
+        <div className="px-3 pb-2.5 sm:px-4">
           <p className="text-[12px] leading-relaxed text-[var(--color-text-tertiary)] line-clamp-2">
             {session.summary}
           </p>
@@ -184,7 +184,7 @@ export function SessionCard({
 
       {/* Row 4: PR link */}
       {session.pr && (
-        <div className="flex items-center gap-1.5 px-4 pb-2.5">
+        <div className="flex items-center gap-1.5 px-3 pb-2.5 sm:px-4">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" className="text-[var(--color-text-muted)] shrink-0">
             <path d="M7.177 3.073L9.573.677A.25.25 0 0110 .854v4.792a.25.25 0 01-.427.177L7.177 3.427a.25.25 0 010-.354zM3.75 2.5a.75.75 0 100 1.5.75.75 0 000-1.5zm-2.25.75a2.25 2.25 0 113 2.122v5.256a2.251 2.251 0 11-1.5 0V5.372A2.25 2.25 0 011.5 3.25zM11 2.5h-1V4h1a1 1 0 011 1v5.628a2.251 2.251 0 101.5 0V5A2.5 2.5 0 0011 2.5zm1 10.25a.75.75 0 111.5 0 .75.75 0 01-1.5 0zM3.75 12a.75.75 0 100 1.5.75.75 0 000-1.5z" />
           </svg>
@@ -207,7 +207,7 @@ export function SessionCard({
       )}
 
       {/* Row 5: Meta row (cost, duration, actions) */}
-      <div className="flex items-center gap-3 border-t border-[var(--color-border-subtle)] px-4 py-2.5">
+      <div className="flex items-center gap-3 border-t border-[var(--color-border-subtle)] px-3 py-2.5 sm:px-4">
         {estimatedCost != null && (
           <span className="text-[10px] text-[var(--color-text-muted)] font-mono">
             ${estimatedCost.toFixed(2)}
@@ -221,7 +221,7 @@ export function SessionCard({
 
       {/* Expanded panel */}
       {expanded && (
-        <div className="border-t border-[var(--color-border-subtle)] px-4 py-3 animate-[slide-up_0.15s_ease]">
+        <div className="border-t border-[var(--color-border-subtle)] px-3 py-3 sm:px-4 animate-[slide-up_0.15s_ease]">
           {/* Activity */}
           <div className="mb-3 flex items-center gap-2">
             <ActivityDot activity={session.activity} />
@@ -300,7 +300,7 @@ export function SessionCard({
           )}
 
           {/* Actions */}
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <a
               href={`/sessions/${encodeURIComponent(session.id)}`}
               onClick={(e) => e.stopPropagation()}

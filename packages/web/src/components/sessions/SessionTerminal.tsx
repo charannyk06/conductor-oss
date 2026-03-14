@@ -1652,15 +1652,15 @@ export function SessionTerminal({
               }
             }}
             placeholder="Find"
-            className="h-6 w-20 min-w-0 bg-transparent px-2 text-[11px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] sm:w-28 sm:text-[12px]"
+            className="h-6 w-24 min-w-0 bg-transparent px-2 text-[11px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] sm:w-28 sm:text-[12px]"
           />
-          <Button type="button" size="icon" variant="ghost" className="h-6 w-6 text-[#c9c0b7]" onClick={() => runSearch("prev")} aria-label="Find previous">
+          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={() => runSearch("prev")} aria-label="Find previous">
             <span className="text-[11px]">&#x2191;</span>
           </Button>
-          <Button type="button" size="icon" variant="ghost" className="h-6 w-6 text-[#c9c0b7]" onClick={() => runSearch("next")} aria-label="Find next">
+          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={() => runSearch("next")} aria-label="Find next">
             <span className="text-[11px]">&#x2193;</span>
           </Button>
-          <Button type="button" size="icon" variant="ghost" className="h-6 w-6 text-[#c9c0b7]" onClick={closeSearch} aria-label="Close search">
+          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={closeSearch} aria-label="Close search">
             <X className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -1675,7 +1675,7 @@ export function SessionTerminal({
               type="button"
               size="icon"
               variant="ghost"
-              className={`pointer-events-auto h-7 w-7 rounded-full border backdrop-blur-sm sm:h-8 sm:w-8 ${
+              className={`pointer-events-auto h-10 w-10 sm:h-7 sm:w-7 rounded-full border backdrop-blur-sm ${
                 transportError
                   ? "border-[#ff8f7a]/25 bg-[#2a1616]/92 text-[#ff8f7a] hover:bg-[#351b1b]"
                   : "border-white/10 bg-[#141010]/92 text-[#c9c0b7] hover:bg-[#201818]"
@@ -1694,7 +1694,7 @@ export function SessionTerminal({
             type="button"
             size="icon"
             variant="ghost"
-            className="pointer-events-auto h-7 w-7 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-8 sm:w-8"
+            className="pointer-events-auto h-10 w-10 sm:h-7 sm:w-7 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818]"
             onClick={() => setSearchOpen(true)}
             aria-label="Search terminal"
           >
@@ -1795,7 +1795,7 @@ export function SessionTerminal({
             </button>
           </div>
           {helperPanelOpen ? (
-            <div className="mt-2 flex items-center gap-2 overflow-x-auto pb-1">
+            <div className="mt-2 flex items-center gap-2 overflow-x-auto pb-1 [-webkit-overflow-scrolling:touch]">
               {LIVE_TERMINAL_HELPER_KEYS.map(({ label, special }) => (
                 <button
                   key={special}
@@ -1824,7 +1824,7 @@ export function SessionTerminal({
                   <button
                     key={`${file.name}-${file.lastModified}`}
                     type="button"
-                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/6 px-2.5 py-1 text-[11px] text-[#d7cec7]"
+                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/6 px-3 py-2 sm:px-2.5 sm:py-1 text-[11px] text-[#d7cec7]"
                     onClick={() => {
                       setAttachments((current) => current.filter((attachment) => attachment.file !== file));
                     }}
@@ -1859,7 +1859,7 @@ export function SessionTerminal({
               </div>
               <button
                 type="button"
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex h-11 w-11 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
                 disabled={sending || (!message.trim() && attachments.length === 0)}
                 onClick={() => {
                   void handleSend();

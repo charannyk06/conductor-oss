@@ -210,6 +210,30 @@ a:hover {
   height: 0;
 }
 
+/* Mobile responsiveness: prevent iOS auto-zoom on input focus */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+/* Mobile responsiveness: touch-friendly scrolling */
+@media (pointer: coarse) {
+  .overflow-x-auto,
+  .overflow-y-auto,
+  .overflow-auto {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Mobile responsiveness: prevent body horizontal overflow */
+html,
+body {
+  overflow-x: hidden;
+}
+
 @media (pointer: coarse) {
   .xterm {
     touch-action: pan-y pinch-zoom;

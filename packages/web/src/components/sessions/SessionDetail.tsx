@@ -193,20 +193,20 @@ export function SessionDetail({
   const terminalTabActive = active && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const sessionTabs = (
-    <TabsList className={immersiveTerminalActive ? "grid w-full grid-cols-4" : "grid w-full grid-cols-4 sm:w-fit sm:inline-flex"}>
-      <TabsTrigger value="overview" className="justify-center px-2 text-[11px] sm:px-2.5 sm:text-[12px]">
+    <TabsList className={immersiveTerminalActive ? "grid w-full grid-cols-4" : "flex w-full overflow-x-auto sm:w-fit sm:inline-flex"}>
+      <TabsTrigger value="overview" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
         <LayoutDashboard className="h-3.5 w-3.5" />
         Overview
       </TabsTrigger>
-      <TabsTrigger value="terminal" className="justify-center px-2 text-[11px] sm:px-2.5 sm:text-[12px]">
+      <TabsTrigger value="terminal" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
         <SquareTerminal className="h-3.5 w-3.5" />
         Terminal
       </TabsTrigger>
-      <TabsTrigger value="preview" className="justify-center px-2 text-[11px] sm:px-2.5 sm:text-[12px]">
+      <TabsTrigger value="preview" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
         <Globe className="h-3.5 w-3.5" />
         Preview
       </TabsTrigger>
-      <TabsTrigger value="diff" className="justify-center px-2 text-[11px] sm:px-2.5 sm:text-[12px]">
+      <TabsTrigger value="diff" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
         <FileCode className="h-3.5 w-3.5" />
         Diff
       </TabsTrigger>

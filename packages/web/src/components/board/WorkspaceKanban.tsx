@@ -567,7 +567,7 @@ function AgentSelectMenu({
         <DropdownMenu.Content
           align="start"
           sideOffset={6}
-          className={`${MENU_PANEL_CLASS} min-w-[280px] max-h-[min(360px,50vh)] overflow-y-auto`}
+          className={`${MENU_PANEL_CLASS} min-w-[220px] max-w-[calc(100vw-2rem)] max-h-[min(360px,50vh)] overflow-y-auto sm:min-w-[280px]`}
         >
           <p className="px-3 pb-1 text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
             Agents
@@ -2093,7 +2093,7 @@ export function WorkspaceKanban({
           </div>
 
           <div className="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:min-w-[220px] sm:flex-nowrap sm:flex-none">
-            <label className="flex h-[31px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:min-w-[200px] sm:w-[240px] sm:flex-none">
+            <label className="flex h-[38px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:h-[31px] sm:min-w-[200px] sm:w-[240px] sm:flex-none">
               <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
               <input
                 value={search}
@@ -2106,7 +2106,7 @@ export function WorkspaceKanban({
             <button
               type="button"
               onClick={() => openComposer("intake")}
-              className="inline-flex h-[31px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[14px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] sm:w-auto"
+              className="inline-flex h-[38px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[14px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px] sm:w-auto"
             >
               <span>New Issue</span>
               <Plus className="h-3.5 w-3.5" />
@@ -2118,9 +2118,10 @@ export function WorkspaceKanban({
           <button
             type="button"
             onClick={() => setProjectSyncOpen((current) => !current)}
-            className="inline-flex h-[31px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+            className="inline-flex h-[38px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px]"
           >
-            <span>GitHub Project</span>
+            <span className="hidden sm:inline">GitHub Project</span>
+            <span className="sm:hidden">GitHub</span>
             <span className="text-[var(--vk-text-muted)]">
               {board?.githubProject?.id
                 ? formatGitHubProjectLabel(board.githubProject)
@@ -2133,7 +2134,7 @@ export function WorkspaceKanban({
               href={board.githubProject.url}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex h-[31px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+              className="inline-flex h-[38px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px]"
             >
               <span>Open Project</span>
               <ExternalLink className="h-3.5 w-3.5" />
@@ -2354,7 +2355,7 @@ export function WorkspaceKanban({
           </div>
         ) : (
           <div
-            className="flex min-h-full min-w-0 items-start gap-3 overflow-x-auto pb-3"
+            className="flex min-h-full min-w-0 snap-x snap-mandatory items-start gap-3 overflow-x-auto pb-3 sm:snap-none"
           >
             {visibleColumns.map((column) => {
               const fullColumn = allColumns.find(
@@ -2376,7 +2377,7 @@ export function WorkspaceKanban({
               <article
                 key={column.role}
                 className={cn(
-                  "flex min-h-[560px] w-[320px] shrink-0 flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)]",
+                  "flex min-h-[560px] w-[85vw] shrink-0 snap-center flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)] sm:w-[320px] sm:snap-align-none",
                   draggingTask && "snap-start"
                 )}
               >
@@ -2393,7 +2394,7 @@ export function WorkspaceKanban({
                   <button
                     type="button"
                     onClick={() => openComposer(column.role)}
-                    className="inline-flex h-7 w-7 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] sm:h-7 sm:w-7"
                     aria-label={`Add task to ${column.heading}`}
                   >
                     <Plus className="h-3.5 w-3.5" />
@@ -2510,7 +2511,7 @@ export function WorkspaceKanban({
                           <button
                             type="button"
                             onClick={() => openEditor(task, column.role)}
-                            className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-6 sm:w-6"
                             aria-label="Edit task"
                             title="Edit task"
                           >
@@ -2780,7 +2781,7 @@ export function WorkspaceKanban({
           onClick={closeEditor}
         >
           <div
-            className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[560px] flex-col overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]"
+            className="flex max-h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] sm:max-h-[calc(100dvh-1.5rem)] sm:max-w-[560px] sm:rounded-[6px] sm:border"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -3061,7 +3062,7 @@ export function WorkspaceKanban({
           onClick={() => !submitting && setComposerOpen(false)}
         >
           <div
-            className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-[980px] flex-col overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_80px_rgba(0,0,0,0.45)]"
+            className="flex max-h-[100dvh] w-full flex-col overflow-hidden border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_80px_rgba(0,0,0,0.45)] sm:max-h-[calc(100dvh-1.5rem)] sm:max-w-[980px] sm:rounded-[10px] sm:border"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
             aria-modal="true"

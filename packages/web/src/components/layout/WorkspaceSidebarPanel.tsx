@@ -87,7 +87,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
           <button
             type="button"
             onClick={onCreateWorkspace}
-            className="mt-3 inline-flex h-8 w-full items-center justify-center gap-1 rounded-[6px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+            className="mt-3 inline-flex h-11 w-full items-center justify-center gap-1 rounded-[6px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-8"
             aria-label="Add workspace"
           >
             <Plus className="h-3.5 w-3.5" />
