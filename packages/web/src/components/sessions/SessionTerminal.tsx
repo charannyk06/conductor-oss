@@ -113,13 +113,15 @@ const RECONNECT_MAX_DELAY_MS = 1600;
 const RENDERER_RECOVERY_THROTTLE_MS = 120;
 const TERMINAL_WRITE_BATCH_MAX_DELAY_MS = 10;
 const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
-// Durable capture stays on the backend. Keep the browser-side working set
-// small enough that a live terminal tab remains close to a 1-2 MB footprint.
-const LIVE_TERMINAL_SCROLLBACK = 96;
+// Keep enough scrollback so users can scroll through recent output without
+// losing context on tab switch or mobile scroll. The backend still owns the
+// durable capture; this only sizes the browser-side xterm ring buffer.
+// 1 000 lines balances usable history (~4–8 MB) with mobile memory limits.
+const LIVE_TERMINAL_SCROLLBACK = 1_000;
 const READ_ONLY_TERMINAL_SNAPSHOT_LINES = 1200;
 const TERMINAL_CONNECTION_CACHE_MAX_TTL_MS = 5_000;
 const TERMINAL_CONNECTION_CACHE_MAX_ENTRIES = 2;
-const TERMINAL_SNAPSHOT_CACHE_MAX_ENTRIES = 1;
+const TERMINAL_SNAPSHOT_CACHE_MAX_ENTRIES = 8;
 const TERMINAL_UI_STATE_CACHE_MAX_ENTRIES = 4;
 const TERMINAL_SNAPSHOT_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
 const TERMINAL_UI_STATE_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
@@ -2313,7 +2315,13 @@ export function SessionTerminal({
     scheduleRendererRecovery(false);
   }, [expectsLiveTerminal, scheduleRendererRecovery]);
 
-  const handleTerminalPointerDown = useCallback((_event: ReactPointerEvent<HTMLDivElement>) => {
+  const handleTerminalPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    // On touch devices, defer focus until we know the gesture is a tap and not
+    // a scroll.  Immediate focus on pointerdown opens the virtual keyboard and
+    // steals the touch from the native scroll handler.
+    if (event.pointerType === "touch") {
+      return;
+    }
     focusTerminal();
   }, [focusTerminal]);
 
@@ -2354,11 +2362,72 @@ export function SessionTerminal({
       handleTerminalWheel(event);
     };
 
+    // --- Touch-scroll support for mobile ---
+    // xterm.js captures touch events on its canvas but can fail to propagate
+    // scroll on older WebKit builds and when the xterm buffer is small.  We
+    // register a parallel touchmove handler on the outer container so that
+    // vertical swipes always translate into terminal scroll-lines, and short
+    // taps (no scroll) still focus the terminal.
+    let touchStartY: number | null = null;
+    let touchScrolled = false;
+    const TOUCH_LINE_HEIGHT_PX = 18;
+
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length === 1) {
+        touchStartY = event.touches[0]!.clientY;
+        touchScrolled = false;
+      }
+    };
+
+    const onTouchMove = (event: TouchEvent) => {
+      const term = termRef.current;
+      if (!term || touchStartY === null || event.touches.length !== 1) {
+        return;
+      }
+      const currentY = event.touches[0]!.clientY;
+      const deltaY = touchStartY - currentY;
+      const deltaLines = Math.trunc(deltaY / TOUCH_LINE_HEIGHT_PX);
+      if (deltaLines === 0) {
+        return;
+      }
+      // Only mark as scrolled and intercept when there is scrollback to
+      // scroll through.  When baseY === 0 the swipe is a no-op and we must
+      // NOT suppress the subsequent tap-to-focus in onTouchEnd.
+      if (term.buffer.active.baseY > 0) {
+        touchScrolled = true;
+        term.scrollLines(deltaLines);
+        updateScrollState();
+        event.preventDefault();
+      } else {
+        // Nothing to scroll – treat this gesture as a potential tap
+        touchScrolled = false;
+      }
+      touchStartY = currentY;
+      touchStartY = currentY;
+    };
+
+    const onTouchEnd = () => {
+      if (!touchScrolled && touchStartY !== null) {
+        // Short tap — focus the terminal (deferred from pointerdown)
+        focusTerminal();
+      }
+      touchStartY = null;
+      touchScrolled = false;
+    };
+
     container.addEventListener("wheel", wheelListener, { passive: false });
+    container.addEventListener("touchstart", onTouchStart, { passive: true });
+    container.addEventListener("touchmove", onTouchMove, { passive: false });
+    container.addEventListener("touchend", onTouchEnd, { passive: true });
+    container.addEventListener("touchcancel", onTouchEnd, { passive: true });
     return () => {
       container.removeEventListener("wheel", wheelListener);
+      container.removeEventListener("touchstart", onTouchStart);
+      container.removeEventListener("touchmove", onTouchMove);
+      container.removeEventListener("touchend", onTouchEnd);
+      container.removeEventListener("touchcancel", onTouchEnd);
     };
-  }, [handleTerminalWheel]);
+  }, [handleTerminalWheel, focusTerminal, updateScrollState]);
 
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
