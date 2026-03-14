@@ -172,9 +172,6 @@ type TerminalCoreClientModules = [
   typeof import("@xterm/addon-fit"),
 ];
 
-const IS_MOBILE_DEVICE =
-  typeof navigator !== "undefined" && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-
 const terminalConnectionCache = new Map<string, CachedTerminalConnection>();
 const terminalSnapshotCache = new Map<string, CachedTerminalSnapshot>();
 const terminalUiStateCache = new Map<string, CachedTerminalUiState>();
@@ -1753,12 +1750,11 @@ export function SessionTerminal({
 
       const isLight = document.documentElement.classList.contains("light");
       const viewportOptions = getSessionTerminalViewportOptions(window.innerWidth);
+      const isMobileViewport = shouldShowTerminalAccessoryBar();
       const terminalOptions: ITerminalOptions & { scrollbar?: { showScrollbar: boolean } } = {
         allowTransparency: false,
-        convertEol: true,
         cursorBlink: true,
         cursorStyle: "block",
-        cursorWidth: 2,
         cursorInactiveStyle: "outline",
         disableStdin: !expectsLiveTerminalRef.current,
         drawBoldTextInBrightColors: true,
@@ -1772,7 +1768,7 @@ export function SessionTerminal({
         scrollback: LIVE_TERMINAL_SCROLLBACK,
         theme: getTerminalTheme(isLight),
         scrollbar: {
-          showScrollbar: !IS_MOBILE_DEVICE,
+          showScrollbar: !isMobileViewport,
         },
       };
       term = new xtermMod.Terminal(terminalOptions);
