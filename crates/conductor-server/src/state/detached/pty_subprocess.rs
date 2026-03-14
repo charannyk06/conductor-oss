@@ -35,7 +35,6 @@
 /// goal: even if a grandchild escapes the group reassignment the monitoring
 /// task will still catch the top-level child exit and emit the recovery
 /// frames.
-
 #[cfg(unix)]
 use std::sync::Arc;
 #[cfg(unix)]

@@ -19,10 +19,11 @@ use std::sync::Arc;
 use crate::state::AppState;
 
 pub(crate) use types::DETACHED_LOG_PATH_METADATA_KEY;
+pub(crate) use types::DIRECT_RUNTIME_MODE;
 pub use pty_host::run_detached_pty_host;
 
 // Re-export constants used in this file's impl AppState methods
-use types::{DIRECT_RUNTIME_MODE, RUNTIME_MODE_METADATA_KEY};
+use types::RUNTIME_MODE_METADATA_KEY;
 
 pub(crate) struct RuntimeLaunch {
     pub(crate) handle: ExecutorHandle,

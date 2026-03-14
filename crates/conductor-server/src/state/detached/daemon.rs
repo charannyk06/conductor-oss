@@ -32,6 +32,7 @@ use super::types::{
 /// are sent through the daemon's Unix control socket so that the daemon — not
 /// the server process — owns the PTY host child processes.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub(super) struct TerminalDaemonManager {
     metadata: TerminalDaemonMetadata,
     /// Session IDs that were spawned through this daemon in the current
@@ -41,6 +42,7 @@ pub(super) struct TerminalDaemonManager {
 }
 
 #[cfg(unix)]
+#[allow(dead_code)]
 impl TerminalDaemonManager {
     /// Create a manager from resolved daemon metadata.
     pub(super) fn new(metadata: TerminalDaemonMetadata) -> Self {
@@ -154,6 +156,7 @@ pub(super) async fn send_terminal_daemon_request(
 /// session IDs.  Returns an error if the daemon is unreachable or responds
 /// with an error.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub(super) async fn list_daemon_sessions(
     metadata: &TerminalDaemonMetadata,
 ) -> Result<Vec<String>> {

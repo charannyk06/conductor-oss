@@ -1,26 +1,23 @@
-#[cfg(test)]
-mod tests {
-    use super::types::*;
-    use super::frame::*;
-    use super::control::*;
-    use super::helpers::*;
-    use super::stream::*;
-    use crate::state::AppState;
-    use anyhow::{anyhow, Result};
-    use conductor_core::types::AgentKind;
-    use conductor_executors::executor::ExecutorInput;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::io::AsyncReadExt;
-    use tokio::net::UnixStream;
-    use uuid::Uuid;
+use super::types::*;
+use super::frame::*;
+use super::control::*;
+use super::helpers::*;
+use super::stream::*;
+use crate::state::AppState;
+use anyhow::{anyhow, Result};
+use conductor_core::types::AgentKind;
+use conductor_executors::executor::ExecutorInput;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::net::UnixStream;
+use uuid::Uuid;
 
-    use super::pty_host::run_detached_pty_host;
-    use crate::state::SessionRecord;
+use super::pty_host::run_detached_pty_host;
+use crate::state::SessionRecord;
 
-    #[test]
+#[test]
     fn detached_stream_frame_decoder_handles_partial_frames() {
         let payload = b"hello";
         let frame = {
@@ -142,6 +139,7 @@ mod tests {
             ready_path: ready_path.clone(),
             stream_flush_interval_ms: detached_stream_flush_interval_ms(),
             stream_max_batch_bytes: detached_stream_max_batch_bytes(),
+            isolation_mode: None,
         };
         tokio::fs::write(&spec_path, serde_json::to_vec(&spec).unwrap())
             .await
@@ -416,4 +414,3 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {label}"))
     }
-}

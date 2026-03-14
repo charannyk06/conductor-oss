@@ -1894,7 +1894,7 @@ mod tests {
     async fn build_state(root: &Path, project: ProjectConfig, project_id: &str) -> Arc<AppState> {
         let mut project = project;
         if project.runtime.is_none() {
-            project.runtime = Some(crate::state::detached_runtime::DIRECT_RUNTIME_MODE.to_string());
+            project.runtime = Some(crate::state::detached::DIRECT_RUNTIME_MODE.to_string());
         }
         let config = ConductorConfig {
             workspace: root.to_path_buf(),
@@ -2524,7 +2524,7 @@ mod tests {
             loop {
                 let current = state.get_session("resume-tmux-session").await.unwrap();
                 if current.metadata.get("runtimeMode").map(String::as_str)
-                    == Some(crate::state::detached_runtime::DIRECT_RUNTIME_MODE)
+                    == Some(crate::state::detached::DIRECT_RUNTIME_MODE)
                     && current.pid.is_some()
                 {
                     return current;
@@ -2537,7 +2537,7 @@ mod tests {
 
         assert_eq!(
             updated.metadata.get("runtimeMode").map(String::as_str),
-            Some(crate::state::detached_runtime::DIRECT_RUNTIME_MODE)
+            Some(crate::state::detached::DIRECT_RUNTIME_MODE)
         );
         let _ = fs::remove_dir_all(&root);
     }

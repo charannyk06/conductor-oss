@@ -184,6 +184,7 @@ pub(super) struct TerminalDaemonResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub(super) struct TerminalDaemonSessionsResponse {
     #[serde(default = "detached_protocol_version")]
     pub(super) protocol_version: u16,
