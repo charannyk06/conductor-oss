@@ -38,9 +38,9 @@ pub struct TerminalStateUpdate {
 
 const DEFAULT_TERMINAL_STORE_COLS: u16 = 120;
 const DEFAULT_TERMINAL_STORE_ROWS: u16 = 32;
-// Keep the live per-session terminal store near a 1-2 MB working set. Durable
-// capture and replay live on disk, so the in-memory store only needs enough
-// short scrollback for attach/reconnect smoothness.
+// Per-session terminal state: 10 000 lines of vt100 scrollback and a 2 MB raw
+// byte ring buffer.  The durable `.terminal` capture file on disk is unbounded;
+// these in-memory limits size the restore snapshot served on reconnect.
 const DEFAULT_TERMINAL_STORE_SCROLLBACK: usize = 10_000;
 const DEFAULT_TERMINAL_HISTORY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TERMINAL_OSC_PENDING_BYTES: usize = 4096;
