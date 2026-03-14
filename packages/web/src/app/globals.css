@@ -2,7 +2,7 @@
 @import "@xterm/xterm/css/xterm.css";
 
 @theme {
-  --font-sans: var(--font-sans);
+  --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-mono);
   --radius-xs: 3px;
   --radius-sm: 3px;
@@ -103,11 +103,15 @@ body {
 }
 
 body {
-  font-family: var(--font-sans), sans-serif;
+  font-family: var(--font-sans), system-ui, sans-serif;
   font-size: 16px;
   line-height: 1.4;
   background: linear-gradient(90deg, #09090b 0%, #18181b 100%);
   color: var(--text-strong);
+}
+
+.font-brand-header {
+  font-family: var(--font-tomorrow), sans-serif;
 }
 
 a {
