@@ -2395,7 +2395,11 @@ export function SessionTerminal({
         term.scrollLines(deltaLines);
         updateScrollState();
         event.preventDefault();
+      } else {
+        // Nothing to scroll – treat this gesture as a potential tap
+        touchScrolled = false;
       }
+      touchStartY = currentY;
       touchStartY = currentY;
     };
 
