@@ -35,13 +35,33 @@ use crate::state::AppState;
 impl AppState {
     pub(super) async fn forward_detached_output(
         self: std::sync::Arc<Self>,
-        forwarder: DetachedOutputForwarder,
+        mut forwarder: DetachedOutputForwarder,
         output_tx: mpsc::Sender<ExecutorOutput>,
     ) -> Result<()> {
+        // If stream_socket_path is not set, try to construct the expected path
+        // using the same hash pattern as detached_socket_paths(). This covers
+        // sessions that were persisted before stream_socket_path was stored.
+        if forwarder.metadata.stream_socket_path.is_none() {
+            let (_, inferred_stream_path) =
+                self.detached_socket_paths(&forwarder.session_id);
+            // Check if the inferred socket is reachable before committing to it.
+            if tokio::net::UnixStream::connect(&inferred_stream_path)
+                .await
+                .is_ok()
+            {
+                forwarder.metadata.stream_socket_path = Some(inferred_stream_path);
+            }
+        }
+
         if forwarder.metadata.stream_socket_path.is_some() {
             self.forward_detached_stream_output(forwarder, output_tx)
                 .await
         } else {
+            let session_id = &forwarder.session_id;
+            tracing::warn!(
+                session_id,
+                "Falling back to deprecated log-tail output path; stream socket is unavailable"
+            );
             self.forward_detached_log_output(forwarder, output_tx).await
         }
     }

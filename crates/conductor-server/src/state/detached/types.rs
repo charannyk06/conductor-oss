@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[cfg(unix)]
 use portable_pty::MasterPty;
@@ -38,7 +38,6 @@ pub(super) const DETACHED_EXIT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) const DETACHED_STREAM_RECONNECT_INTERVAL: Duration = Duration::from_millis(50);
 pub(super) const DETACHED_STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(32);
 pub(super) const DETACHED_STREAM_MAX_BATCH_BYTES: usize = 128 * 1024;
-pub(super) const DETACHED_STREAM_CHANNEL_CAPACITY: usize = 256;
 pub(super) const DETACHED_CAPTURE_CHANNEL_CAPACITY: usize = 256;
 pub(super) const DETACHED_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
 pub(super) const DETACHED_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
@@ -217,15 +216,11 @@ pub(super) enum DetachedPtyHostCaptureMessage {
     Shutdown,
 }
 
+#[derive(Clone)]
 pub(super) enum DetachedPtyHostStreamMessage {
     Data(DetachedPtyOutputChunk),
     Exit { offset: u64, exit_code: i32 },
     Error { offset: u64, message: String },
-}
-
-pub(super) struct DetachedHostStreamSlot {
-    pub(super) generation: u64,
-    pub(super) tx: mpsc::Sender<DetachedPtyHostStreamMessage>,
 }
 
 #[cfg(unix)]
@@ -244,8 +239,7 @@ pub(super) struct DetachedHostState {
     pub(super) master: Arc<StdMutex<Option<Box<dyn MasterPty + Send>>>>,
     pub(super) child: Arc<StdMutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     pub(super) capture_tx: mpsc::Sender<DetachedPtyHostCaptureMessage>,
-    pub(super) stream_slot: Arc<StdMutex<Option<DetachedHostStreamSlot>>>,
-    pub(super) stream_generation: AtomicU64,
+    pub(super) stream_tx: broadcast::Sender<DetachedPtyHostStreamMessage>,
     pub(super) log_offset: AtomicU64,
     pub(super) log_path: PathBuf,
     pub(super) stream_batch: DetachedStreamBatchConfig,

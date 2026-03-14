@@ -241,9 +241,16 @@ impl AppState {
             .get_session(session_id)
             .await
             .with_context(|| format!("Session {session_id} not found"))?;
-        let Some(metadata) = detached_runtime_metadata(&session) else {
+        let Some(mut metadata) = detached_runtime_metadata(&session) else {
             return Ok(());
         };
+        // For sessions restored from older metadata that predates stream_socket_path
+        // being persisted, attempt to infer the expected socket path so the stream
+        // transport is tried before falling back to log-tail.
+        if metadata.stream_socket_path.is_none() {
+            let (_, inferred_stream_path) = self.detached_socket_paths(session_id);
+            metadata.stream_socket_path = Some(inferred_stream_path);
+        }
         let Some(response) = ping_detached_runtime(&metadata).await? else {
             if let Some(exit_code) = read_detached_exit_code(&metadata.exit_path).await? {
                 let event = if exit_code == 0 {

@@ -37,6 +37,7 @@ impl AppState {
             metadata,
             mut offset,
         } = forwarder;
+        tracing::warn!(session_id, "Using deprecated log-tail output path; stream transport is preferred");
         let (_watcher, mut log_events) = watch_detached_log(&metadata.log_path)?;
         let mut partial = Vec::new();
         let mut exit_deadline = None;

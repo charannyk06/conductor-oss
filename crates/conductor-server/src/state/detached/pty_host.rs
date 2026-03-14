@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWrit
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 #[cfg(unix)]
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, Notify};
 
 #[cfg(unix)]
 use tokio::fs::OpenOptions;
@@ -96,6 +96,8 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
         capture_rx,
     ));
 
+    let (stream_tx, _) = broadcast::channel(2048);
+
     let shared = Arc::new(DetachedHostState {
         protocol_version: spec.protocol_version,
         token: spec.token.clone(),
@@ -104,8 +106,7 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
         master,
         child,
         capture_tx: capture_tx.clone(),
-        stream_slot: Arc::new(StdMutex::new(None)),
-        stream_generation: AtomicU64::new(0),
+        stream_tx,
         log_offset: AtomicU64::new(0),
         log_path: spec.log_path.clone(),
         stream_batch: DetachedStreamBatchConfig {
@@ -131,10 +132,9 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
                     };
                     // Prioritize the live stream before durable capture so reconnect safety
                     // does not add avoidable latency to the active terminal path.
-                    if let Some(sender) = clone_detached_host_stream_sender(&shared_for_output) {
-                        let _ =
-                            sender.blocking_send(DetachedPtyHostStreamMessage::Data(chunk.clone()));
-                    }
+                    let _ = shared_for_output
+                        .stream_tx
+                        .send(DetachedPtyHostStreamMessage::Data(chunk.clone()));
                     if shared_for_output
                         .capture_tx
                         .try_send(DetachedPtyHostCaptureMessage::Data(chunk.clone()))
@@ -185,22 +185,20 @@ pub async fn run_detached_pty_host(spec_path: PathBuf) -> Result<()> {
         let _ = flush_detached_capture(&shared_for_wait.capture_tx).await;
         let _ = tokio::fs::write(&exit_path, exit_code.to_string()).await;
 
-        if let Some(sender) = clone_detached_host_stream_sender(&shared_for_wait) {
-            if let Some(message) = stream_error {
-                let _ = sender
-                    .send(DetachedPtyHostStreamMessage::Error {
-                        offset: stream_offset,
-                        message,
-                    })
-                    .await;
-            }
-            let _ = sender
-                .send(DetachedPtyHostStreamMessage::Exit {
+        if let Some(message) = stream_error {
+            let _ = shared_for_wait
+                .stream_tx
+                .send(DetachedPtyHostStreamMessage::Error {
                     offset: stream_offset,
-                    exit_code,
-                })
-                .await;
+                    message,
+                });
         }
+        let _ = shared_for_wait
+            .stream_tx
+            .send(DetachedPtyHostStreamMessage::Exit {
+                offset: stream_offset,
+                exit_code,
+            });
         let _ = shared_for_wait
             .capture_tx
             .send(DetachedPtyHostCaptureMessage::Shutdown)
@@ -371,56 +369,28 @@ async fn handle_detached_stream_connection(
         return Ok(());
     }
 
-    let (tx, rx) = mpsc::channel(DETACHED_STREAM_CHANNEL_CAPACITY);
-    let generation = state.stream_generation.fetch_add(1, Ordering::Relaxed) + 1;
-    {
-        let mut slot = state
-            .stream_slot
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *slot = Some(DetachedHostStreamSlot {
-            generation,
-            tx: tx.clone(),
-        });
-    }
+    let rx = state.stream_tx.subscribe();
 
-    let result = async {
-        flush_detached_capture(&state.capture_tx).await?;
-        let replay_limit = detached_log_len(&state.log_path).await?;
-        let response = DetachedPtyHostStreamResponse {
-            protocol_version: state.protocol_version,
-            ok: true,
-            child_pid: Some(state.child_pid),
-            error: None,
-        };
-        stream.write_all(&serde_json::to_vec(&response)?).await?;
-        stream.write_all(b"\n").await?;
-        stream.flush().await?;
-        forward_detached_host_stream(
-            stream,
-            state.log_path.clone(),
-            request.offset,
-            replay_limit,
-            state.stream_batch,
-            rx,
-        )
-        .await
-    }
-    .await;
-
-    let mut slot = state
-        .stream_slot
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if slot
-        .as_ref()
-        .map(|current| current.generation == generation)
-        .unwrap_or(false)
-    {
-        *slot = None;
-    }
-
-    result
+    flush_detached_capture(&state.capture_tx).await?;
+    let replay_limit = detached_log_len(&state.log_path).await?;
+    let response = DetachedPtyHostStreamResponse {
+        protocol_version: state.protocol_version,
+        ok: true,
+        child_pid: Some(state.child_pid),
+        error: None,
+    };
+    stream.write_all(&serde_json::to_vec(&response)?).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
+    forward_detached_host_stream(
+        stream,
+        state.log_path.clone(),
+        request.offset,
+        replay_limit,
+        state.stream_batch,
+        rx,
+    )
+    .await
 }
 
 #[cfg(unix)]
@@ -430,7 +400,7 @@ async fn forward_detached_host_stream(
     requested_offset: u64,
     replay_limit: u64,
     stream_batch: DetachedStreamBatchConfig,
-    mut rx: mpsc::Receiver<DetachedPtyHostStreamMessage>,
+    mut rx: broadcast::Receiver<DetachedPtyHostStreamMessage>,
 ) -> Result<()> {
     let mut stream_floor = requested_offset.min(replay_limit);
     replay_detached_log_range(&mut stream, &log_path, stream_floor, replay_limit).await?;
@@ -443,11 +413,42 @@ async fn forward_detached_host_stream(
     loop {
         if let Some(deadline) = flush_deadline {
             tokio::select! {
-                maybe_message = rx.recv() => {
-                    let Some(message) = maybe_message else {
-                        flush_detached_stream_batch(&mut stream, &mut pending_offset, &mut pending).await?;
-                        return Ok(());
-                    };
+                recv_result = rx.recv() => {
+                    match recv_result {
+                        Ok(message) => {
+                            if handle_detached_host_stream_message(
+                                &mut stream,
+                                &mut stream_floor,
+                                &mut pending_offset,
+                                &mut pending,
+                                &mut flush_deadline,
+                                stream_batch,
+                                message,
+                            )
+                            .await? {
+                                return Ok(());
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            flush_detached_stream_batch(&mut stream, &mut pending_offset, &mut pending).await?;
+                            return Ok(());
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(
+                                "Detached PTY stream receiver lagged by {} messages; catching up from durable log",
+                                n
+                            );
+                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    flush_detached_stream_batch(&mut stream, &mut pending_offset, &mut pending).await?;
+                    flush_deadline = None;
+                }
+            }
+        } else {
+            match rx.recv().await {
+                Ok(message) => {
                     if handle_detached_host_stream_message(
                         &mut stream,
                         &mut stream_floor,
@@ -457,32 +458,21 @@ async fn forward_detached_host_stream(
                         stream_batch,
                         message,
                     )
-                    .await? {
+                    .await?
+                    {
                         return Ok(());
                     }
                 }
-                _ = tokio::time::sleep_until(deadline) => {
+                Err(broadcast::error::RecvError::Closed) => {
                     flush_detached_stream_batch(&mut stream, &mut pending_offset, &mut pending).await?;
-                    flush_deadline = None;
+                    return Ok(());
                 }
-            }
-        } else {
-            let Some(message) = rx.recv().await else {
-                flush_detached_stream_batch(&mut stream, &mut pending_offset, &mut pending).await?;
-                return Ok(());
-            };
-            if handle_detached_host_stream_message(
-                &mut stream,
-                &mut stream_floor,
-                &mut pending_offset,
-                &mut pending,
-                &mut flush_deadline,
-                stream_batch,
-                message,
-            )
-            .await?
-            {
-                return Ok(());
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        "Detached PTY stream receiver lagged by {} messages; catching up from durable log",
+                        n
+                    );
+                }
             }
         }
     }
@@ -618,18 +608,6 @@ async fn flush_detached_stream_batch(
     stream.flush().await?;
     pending.clear();
     Ok(())
-}
-
-#[cfg(unix)]
-fn clone_detached_host_stream_sender(
-    state: &DetachedHostState,
-) -> Option<mpsc::Sender<DetachedPtyHostStreamMessage>> {
-    state
-        .stream_slot
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .as_ref()
-        .map(|slot| slot.tx.clone())
 }
 
 #[cfg(unix)]
