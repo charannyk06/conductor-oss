@@ -1,6 +1,6 @@
 mod app_update;
 mod board_collaboration;
-mod detached_runtime;
+mod detached;
 mod helpers;
 mod runtime_status;
 mod session_manager;
@@ -12,8 +12,8 @@ mod workspace;
 
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
-pub use detached_runtime::run_detached_pty_host;
-pub(crate) use detached_runtime::DETACHED_LOG_PATH_METADATA_KEY;
+pub use detached::run_detached_pty_host;
+pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use helpers::sanitize_terminal_text;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
