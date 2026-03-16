@@ -132,7 +132,6 @@ export class TtydClient {
 
         this.socket.onclose = (event) => {
           clearTimeout(timeout);
-          this.cancelBatch();
           this.socket = null;
           this.callbacks.onDisconnected?.(event.code, event.reason || "");
           // no-op if promise already resolved
@@ -252,7 +251,15 @@ export class TtydClient {
     const str = this.textDecoder.decode(data, { stream: true });
     if (!str) return; // Empty or incomplete UTF-8 sequence
 
-    // Write with callback to track pending renders
+    // For small writes, use fast path (no callback overhead)
+    const byteLength = data.byteLength;
+    if (byteLength < 1024) {
+      // Fast path: direct write without callback
+      this.terminal.write(str);
+      return;
+    }
+
+    // For larger writes, track pending with callback for flow control
     this.terminal.write(str, () => {
       this.pending = Math.max(this.pending - 1, 0);
       if (this.pending < lowWater && this.pending > 0) {
