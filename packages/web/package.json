@@ -13,7 +13,7 @@
     "clean": "rm -rf .next"
   },
   "dependencies": {
-    "@clerk/nextjs": "^6.39.0",
+    "@clerk/nextjs": "^7.0.4",
     "@conductor-oss/core": "workspace:*",
     "@pierre/diffs": "^1.0.11",
     "@primer/octicons-react": "^19.15.0",
