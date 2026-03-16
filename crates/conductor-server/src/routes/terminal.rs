@@ -881,32 +881,66 @@ async fn handle_terminal_socket(
     client_sequence: Option<u64>,
     bidirectional: bool,
 ) {
-    // In bidirectional (ttyd) mode, skip the JSON ready event and use binary protocol only.
-    // EventStream mode expects text messages with JSON events.
-    if !bidirectional {
+    eprintln!("[TERMINAL_SOCKET] Handler called: bidirectional={}, cols={}, rows={}", bidirectional, cols, rows);
+
+    // For bidirectional (ttyd) mode, wait for client handshake first to ensure browser's onopen has fired
+    if bidirectional {
+        eprintln!("[TERMINAL_SOCKET] Waiting for client handshake in bidirectional mode");
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await {
+                Ok(Some(Ok(msg))) => {
+                    eprintln!("[TERMINAL_SOCKET] Received client message: {:?}", msg);
+                    // Check if it's a handshake message (JSON starting with '{')
+                    if let Message::Binary(data) = &msg {
+                        if !data.is_empty() && data[0] == b'{' {
+                            eprintln!("[TERMINAL_SOCKET] Client handshake received, proceeding");
+                            break;
+                        }
+                    }
+                    // For non-handshake messages, continue waiting
+                }
+                _ => {
+                    eprintln!("[TERMINAL_SOCKET] Timeout or error waiting for handshake");
+                    return;
+                }
+            }
+        }
+    } else {
+        // For non-bidirectional mode, send ready event immediately
+        eprintln!("[TERMINAL_SOCKET] Sending server_ready_event (not bidirectional)");
         if socket
             .send(Message::Text(server_ready_event(&session_id).into()))
             .await
             .is_err()
         {
+            eprintln!("[TERMINAL_SOCKET] Error sending server_ready_event, returning");
             return;
         }
+        eprintln!("[TERMINAL_SOCKET] server_ready_event sent successfully");
     }
 
+    eprintln!("[TERMINAL_SOCKET] Ensuring session and terminal host");
     let _ = state.ensure_session_live(&session_id).await;
     let handle = state.ensure_terminal_host(&session_id).await;
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
+    eprintln!("[TERMINAL_SOCKET] Session and terminal host ready");
     let mut terminal_events = Some(handle.terminal_tx.subscribe());
     let mut stream_sequence_floor = None;
+    eprintln!("[TERMINAL_SOCKET] Getting session snapshot");
     if let Some(session) = state.get_session(&session_id).await {
+        eprintln!("[TERMINAL_SOCKET] Building terminal snapshot");
         if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
+            eprintln!("[TERMINAL_SOCKET] Checking if should send initial restore");
             if should_send_initial_restore(&snapshot, client_sequence) {
+                eprintln!("[TERMINAL_SOCKET] Sending initial restore");
                 if bidirectional {
+                    eprintln!("[TERMINAL_SOCKET] Bidirectional mode - sending history");
                     // In bidirectional mode, skip the vt100 screen reconstruction
                     // which produces garbled output when replayed through xterm.js.
                     // Send only raw history bytes (faithful PTY output) and rely on
                     // the resize SIGWINCH to trigger the agent's TUI to repaint.
                     if !snapshot.history.is_empty() {
+                        eprintln!("[TERMINAL_SOCKET] History not empty, encoding frame");
                         let mut buf = b"\x1b[2J\x1b[H".to_vec(); // clear screen + cursor home
                         let max_history = LIVE_TERMINAL_SNAPSHOT_MAX_BYTES.saturating_sub(buf.len());
                         let history = if snapshot.history.len() > max_history {
@@ -915,16 +949,31 @@ async fn handle_terminal_socket(
                             &snapshot.history
                         };
                         buf.extend_from_slice(history);
-                        let frame = encode_ttyd_output_frame(&buf);
-                        if socket
-                            .send(Message::Binary(frame.into()))
-                            .await
-                            .is_err()
-                        {
-                            return;
+                        // Send in chunks to avoid exceeding WebSocket frame size limits
+                        // Split the data into 64KB chunks, leaving room for the ttyd command byte
+                        const CHUNK_SIZE: usize = 65536 - 1; // 64KB minus 1 byte for CMD_OUTPUT
+                        let mut offset = 0;
+                        while offset < buf.len() {
+                            let end = std::cmp::min(offset + CHUNK_SIZE, buf.len());
+                            let chunk = &buf[offset..end];
+                            let frame = encode_ttyd_output_frame(chunk);
+
+                            eprintln!("[TERMINAL_SOCKET] Sending binary chunk {}-{} ({} bytes)", offset, end, frame.len());
+                            match socket.send(Message::Binary(frame.into())).await {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    eprintln!("[TERMINAL_SOCKET] Error sending binary chunk: {:?}", e);
+                                    return;
+                                }
+                            }
+                            offset = end;
                         }
+                        eprintln!("[TERMINAL_SOCKET] All binary chunks sent successfully");
+                    } else {
+                        eprintln!("[TERMINAL_SOCKET] History is empty, skipping history send");
                     }
                     // Force SIGWINCH so TUI agents repaint on top of the history
+                    eprintln!("[TERMINAL_SOCKET] Sending resize signal");
                     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
                 } else {
                     let restore_frame = encode_terminal_restore_frame(
@@ -947,7 +996,9 @@ async fn handle_terminal_socket(
         }
     }
 
+    eprintln!("[TERMINAL_SOCKET] Entering main event loop");
     loop {
+        eprintln!("[TERMINAL_SOCKET] Main loop tick");
         tokio::select! {
             attach_event = async {
                 match terminal_events.as_mut() {

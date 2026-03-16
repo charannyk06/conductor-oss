@@ -110,8 +110,6 @@ pub struct AppState {
     runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
     dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
     feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
-    /// Active ttyd processes keyed by session ID.
-    pub ttyd_sessions: Mutex<HashMap<String, conductor_executors::ttyd::TtydSession>>,
 }
 
 impl AppState {
@@ -141,7 +139,6 @@ impl AppState {
             runtime_status_cache: Mutex::new(HashMap::new()),
             dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
             feed_payload_cache: Mutex::new(HashMap::new()),
-            ttyd_sessions: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;
@@ -846,11 +843,6 @@ impl AppState {
                 None
             }
         }
-    }
-
-    /// Get the ttyd WebSocket URL for a session, if a ttyd process is running.
-    pub(crate) async fn ttyd_ws_url(&self, session_id: &str) -> Option<String> {
-        self.ttyd_sessions.lock().await.get(session_id).map(|s| s.ws_url.clone())
     }
 
     pub(crate) fn acquire_detached_runtime_spawn_limit(&self) -> Arc<Semaphore> {

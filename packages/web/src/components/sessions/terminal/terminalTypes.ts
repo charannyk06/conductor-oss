@@ -24,6 +24,7 @@ export interface SessionTerminalProps {
 }
 
 export type TerminalConnectionInfo = {
+  ptyWsUrl: string | null;
   stream: {
     transport: "eventstream";
     wsUrl: string | null;

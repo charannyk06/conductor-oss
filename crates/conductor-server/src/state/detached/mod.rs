@@ -82,17 +82,6 @@ impl AppState {
             return Ok(false);
         }
 
-        // Native ttyd sessions are considered live if the ttyd server still
-        // holds the session (the PTY process is running).
-        let is_ttyd_runtime = session
-            .metadata
-            .get(RUNTIME_MODE_METADATA_KEY)
-            .map(|value| value == "ttyd")
-            .unwrap_or(false);
-        if is_ttyd_runtime {
-            return Ok(self.ttyd_sessions.lock().await.contains_key(session_id));
-        }
-
         let is_direct_runtime = session
             .metadata
             .get(RUNTIME_MODE_METADATA_KEY)

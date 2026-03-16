@@ -118,7 +118,28 @@ export class TtydClient {
 
         this.socket.onopen = () => {
           clearTimeout(timeout);
-          console.log("[TTyD] WebSocket connected successfully");
+          console.log("[TTyD] WebSocket onopen fired - connection opened", {
+            readyState: this.socket?.readyState,
+            timestamp: new Date().toISOString()
+          });
+
+          // Send client handshake immediately to signal that browser is ready
+          // Send as BINARY frame with JSON content (matches ttyd protocol)
+          const handshake = JSON.stringify({ type: "handshake" });
+          const handshakeBytes = new TextEncoder().encode(handshake);
+          console.log("[TTyD] Sending client handshake", {
+            length: handshakeBytes.length,
+            firstByte: handshakeBytes[0],
+            firstChar: String.fromCharCode(handshakeBytes[0])
+          });
+          try {
+            this.socket?.send(handshakeBytes);
+            console.log("[TTyD] Handshake sent successfully");
+          } catch (err) {
+            console.error("[TTyD] Error sending handshake:", err);
+            throw err;
+          }
+
           this.reconnectAttempts = 0;
           this.pendingReconnect = false;
           this.onConnected?.();
@@ -126,23 +147,40 @@ export class TtydClient {
         };
 
         this.socket.onmessage = (event) => {
-          console.debug("[TTyD] Received message", { size: (event.data as ArrayBuffer).byteLength });
+          const data = event.data as ArrayBuffer;
+          const view = new Uint8Array(data);
+          console.log("[TTyD] Received message", {
+            size: data.byteLength,
+            firstByte: view[0],
+            firstByteChar: String.fromCharCode(view[0]),
+            readyState: this.socket?.readyState,
+            timestamp: new Date().toISOString()
+          });
           this.handleMessage(event.data as ArrayBuffer);
         };
 
         this.socket.onclose = (event) => {
           clearTimeout(timeout);
-          console.warn("[TTyD] WebSocket closed", { code: event.code, reason: event.reason, wasOpen: event.wasClean });
+          console.warn("[TTyD] WebSocket onclose fired", {
+            code: event.code,
+            reason: event.reason,
+            wasClean: event.wasClean,
+            readyState: this.socket?.readyState,
+            timestamp: new Date().toISOString()
+          });
           this.handleDisconnect(event.code, event.reason || "");
           reject(new Error(`WebSocket closed with code ${event.code}`));
         };
 
         this.socket.onerror = (event) => {
           clearTimeout(timeout);
-          console.error("[TTyD] WebSocket error event", {
+          console.error("[TTyD] WebSocket error event (full object)", event);
+          console.error("[TTyD] WebSocket error event (properties)", {
             type: event.type,
             readyState: this.socket?.readyState,
             currentTarget: (event.currentTarget as WebSocket)?.readyState,
+            error: (event as any).error,
+            message: (event as any).message,
           });
           reject(new Error("WebSocket connection failed"));
         };
