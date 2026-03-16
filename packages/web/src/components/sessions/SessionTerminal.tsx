@@ -123,6 +123,8 @@ export function SessionTerminal({
   const [interactiveTerminal, setInteractiveTerminal] = useState(true);
   const [transportNotice, setTransportNotice] = useState<string | null>(null);
   const [reconnectToken, setReconnectToken] = useState(0);
+  const lastReconnectTokenRef = useRef(0);
+  const requestReconnectRef = useRef<() => void>(() => {});
   const [message, setMessage] = useState(() => initialUiState?.message ?? "");
   const [attachments, setAttachments] = useState<Array<{ file: File }>>([]);
   const [sending, setSending] = useState(false);
@@ -269,6 +271,8 @@ export function SessionTerminal({
     setSocketBaseUrl,
     setReconnectToken,
   );
+
+  requestReconnectRef.current = requestReconnect;
 
   const { searchRef, runSearch } = useTerminalSearch({
     searchOpen,
@@ -922,8 +926,12 @@ export function SessionTerminal({
       return;
     }
 
-    if (expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
-      requestReconnect();
+    // Only reconnect when we would actually stream. When shouldStreamLiveTerminal
+    // is false (e.g. page hidden or terminal tab inactive), the connection
+    // resolution effect sets connectionState to "closed" — reconnecting here
+    // would bounce it back to "connecting" and create an infinite update loop.
+    if (shouldStreamLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
+      requestReconnectRef.current();
     }
 
     clearVisibilityRecoveryTimers();
@@ -942,7 +950,7 @@ export function SessionTerminal({
       window.cancelAnimationFrame(frameHandle);
       clearVisibilityRecoveryTimers();
     };
-  }, [active, clearVisibilityRecoveryTimers, connectionState, expectsLiveTerminal, requestReconnect, scheduleRendererRecovery]);
+  }, [active, clearVisibilityRecoveryTimers, connectionState, shouldStreamLiveTerminal, scheduleRendererRecovery]);
 
   // Snapshot render effect
   useEffect(() => {
@@ -1051,7 +1059,10 @@ export function SessionTerminal({
       }
       normalizeWhitespaceOnlyDraft();
       if (expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
-        requestReconnect();
+        if (reconnectToken !== lastReconnectTokenRef.current) {
+          lastReconnectTokenRef.current = reconnectToken;
+          requestReconnectRef.current();
+        }
       }
       scheduleRendererRecovery(false);
     };
@@ -1060,7 +1071,10 @@ export function SessionTerminal({
       setPageVisible(!document.hidden);
       normalizeWhitespaceOnlyDraft();
       if (!document.hidden && expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
-        requestReconnect();
+        if (reconnectToken !== lastReconnectTokenRef.current) {
+          lastReconnectTokenRef.current = reconnectToken;
+          requestReconnectRef.current();
+        }
       }
       scheduleRendererRecovery(false);
     };
@@ -1072,7 +1086,7 @@ export function SessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [connectionState, expectsLiveTerminal, normalizeWhitespaceOnlyDraft, rememberFocusedSurface, requestReconnect, scheduleRendererRecovery]);
+  }, [connectionState, expectsLiveTerminal, reconnectToken, normalizeWhitespaceOnlyDraft, rememberFocusedSurface, scheduleRendererRecovery]);
 
   useEffect(() => {
     const handleDocumentFocusIn = () => {

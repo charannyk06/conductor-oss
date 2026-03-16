@@ -133,17 +133,19 @@ export async function GET(
     ? roleMeetsRequirement(access.role, "operator")
     : false;
 
-  // Fetch session to check for ttyd WebSocket URL
+  // Check if ttyd is running for this session
   let ttydWsUrl: string | null = null;
   try {
     const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
-    const sessionRes = await fetch(`${backendUrl}/api/sessions/${encodeURIComponent(id)}`, {
-      cache: "no-store",
-      headers: { "x-conductor-proxy-authorized": "true" },
-    });
-    if (sessionRes.ok) {
-      const sessionData = (await sessionRes.json()) as { metadata?: Record<string, string> };
-      ttydWsUrl = sessionData?.metadata?.ttydWsUrl ?? null;
+    const ttydRes = await fetch(
+      `${backendUrl}/api/sessions/${encodeURIComponent(id)}/terminal/ttyd`,
+      { cache: "no-store", headers: { "x-conductor-proxy-authorized": "true" } },
+    );
+    if (ttydRes.ok) {
+      const ttydData = (await ttydRes.json()) as { ttydWsUrl?: string | null; available?: boolean };
+      if (ttydData?.available && ttydData?.ttydWsUrl) {
+        ttydWsUrl = ttydData.ttydWsUrl;
+      }
     }
   } catch {
     // Non-fatal: fall through to regular transport

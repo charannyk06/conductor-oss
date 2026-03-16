@@ -980,14 +980,9 @@ impl AppState {
                     &cwd,
                     &env,
                 ).await {
-                    Ok(session) => {
-                        let ws_url = session.ws_url.clone();
-                        let http_url = session.http_url.clone();
-                        state.ttyd_sessions.lock().await.insert(sid.clone(), session);
-                        if let Some(s) = state.sessions.write().await.get_mut(&sid) {
-                            s.metadata.insert("ttydWsUrl".to_string(), ws_url.clone());
-                            s.metadata.insert("ttydHttpUrl".to_string(), http_url);
-                        }
+                    Ok(ttyd_sess) => {
+                        let ws_url = ttyd_sess.ws_url.clone();
+                        state.ttyd_sessions.lock().await.insert(sid.clone(), ttyd_sess);
                         tracing::info!(session_id = %sid, ttyd_ws = %ws_url, "ttyd spawned");
                     }
                     Err(err) => {

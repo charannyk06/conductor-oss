@@ -115,6 +115,23 @@ pub fn router() -> Router<Arc<AppState>> {
             get(terminal_snapshot),
         )
         .route("/api/sessions/{id}/terminal/stream", get(terminal_stream))
+        .route("/api/sessions/{id}/terminal/ttyd", get(terminal_ttyd_info))
+}
+
+async fn terminal_ttyd_info(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.ttyd_ws_url(&id).await {
+        Some(ws_url) => Json(json!({
+            "ttydWsUrl": ws_url,
+            "available": true,
+        })).into_response(),
+        None => Json(json!({
+            "ttydWsUrl": null,
+            "available": false,
+        })).into_response(),
+    }
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {

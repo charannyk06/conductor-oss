@@ -848,6 +848,11 @@ impl AppState {
         }
     }
 
+    /// Get the ttyd WebSocket URL for a session, if a ttyd process is running.
+    pub(crate) async fn ttyd_ws_url(&self, session_id: &str) -> Option<String> {
+        self.ttyd_sessions.lock().await.get(session_id).map(|s| s.ws_url.clone())
+    }
+
     pub(crate) fn acquire_detached_runtime_spawn_limit(&self) -> Arc<Semaphore> {
         self.detached_runtime_spawn_limit.clone()
     }
