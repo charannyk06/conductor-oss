@@ -1,11 +1,15 @@
 /**
- * React hook for managing ttyd WebSocket connection with xterm.js
+ * React hook for managing ttyd WebSocket connection with xterm.js.
+ *
+ * The TtydClient owns the Terminal reference and writes output directly —
+ * this hook just manages lifecycle, reconnection, and exposes control methods.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
 import { TtydClient, DEFAULT_FLOW_CONTROL } from "./ttydClient";
+import { RECONNECT_BASE_DELAY_MS, RECONNECT_MAX_DELAY_MS } from "./terminalConstants";
 
 export interface UseTtydConnectionOptions {
   terminal: Terminal | null;
@@ -27,10 +31,6 @@ export interface UseTtydConnectionResult {
   sendResize: (cols: number, rows: number) => void;
 }
 
-/**
- * Hook for managing ttyd WebSocket connection
- * Handles terminal I/O, resizing, and flow control
- */
 export function useTtydConnection(
   options: UseTtydConnectionOptions
 ): UseTtydConnectionResult {
@@ -40,209 +40,146 @@ export function useTtydConnection(
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const writeCallbackRef = useRef<(() => void) | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const maxReconnectAttempts = 5;
 
-  // Initialize client
+  // Store callbacks in refs to avoid re-running effects on every render
+  const onConnectionReadyRef = useRef(onConnectionReady);
+  const onConnectionErrorRef = useRef(onConnectionError);
+  const onConnectionClosedRef = useRef(onConnectionClosed);
+  onConnectionReadyRef.current = onConnectionReady;
+  onConnectionErrorRef.current = onConnectionError;
+  onConnectionClosedRef.current = onConnectionClosed;
+
+  // Clear error when ptyWsUrl changes to allow retry with a fresh URL/token
+  const prevPtyWsUrlRef = useRef(ptyWsUrl);
+  useEffect(() => {
+    if (ptyWsUrl !== prevPtyWsUrlRef.current) {
+      prevPtyWsUrlRef.current = ptyWsUrl;
+      setError(null);
+    }
+  }, [ptyWsUrl]);
+
+  // Create TtydClient when terminal is available.
+  // The client owns the terminal ref and writes output directly.
   useEffect(() => {
     if (!enabled || !terminal) return;
 
-    const client = new TtydClient(DEFAULT_FLOW_CONTROL);
+    const client = new TtydClient(terminal, DEFAULT_FLOW_CONTROL, {
+      onTitle: (title) => {
+        try {
+          document.title = title;
+        } catch {
+          /* ignore */
+        }
+      },
+      onPreferences: () => {
+        // Server preferences intentionally ignored.
+        // Frontend owns terminal theme and font sizing.
+      },
+      onConnected: () => {
+        reconnectAttemptsRef.current = 0;
+        setIsConnected(true);
+        setIsConnecting(false);
+        setError(null);
+        onConnectionReadyRef.current?.();
+      },
+      onDisconnected: (code, reason) => {
+        setIsConnected(false);
+        setIsConnecting(false);
+        onConnectionClosedRef.current?.(code, reason);
 
-    // Handle output from server
-    client.setOnData((data) => {
-      if (typeof data === "string") {
-        terminal.write(data, () => {
-          writeCallbackRef.current?.();
-        });
-      } else {
-        const str = new TextDecoder().decode(data);
-        terminal.write(str, () => {
-          writeCallbackRef.current?.();
-        });
-      }
-    });
-
-    // Handle window title
-    client.setOnTitle((title) => {
-      // Update document title or display in UI
-      try {
-        document.title = title;
-      } catch {
-        // Ignore if setting document title fails
-      }
-    });
-
-    // Handle preferences (color scheme, font size, etc.)
-    client.setOnPreferences((prefs) => {
-      if (!prefs || typeof prefs !== "object") return;
-
-      const prefsObj = prefs as Record<string, unknown>;
-
-      // Apply theme if available
-      if (typeof prefsObj.theme === "string") {
-        terminal.options.theme = {
-          background: "#000000",
-          foreground: "#ffffff",
-        };
-      }
-
-      // Apply font size if available
-      if (typeof prefsObj.fontSize === "number") {
-        terminal.options.fontSize = prefsObj.fontSize;
-      }
-    });
-
-    // Handle connection established
-    client.setOnConnected(() => {
-      setIsConnected(true);
-      setIsConnecting(false);
-      setError(null);
-      onConnectionReady?.();
-    });
-
-    // Handle disconnection
-    client.setOnDisconnected((code, reason) => {
-      setIsConnected(false);
-      setIsConnecting(false);
-      onConnectionClosed?.(code, reason);
-    });
-
-    // Handle errors
-    client.setOnError((errorMsg) => {
-      const err = new Error(`Terminal error: ${errorMsg}`);
-      setError(err);
-      onConnectionError?.(err);
+        // Auto-reconnect on abnormal closure
+        if (code !== 1000 && reconnectAttemptsRef.current < maxReconnectAttempts) {
+          reconnectAttemptsRef.current++;
+          const delayMs = Math.min(
+            RECONNECT_BASE_DELAY_MS * Math.pow(2, reconnectAttemptsRef.current - 1),
+            RECONNECT_MAX_DELAY_MS,
+          );
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            setError(null); // allow auto-connect effect to fire
+          }, delayMs);
+        }
+      },
+      onError: (errorMsg) => {
+        const err = new Error(`Terminal error: ${errorMsg}`);
+        setError(err);
+        onConnectionErrorRef.current?.(err);
+      },
     });
 
     clientRef.current = client;
 
     return () => {
       client.disconnect();
+      clientRef.current = null;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
     };
-  }, [enabled, terminal, onConnectionReady, onConnectionError, onConnectionClosed]);
+  }, [enabled, terminal]);
 
-  // Handle terminal input from user
+  // Wire terminal input → WebSocket
   useEffect(() => {
     if (!terminal || !clientRef.current) return;
 
-    const handleData = (data: string) => {
+    const disposable = terminal.onData((data: string) => {
       clientRef.current?.sendInput(data);
-    };
+    });
 
-    terminal.onData(handleData);
-
-    return () => {
-      // Note: xterm.js doesn't provide a way to unsubscribe directly
-      // These listeners will be cleaned up when terminal is disposed
-    };
+    return () => disposable.dispose();
   }, [terminal]);
 
-  // Handle terminal resize
+  // Wire terminal resize → WebSocket
   useEffect(() => {
     if (!terminal || !fitAddon || !clientRef.current) return;
 
-    const handleResize = ({ cols, rows }: { cols: number; rows: number }) => {
+    const disposable = terminal.onResize(({ cols, rows }: { cols: number; rows: number }) => {
       clientRef.current?.sendResize(cols, rows);
-    };
+    });
 
-    terminal.onResize(handleResize);
-
-    return () => {
-      // Same as above - listeners cleaned up with terminal disposal
-    };
+    return () => disposable.dispose();
   }, [terminal, fitAddon]);
 
-  // Track xterm.js write completion for flow control
-  useEffect(() => {
-    if (!terminal || !clientRef.current) return;
-
-    writeCallbackRef.current = () => {
-      clientRef.current?.markWriteComplete();
-    };
-
-    return () => {
-      writeCallbackRef.current = null;
-    };
-  }, [terminal]);
-
-  // Connect function
+  // Connect — passes terminal dimensions in the ttyd handshake
   const connect = useCallback(async () => {
-    if (!ptyWsUrl || !clientRef.current || isConnected || isConnecting) {
-      return;
-    }
+    if (!ptyWsUrl || !clientRef.current || isConnected || isConnecting) return;
 
     setIsConnecting(true);
     setError(null);
 
     try {
-      await clientRef.current.connect(ptyWsUrl);
+      const cols = terminal?.cols ?? 120;
+      const rows = terminal?.rows ?? 40;
+      await clientRef.current.connect(ptyWsUrl, cols, rows);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      setError(error);
+      const connectError = err instanceof Error ? err : new Error(String(err));
+      setError(connectError);
       setIsConnecting(false);
-      onConnectionError?.(error);
+      onConnectionErrorRef.current?.(connectError);
     }
-  }, [ptyWsUrl, isConnected, isConnecting, onConnectionError]);
+  }, [ptyWsUrl, isConnected, isConnecting, terminal]);
 
-  // Disconnect function
   const disconnect = useCallback(() => {
     clientRef.current?.disconnect();
     setIsConnected(false);
   }, []);
 
-  // Send input function
   const sendInput = useCallback((data: string | Uint8Array) => {
     clientRef.current?.sendInput(data);
   }, []);
 
-  // Send resize function
   const sendResize = useCallback((cols: number, rows: number) => {
     clientRef.current?.sendResize(cols, rows);
   }, []);
 
   // Auto-connect when enabled and URL is available
   useEffect(() => {
-    console.log("[useTtydConnection] Auto-connect check", {
-      enabled,
-      ptyWsUrl: ptyWsUrl?.slice(0, 50),
-      isConnected,
-      isConnecting,
-      error: error?.message,
-      terminal: !!terminal,
-      clientRef: !!clientRef.current,
-    });
+    if (!enabled || !ptyWsUrl || !terminal || isConnected || isConnecting || error) return;
 
-    if (!enabled) {
-      console.log("[useTtydConnection] Connection disabled");
-      return;
-    }
-
-    if (!ptyWsUrl) {
-      console.log("[useTtydConnection] No ptyWsUrl provided");
-      return;
-    }
-
-    if (!terminal) {
-      console.log("[useTtydConnection] Terminal not ready");
-      return;
-    }
-
-    if (isConnected) {
-      console.log("[useTtydConnection] Already connected");
-      return;
-    }
-
-    if (isConnecting) {
-      console.log("[useTtydConnection] Already connecting");
-      return;
-    }
-
-    if (error) {
-      console.log("[useTtydConnection] Previous error exists", error.message);
-      return;
-    }
-
-    console.log("[useTtydConnection] Initiating connection to", ptyWsUrl);
     const timer = setTimeout(() => {
       connect();
     }, 0);

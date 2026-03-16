@@ -1,8 +1,6 @@
-import type { DashboardRoleBindings } from "@conductor-oss/core/types";
 import { roleMeetsRequirement } from "@/lib/accessControl";
 import {
   getDashboardAccess,
-  getDashboardConfigSnapshot,
   guardApiAccess,
 } from "@/lib/auth";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
@@ -50,48 +48,11 @@ function resolveBackendTerminalWsUrl(backendUrl: string, id: string): URL {
   return wsUrl;
 }
 
-function parseCsvEnv(name: string): string[] {
-  return (process.env[name] ?? "")
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean);
-}
-
-function roleBindingsConfigured(
-  bindings: DashboardRoleBindings | null | undefined
-): boolean {
-  if (!bindings) return false;
-  return (
-    (bindings.viewers?.length ?? 0) > 0 ||
-    (bindings.operators?.length ?? 0) > 0 ||
-    (bindings.admins?.length ?? 0) > 0 ||
-    (bindings.viewerDomains?.length ?? 0) > 0 ||
-    (bindings.operatorDomains?.length ?? 0) > 0 ||
-    (bindings.adminDomains?.length ?? 0) > 0
-  );
-}
-
-function terminalAccessControlEnabled(): boolean {
-  const access = getDashboardConfigSnapshot().access;
-  const requireAuth =
-    access?.requireAuth === true ||
-    (process.env.CONDUCTOR_REQUIRE_AUTH ?? "").trim().toLowerCase() ===
-      "true" ||
-    parseCsvEnv("CONDUCTOR_ALLOWED_EMAILS").length > 0 ||
-    parseCsvEnv("CONDUCTOR_ALLOWED_DOMAINS").length > 0 ||
-    parseCsvEnv("CONDUCTOR_ADMIN_EMAILS").length > 0 ||
-    roleBindingsConfigured(access?.roles);
-
-  const builtinRemoteAuthEnabled =
-    (process.env.CONDUCTOR_REMOTE_ACCESS_TOKEN ?? "").trim().length > 0 &&
-    (process.env.CONDUCTOR_REMOTE_SESSION_SECRET ?? "").trim().length > 0;
-
-  return (
-    requireAuth ||
-    Boolean(access?.allowSignedShareLinks && builtinRemoteAuthEnabled)
-  );
-}
-
+/**
+ * Resolve the direct ttyd WebSocket URL for a session.
+ * Always asks the backend whether a terminal token is required — the backend
+ * is the single source of truth for access-control decisions.
+ */
 async function resolvePtyWsUrl(
   request: Request,
   backendUrl: string,
@@ -100,27 +61,36 @@ async function resolvePtyWsUrl(
   const wsUrl = resolveBackendTerminalWsUrl(backendUrl, id);
   wsUrl.searchParams.set("protocol", "ttyd");
 
-  if (!terminalAccessControlEnabled()) {
-    return wsUrl.toString();
-  }
-
+  // Always ask the backend for a terminal token.  The backend decides
+  // whether one is required based on its own access-control config.
   const tokenUrl = new URL(
     `/api/sessions/${encodeURIComponent(id)}/terminal/token`,
     backendUrl
   );
-  const response = await fetch(tokenUrl, {
-    method: "GET",
-    headers: await buildForwardedAccessHeaders(request),
-    cache: "no-store",
-    signal: request.signal,
-  });
-  const payload = (await response.json().catch(() => null)) as
-    | TerminalTokenPayload
-    | null;
-  if (!response.ok) {
-    throw new Error(
-      payload?.error ?? `Failed to resolve terminal token: ${response.status}`
-    );
+
+  let payload: TerminalTokenPayload | null = null;
+  try {
+    const response = await fetch(tokenUrl, {
+      method: "GET",
+      headers: await buildForwardedAccessHeaders(request),
+      cache: "no-store",
+      signal: request.signal,
+    });
+    payload = (await response.json().catch(() => null)) as
+      | TerminalTokenPayload
+      | null;
+    if (!response.ok) {
+      throw new Error(
+        payload?.error ?? `Failed to resolve terminal token: ${response.status}`
+      );
+    }
+  } catch (err) {
+    // If we can't reach the token endpoint (e.g. backend not running yet),
+    // fall back to URL without token — the WS handler will reject if needed.
+    console.warn("[Terminal Connection] Token fetch failed, proceeding without token:", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return wsUrl.toString();
   }
 
   if (payload?.required !== true) {
@@ -252,7 +222,6 @@ export async function GET(
   const body = (await response.json()) as Record<string, unknown>;
   try {
     const ptyWsUrl = await resolvePtyWsUrl(request, backendUrl, id);
-    console.log("[Terminal Connection] Resolved ptyWsUrl:", { ptyWsUrl, backendUrl, sessionId: id });
     body.ptyWsUrl = ptyWsUrl;
   } catch (error) {
     console.warn("[Terminal Connection] Failed to resolve direct terminal websocket URL", {

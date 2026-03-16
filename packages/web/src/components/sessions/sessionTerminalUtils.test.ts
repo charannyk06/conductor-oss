@@ -243,20 +243,23 @@ test("parseTerminalBinaryFrame decodes stream frames", () => {
 });
 
 test("getSessionTerminalViewportOptions keeps compact fonts for phones and larger fonts for desktop", () => {
+  // Small phones (< 480px) — larger lineHeight for fewer rows
   assert.deepEqual(getSessionTerminalViewportOptions(390), {
     fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-    fontSize: 11,
-    lineHeight: 1,
+    fontSize: 14,
+    lineHeight: 1.4,
   });
+  // Larger phones / tablet-portrait (480-640px)
   assert.deepEqual(getSessionTerminalViewportOptions(520), {
     fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-    fontSize: 13,
-    lineHeight: 1.08,
+    fontSize: 14,
+    lineHeight: 1.3,
   });
+  // Desktop (>= 640px)
   assert.deepEqual(getSessionTerminalViewportOptions(1280), {
     fontFamily: TERMINAL_FONT_FAMILY,
-    fontSize: 17,
-    lineHeight: 1.06,
+    fontSize: 14,
+    lineHeight: 1.2,
   });
 });
 

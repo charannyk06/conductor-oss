@@ -395,19 +395,24 @@ export function sanitizeRemoteTerminalSnapshot(snapshot: string): string {
 }
 
 export function getSessionTerminalViewportOptions(width: number): SessionTerminalViewportOptions {
-  if (width < 420) {
+  if (width < 480) {
+    // Small phones — 14px with generous line spacing yields ~32 rows
+    // instead of the original 49. Agent TUIs (Claude Code, etc.) position
+    // their UI content in the lower half of the screen; fewer rows means
+    // the empty top region is proportionally much smaller.
     return {
       fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-      fontSize: 11,
-      lineHeight: 1.2,
+      fontSize: 14,
+      lineHeight: 1.4,
     };
   }
 
   if (width < 640) {
+    // Larger phones / tablet-portrait — slightly tighter spacing.
     return {
       fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-      fontSize: 13,
-      lineHeight: 1.2,
+      fontSize: 14,
+      lineHeight: 1.3,
     };
   }
 

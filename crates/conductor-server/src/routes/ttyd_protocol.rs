@@ -80,12 +80,16 @@ pub fn encode_resume() -> Vec<u8> {
     vec![CMD_RESUME]
 }
 
-/// Default terminal preferences sent to client
+/// Default terminal preferences sent to client.
+///
+/// NOTE: The frontend owns the terminal theme and font sizing via
+/// `getTerminalTheme()` and `getSessionTerminalViewportOptions()`.
+/// Sending `"theme"` or `"fontSize"` here would override the frontend's
+/// carefully designed 16-color palette and responsive font sizing, so we
+/// intentionally omit them.  Only send preferences that the frontend
+/// cannot determine on its own.
 pub fn default_preferences() -> Value {
     json!({
-        "fontSize": 16,
-        "fontFamily": "Monaco, Courier New, monospace",
-        "theme": "xterm",
         "bellSound": "",
     })
 }

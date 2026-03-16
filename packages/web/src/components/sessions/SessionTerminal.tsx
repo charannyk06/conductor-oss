@@ -1,36 +1,28 @@
 "use client";
 
 import React, { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
 import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xterm/xterm";
-import { AlertCircle, ChevronDown, Loader2, Paperclip, RefreshCw, Search, Send, X } from "lucide-react";
+import { AlertCircle, ChevronDown, Loader2, RefreshCw, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { getTerminalTheme } from "@/components/terminal/xtermTheme";
-import { extractLocalFileTransferPath, uploadProjectAttachments } from "./attachmentUploads";
-import { captureTerminalViewport, type TerminalViewportState } from "./terminalViewport";
+import { captureTerminalViewport } from "./terminalViewport";
 import {
   buildTerminalSnapshotPayload,
   calculateMobileTerminalViewportMetrics,
   getSessionTerminalViewportOptions,
-  stripBrowserTerminalResponses,
   type TerminalModeState,
-  type TerminalWriteChunk,
 } from "./sessionTerminalUtils";
 import type { TerminalInsertRequest } from "./terminalInsert";
 
 // --- Extracted modules ---
 import {
   LIVE_TERMINAL_STATUSES,
-  RESUMABLE_STATUSES,
   LIVE_TERMINAL_SCROLLBACK,
   READ_ONLY_TERMINAL_SNAPSHOT_LINES,
-  LIVE_TERMINAL_HELPER_KEYS,
 } from "./terminal/terminalConstants";
 import type {
   TerminalSnapshot,
-  TerminalServerEvent,
-  TerminalStreamEventMessage,
 } from "./terminal/terminalTypes";
 import {
   readCachedTerminalSnapshot,
@@ -43,14 +35,8 @@ import {
 import {
   fetchTerminalConnection,
   fetchTerminalSnapshot,
-  fetchSessionStatus,
 } from "./terminal/terminalApi";
 import {
-  decodeTerminalPayloadToString,
-  shellEscapePath,
-  shellEscapePaths,
-  extractClipboardFiles,
-  localFileTransferError,
   buildReadableSnapshotPayload,
   terminalHasRenderedContent,
   shouldShowTerminalAccessoryBar,
@@ -92,7 +78,6 @@ export function SessionTerminal({
   pendingInsert,
   immersiveMobileMode = false,
 }: SessionTerminalProps) {
-  const router = useRouter();
   const surfaceRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerminal | null>(null);
@@ -100,7 +85,6 @@ export function SessionTerminal({
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const inputDisposableRef = useRef<IDisposable | null>(null);
   const scrollDisposableRef = useRef<IDisposable | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const resumeTextareaRef = useRef<HTMLTextAreaElement>(null);
   const latestStatusRef = useRef(sessionState);
   const activeRef = useRef(active);
@@ -118,11 +102,6 @@ export function SessionTerminal({
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [transportError, setTransportError] = useState<string | null>(null);
   const [interactiveTerminal, setInteractiveTerminal] = useState(true);
-  const [message, setMessage] = useState(() => initialUiState?.message ?? "");
-  const [attachments, setAttachments] = useState<Array<{ file: File }>>([]);
-  const [sending, setSending] = useState(false);
-  const [sendError, setSendError] = useState<string | null>(null);
-  const [dragActive, setDragActive] = useState(false);
   const [searchOpen, setSearchOpen] = useState(() => initialUiState?.searchOpen ?? false);
   const [searchQuery, setSearchQuery] = useState(() => initialUiState?.searchQuery ?? "");
   const [snapshotReady, setSnapshotReady] = useState(false);
@@ -131,10 +110,7 @@ export function SessionTerminal({
   const [snapshotModes, setSnapshotModes] = useState<TerminalModeState | undefined>(undefined);
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
-  const [showTerminalAccessoryBar, setShowTerminalAccessoryBar] = useState(() => shouldShowTerminalAccessoryBar());
-  const [helperPanelOpen, setHelperPanelOpen] = useState(() => initialUiState?.helperPanelOpen ?? false);
   const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
-  const [mobileKeyboardVisible, setMobileKeyboardVisible] = useState(false);
 
   // --- Derived state ---
   const normalizedSessionStatus = useMemo(
@@ -152,29 +128,6 @@ export function SessionTerminal({
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
   const shouldAttachTerminalSurface = active && pageVisible;
   const shouldStreamLiveTerminal = expectsLiveTerminal && shouldAttachTerminalSurface;
-  const showResumeRail = RESUMABLE_STATUSES.has(normalizedSessionStatus) && !expectsLiveTerminal;
-  const showLiveHelperBar = expectsLiveTerminal && interactiveTerminal && showTerminalAccessoryBar;
-  const showPersistentTopControls = immersiveMobileMode || showTerminalAccessoryBar;
-  const railPlaceholder = normalizedSessionStatus === "done"
-    ? "Continue the session..."
-    : normalizedSessionStatus === "needs_input" || normalizedSessionStatus === "stuck"
-      ? "Answer the agent and resume..."
-      : "Restart this session with a follow-up...";
-  const terminalContextLabel = [
-    sessionModel || agentName || "session",
-    sessionReasoningEffort || null,
-    expectsLiveTerminal
-      ? (connectionState === "live" ? "streaming" : connectionState)
-      : showResumeRail
-        ? "resume"
-        : normalizedSessionStatus,
-    projectId || null,
-  ]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .join(" · ");
-  const resumeComposerHint = attachments.length > 0
-    ? "Press Enter to resume. Shift+Enter adds a newline. Attachments upload before the next run starts."
-    : "Press Enter to resume. Shift+Enter adds a newline.";
   const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && connectionState === "live";
   const canRenderTerminal = shouldAttachTerminalSurface;
   expectsLiveTerminalRef.current = expectsLiveTerminal;
@@ -184,7 +137,6 @@ export function SessionTerminal({
   const {
     sendResize,
     sendTerminalKeys,
-    sendTerminalSpecial,
     clearScheduledTerminalHttpControlFlush,
     terminalHttpControlQueueRef,
     terminalHttpControlInFlightRef,
@@ -304,11 +256,7 @@ export function SessionTerminal({
   snapshotTranscriptRef.current = snapshotTranscript;
   snapshotModesRef.current = snapshotModes;
 
-  const floatingOverlayBottomPx = showResumeRail
-    ? 132
-    : showLiveHelperBar
-      ? helperPanelOpen ? 112 : 64
-      : 12;
+  const floatingOverlayBottomPx = 12;
   const terminalSurfaceStyle = useMemo<CSSProperties | undefined>(() => {
     if (!immersiveMobileMode || !mobileViewportHeight || mobileViewportHeight <= 0) {
       return undefined;
@@ -332,49 +280,6 @@ export function SessionTerminal({
   useEffect(() => { scheduleRendererRecoveryRef.current = scheduleRendererRecovery; }, [scheduleRendererRecovery]);
 
   // --- Callbacks ---
-  const normalizeWhitespaceOnlyDraft = useCallback(() => {
-    setMessage((current) => (current.trim().length === 0 ? "" : current));
-  }, []);
-
-  const queueResumeAttachments = useCallback((files: File[]) => {
-    if (!files.length) return;
-    setAttachments((current) => [
-      ...current,
-      ...files.map((file) => ({ file })),
-    ]);
-  }, []);
-
-  const injectFilesIntoTerminal = useCallback(async (files: File[]) => {
-    const uploadedPaths = await uploadProjectAttachments({
-      files,
-      projectId,
-      preferAbsolute: true,
-    });
-    if (!uploadedPaths.length) return;
-    const escaped = shellEscapePaths(uploadedPaths);
-    await sendTerminalKeys(`${escaped} `);
-  }, [projectId, sendTerminalKeys]);
-
-  const handleIncomingFiles = useCallback(async (files: File[]) => {
-    if (!files.length) return;
-    setSendError(null);
-    try {
-      if (expectsLiveTerminal && !interactiveTerminal) {
-        throw new Error("Operator access is required for live terminal input");
-      }
-      if (expectsLiveTerminal) {
-        if (!canSendLiveInput) {
-          throw new Error("Wait for the live terminal to reconnect before sending files.");
-        }
-        await injectFilesIntoTerminal(files);
-        return;
-      }
-      queueResumeAttachments(files);
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : "Failed to process files");
-    }
-  }, [canSendLiveInput, expectsLiveTerminal, injectFilesIntoTerminal, interactiveTerminal, queueResumeAttachments]);
-
   const applyFetchedSnapshot = useCallback((snapshot: TerminalSnapshot) => {
     snapshotAppliedRef.current = null;
     lastTerminalSequenceRef.current = snapshot.sequence;
@@ -404,10 +309,10 @@ export function SessionTerminal({
       : pendingViewportRestoreRef.current;
     pendingViewportRestoreRef.current = viewport;
     storeCachedTerminalUiState(sessionId, {
-      message,
+      message: "",
       searchOpen,
       searchQuery,
-      helperPanelOpen,
+      helperPanelOpen: false,
       viewport,
     });
   });
@@ -416,7 +321,7 @@ export function SessionTerminal({
 
   useEffect(() => {
     persistCachedUiState();
-  }, [helperPanelOpen, message, persistCachedUiState, searchOpen, searchQuery]);
+  }, [persistCachedUiState, searchOpen, searchQuery]);
 
   useEffect(() => () => {
     persistCachedUiState();
@@ -432,31 +337,8 @@ export function SessionTerminal({
   }, [expectsLiveTerminal, liveOutputStartedRef, snapshotAppliedRef]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const mediaQuery = typeof window.matchMedia === "function"
-      ? window.matchMedia("(pointer: coarse)")
-      : null;
-    const syncTerminalAccessoryBar = () => {
-      setShowTerminalAccessoryBar(shouldShowTerminalAccessoryBar());
-    };
-
-    syncTerminalAccessoryBar();
-    window.addEventListener("resize", syncTerminalAccessoryBar);
-    mediaQuery?.addEventListener?.("change", syncTerminalAccessoryBar);
-
-    return () => {
-      window.removeEventListener("resize", syncTerminalAccessoryBar);
-      mediaQuery?.removeEventListener?.("change", syncTerminalAccessoryBar);
-    };
-  }, []);
-
-  useEffect(() => {
     if (!immersiveMobileMode || typeof window === "undefined" || !window.visualViewport) {
       setMobileViewportHeight(null);
-      setMobileKeyboardVisible(false);
       return;
     }
 
@@ -479,9 +361,12 @@ export function SessionTerminal({
           surface.getBoundingClientRect().top,
         );
         setMobileViewportHeight((current) => (current === metrics.usableHeight ? current : metrics.usableHeight));
-        setMobileKeyboardVisible((current) => (current === metrics.keyboardVisible ? current : metrics.keyboardVisible));
         if (activeRef.current) {
-          scheduleRendererRecovery(true);
+          // false — just re-fit dimensions, no full repaint. Mobile viewport
+          // changes (keyboard show/hide, scroll) are frequent during live
+          // streaming; forceResize=true would trigger term.refresh() causing
+          // visible flicker on every viewport event.
+          scheduleRendererRecovery(false);
         }
       });
     };
@@ -500,13 +385,6 @@ export function SessionTerminal({
       window.removeEventListener("resize", syncMobileViewport);
     };
   }, [immersiveMobileMode, scheduleRendererRecovery]);
-
-  useEffect(() => {
-    if (!mobileKeyboardVisible) {
-      return;
-    }
-    setHelperPanelOpen(false);
-  }, [mobileKeyboardVisible]);
 
   // Reset state when sessionId changes
   useEffect(() => {
@@ -534,14 +412,8 @@ export function SessionTerminal({
     setConnectionState("connecting");
     setTransportError(null);
     setInteractiveTerminal(true);
-    setMessage(cachedUiState?.message ?? "");
-    setAttachments([]);
-    setSending(false);
-    setSendError(null);
-    setDragActive(false);
     setSearchOpen(cachedUiState?.searchOpen ?? false);
     setSearchQuery(cachedUiState?.searchQuery ?? "");
-    setHelperPanelOpen(cachedUiState?.helperPanelOpen ?? false);
     _setShowScrollToBottom(false);
     setSnapshotReady(cachedSnapshot !== null);
     setSnapshotAnsi(cachedSnapshot?.snapshot ?? "");
@@ -549,7 +421,6 @@ export function SessionTerminal({
     setSnapshotModes(cachedSnapshot?.modes);
     setSessionStatusOverride(null);
     setMobileViewportHeight(null);
-    setMobileKeyboardVisible(false);
     termRef.current?.reset();
     updateScrollState();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -617,7 +488,8 @@ export function SessionTerminal({
     return () => { mounted = false; };
   }, [active, applyFetchedSnapshot, expectsLiveTerminal, lastTerminalSequenceRef, liveOutputStartedRef, sessionId, shouldStreamLiveTerminal, snapshotAppliedRef, snapshotAnsiRef, snapshotModesRef, snapshotTranscriptRef]);
 
-  // Connection resolution effect
+  // Connection resolution effect — clears stale cached connection to ensure
+  // fresh token/URL when a session transitions to live.
   useEffect(() => {
     let mounted = true;
 
@@ -626,6 +498,9 @@ export function SessionTerminal({
       setTransportError(null);
       return () => { mounted = false; };
     }
+
+    // Bust stale cached connection info so we always get a fresh ptyWsUrl/token
+    clearCachedTerminalConnection(sessionId);
 
     void (async () => {
       try {
@@ -679,21 +554,29 @@ export function SessionTerminal({
     lastObservedContainerSizeRef.current = sizeKey;
     lastViewportOptionKeyRef.current = viewportKey;
 
+    // Track whether font metrics actually changed — only font changes need
+    // a full repaint (forceResize=true). Pure container size changes just
+    // need a re-fit (false), which avoids term.refresh() and the visible
+    // flicker it causes during live streaming on mobile.
+    let fontChanged = false;
     try {
       if (term.options.fontFamily !== nextViewportOptions.fontFamily) {
         term.options.fontFamily = nextViewportOptions.fontFamily;
+        fontChanged = true;
       }
       if (term.options.fontSize !== nextViewportOptions.fontSize) {
         term.options.fontSize = nextViewportOptions.fontSize;
+        fontChanged = true;
       }
       if (term.options.lineHeight !== nextViewportOptions.lineHeight) {
         term.options.lineHeight = nextViewportOptions.lineHeight;
+        fontChanged = true;
       }
     } catch {
       return;
     }
 
-    scheduleRendererRecovery(true);
+    scheduleRendererRecovery(fontChanged);
   });
 
   // --- Terminal init effect ---
@@ -846,30 +729,28 @@ export function SessionTerminal({
     term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal;
   }, [expectsLiveTerminal, interactiveTerminal]);
 
-  // Active pane recovery effect
+  // Active pane recovery — fires ONLY on tab activation.
+  // A single recovery re-fits the terminal after potential WebGL context loss,
+  // plus one delayed retry to handle late-settling layouts.
+  // connectionState and shouldStreamLiveTerminal intentionally excluded —
+  // recovery must NEVER fire during live streaming or connection transitions,
+  // as it triggers term.refresh() which causes full-screen repaints that
+  // produce visible flicker while data is actively streaming.
   useEffect(() => {
     if (!active) {
       return;
     }
 
-
-    clearVisibilityRecoveryTimers();
-    const frameHandle = window.requestAnimationFrame(() => {
-      scheduleRendererRecovery(true);
-      const timers: number[] = [];
-      timers.push(window.setTimeout(() => {
-        scheduleRendererRecovery(true);
-      }, 48));
-      timers.push(window.setTimeout(() => {
-        scheduleRendererRecovery(true);
-      }, 140));
-    });
+    scheduleRendererRecovery(true);
+    const retryTimer = window.setTimeout(() => {
+      scheduleRendererRecovery(false);
+    }, 150);
 
     return () => {
-      window.cancelAnimationFrame(frameHandle);
-      clearVisibilityRecoveryTimers();
+      window.clearTimeout(retryTimer);
     };
-  }, [active, clearVisibilityRecoveryTimers, connectionState, shouldStreamLiveTerminal, scheduleRendererRecovery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, scheduleRendererRecovery]);
 
   // Snapshot render effect
   useEffect(() => {
@@ -947,6 +828,14 @@ export function SessionTerminal({
         termCols: termRef.current?.cols ?? null,
         bufferBaseY: termRef.current?.buffer.active.baseY ?? null,
         bufferViewportY: termRef.current?.buffer.active.viewportY ?? null,
+        ptyWsUrl,
+        ttydConnected,
+        ttydConnecting,
+        ttydError: ttydError?.message ?? null,
+        expectsLiveTerminal,
+        pageVisible,
+        shouldAttachTerminalSurface,
+        shouldStreamLiveTerminal,
       }),
     };
 
@@ -958,14 +847,22 @@ export function SessionTerminal({
   }, [
     active,
     connectionState,
+    expectsLiveTerminal,
     interactiveTerminal,
     liveOutputStartedRef,
+    pageVisible,
+    ptyWsUrl,
     sessionId,
+    shouldAttachTerminalSurface,
+    shouldStreamLiveTerminal,
     snapshotAnsi,
     snapshotAppliedRef,
     snapshotTranscript,
     snapshotReady,
     terminalReady,
+    ttydConnected,
+    ttydConnecting,
+    ttydError,
   ]);
 
   // Visibility/focus effect
@@ -976,13 +873,11 @@ export function SessionTerminal({
         rememberFocusedSurface();
         return;
       }
-      normalizeWhitespaceOnlyDraft();
       scheduleRendererRecovery(false);
     };
 
     const handleWindowFocus = () => {
       setPageVisible(!document.hidden);
-      normalizeWhitespaceOnlyDraft();
       scheduleRendererRecovery(false);
     };
 
@@ -993,7 +888,11 @@ export function SessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [connectionState, shouldStreamLiveTerminal, normalizeWhitespaceOnlyDraft, rememberFocusedSurface, scheduleRendererRecovery]);
+    // connectionState and shouldStreamLiveTerminal intentionally excluded —
+    // these event handlers must be stable regardless of streaming state.
+    // Re-registering on connection changes was causing unnecessary churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rememberFocusedSurface, scheduleRendererRecovery]);
 
   useEffect(() => {
     const handleDocumentFocusIn = () => {
@@ -1061,128 +960,23 @@ export function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Paste handling effect
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const handlePaste = (event: ClipboardEvent) => {
-      const clipboard = event.clipboardData;
-      if (!clipboard) return;
-      const files = extractClipboardFiles(clipboard);
-      if (files.length > 0) {
-        event.preventDefault();
-        void handleIncomingFiles(files);
-        return;
-      }
-
-      const localFilePath = extractLocalFileTransferPath(clipboard.getData("text/plain") ?? "");
-      if (!localFilePath) {
-        return;
-      }
-
-      event.preventDefault();
-      setSendError(localFileTransferError(localFilePath));
-      return;
-    };
-
-    const pasteListener = (event: ClipboardEvent) => {
-      handlePaste(event);
-    };
-
-    container.addEventListener("paste", pasteListener, { capture: true });
-    return () => {
-      container.removeEventListener("paste", pasteListener, { capture: true });
-    };
-  }, [handleIncomingFiles]);
-
-  // --- Send handler ---
-  const handleSend = useCallback(async () => {
-    const trimmedMessage = message.trim();
-    if (!trimmedMessage && attachments.length === 0) return;
-
-    setSending(true);
-    setSendError(null);
-
-    try {
-      const attachmentPaths = await uploadProjectAttachments({
-        files: attachments.map((attachment) => attachment.file),
-        projectId,
-        preferAbsolute: true,
-      });
-
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: trimmedMessage,
-          attachments: attachmentPaths,
-          model: sessionModel || null,
-          reasoningEffort: sessionReasoningEffort || null,
-          projectId: projectId || null,
-        }),
-      });
-
-      const data = (await response.json().catch(() => null)) as
-        | { error?: string; sessionId?: string | null }
-        | null;
-
-      if (!response.ok) {
-        throw new Error(data?.error ?? `Failed to send message: ${response.status}`);
-      }
-
-      setMessage("");
-      setAttachments([]);
-      if (data?.sessionId && data.sessionId !== sessionId) {
-        router.push(`/sessions/${encodeURIComponent(data.sessionId)}`);
-        return;
-      }
-      try {
-        const nextStatus = await fetchSessionStatus(sessionId);
-        setSessionStatusOverride(nextStatus);
-      } catch {
-        // The session page hook will still reconcile status through the shared session stream.
-      }
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : "Failed to resume session");
-    } finally {
-      setSending(false);
-    }
-  }, [attachments, message, projectId, router, sessionId, sessionModel, sessionReasoningEffort]);
-
-  // Pending insert effect
+  // Pending insert effect — only for live terminal inline text
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
       return;
     }
 
     lastAppliedInsertNonceRef.current = pendingInsert.nonce;
-    setSendError(null);
 
     if (canSendLiveInput) {
       const inlineText = pendingInsert.inlineText.trim();
       if (inlineText.length > 0) {
-        void sendTerminalKeys(`${inlineText} `).catch((err: unknown) => {
-          setSendError(err instanceof Error ? err.message : "Failed to insert preview context into terminal");
+        void sendTerminalKeys(`${inlineText} `).catch(() => {
+          // Ignore transient errors during live input
         });
       }
-      return;
     }
-
-    if (expectsLiveTerminal && !interactiveTerminal) {
-      setSendError("Operator access is required for live terminal input");
-      return;
-    }
-
-    const draftText = pendingInsert.draftText.trim();
-    if (draftText.length === 0) {
-      return;
-    }
-
-    setMessage((current) => (current.trim().length > 0 ? `${current}\n\n${draftText}` : draftText));
-  }, [canSendLiveInput, expectsLiveTerminal, interactiveTerminal, pendingInsert, sendTerminalKeys]);
+  }, [canSendLiveInput, pendingInsert, sendTerminalKeys]);
 
   const scrollToBottom = useCallback(() => {
     const term = termRef.current;
@@ -1377,34 +1171,6 @@ export function SessionTerminal({
     restorePreferredFocus();
   }, [restorePreferredFocus]);
 
-  const handleLiveHelperKey = useCallback((special: string) => {
-    void sendTerminalSpecial(special)
-      .then(() => {
-        setSendError(null);
-      })
-      .catch((err: unknown) => {
-        setSendError(err instanceof Error ? err.message : "Failed to send terminal input");
-      })
-      .finally(() => {
-        requestAnimationFrame(() => {
-          focusTerminal();
-        });
-      });
-  }, [focusTerminal, sendTerminalSpecial]);
-
-  const handleFileSelection = useCallback((files: File[]) => {
-    if (!files.length) {
-      return;
-    }
-
-    if (expectsLiveTerminal) {
-      void handleIncomingFiles(files);
-      return;
-    }
-
-    queueResumeAttachments(files);
-  }, [expectsLiveTerminal, handleIncomingFiles, queueResumeAttachments]);
-
   // --- Render ---
   return (
     <div
@@ -1413,50 +1179,6 @@ export function SessionTerminal({
       className={immersiveMobileMode
         ? "group/terminal relative flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-[#060404]"
         : "group/terminal relative flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-white/10 bg-[#060404] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
-      onDragOver={(event) => {
-        event.preventDefault();
-        setDragActive(true);
-      }}
-      onDragLeave={(event) => {
-        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-        setDragActive(false);
-      }}
-      onDrop={async (event) => {
-        event.preventDefault();
-        setDragActive(false);
-        const files = Array.from(event.dataTransfer.files ?? []);
-        const plainText = event.dataTransfer.getData("text/plain").trim();
-        if (files.length > 0) {
-          void handleIncomingFiles(files);
-          return;
-        }
-        const localFilePath = extractLocalFileTransferPath(plainText);
-        if (localFilePath) {
-          setSendError(localFileTransferError(localFilePath));
-          return;
-        }
-        if (!plainText) {
-          return;
-        }
-        try {
-          if (canSendLiveInput) {
-            const payload = plainText.startsWith("/") ? shellEscapePath(plainText) : plainText;
-            await sendTerminalKeys(payload);
-            return;
-          }
-          if (expectsLiveTerminal && !interactiveTerminal) {
-            setSendError("Operator access is required for live terminal input");
-            return;
-          }
-          if (expectsLiveTerminal) {
-            setSendError("Wait for the live terminal to reconnect before sending input.");
-            return;
-          }
-          setMessage((current) => current.length > 0 ? `${current}\n${plainText}` : plainText);
-        } catch (err) {
-          setSendError(err instanceof Error ? err.message : "Failed to write drop payload");
-        }
-      }}
     >
       {searchOpen ? (
         <div className={immersiveMobileMode
@@ -1491,7 +1213,7 @@ export function SessionTerminal({
         </div>
       ) : (
         <div className={`${immersiveMobileMode ? "absolute right-3 top-14" : "absolute right-2 top-2 sm:right-3 sm:top-3"} z-10 flex items-center gap-1.5 transition-opacity sm:gap-2 ${
-          connectionState === "live" && !showPersistentTopControls
+          connectionState === "live"
             ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
             : "opacity-100"
         }`}>
@@ -1553,156 +1275,6 @@ export function SessionTerminal({
             <ChevronDown className="h-4 w-4" />
             <span className="ml-1 text-[11px] uppercase tracking-[0.16em]">Jump to latest</span>
           </Button>
-        </div>
-      ) : null}
-
-      {dragActive ? (
-        <div className="pointer-events-none absolute inset-4 z-10 flex items-center justify-center rounded-[18px] border border-dashed border-white/20 bg-black/55">
-          <span className="rounded-full border border-white/10 bg-white/6 px-4 py-2 text-[12px] text-[#efe8e1]">
-            {expectsLiveTerminal && interactiveTerminal
-              ? "Drop files or screenshots to insert uploaded paths into the terminal"
-              : expectsLiveTerminal
-                ? "Live terminal input is read-only without operator access"
-              : "Drop files or screenshots to attach them before resuming"}
-          </span>
-        </div>
-      ) : null}
-
-      <input
-        ref={fileInputRef}
-        type="file"
-        className="hidden"
-        multiple
-        onChange={(event) => {
-          handleFileSelection(Array.from(event.target.files ?? []));
-          event.target.value = "";
-        }}
-      />
-
-
-      {showLiveHelperBar ? (
-        <div className="border-t border-white/8 bg-[#0b0808]/96 px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className="shrink-0 rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] px-3 py-2 text-[11px] font-medium text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={focusTerminal}
-              disabled={connectionState !== "live"}
-            >
-              Focus terminal
-            </button>
-            <button
-              type="button"
-              className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => setHelperPanelOpen((current) => !current)}
-              disabled={connectionState !== "live"}
-              aria-expanded={helperPanelOpen}
-            >
-              {helperPanelOpen ? "Hide keys" : "Helper keys"}
-            </button>
-            <button
-              type="button"
-              className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={connectionState !== "live"}
-            >
-              Attach
-            </button>
-          </div>
-          {helperPanelOpen ? (
-            <div className="mt-2 flex items-center gap-2 overflow-x-auto pb-1 [-webkit-overflow-scrolling:touch]">
-              {LIVE_TERMINAL_HELPER_KEYS.map(({ label, special }) => (
-                <button
-                  key={special}
-                  type="button"
-                  className="shrink-0 rounded-full border border-white/12 bg-white/6 px-3 py-2 text-[11px] text-[#d7cec7] transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={connectionState !== "live"}
-                  onClick={() => handleLiveHelperKey(special)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {sendError ? (
-            <p className="mt-2 text-[12px] text-[#ff8f7a]">{sendError}</p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {showResumeRail ? (
-        <div className="border-t border-white/6 bg-[#080606]/98 px-3 py-3 sm:px-4 sm:pb-4">
-          <div className="rounded-[20px] border border-[#2c221d] bg-[linear-gradient(180deg,rgba(29,22,20,0.98),rgba(18,14,13,0.98))] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_22px_44px_rgba(0,0,0,0.34)]">
-            {attachments.length > 0 ? (
-              <div className="mb-2 flex flex-wrap gap-2">
-                {attachments.map(({ file }) => (
-                  <button
-                    key={`${file.name}-${file.lastModified}`}
-                    type="button"
-                    className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/6 px-3 py-2 sm:px-2.5 sm:py-1 text-[11px] text-[#d7cec7]"
-                    onClick={() => {
-                      setAttachments((current) => current.filter((attachment) => attachment.file !== file));
-                    }}
-                  >
-                    <Paperclip className="h-3 w-3" />
-                    {file.name}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-
-            <div className="flex items-end gap-2.5">
-              <div className="min-h-[38px] min-w-0 flex-1">
-                <textarea
-                  ref={resumeTextareaRef}
-                  value={message}
-                  onChange={(event) => setMessage(event.target.value)}
-                  onFocus={() => {
-                    preferredFocusTargetRef.current = "resume";
-                    restoreFocusOnRecoveryRef.current = true;
-                    normalizeWhitespaceOnlyDraft();
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void handleSend();
-                    }
-                  }}
-                  placeholder={railPlaceholder}
-                  className="min-h-[38px] w-full resize-none border-0 bg-transparent px-0.5 py-2.5 text-[14px] leading-7 text-[#efe8e1] outline-none placeholder:text-[#7d746e]"
-                />
-              </div>
-              <button
-                type="button"
-                className="inline-flex h-11 w-11 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-full border border-[#f3f0ea]/12 bg-[#f3f0ea] text-[#0d0909] transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
-                disabled={sending || (!message.trim() && attachments.length === 0)}
-                onClick={() => {
-                  void handleSend();
-                }}
-                aria-label="Resume session"
-              >
-                {sending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
-              </button>
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-[#8c8078]">
-              <span className="max-w-full truncate">{terminalContextLabel}</span>
-              <span className="h-1 w-1 rounded-full bg-[#5f534d]" />
-              <span>{attachments.length > 0 ? `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : "resume session"}</span>
-            </div>
-          </div>
-          <p className="mt-2 px-1 text-[11px] text-[#8e847d]">{resumeComposerHint}</p>
-
-          {sendError ? (
-            <p className="mt-2 px-1 text-[12px] text-[#ff8f7a]">{sendError}</p>
-          ) : null}
-        </div>
-      ) : !showLiveHelperBar && sendError ? (
-        <div className="absolute bottom-3 left-3 rounded-full border border-[#ff8f7a]/30 bg-[#1d1111]/90 px-3 py-1.5 text-[12px] text-[#ff8f7a] backdrop-blur-sm">
-          {sendError}
         </div>
       ) : null}
     </div>

@@ -34,6 +34,12 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     state.start_app_update_watchdog();
     state.publish_snapshot().await;
 
+    // WebSocket routes are merged AFTER the CorsLayer so they bypass CORS.
+    // The CorsLayer adds headers (Vary, Access-Control-*) to 101 Switching
+    // Protocols responses, which causes browsers to reject the WebSocket
+    // upgrade with an error before onopen fires.
+    let ws_routes = routes::terminal::ws_router().with_state(state.clone());
+
     let app = Router::new()
         .merge(routes::app_update::router())
         .merge(routes::config::router())
@@ -96,6 +102,8 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
                 .allow_credentials(true)
                 .max_age(Duration::from_secs(3600))
         })
+        // Merge WebSocket routes after CorsLayer so they bypass CORS entirely
+        .merge(ws_routes)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB request body limit
         .layer(TraceLayer::new_for_http());
 

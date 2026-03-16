@@ -2341,7 +2341,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                 <DropdownMenu.Content
                   align="start"
                   sideOffset={6}
-                  className={lightMenuClass}
+                  className={scrollMenuClass}
                 >
                   <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
                     Agents
@@ -2484,7 +2484,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                       </button>
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Portal>
-                      <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                      <DropdownMenu.Content align="start" sideOffset={6} className={scrollMenuClass}>
                         <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">Projects</p>
                         {projectOptions.map((project) => {
                           const displayName = getProjectDisplayName(project);

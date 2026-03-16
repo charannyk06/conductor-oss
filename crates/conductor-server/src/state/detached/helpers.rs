@@ -30,6 +30,14 @@ pub(super) fn prepare_detached_runtime_env(
     interactive: bool,
     env: &mut HashMap<String, String>,
 ) {
+    // Ensure the PTY advertises full color support so that agents like
+    // Claude Code render their TUI with the correct palette.  Only set
+    // these when the caller hasn't already provided explicit values.
+    env.entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env.entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
+
     if kind == AgentKind::QwenCode && interactive {
         // Qwen's TUI currently crashes if its active theme resolves to a
         // gradient with fewer than two stops. Force the no-color theme for

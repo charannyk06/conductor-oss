@@ -103,6 +103,22 @@ use crate::state::SessionRecord;
         assert!(!env.contains_key("NO_COLOR"));
     }
 
+    #[test]
+    fn prepare_detached_runtime_env_sets_term_and_colorterm() {
+        let mut env = HashMap::new();
+        prepare_detached_runtime_env(AgentKind::ClaudeCode, true, &mut env);
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+    }
+
+    #[test]
+    fn prepare_detached_runtime_env_does_not_override_existing_term() {
+        let mut env = HashMap::new();
+        env.insert("TERM".to_string(), "screen-256color".to_string());
+        prepare_detached_runtime_env(AgentKind::ClaudeCode, true, &mut env);
+        assert_eq!(env.get("TERM").map(String::as_str), Some("screen-256color"));
+    }
+
     #[tokio::test]
     async fn detached_pty_host_streams_replays_and_persists_output() {
         let root = std::env::temp_dir().join(format!(

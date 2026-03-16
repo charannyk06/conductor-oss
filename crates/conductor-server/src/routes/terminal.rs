@@ -95,13 +95,19 @@ impl TerminalSnapshotReason {
     }
 }
 
-pub fn router() -> Router<Arc<AppState>> {
+/// WebSocket routes that must bypass CorsLayer to avoid 101 response interference.
+pub fn ws_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
         .route(
             "/api/sessions/{id}/terminal/control/ws",
             get(terminal_control_websocket),
         )
+}
+
+/// Non-WebSocket terminal routes (HTTP/SSE) that go through normal CORS middleware.
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new()
         .route(
             "/api/sessions/{id}/terminal/stream-token",
             get(terminal_stream_token),
@@ -200,8 +206,9 @@ struct TerminalQuery {
     token: Option<String>,
     sequence: Option<u64>,
     /// When set to "ttyd", the WebSocket uses bidirectional binary mode:
-    /// output frames are `[0x00][raw PTY bytes]`, input frames `[0x00][bytes]`
-    /// send keystrokes, and `[0x01][JSON{columns,rows}]` sends a resize.
+    /// output frames are `['0' (0x30)][raw PTY bytes]`, input frames `['0' (0x30)][bytes]`
+    /// send keystrokes, `['1' (0x31)][JSON{columns,rows}]` sends a resize,
+    /// `['2' (0x32)]` pauses output, and `['3' (0x33)]` resumes output.
     protocol: Option<String>,
 }
 
@@ -253,26 +260,20 @@ async fn terminal_websocket(
     Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    eprintln!("[TERMINAL_WS] Received WebSocket upgrade request for session: {}", id);
-
     if state.get_session(&id).await.is_none() {
-        eprintln!("[TERMINAL_WS] Session not found: {}", id);
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     }
 
     let bidirectional = query.protocol.as_deref() == Some("ttyd");
-    eprintln!("[TERMINAL_WS] Bidirectional mode: {}", bidirectional);
 
     // Bidirectional mode sends keystrokes, so require operator-level access.
     if bidirectional {
         if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
-            eprintln!("[TERMINAL_WS] Authorization failed: {:?}", err);
             return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
         }
     } else if let Err(err) =
         authorize_terminal_stream_socket_access(&state, &id, query.token.as_deref()).await
     {
-        eprintln!("[TERMINAL_WS] Stream authorization failed: {:?}", err);
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
 
@@ -280,9 +281,7 @@ async fn terminal_websocket(
     let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
     let client_sequence = query.sequence;
 
-    eprintln!("[TERMINAL_WS] Calling on_upgrade, about to send 101 response");
     ws.on_upgrade(move |socket| {
-        eprintln!("[TERMINAL_WS] on_upgrade callback invoked, socket is ready");
         handle_terminal_socket(socket, state, id, cols, rows, client_sequence, bidirectional)
     })
 }
@@ -890,83 +889,80 @@ async fn handle_terminal_socket(
     client_sequence: Option<u64>,
     bidirectional: bool,
 ) {
-    eprintln!("[TERMINAL_SOCKET] ==== HANDLER STARTING ====");
-    eprintln!("[TERMINAL_SOCKET] Handler called: bidirectional={}, cols={}, rows={}", bidirectional, cols, rows);
-    eprintln!("[TERMINAL_SOCKET] Socket is ready for I/O");
-
-    // For bidirectional (ttyd) mode, wait for client handshake first to ensure browser's onopen has fired
-    if bidirectional {
-        eprintln!("[TERMINAL_SOCKET] ==== BIDIRECTIONAL MODE: Waiting for client handshake ====");
-        eprintln!("[TERMINAL_SOCKET] Browser should now have: 101 response, can fire onopen");
-        eprintln!("[TERMINAL_SOCKET] Waiting up to 5 seconds for client to send handshake message...");
-
+    // For bidirectional (ttyd) mode, wait for client JSON_DATA handshake first.
+    // Per ttyd protocol the handshake carries {columns, rows} for initial sizing.
+    let (cols, rows) = if bidirectional {
+        let mut handshake_cols = cols;
+        let mut handshake_rows = rows;
         loop {
-            eprintln!("[TERMINAL_SOCKET] About to call socket.recv() to wait for handshake...");
-            let recv_result = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
-            eprintln!("[TERMINAL_SOCKET] socket.recv() returned: {:?}", recv_result.as_ref().map(|r| r.as_ref().map(|m| format!("{:?}", m).chars().take(80).collect::<String>())));
-
-            match recv_result {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await {
                 Ok(Some(Ok(msg))) => {
-                    eprintln!("[TERMINAL_SOCKET] Received client message: {:?}", msg);
-                    // Check if it's a handshake message (JSON starting with '{')
                     if let Message::Binary(data) = &msg {
                         if !data.is_empty() && data[0] == b'{' {
-                            eprintln!("[TERMINAL_SOCKET] Client handshake received, proceeding");
+                            // Parse cols/rows from the handshake JSON
+                            if let Ok(json_str) = std::str::from_utf8(&data) {
+                                if let Ok(value) = serde_json::from_str::<Value>(json_str) {
+                                    if let Some(c) = value.get("columns").and_then(Value::as_u64) {
+                                        handshake_cols = (c as u16).max(1);
+                                    }
+                                    if let Some(r) = value.get("rows").and_then(Value::as_u64) {
+                                        handshake_rows = (r as u16).max(1);
+                                    }
+                                }
+                            }
                             break;
                         }
                     }
-                    // For non-handshake messages, continue waiting
                 }
-                Ok(Some(Err(e))) => {
-                    eprintln!("[TERMINAL_SOCKET] Socket error: {:?}", e);
-                    return;
-                }
-                Ok(None) => {
-                    eprintln!("[TERMINAL_SOCKET] Socket closed prematurely");
-                    return;
-                }
-                Err(_) => {
-                    eprintln!("[TERMINAL_SOCKET] Timeout or error waiting for handshake");
-                    return;
-                }
+                Ok(Some(Err(_))) | Ok(None) | Err(_) => return,
             }
         }
+
+        // ttyd protocol: respond with SET_WINDOW_TITLE and SET_PREFERENCES
+        let title_frame = ttyd_protocol::encode_window_title(&session_id);
+        if socket
+            .send(Message::Binary(title_frame.into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let prefs_frame = ttyd_protocol::encode_preferences(&ttyd_protocol::default_preferences());
+        if socket
+            .send(Message::Binary(prefs_frame.into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        (handshake_cols, handshake_rows)
     } else {
-        // For non-bidirectional mode, send ready event immediately
-        eprintln!("[TERMINAL_SOCKET] Sending server_ready_event (not bidirectional)");
         if socket
             .send(Message::Text(server_ready_event(&session_id).into()))
             .await
             .is_err()
         {
-            eprintln!("[TERMINAL_SOCKET] Error sending server_ready_event, returning");
             return;
         }
-        eprintln!("[TERMINAL_SOCKET] server_ready_event sent successfully");
-    }
+        (cols, rows)
+    };
 
-    eprintln!("[TERMINAL_SOCKET] Ensuring session and terminal host");
     let _ = state.ensure_session_live(&session_id).await;
     let handle = state.ensure_terminal_host(&session_id).await;
     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
-    eprintln!("[TERMINAL_SOCKET] Session and terminal host ready");
     let mut terminal_events = Some(handle.terminal_tx.subscribe());
     let mut stream_sequence_floor = None;
-    eprintln!("[TERMINAL_SOCKET] Getting session snapshot");
     if let Some(session) = state.get_session(&session_id).await {
-        eprintln!("[TERMINAL_SOCKET] Building terminal snapshot");
         if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
-            eprintln!("[TERMINAL_SOCKET] Checking if should send initial restore");
             if should_send_initial_restore(&snapshot, client_sequence) {
-                eprintln!("[TERMINAL_SOCKET] Sending initial restore");
                 if bidirectional {
-                    eprintln!("[TERMINAL_SOCKET] Bidirectional mode - sending history");
                     // In bidirectional mode, skip the vt100 screen reconstruction
                     // which produces garbled output when replayed through xterm.js.
                     // Send only raw history bytes (faithful PTY output) and rely on
                     // the resize SIGWINCH to trigger the agent's TUI to repaint.
                     if !snapshot.history.is_empty() {
-                        eprintln!("[TERMINAL_SOCKET] History not empty, encoding frame");
                         let mut buf = b"\x1b[2J\x1b[H".to_vec(); // clear screen + cursor home
                         let max_history = LIVE_TERMINAL_SNAPSHOT_MAX_BYTES.saturating_sub(buf.len());
                         let history = if snapshot.history.len() > max_history {
@@ -975,31 +971,19 @@ async fn handle_terminal_socket(
                             &snapshot.history
                         };
                         buf.extend_from_slice(history);
-                        // Send in chunks to avoid exceeding WebSocket frame size limits
-                        // Split the data into 64KB chunks, leaving room for the ttyd command byte
-                        const CHUNK_SIZE: usize = 65536 - 1; // 64KB minus 1 byte for CMD_OUTPUT
+                        const CHUNK_SIZE: usize = 65536 - 1;
                         let mut offset = 0;
                         while offset < buf.len() {
                             let end = std::cmp::min(offset + CHUNK_SIZE, buf.len());
                             let chunk = &buf[offset..end];
                             let frame = encode_ttyd_output_frame(chunk);
-
-                            eprintln!("[TERMINAL_SOCKET] Sending binary chunk {}-{} ({} bytes)", offset, end, frame.len());
-                            match socket.send(Message::Binary(frame.into())).await {
-                                Ok(_) => {},
-                                Err(e) => {
-                                    eprintln!("[TERMINAL_SOCKET] Error sending binary chunk: {:?}", e);
-                                    return;
-                                }
+                            if socket.send(Message::Binary(frame.into())).await.is_err() {
+                                return;
                             }
                             offset = end;
                         }
-                        eprintln!("[TERMINAL_SOCKET] All binary chunks sent successfully");
-                    } else {
-                        eprintln!("[TERMINAL_SOCKET] History is empty, skipping history send");
                     }
                     // Force SIGWINCH so TUI agents repaint on top of the history
-                    eprintln!("[TERMINAL_SOCKET] Sending resize signal");
                     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
                 } else {
                     let restore_frame = encode_terminal_restore_frame(
@@ -1022,10 +1006,24 @@ async fn handle_terminal_socket(
         }
     }
 
-    eprintln!("[TERMINAL_SOCKET] Entering main event loop");
+    // For bidirectional (ttyd) mode, batch stream output chunks into fewer,
+    // larger WebSocket frames. The PTY read loop uses a 4KB buffer, so a
+    // single TUI update from Claude Code (8-20KB of ANSI sequences) arrives
+    // as multiple small broadcast events. Sending each as a separate WebSocket
+    // message causes xterm.js to render intermediate partial states — visible
+    // as garbled/flickering output. Batching at ~16ms (one display frame)
+    // ensures complete TUI updates land as a single message.
+    let mut batch_buffer: Vec<u8> = Vec::new();
+    let mut batch_interval = tokio::time::interval(std::time::Duration::from_millis(16));
+    batch_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Skip the first immediate tick so we don't flush an empty buffer.
+    batch_interval.reset();
+
     loop {
-        eprintln!("[TERMINAL_SOCKET] Main loop tick");
         tokio::select! {
+            biased;
+
+            // Drain all pending stream events first (accumulate into batch).
             attach_event = async {
                 match terminal_events.as_mut() {
                     Some(receiver) => Some(receiver.recv().await),
@@ -1037,17 +1035,27 @@ async fn handle_terminal_socket(
                         if should_skip_stream_chunk(stream_sequence_floor, chunk.sequence) {
                             continue;
                         }
-                        let frame = if bidirectional {
-                            encode_ttyd_output_frame(&chunk.bytes)
+                        if bidirectional {
+                            // Accumulate in batch buffer — flushed by the interval tick below.
+                            batch_buffer.extend_from_slice(&chunk.bytes);
+                            // Safety valve: flush immediately if batch exceeds 128KB to
+                            // bound memory usage during high-throughput bursts.
+                            if batch_buffer.len() >= 131_072 {
+                                let frame = encode_ttyd_output_frame(&batch_buffer);
+                                batch_buffer.clear();
+                                if socket.send(Message::Binary(frame.into())).await.is_err() {
+                                    break;
+                                }
+                            }
                         } else {
-                            encode_terminal_stream_frame(&chunk)
-                        };
-                        if socket
-                            .send(Message::Binary(frame.into()))
-                            .await
-                            .is_err()
-                        {
-                            break;
+                            let frame = encode_terminal_stream_frame(&chunk);
+                            if socket
+                                .send(Message::Binary(frame.into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
                     Some(Ok(TerminalStreamEvent::Exit(exit_code))) => {
@@ -1136,6 +1144,16 @@ async fn handle_terminal_socket(
                     }
                 }
             }
+            // Flush the accumulated batch buffer to the client on the ~16ms interval.
+            // The guard ensures we only wake for this branch when there is actual data.
+            _ = batch_interval.tick(), if !batch_buffer.is_empty() => {
+                let frame = encode_ttyd_output_frame(&batch_buffer);
+                batch_buffer.clear();
+                if socket.send(Message::Binary(frame.into())).await.is_err() {
+                    break;
+                }
+            }
+
             message = socket.recv() => {
                 match message {
                     Some(Ok(Message::Binary(data))) if bidirectional && !data.is_empty() => {
