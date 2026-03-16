@@ -97,10 +97,6 @@ export function SessionTerminal({
 
   const [terminalReady, setTerminalReady] = useState(false);
   const [ptyWsUrl, setPtyWsUrl] = useState<string | null>(null);
-  const ptySocketRef = useRef<WebSocket | null>(null);
-  const ptyActiveRef = useRef(false);
-  const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
-  const [transportError, setTransportError] = useState<string | null>(null);
   const [interactiveTerminal, setInteractiveTerminal] = useState(true);
   const [searchOpen, setSearchOpen] = useState(() => initialUiState?.searchOpen ?? false);
   const [searchQuery, setSearchQuery] = useState(() => initialUiState?.searchQuery ?? "");
@@ -128,8 +124,6 @@ export function SessionTerminal({
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
   const shouldAttachTerminalSurface = active && pageVisible;
   const shouldStreamLiveTerminal = expectsLiveTerminal && shouldAttachTerminalSurface;
-  const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && connectionState === "live";
-  const canRenderTerminal = shouldAttachTerminalSurface;
   expectsLiveTerminalRef.current = expectsLiveTerminal;
   pageVisibleRef.current = pageVisible;
 
@@ -147,7 +141,7 @@ export function SessionTerminal({
   inputInteractiveRef.current = interactiveTerminal;
 
   // TTyD WebSocket connection (for direct PTY I/O via binary protocol)
-  // Must be declared before httpSendResize that uses it
+  // Must be declared before canSendLiveInput and httpSendResize that use it
   const {
     isConnected: ttydConnected,
     isConnecting: ttydConnecting,
@@ -159,39 +153,26 @@ export function SessionTerminal({
     fitAddon: fitRef.current,
     ptyWsUrl,
     enabled: ptyWsUrl !== null && expectsLiveTerminalRef.current,
-    onConnectionReady: () => {
-      ptyActiveRef.current = true;
-      setConnectionState("live");
-      setTransportError(null);
-    },
-    onConnectionClosed: (code) => {
-      ptyActiveRef.current = false;
-      if (code !== 1000) {
-        setConnectionState("error");
-      } else {
-        setConnectionState("closed");
-      }
-    },
-    onConnectionError: (error) => {
-      ptyActiveRef.current = false;
-      setTransportError(error.message);
-      setConnectionState("error");
-    },
   });
 
-  // When the bidirectional PTY WS is active, resize is handled directly
-  // over the WS — skip the HTTP resize to avoid double SIGWINCH.
+  const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && ttydConnected;
+  const canRenderTerminal = shouldAttachTerminalSurface;
+
+  // When TTyD is active, resize is handled directly over the WebSocket.
+  // Otherwise, fall back to HTTP resize.
   const httpSendResize = useCallback(
     async (cols: number, rows: number): Promise<boolean> => {
       if (ttydConnected) {
         ttydSendResize(cols, rows);
         return true;
       }
-      if (ptyActiveRef.current) return true;
       return sendResize(cols, rows);
     },
     [ttydConnected, ttydSendResize, sendResize],
   );
+
+  // No-op error setter for useTerminalResize (errors are handled by ttyd hook)
+  const noop = useCallback(() => {}, []);
 
   const {
     pendingResizeSyncRef,
@@ -219,7 +200,7 @@ export function SessionTerminal({
     containerRef,
     resumeTextareaRef,
     httpSendResize,
-    setTransportError,
+    noop,
     initialUiState?.viewport ?? null,
   );
 
@@ -295,10 +276,6 @@ export function SessionTerminal({
       window.requestAnimationFrame(() => {
         requestSnapshotRender();
       });
-    }
-    if (snapshot.live) {
-      setConnectionState("live");
-      setTransportError(null);
     }
   }, [lastTerminalSequenceRef, requestSnapshotRender, sessionId, snapshotAppliedRef, snapshotAnsiRef, snapshotModesRef, snapshotTranscriptRef]);
 
@@ -409,8 +386,6 @@ export function SessionTerminal({
     lastObservedContainerSizeRef.current = null;
     lastViewportOptionKeyRef.current = null;
     pendingViewportRestoreRef.current = cachedUiState?.viewport ?? null;
-    setConnectionState("connecting");
-    setTransportError(null);
     setInteractiveTerminal(true);
     setSearchOpen(cachedUiState?.searchOpen ?? false);
     setSearchQuery(cachedUiState?.searchQuery ?? "");
@@ -494,8 +469,6 @@ export function SessionTerminal({
     let mounted = true;
 
     if (!expectsLiveTerminal || !shouldStreamLiveTerminal) {
-      setConnectionState("closed");
-      setTransportError(null);
       return () => { mounted = false; };
     }
 
@@ -508,12 +481,9 @@ export function SessionTerminal({
         if (!mounted) return;
         setPtyWsUrl(connection.ptyWsUrl);
         setInteractiveTerminal(connection.control.interactive);
-        setTransportError(null);
-        setConnectionState("connecting");
       } catch (err) {
         if (!mounted) return;
-        setTransportError(err instanceof Error ? err.message : "Failed to resolve terminal connection");
-        setConnectionState("error");
+        console.error("Failed to resolve terminal connection:", err);
       }
     })();
 
@@ -522,13 +492,10 @@ export function SessionTerminal({
 
   // --- Event handlers (useEffectEvent) ---
   const handleTerminalData = useEffectEvent((data: string) => {
-    // When ttyd WebSocket is active, send input directly over it
     if (ttydConnected) {
       ttydSendInput(data);
       return;
     }
-    // Otherwise skip if ptyActiveRef is set (legacy bidirectional WS)
-    if (ptyActiveRef.current) return;
     void sendTerminalKeys(data).catch(() => {
       // Ignore transient disconnects while xterm is still flushing local input.
     });
@@ -734,10 +701,6 @@ export function SessionTerminal({
   // Active pane recovery — fires ONLY on tab activation.
   // A single recovery re-fits the terminal after potential WebGL context loss,
   // plus one delayed retry to handle late-settling layouts.
-  // connectionState and shouldStreamLiveTerminal intentionally excluded —
-  // recovery must NEVER fire during live streaming or connection transitions,
-  // as it triggers term.refresh() which causes full-screen repaints that
-  // produce visible flicker while data is actively streaming.
   useEffect(() => {
     if (!active) {
       return;
@@ -821,7 +784,7 @@ export function SessionTerminal({
         snapshotLength: snapshotAnsi.length,
         snapshotTranscriptLength: snapshotTranscript.length,
         snapshotPreview: snapshotAnsi.slice(0, 120),
-        connectionState,
+        connectionState: ttydConnected ? "live" : ttydConnecting ? "connecting" : ttydError ? "error" : "closed",
         interactiveTerminal,
         liveOutputStarted: liveOutputStartedRef.current,
         snapshotApplied: snapshotAppliedRef.current,
@@ -848,7 +811,9 @@ export function SessionTerminal({
     };
   }, [
     active,
-    connectionState,
+    ttydConnected,
+    ttydConnecting,
+    ttydError,
     expectsLiveTerminal,
     interactiveTerminal,
     liveOutputStartedRef,
@@ -890,9 +855,7 @@ export function SessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-    // connectionState and shouldStreamLiveTerminal intentionally excluded —
-    // these event handlers must be stable regardless of streaming state.
-    // Re-registering on connection changes was causing unnecessary churn.
+    // shouldStreamLiveTerminal intentionally excluded — these event handlers must be stable
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rememberFocusedSurface, scheduleRendererRecovery]);
 
@@ -920,12 +883,6 @@ export function SessionTerminal({
     terminalWriteRestoreFocusRef.current = false;
     terminalHttpControlQueueRef.current = [];
     terminalHttpControlInFlightRef.current = false;
-    ptyActiveRef.current = false;
-    const ptyWs = ptySocketRef.current;
-    ptySocketRef.current = null;
-    if (ptyWs) {
-      ptyWs.close();
-    }
     if (expectsLiveTerminal) {
       clearCachedTerminalSnapshot(sessionId);
       snapshotAppliedRef.current = null;
@@ -942,9 +899,6 @@ export function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldStreamLiveTerminal, sessionId, expectsLiveTerminal]);
 
-  // WebSocket connection is now handled by useTtydConnection hook above
-
-
   // Global cleanup effect
   useEffect(() => () => {
     clearScheduledRecovery();
@@ -956,9 +910,6 @@ export function SessionTerminal({
     terminalWriteRestoreFocusRef.current = false;
     terminalHttpControlQueueRef.current = [];
     terminalHttpControlInFlightRef.current = false;
-    ptyActiveRef.current = false;
-    ptySocketRef.current?.close();
-    ptySocketRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1215,26 +1166,26 @@ export function SessionTerminal({
         </div>
       ) : (
         <div className={`${immersiveMobileMode ? "absolute right-3 top-14" : "absolute right-2 top-2 sm:right-3 sm:top-3"} z-10 flex items-center gap-1.5 transition-opacity sm:gap-2 ${
-          connectionState === "live"
+          ttydConnected
             ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
             : "opacity-100"
         }`}>
-          {connectionState !== "live" ? (
+          {!ttydConnected ? (
             <Button
               type="button"
               size="icon"
               variant="ghost"
               className={`pointer-events-auto h-10 w-10 sm:h-7 sm:w-7 rounded-full border backdrop-blur-sm ${
-                transportError
+                ttydError
                   ? "border-[#ff8f7a]/25 bg-[#2a1616]/92 text-[#ff8f7a] hover:bg-[#351b1b]"
                   : "border-white/10 bg-[#141010]/92 text-[#c9c0b7] hover:bg-[#201818]"
               }`}
               disabled
-              aria-label="Reconnect (auto-managed by WebSocket)"
+              aria-label="Connecting... (auto-managed by TTyD)"
             >
-              {connectionState === "connecting"
+              {ttydConnecting
                 ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                : transportError
+                : ttydError
                   ? <AlertCircle className="h-3.5 w-3.5" />
                   : <RefreshCw className="h-3.5 w-3.5" />}
             </Button>
