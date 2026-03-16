@@ -253,27 +253,36 @@ async fn terminal_websocket(
     Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    eprintln!("[TERMINAL_WS] Received WebSocket upgrade request for session: {}", id);
+
     if state.get_session(&id).await.is_none() {
+        eprintln!("[TERMINAL_WS] Session not found: {}", id);
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     }
 
     let bidirectional = query.protocol.as_deref() == Some("ttyd");
+    eprintln!("[TERMINAL_WS] Bidirectional mode: {}", bidirectional);
 
     // Bidirectional mode sends keystrokes, so require operator-level access.
     if bidirectional {
         if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
+            eprintln!("[TERMINAL_WS] Authorization failed: {:?}", err);
             return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
         }
     } else if let Err(err) =
         authorize_terminal_stream_socket_access(&state, &id, query.token.as_deref()).await
     {
+        eprintln!("[TERMINAL_WS] Stream authorization failed: {:?}", err);
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
 
     let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
     let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
     let client_sequence = query.sequence;
+
+    eprintln!("[TERMINAL_WS] Calling on_upgrade, about to send 101 response");
     ws.on_upgrade(move |socket| {
+        eprintln!("[TERMINAL_WS] on_upgrade callback invoked, socket is ready");
         handle_terminal_socket(socket, state, id, cols, rows, client_sequence, bidirectional)
     })
 }
@@ -881,13 +890,19 @@ async fn handle_terminal_socket(
     client_sequence: Option<u64>,
     bidirectional: bool,
 ) {
+    eprintln!("[TERMINAL_SOCKET] ==== HANDLER STARTING ====");
     eprintln!("[TERMINAL_SOCKET] Handler called: bidirectional={}, cols={}, rows={}", bidirectional, cols, rows);
+    eprintln!("[TERMINAL_SOCKET] Socket is ready for I/O");
 
     // For bidirectional (ttyd) mode, wait for client handshake first to ensure browser's onopen has fired
     if bidirectional {
-        eprintln!("[TERMINAL_SOCKET] Waiting for client handshake in bidirectional mode");
+        eprintln!("[TERMINAL_SOCKET] ==== BIDIRECTIONAL MODE: Waiting for client handshake ====");
         loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await {
+            eprintln!("[TERMINAL_SOCKET] Calling socket.recv()...");
+            let recv_result = tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
+            eprintln!("[TERMINAL_SOCKET] socket.recv() returned: {:?}", recv_result.as_ref().map(|r| r.as_ref().map(|m| format!("{:?}", m).chars().take(80).collect::<String>())));
+
+            match recv_result {
                 Ok(Some(Ok(msg))) => {
                     eprintln!("[TERMINAL_SOCKET] Received client message: {:?}", msg);
                     // Check if it's a handshake message (JSON starting with '{')

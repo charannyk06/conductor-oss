@@ -101,16 +101,22 @@ export class TtydClient {
     return new Promise((resolve, reject) => {
       try {
         const wsUrl = resolveWebSocketUrl(url);
-        console.log("[TTyD] Connecting to", wsUrl, "from URL:", url);
-        console.log("[TTyD] window.location:", { protocol: window.location.protocol, host: window.location.host });
+        console.log("[TTyD] === INITIATING CONNECTION ===", {
+          originalUrl: url,
+          resolvedWsUrl: wsUrl,
+          timestamp: new Date().toISOString(),
+          windowLocation: { protocol: window.location.protocol, host: window.location.host }
+        });
 
+        console.log("[TTyD] Creating WebSocket object...");
         this.socket = new WebSocket(wsUrl);
+        console.log("[TTyD] WebSocket object created, readyState:", this.socket.readyState);
         this.socket.binaryType = "arraybuffer";
 
         // Add timeout for connection attempts
         const timeout = setTimeout(() => {
           if (this.socket && this.socket.readyState !== WebSocket.OPEN && this.socket.readyState !== WebSocket.CLOSED) {
-            console.error("[TTyD] Connection timeout");
+            console.error("[TTyD] Connection timeout after 10 seconds", { readyState: this.socket?.readyState });
             this.socket.close();
             reject(new Error("WebSocket connection timeout"));
           }
@@ -118,8 +124,9 @@ export class TtydClient {
 
         this.socket.onopen = () => {
           clearTimeout(timeout);
-          console.log("[TTyD] WebSocket onopen fired - connection opened", {
+          console.log("[TTyD] WebSocket ONOPEN FIRED - connection successfully opened", {
             readyState: this.socket?.readyState,
+            readyStateStr: "OPEN",
             timestamp: new Date().toISOString()
           });
 
@@ -174,14 +181,42 @@ export class TtydClient {
 
         this.socket.onerror = (event) => {
           clearTimeout(timeout);
-          console.error("[TTyD] WebSocket error event (full object)", event);
-          console.error("[TTyD] WebSocket error event (properties)", {
-            type: event.type,
-            readyState: this.socket?.readyState,
-            currentTarget: (event.currentTarget as WebSocket)?.readyState,
-            error: (event as any).error,
-            message: (event as any).message,
+          const readyState = this.socket?.readyState;
+          const readyStateStr = readyState === 0 ? 'CONNECTING' : readyState === 1 ? 'OPEN' : readyState === 2 ? 'CLOSING' : readyState === 3 ? 'CLOSED' : 'UNKNOWN';
+
+          console.error("[TTyD] WebSocket ERROR FIRED (BEFORE onopen check)", {
+            timestamp: new Date().toISOString(),
+            readyState,
+            readyStateStr,
+            eventType: event.type,
           });
+
+          // Try to get error details from various properties
+          const errorDetails: any = {
+            type: event.type,
+            currentTarget: event.currentTarget?.constructor.name,
+            isTrusted: event.isTrusted,
+            eventKeys: Object.keys(event).filter(k => !k.startsWith('_')),
+          };
+
+          // Check for error/message properties (even though they typically don't exist on WebSocket error events)
+          if ((event as any).error) errorDetails.error = String((event as any).error);
+          if ((event as any).message) errorDetails.message = String((event as any).message);
+          if ((event as any).reason) errorDetails.reason = String((event as any).reason);
+          if ((event as any).code) errorDetails.code = (event as any).code;
+
+          console.error("[TTyD] Error event details:", errorDetails);
+
+          // Also log the socket state in detail
+          if (this.socket) {
+            console.error("[TTyD] Socket state at error time:", {
+              readyState: this.socket.readyState,
+              url: this.socket.url,
+              binaryType: this.socket.binaryType,
+              bufferedAmount: this.socket.bufferedAmount,
+            });
+          }
+
           reject(new Error("WebSocket connection failed"));
         };
       } catch (err) {
