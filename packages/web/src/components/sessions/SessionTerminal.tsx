@@ -116,6 +116,8 @@ export function SessionTerminal({
 
   const [terminalReady, setTerminalReady] = useState(false);
   const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
+  const [ttydWsUrl, setTtydWsUrl] = useState<string | null>(null);
+  const ttydSocketRef = useRef<WebSocket | null>(null);
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [transportError, setTransportError] = useState<string | null>(null);
   const [interactiveTerminal, setInteractiveTerminal] = useState(true);
@@ -617,6 +619,10 @@ export function SessionTerminal({
         setSocketBaseUrl(null);
         const connection = await fetchTerminalConnection(sessionId);
         if (!mounted) return;
+        // Check for ttyd WebSocket URL (direct PTY streaming)
+        const rawResponse = connection as Record<string, unknown>;
+        const ttydUrl = typeof rawResponse.ttydWsUrl === "string" ? rawResponse.ttydWsUrl : null;
+        setTtydWsUrl(ttydUrl);
         setSocketBaseUrl(connection.stream.wsUrl);
         setInteractiveTerminal(connection.control.interactive);
         setTransportNotice(connection.control.fallbackReason);
@@ -1114,8 +1120,73 @@ export function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldStreamLiveTerminal, sessionId, expectsLiveTerminal]);
 
-  // EventSource connection effect
+  // ttyd WebSocket connection (preferred when available)
   useEffect(() => {
+    if (!ttydWsUrl || !terminalReady || !shouldStreamLiveTerminal) return;
+    const term = termRef.current;
+    if (!term) return;
+
+    const ws = new WebSocket(ttydWsUrl);
+    ws.binaryType = "arraybuffer";
+    ttydSocketRef.current = ws;
+
+    ws.onopen = () => {
+      setConnectionState("live");
+      setTransportError(null);
+      setTransportNotice(null);
+      // Send initial resize
+      const resizeJson = JSON.stringify({ columns: term.cols, rows: term.rows });
+      const encoder = new TextEncoder();
+      const resizePayload = encoder.encode("1" + resizeJson);
+      ws.send(resizePayload);
+    };
+
+    ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) {
+        const data = new Uint8Array(event.data);
+        if (data.length > 0 && data[0] === 0) {
+          // Type 0 = output: write raw PTY bytes directly to xterm
+          term.write(data.subarray(1));
+        }
+        // Type 1 = title change (ignored)
+        // Type 2 = preferences (ignored)
+      }
+    };
+
+    ws.onerror = () => {
+      setTransportError("ttyd WebSocket error");
+      setConnectionState("error");
+    };
+
+    ws.onclose = () => {
+      if (ttydSocketRef.current === ws) {
+        ttydSocketRef.current = null;
+        setConnectionState("closed");
+      }
+    };
+
+    // Handle xterm input → ttyd
+    const inputDisposable = term.onData((data: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        const encoder = new TextEncoder();
+        const payload = encoder.encode("0" + data);
+        ws.send(payload);
+      }
+    });
+
+    return () => {
+      inputDisposable.dispose();
+      if (ttydSocketRef.current === ws) {
+        ttydSocketRef.current = null;
+      }
+      ws.close();
+    };
+  }, [ttydWsUrl, terminalReady, shouldStreamLiveTerminal]);
+
+  // EventSource connection effect (fallback when ttyd not available)
+  useEffect(() => {
+    // Skip SSE if ttyd is connected
+    if (ttydWsUrl) return;
     if (
       !terminalReady
       || !socketBaseUrl

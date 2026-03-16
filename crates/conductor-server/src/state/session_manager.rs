@@ -314,6 +314,30 @@ fn set_parser_state(
     }
 }
 
+/// Build a minimal command for ttyd to launch an agent.
+pub(crate) fn build_ttyd_command(agent: &str, prompt: &str) -> Vec<String> {
+    let kind = conductor_core::types::AgentKind::parse(agent);
+    let mut cmd: Vec<String> = match kind {
+        conductor_core::types::AgentKind::ClaudeCode => {
+            vec!["claude".into(), "--dangerously-skip-permissions".into()]
+        }
+        conductor_core::types::AgentKind::Codex => vec!["codex".into()],
+        conductor_core::types::AgentKind::Gemini => vec!["gemini".into()],
+        conductor_core::types::AgentKind::QwenCode => vec!["qwen".into()],
+        conductor_core::types::AgentKind::Amp => vec!["amp".into()],
+        conductor_core::types::AgentKind::CursorCli => vec!["cursor-agent".into()],
+        conductor_core::types::AgentKind::OpenCode => vec!["opencode".into()],
+        conductor_core::types::AgentKind::Droid => vec!["droid".into()],
+        conductor_core::types::AgentKind::GithubCopilot => vec!["copilot".into()],
+        conductor_core::types::AgentKind::Ccr => vec!["ccr".into()],
+        conductor_core::types::AgentKind::Custom(ref name) => vec![name.clone()],
+    };
+    if !prompt.trim().is_empty() {
+        cmd.push(prompt.to_string());
+    }
+    cmd
+}
+
 fn detect_parser_state(session: &mut SessionRecord, text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -933,6 +957,45 @@ impl AppState {
                     .map(std::time::Duration::from_secs),
             },
         );
+
+        // Spawn ttyd alongside for direct WebSocket PTY streaming.
+        // Non-blocking, non-fatal. Falls back to existing transport if ttyd missing.
+        {
+            let state = Arc::clone(self);
+            let sid = session_id.clone();
+            let cwd = workspace_path.working_directory.clone();
+            let prompt = prompt.clone();
+            let agent_name = project_agent.clone();
+            tokio::spawn(async move {
+                if conductor_executors::ttyd::find_ttyd().is_err() {
+                    return;
+                }
+                // Build minimal agent command for ttyd
+                let command = crate::state::session_manager::build_ttyd_command(
+                    &agent_name, &prompt,
+                );
+                let env: HashMap<String, String> = std::env::vars().collect();
+                match conductor_executors::ttyd::TtydSession::spawn(
+                    &command,
+                    &cwd,
+                    &env,
+                ).await {
+                    Ok(session) => {
+                        let ws_url = session.ws_url.clone();
+                        let http_url = session.http_url.clone();
+                        state.ttyd_sessions.lock().await.insert(sid.clone(), session);
+                        if let Some(s) = state.sessions.write().await.get_mut(&sid) {
+                            s.metadata.insert("ttydWsUrl".to_string(), ws_url.clone());
+                            s.metadata.insert("ttydHttpUrl".to_string(), http_url);
+                        }
+                        tracing::info!(session_id = %sid, ttyd_ws = %ws_url, "ttyd spawned");
+                    }
+                    Err(err) => {
+                        tracing::warn!(session_id = %sid, error = %err, "ttyd spawn skipped");
+                    }
+                }
+            });
+        }
 
         Ok(record)
     }

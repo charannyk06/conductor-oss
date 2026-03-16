@@ -110,6 +110,8 @@ pub struct AppState {
     runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
     dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
     feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
+    /// Active ttyd processes keyed by session ID.
+    pub ttyd_sessions: Mutex<HashMap<String, conductor_executors::ttyd::TtydSession>>,
 }
 
 impl AppState {
@@ -139,6 +141,7 @@ impl AppState {
             runtime_status_cache: Mutex::new(HashMap::new()),
             dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
             feed_payload_cache: Mutex::new(HashMap::new()),
+            ttyd_sessions: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;

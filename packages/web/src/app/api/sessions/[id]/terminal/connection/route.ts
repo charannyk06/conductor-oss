@@ -133,19 +133,48 @@ export async function GET(
     ? roleMeetsRequirement(access.role, "operator")
     : false;
 
+  // Fetch session to check for ttyd WebSocket URL
+  let ttydWsUrl: string | null = null;
+  try {
+    const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
+    const sessionRes = await fetch(`${backendUrl}/api/sessions/${encodeURIComponent(id)}`, {
+      cache: "no-store",
+      headers: { "x-conductor-proxy-authorized": "true" },
+    });
+    if (sessionRes.ok) {
+      const sessionData = (await sessionRes.json()) as { metadata?: Record<string, string> };
+      ttydWsUrl = sessionData?.metadata?.ttydWsUrl ?? null;
+    }
+  } catch {
+    // Non-fatal: fall through to regular transport
+  }
+
   if (!interactive) {
-    return buildEventStreamConnection(
+    const response = buildEventStreamConnection(
       id,
       false,
       "Live terminal control requires operator access. The terminal stays live in read-only mode.",
       startedAt
     );
+    if (ttydWsUrl) {
+      const body = await response.json();
+      body.ttydWsUrl = ttydWsUrl;
+      return applyTerminalConnectionHeaders(
+        NextResponse.json(body),
+        { startedAt, transport: "eventstream", interactive: false },
+      );
+    }
+    return response;
   }
 
-  return buildEventStreamConnection(
-    id,
-    true,
-    null,
-    startedAt
-  );
+  const response = buildEventStreamConnection(id, true, null, startedAt);
+  if (ttydWsUrl) {
+    const body = await response.json();
+    body.ttydWsUrl = ttydWsUrl;
+    return applyTerminalConnectionHeaders(
+      NextResponse.json(body),
+      { startedAt, transport: "eventstream", interactive: true },
+    );
+  }
+  return response;
 }

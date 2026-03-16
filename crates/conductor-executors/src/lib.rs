@@ -1,6 +1,7 @@
 pub mod discovery;
 pub mod executor;
 pub mod process;
+pub mod ttyd;
 pub mod prompt;
 
 pub mod agents;
