@@ -2,7 +2,7 @@
 
 # Conductor OSS
 
-### Local-first orchestration for coding-agent CLIs
+### The local-first control plane for AI coding agents
 
 **One command. Markdown-native. No cloud relay.**
 
@@ -14,61 +14,30 @@
 
 </div>
 
-Conductor OSS is a local-first control plane for software work driven by AI coding agents.
+---
 
-It turns Markdown kanban boards into dispatchable work, launches installed coding CLIs inside isolated workspaces, persists state in local files plus SQLite, and gives you a browser dashboard for live terminal access, normalized session history, preview, diff review, and recovery workflows.
+Conductor OSS is a local-first orchestration platform for AI coding agents. It takes Markdown kanban boards, turns them into dispatchable work, and launches your installed coding CLIs — Claude Code, Codex, Gemini, and seven others — inside isolated git worktrees with full terminal access from a browser dashboard.
 
-If you already use tools like Claude Code, Codex, Gemini, Qwen Code, Cursor Agent, Amp, OpenCode, Copilot, or CCR, Conductor is the orchestration layer around them rather than a replacement for them.
+Everything runs on your machine. State lives in local files and SQLite. Agents keep their own authentication and billing. Conductor is the operating layer around them, not a replacement.
 
-## What Conductor Does
+<div align="center">
 
-- Dispatches tasks from `CONDUCTOR.md` boards into real agent sessions.
-- Runs agents locally in the repo or in isolated git worktrees.
-- Uses a terminal-first runtime so each session remains an interactive shell-backed workspace.
-- Streams session status into a dashboard over SSE and websocket-backed terminal connections.
-- Tracks retries, restores, kill/archive flows, session diffs, checks, previews, and feedback loops.
-- Stores state locally in `conductor.yaml`, `CONDUCTOR.md`, and `.conductor/conductor.db`.
-- Keeps agent authentication and billing with the upstream CLI you already installed.
+![Conductor full demo](docs/demo/full-demo.gif)
 
-## Core Workflow
+</div>
 
-1. Add a local repo or clone one into a managed workspace.
-2. Create or edit tasks in `CONDUCTOR.md`.
-3. Move a task into `Ready to Dispatch`.
-4. Conductor launches the selected agent in an isolated workspace.
-5. Follow the session from the browser:
-   - `Terminal`: the live terminal is the primary session workspace.
-   - `Overview`: normalized feed, runtime state, metadata, and recovery hints.
-   - `Preview`: connect a local dev URL and interact with the app from the session page.
-   - `Diff`: inspect changed files, workspace contents, and checks.
-6. Retry, restore, send feedback, or archive the session when needed.
+## Why Conductor
 
-## Highlights
+Running one agent in one terminal works fine for a single task. When you want to queue multiple tasks across multiple repos, dispatch them to different agents, watch them run in parallel, retry failures, review diffs, and coordinate it all from one place — you need an orchestration layer.
 
-- Local-first by design: no hosted relay, no repo proxy, no hosted state store.
-- Markdown-native planning: boards remain readable outside the app.
-- Multi-agent support with adapter-based discovery and launch logic.
-- Worktree-aware execution for parallel changes in the same repository.
-- Session recovery after backend restarts, including direct PTY terminal restore for live runtimes.
-- GitHub-aware flows for repository import, PR metadata, checks, and project syncing.
-- MCP server mode for integrating Conductor with external clients.
+Conductor adds:
 
-## Supported Agents
-
-Built-in adapters currently exist for:
-
-- Claude Code
-- Codex
-- Gemini
-- Qwen Code
-- Amp
-- Cursor Agent
-- OpenCode
-- Droid
-- GitHub Copilot
-- CCR
-
-Availability still depends on what is installed and authenticated on your machine.
+- **Planning** — Markdown kanban boards that work in Obsidian and in the browser
+- **Dispatch** — Automated task-to-agent assignment with queue management
+- **Isolation** — Git worktree-per-session so agents never step on each other
+- **Visibility** — Live terminal streaming, session feeds, and diff inspection
+- **Recovery** — Session restore after backend restarts, retries, and feedback loops
+- **Review** — PR creation, CI check monitoring, and code diff tools built in
 
 ## Quick Start
 
@@ -76,46 +45,18 @@ Availability still depends on what is installed and authenticated on your machin
 
 - Node.js `>= 18`
 - `git`
-- at least one supported coding-agent CLI installed and authenticated
+- At least one supported coding agent CLI installed and authenticated
 
-### Launch Conductor
+### Launch
 
 ```bash
 npx conductor-oss@latest
 ```
 
-The npm launcher defaults to `co start --open`, which starts the local stack and opens the dashboard.
+This starts the Rust backend and Next.js dashboard, then opens the browser. Default ports:
 
-### Native Launch Experience
-
-Conductor launches agents into their native terminal UIs instead of replacing them with a synthetic chat shell.
-
-- Claude Code launches into the full Claude Code terminal workspace.
-- Codex launches into the full Codex terminal app and keeps the native review and tool flow intact.
-- Gemini launches into the full Gemini CLI terminal UI, including its native multi-step workflow.
-
-The dashboard terminal is a live viewer and input surface over the backend-owned session, so reconnecting or switching sessions preserves the real agent experience instead of rebuilding a frontend-only shell.
-
-Agent launch surface:
-
-![Conductor agent picker](docs/screenshots/launch-agent-picker.png)
-
-Claude Code session:
-
-![Claude Code native terminal in Conductor](docs/screenshots/launch-claude-native.png)
-
-Codex session:
-
-![Codex native terminal in Conductor](docs/screenshots/launch-codex-native.png)
-
-Gemini session:
-
-![Gemini native terminal in Conductor](docs/screenshots/launch-gemini-native.png)
-
-Launcher defaults:
-
-- dashboard: `http://127.0.0.1:4747`
-- Rust backend: `http://127.0.0.1:4748`
+- Dashboard: `http://127.0.0.1:4747`
+- Backend: `http://127.0.0.1:4748`
 
 ### Initialize an existing repo
 
@@ -124,186 +65,266 @@ npx conductor-oss@latest init
 npx conductor-oss@latest start --workspace .
 ```
 
-That scaffolds:
+This scaffolds `conductor.yaml`, `CONDUCTOR.md`, and `.conductor/conductor.db` in the current directory.
 
-- `conductor.yaml`
-- `CONDUCTOR.md`
-- `.conductor/conductor.db`
-
-If you prefer a global install:
+### Global install
 
 ```bash
 npm install -g conductor-oss
 co
 ```
 
-The launcher exposes `conductor-oss`, `conductor`, and `co`.
+The launcher registers three aliases: `conductor-oss`, `conductor`, and `co`.
 
-## CLI Overview
+## Supported Agents
 
-The npm launcher is the main user-facing CLI. Run `co --help` for the full surface.
+Conductor ships with adapters for 10 coding agent CLIs. Each adapter handles binary detection, launch commands, process monitoring, and prompt delivery.
 
-Common launcher commands:
+| Agent | CLI |
+|-------|-----|
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Gemini | `gemini` |
+| Qwen Code | `qwen` |
+| Amp | `amp` |
+| Cursor Agent | `cursor-agent` |
+| OpenCode | `opencode` |
+| Droid | `droid` |
+| GitHub Copilot | `gh copilot` |
+| CCR | `ccr` |
 
-- `co start` - start the Rust backend and web dashboard
-- `co dashboard` - open the dashboard
-- `co init` - scaffold `conductor.yaml` and `CONDUCTOR.md`
-- `co setup` - guided first-run setup
-- `co doctor` - diagnose backend and runtime issues
-- `co spawn` - create a session
-- `co list` - list sessions
-- `co status` - summarize session state
-- `co send` - send a follow-up to a session
-- `co attach` - legacy command kept only to explain the direct-terminal migration
-- `co restore` - restore an exited session
-- `co retry` - create a new attempt from an earlier task or session
-- `co kill` - terminate a session
-- `co cleanup` - reclaim resources from completed sessions
-- `co feedback` - send reviewer feedback back into a session
-- `co task` - task graph helpers
-- `co mcp-server` - run Conductor as an MCP server over stdio
+Agents appear in the dashboard picker based on what is installed and authenticated on your machine.
 
-There is also a native Rust CLI in `crates/conductor-cli` used by the launcher and source development. Its command set is intentionally smaller and lower-level than the npm launcher.
+## Native Terminal Experience
 
-## Configuration and Local Data
+Conductor launches agents into their real terminal UIs — not a synthetic chat shell. Claude Code runs as Claude Code. Codex runs as Codex. The dashboard terminal is a live viewer over the backend-owned PTY session using the TTyD binary protocol, so reconnecting or switching sessions preserves the native agent experience.
 
-Conductor uses a small set of local files:
+<div align="center">
 
-- `conductor.yaml`
-  Workspace and project configuration, agent defaults, access settings, and runtime preferences.
-- `CONDUCTOR.md`
-  Markdown kanban board used for planning and dispatch.
-- `.conductor/conductor.db`
-  SQLite persistence for sessions, metadata, and runtime state.
-- `.conductor/rust-backend/detached/`
-  Runtime artifacts for direct PTY-backed sessions.
-- `attachments/...`
-  Uploaded session files and generated artifacts.
+| Agent Picker | Claude Code Session |
+|:---:|:---:|
+| ![Agent picker](docs/screenshots/launch-agent-picker.png) | ![Claude Code terminal](docs/screenshots/launch-claude-native.png) |
 
-## Application Surfaces
+| Codex Session | Gemini Session |
+|:---:|:---:|
+| ![Codex terminal](docs/screenshots/launch-codex-native.png) | ![Gemini terminal](docs/screenshots/launch-gemini-native.png) |
 
-### Dashboard
+</div>
 
-The Next.js dashboard is the main UI for:
+## How It Works
 
-- project and repository management
-- board editing and task comments
-- session monitoring
-- terminal access
-- preview browser controls
-- diff and file inspection
-- PR and check visibility
-- app update notices and runtime health
+### Task Lifecycle
 
-### Rust Backend
+```
+Inbox → Ready to Dispatch → Dispatching → In Progress → Review → Done
+```
 
-The Rust backend is the orchestration core. It handles:
+1. **Create tasks** in `CONDUCTOR.md` — a Markdown kanban board compatible with Obsidian
+2. **Move tasks** to "Ready to Dispatch" (or let the automation promote them)
+3. **Conductor dispatches** — picks up queued tasks, selects an agent, prepares the workspace
+4. **Agent executes** — launched in an isolated git worktree with a compiled task prompt
+5. **Monitor live** — terminal streaming, normalized session feed, and runtime metadata in the dashboard
+6. **Review output** — inspect diffs, browse changed files, view CI checks, create PRs
+7. **Iterate** — retry, restore, send feedback, or archive
 
-- session lifecycle and spawn queueing
-- executor discovery and agent adapters
-- direct PTY runtime management
-- workspace and worktree preparation
-- SQLite persistence
-- SSE event streaming
-- terminal websocket transport
-- board automation and filesystem watching
-- GitHub and notification integrations
+### Dashboard Surfaces
 
-### Terminal-First Sessions
+Each session page provides:
 
-The live terminal is now the primary session workspace. The dashboard still provides a normalized feed and metadata, but interactive work is expected to happen through the terminal surface, not a synthetic chat-only shell.
+- **Terminal** — live interactive terminal over the agent's PTY session
+- **Overview** — normalized conversation feed, runtime state, metadata, and recovery actions
+- **Preview** — connect a local dev URL and interact with the running app
+- **Diff** — file-level change inspection and workspace file browser
 
-### Terminal Validation And Rollout
+<div align="center">
 
-Phase 2 terminal validation now has explicit operator guidance:
+| Dashboard Overview | Session Detail |
+|:---:|:---:|
+| ![Dashboard](docs/screenshots/01-dashboard-overview.png) | ![Session](docs/screenshots/07-session-detail.png) |
 
-- [Terminal rollout notes](docs/terminal-rollout.md) cover benchmark hooks, acceptance targets, merge gates, and failure signals to capture.
-- [Terminal QA checklist](docs/terminal-qa-checklist.md) covers desktop, phone, and private-remote manual verification.
-- [Terminal QA matrix](docs/terminal-qa-matrix.md) is the sign-off sheet for recorded timings and pass/fail status.
-- `bun run bench:terminal -- <session-id>` runs the lightweight terminal benchmark sweep through the dashboard endpoints.
+</div>
+
+## CLI Reference
+
+The npm launcher (`co`) is the primary CLI. Run `co --help` for the full command list.
+
+| Command | Description |
+|---------|-------------|
+| `co start` | Start the backend and dashboard |
+| `co init` | Scaffold `conductor.yaml` and `CONDUCTOR.md` |
+| `co setup` | Guided first-run configuration |
+| `co doctor` | Diagnose backend and runtime issues |
+| `co spawn` | Create a new session |
+| `co list` | List all sessions |
+| `co status` | Summarize workspace and session state |
+| `co send` | Send a follow-up message to a running session |
+| `co feedback` | Send reviewer feedback into a session |
+| `co retry` | Create a new attempt from a prior task or session |
+| `co restore` | Restore an exited session |
+| `co kill` | Terminate a session |
+| `co cleanup` | Reclaim resources from completed sessions |
+| `co dashboard` | Open the dashboard in a browser |
+| `co mcp-server` | Run Conductor as an MCP server over stdio |
+
+A lower-level Rust CLI also exists in `crates/conductor-cli` for direct backend interaction during development.
+
+## Configuration
+
+Conductor uses three local files:
+
+| File | Purpose |
+|------|---------|
+| `conductor.yaml` | Workspace config, project definitions, agent defaults, runtime preferences |
+| `CONDUCTOR.md` | Markdown kanban board for planning and dispatch |
+| `.conductor/conductor.db` | SQLite database for sessions, metadata, and runtime state |
+
+Additional runtime artifacts:
+
+- `.conductor/rust-backend/detached/` — PTY session data for terminal restore
+- `attachments/` — Uploaded files and generated session artifacts
 
 ## Architecture
 
-User-facing stack:
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   npm launcher   │    │  Next.js 16 UI   │    │  Rust backend   │
+│  packages/cli    │    │  packages/web    │    │  conductor-     │
+│                  │    │                  │    │  server         │
+│  start, spawn,   │───▶│  Dashboard,      │◀──▶│  HTTP + SSE +   │
+│  init, doctor    │    │  Terminal,       │    │  WebSocket      │
+│                  │    │  Diff, Preview   │    │                 │
+└─────────────────┘    └──────────────────┘    └────────┬────────┘
+                                                        │
+                    ┌───────────────────────────────────┤
+                    │                                   │
+          ┌────────▼────────┐               ┌──────────▼──────────┐
+          │  conductor-core  │               │ conductor-executors  │
+          │  Types, config,  │               │ 10 agent adapters,   │
+          │  board parsing   │               │ process management   │
+          └─────────────────┘               └──────────────────────┘
+                    │                                   │
+          ┌────────▼────────┐               ┌──────────▼──────────┐
+          │  conductor-db    │               │  conductor-git       │
+          │  SQLite via sqlx │               │  Worktree isolation  │
+          └─────────────────┘               └──────────────────────┘
+```
 
-- npm launcher in `packages/cli`
-- Next.js dashboard in `packages/web`
-- Rust backend in `crates/conductor-server`
+### Rust Crates
 
-Rust workspace crates:
+| Crate | Purpose |
+|-------|---------|
+| `conductor-server` | Axum HTTP server — 24 route modules, session manager, PTY runtime, SSE streaming |
+| `conductor-core` | Shared types, board parser, configuration, task and session models |
+| `conductor-executors` | 10 agent adapters — binary detection, launch commands, prompt delivery |
+| `conductor-db` | SQLite persistence via sqlx with compile-time checked queries |
+| `conductor-git` | Git operations and worktree lifecycle management |
+| `conductor-watcher` | Filesystem watcher for `CONDUCTOR.md` changes |
+| `conductor-cli` | Low-level Rust CLI binary |
 
-- `crates/conductor-cli`
-- `crates/conductor-core`
-- `crates/conductor-db`
-- `crates/conductor-executors`
-- `crates/conductor-git`
-- `crates/conductor-server`
-- `crates/conductor-watcher`
+### TypeScript Packages
 
-Key runtime properties:
+| Package | Purpose |
+|---------|---------|
+| `packages/cli` | npm launcher — user-facing CLI, binary management, process orchestration |
+| `packages/web` | Next.js 16 dashboard — session UI, terminal viewer, board editor, diff tools |
+| `packages/core` | Shared TypeScript types and Zod schemas |
 
-- local-first
-- SQLite-only persistence
-- direct PTY-backed interactive sessions
-- agent-agnostic execution
-- Markdown-native board state
+### Key Design Decisions
+
+- **Local-first** — no cloud relay, no credential proxying, all state on disk
+- **SQLite-only** — single-file database, no external DB dependency
+- **Direct PTY** — shell-backed sessions via `portable-pty`, not synthetic chat shells
+- **Agent-agnostic** — Conductor orchestrates; each agent keeps its own auth and billing
+- **Markdown-native** — boards live in `CONDUCTOR.md`, readable in any editor or Obsidian
+- **Worktree isolation** — each session gets its own git worktree to prevent conflicts
+- **TTyD protocol** — binary WebSocket framing for efficient terminal streaming
 
 ## Develop From Source
 
-Requirements:
+### Prerequisites
 
+- Rust stable toolchain
 - Bun `>= 1.2`
 - Node.js `>= 18`
-- Rust toolchain
-Install dependencies:
+- `git`
+
+### Setup
 
 ```bash
 bun install
 ```
 
-Run the full dev stack:
+### Commands
 
 ```bash
-bun run dev:full
+bun run dev:full     # Dashboard (port 3000) + Rust backend (port 4749)
+bun run dev          # Dashboard only
+bun run dev:backend  # Backend only (or: cargo run --bin conductor-server)
+bun run build        # Full production build
+bun run typecheck    # TypeScript type checking
+
+cargo test --workspace                   # Rust tests
+cargo clippy --workspace -- -D warnings  # Rust linting
 ```
 
-Source-dev defaults:
+### Dev Ports
 
-- dashboard: `http://localhost:3000`
-- Rust backend: `http://127.0.0.1:4749`
+| Service | Port |
+|---------|------|
+| Dashboard (dev) | `http://localhost:3000` |
+| Dashboard (prod) | `http://127.0.0.1:4747` |
+| Rust backend | `http://127.0.0.1:4749` |
 
-Useful commands:
+## Demos
 
-```bash
-bun run dev
-bun run dev:backend
-bun run dev:full
-bun run build
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-bun run typecheck
+<div align="center">
+
+| Add a task | Auto-dispatch |
+|:---:|:---:|
+| ![Add task](docs/demo/01-add-task.gif) | ![Auto dispatch](docs/demo/02-auto-dispatch.gif) |
+
+| Live terminal | PR creation |
+|:---:|:---:|
+| ![Live terminal](docs/demo/03-live-terminal.gif) | ![PR creation](docs/demo/05-pr-creation.gif) |
+
+</div>
+
+## Project Structure
+
+```
+conductor-oss/
+├── crates/
+│   ├── conductor-server/       # Axum HTTP server, routes, state, SSE
+│   ├── conductor-core/         # Types, config, board parsing
+│   ├── conductor-executors/    # Agent adapters (10 agents)
+│   ├── conductor-db/           # SQLite persistence
+│   ├── conductor-git/          # Git/worktree operations
+│   ├── conductor-watcher/      # Filesystem watcher
+│   ├── conductor-cli/          # Rust CLI binary
+│   └── notify-rust/            # Desktop notifications
+├── packages/
+│   ├── cli/                    # npm launcher
+│   ├── web/                    # Next.js dashboard
+│   └── core/                   # Shared TypeScript types
+├── docs/
+│   ├── screenshots/            # Dashboard and session screenshots
+│   ├── demo/                   # Workflow demo GIFs
+│   └── terminal-*.md           # Terminal protocol and QA docs
+├── .github/workflows/          # CI, release, security, PR checks
+├── Cargo.toml                  # Rust workspace
+├── package.json                # Bun workspace
+├── conductor.yaml              # Workspace config (user-created)
+├── CONDUCTOR.md                # Kanban board (user-created)
+└── LICENSE                     # MIT
 ```
 
-## Current Constraints
+## Known Constraints
 
-- The interactive runtime is direct PTY-backed; old tmux sessions are treated as legacy compatibility data.
-- Agent behavior and output quality depend on the upstream CLI you install.
-- GitHub-heavy flows work best with `gh` installed and authenticated.
-- Preview tooling is strongest when a repo exposes a local dev server or preview URL.
-- Public tunnel-style remote access was removed; protected remote setups should use your own network or proxy layer.
-
-## Why Conductor Exists
-
-Single-agent terminals are useful for one task at a time. Conductor adds the operating layer around them:
-
-- queueing
-- planning
-- isolation
-- visibility
-- retries
-- recovery
-- review
-- browser-based coordination
+- Agent output quality depends entirely on the upstream CLI you install — Conductor orchestrates, it does not modify agent behavior
+- GitHub-integrated flows (PR creation, check monitoring) work best with `gh` installed and authenticated
+- Preview tooling requires a repo that exposes a local dev server URL
+- Remote access was intentionally removed — use your own network or proxy layer for remote setups
+- The runtime is direct PTY-only; legacy tmux sessions are treated as compatibility data
 
 ## Links
 
