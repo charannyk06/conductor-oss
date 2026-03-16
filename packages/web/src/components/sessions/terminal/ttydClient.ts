@@ -44,14 +44,13 @@ const CMD_SET_PREFS = 0x32; // '2'
 const CMD_INPUT = 0x30;     // '0'
 const CMD_RESIZE = 0x31;    // '1'
 
+// Flow control is simple: just track pending writes
 export interface FlowControlConfig {
-  limit: number;     // bytes accumulated before engaging flow control
   highWater: number; // pending writes threshold to send PAUSE
   lowWater: number;  // pending writes threshold to send RESUME
 }
 
 export const DEFAULT_FLOW_CONTROL: FlowControlConfig = {
-  limit: 100_000,
   highWater: 10,
   lowWater: 4,
 };
@@ -75,16 +74,8 @@ export class TtydClient {
   private flowControl: FlowControlConfig;
   private callbacks: TtydCallbacks;
 
-  // Flow control state — mirrors reference ttyd exactly
-  private written = 0;
+  // Flow control state — track pending writes
   private pending = 0;
-
-  // Write batching — accumulate chunks between animation frames so a single
-  // TUI update (which the backend may split across multiple 4KB PTY reads)
-  // lands as one atomic terminal.write() call with no intermediate renders.
-  private batchChunks: Uint8Array[] = [];
-  private batchBytes = 0;
-  private batchFrame: number | null = null;
 
   private textEncoder = new TextEncoder();
   private textDecoder = new TextDecoder("utf-8", { fatal: false });
@@ -161,10 +152,8 @@ export class TtydClient {
 
   /**
    * Disconnect from the WebSocket.
-   * Handlers are nulled before close to prevent spurious callbacks during cleanup.
    */
   disconnect(): void {
-    this.cancelBatch();
     // Flush any remaining UTF-8 sequence from the decoder
     const remaining = this.textDecoder.decode();
     if (remaining) {
@@ -228,10 +217,8 @@ export class TtydClient {
 
     switch (cmd) {
       case CMD_OUTPUT:
-        // Terminal output — accumulate into the write batch.
-        // The batch is flushed to xterm.js on the next animation frame so
-        // multiple small WebSocket messages land as one atomic write.
-        this.enqueueOutput(payload);
+        // Terminal output — write directly with flow control
+        this.writeOutput(payload);
         break;
       case CMD_SET_TITLE:
         try {
@@ -255,107 +242,28 @@ export class TtydClient {
   }
 
   /**
-   * Enqueue output data for the next batched write.
-   *
-   * Data is copied into the batch buffer immediately (the WebSocket
-   * ArrayBuffer may be reused). A rAF callback is scheduled to flush all
-   * accumulated chunks as a single terminal.write() call, eliminating
-   * intermediate renders that cause garbled TUI output.
+   * Write output data directly to xterm.js with flow control.
+   * Decodes UTF-8 and applies backpressure via PAUSE/RESUME.
    */
-  private enqueueOutput(data: Uint8Array): void {
-    // Copy the data — subarray shares the WebSocket ArrayBuffer which may
-    // not be retained across message events in all browser implementations.
-    const copy = new Uint8Array(data.length);
-    copy.set(data);
-
-    this.batchChunks.push(copy);
-    this.batchBytes += copy.length;
-
-    if (this.batchFrame === null) {
-      this.batchFrame = requestAnimationFrame(() => {
-        this.batchFrame = null;
-        this.flushBatch();
-      });
-    }
-  }
-
-  /**
-   * Flush the accumulated write batch to xterm.js as a single write.
-   *
-   * Concatenates all queued chunks into one Uint8Array and calls
-   * terminal.write() once. This ensures xterm.js processes the entire
-   * batch atomically — the parser handles the full sequence of escape codes
-   * before the renderer paints, eliminating partial/garbled intermediate frames.
-   *
-   * Flow control (PAUSE/RESUME) is applied per the ttyd protocol.
-   */
-  private flushBatch(): void {
-    if (this.batchChunks.length === 0) {
-      return;
-    }
-
-    // Fast path: single chunk — no concatenation needed
-    let batch: Uint8Array;
-    if (this.batchChunks.length === 1) {
-      batch = this.batchChunks[0]!;
-    } else {
-      batch = new Uint8Array(this.batchBytes);
-      let offset = 0;
-      for (const chunk of this.batchChunks) {
-        batch.set(chunk, offset);
-        offset += chunk.length;
-      }
-    }
-
-    this.batchChunks = [];
-    this.batchBytes = 0;
-
-    // Apply flow control on the aggregated batch
-    this.writeTerminalData(batch);
-  }
-
-  /**
-   * Write data to xterm.js with ttyd flow control.
-   *
-   * Below the byte limit: fast path — terminal.write(data) with zero overhead.
-   * Above the byte limit: flow control — track pending xterm.js renders,
-   * send PAUSE when too many queued, RESUME when caught up.
-   */
-  private writeTerminalData(data: Uint8Array): void {
-    const { limit, highWater, lowWater } = this.flowControl;
+  private writeOutput(data: Uint8Array): void {
+    const { highWater, lowWater } = this.flowControl;
 
     // Decode bytes to string for xterm.js parser
     const str = this.textDecoder.decode(data, { stream: true });
     if (!str) return; // Empty or incomplete UTF-8 sequence
 
-    this.written += data.length;
-    if (this.written > limit) {
-      // Flow control path: track xterm.js render completion
-      this.terminal.write(str, () => {
-        this.pending = Math.max(this.pending - 1, 0);
-        if (this.pending < lowWater) {
-          this.sendResume();
-        }
-      });
-      this.pending++;
-      this.written = 0;
-      if (this.pending > highWater) {
-        this.sendPause();
+    // Write with callback to track pending renders
+    this.terminal.write(str, () => {
+      this.pending = Math.max(this.pending - 1, 0);
+      if (this.pending < lowWater && this.pending > 0) {
+        this.sendResume();
       }
-    } else {
-      // Fast path: direct write, no callback, no tracking
-      this.terminal.write(str);
-    }
-  }
+    });
 
-  /** Cancel any pending batch flush. */
-  private cancelBatch(): void {
-    if (this.batchFrame !== null) {
-      cancelAnimationFrame(this.batchFrame);
-      this.batchFrame = null;
+    this.pending++;
+    if (this.pending >= highWater) {
+      this.sendPause();
     }
-    this.batchChunks = [];
-    this.batchBytes = 0;
   }
 
   private sendPause(): void {
