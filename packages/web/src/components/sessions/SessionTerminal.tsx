@@ -596,7 +596,9 @@ export function SessionTerminal({
       const viewportOptions = getSessionTerminalViewportOptions(window.innerWidth);
       const isMobileViewport = shouldShowTerminalAccessoryBar();
       const terminalOptions: ITerminalOptions & { scrollbar?: { showScrollbar: boolean } } = {
+        allowProposedApi: true,
         allowTransparency: false,
+        convertEol: true,
         cursorBlink: true,
         cursorStyle: "block",
         cursorInactiveStyle: "outline",
