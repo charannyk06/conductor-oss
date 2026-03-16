@@ -99,6 +99,9 @@ export function useTtydConnection(
             RECONNECT_BASE_DELAY_MS * Math.pow(2, reconnectAttemptsRef.current - 1),
             RECONNECT_MAX_DELAY_MS,
           );
+          // Set a sentinel error to prevent the auto-connect effect from
+          // firing immediately — cleared after the backoff delay.
+          setError(new Error("Reconnecting…"));
           reconnectTimerRef.current = setTimeout(() => {
             reconnectTimerRef.current = null;
             setError(null); // allow auto-connect effect to fire

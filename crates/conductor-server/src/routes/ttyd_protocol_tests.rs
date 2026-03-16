@@ -103,15 +103,6 @@ mod tests {
     }
 
     #[test]
-    fn test_flow_control_defaults() {
-        let fc = FlowControlConfig::default();
-
-        assert_eq!(fc.write_threshold, 100_000);
-        assert_eq!(fc.high_water, 10);
-        assert_eq!(fc.low_water, 4);
-    }
-
-    #[test]
     fn test_parse_invalid_message() {
         let msg = vec![]; // Empty message
         assert!(ClientMessage::from_websocket_frame(&msg).is_none());

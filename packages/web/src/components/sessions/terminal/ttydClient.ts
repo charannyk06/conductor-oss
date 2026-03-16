@@ -97,6 +97,16 @@ export class TtydClient {
   connect(url: string, cols?: number, rows?: number): Promise<void> {
     return new Promise((resolve, reject) => {
       try {
+        // Close any existing socket before opening a new one
+        if (this.socket) {
+          this.socket.onopen = null;
+          this.socket.onmessage = null;
+          this.socket.onclose = null;
+          this.socket.onerror = null;
+          this.socket.close(1000, "Reconnecting");
+          this.socket = null;
+        }
+
         const wsUrl = resolveWebSocketUrl(url);
         this.socket = new WebSocket(wsUrl);
         this.socket.binaryType = "arraybuffer";
@@ -239,6 +249,9 @@ export class TtydClient {
    * Write output data directly to xterm.js with flow control.
    * Decodes UTF-8 and applies backpressure via PAUSE/RESUME.
    */
+  // Whether PAUSE has been sent and we're waiting for pending to drop
+  private paused = false;
+
   private writeOutput(data: Uint8Array): void {
     const { highWater, lowWater } = this.flowControl;
 
@@ -256,13 +269,16 @@ export class TtydClient {
     // For larger writes, track pending with callback for flow control
     this.terminal.write(data, () => {
       this.pending = Math.max(this.pending - 1, 0);
-      if (this.pending < lowWater && this.pending > 0) {
+      // Send RESUME exactly once when pending drops below lowWater
+      if (this.paused && this.pending < lowWater) {
+        this.paused = false;
         this.sendResume();
       }
     });
 
     this.pending++;
-    if (this.pending >= highWater) {
+    if (!this.paused && this.pending >= highWater) {
+      this.paused = true;
       this.sendPause();
     }
   }

@@ -1031,10 +1031,11 @@ export function SessionTerminal({
           </div>
         )}
 
-      <div className={immersiveMobileMode ? "min-h-0 min-w-0 flex-1 overflow-hidden px-2 pb-0 pt-0 w-full" : "min-h-0 min-w-0 flex-1 overflow-hidden px-1.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"}>
+      <div className={immersiveMobileMode ? "min-h-0 min-w-0 flex-1 overflow-hidden px-0 pb-0 pt-0 w-full" : "min-h-0 min-w-0 flex-1 overflow-hidden px-1.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"}>
         <div
           ref={containerRef}
           className="h-full w-full min-w-0 max-w-full overflow-hidden touch-pan-y"
+          style={immersiveMobileMode ? { width: 'calc(100% - 24px)', marginLeft: 12, marginRight: 12 } : undefined}
           onClick={focusTerminal}
           onPointerDown={handleTerminalPointerDown}
         />

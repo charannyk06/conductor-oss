@@ -345,6 +345,10 @@ async fn terminal_connection(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(err) = authorize_terminal_access(&state, &id, None).await {
+        return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
+    }
+
     let Some(_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
@@ -383,10 +387,15 @@ async fn terminal_connection(
         .as_ref()
         .map(|t| format!("&token={}", t))
         .unwrap_or_default();
-    let stream_ws_url = format!(
-        "/api/sessions/{}/terminal/stream{}",
-        id, stream_token_param
-    );
+    let stream_ws_url = if stream_token_param.is_empty() {
+        format!("/api/sessions/{}/terminal/stream", id)
+    } else {
+        format!(
+            "/api/sessions/{}/terminal/stream?{}",
+            id,
+            stream_token_param.trim_start_matches('&')
+        )
+    };
 
     Json(json!({
         "ptyWsUrl": pty_ws_url,
