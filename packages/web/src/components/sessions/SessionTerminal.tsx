@@ -32,10 +32,10 @@ import {
   clearCachedTerminalConnection,
 } from "./terminal/terminalCache";
 import {
-  fetchFastBootstrap,
   fetchTerminalSnapshot,
   postSessionTerminalKeys,
   postTerminalResize,
+  spawnTtydSession,
 } from "./terminal/terminalApi";
 import {
   buildReadableSnapshotPayload,
@@ -48,8 +48,40 @@ import { useTerminalSocket, type TerminalConnectionState } from "./terminal/useT
 import { useTerminalRestore } from "./terminal/useTerminalRestore";
 import { useTerminalLifecycle } from "./terminal/useTerminalLifecycle";
 import { useTerminalWriter } from "./terminal/useTerminalWriter";
+import { encodeTtydInput, encodeTtydResize } from "./terminal/ttydProtocol";
+import { useTtydFlowControl } from "./terminal/useTtydFlowControl";
 
 // ---------------------------------------------------------------------------
+
+/** Map named special keys to their raw byte sequences for ttyd INPUT frames. */
+const SPECIAL_KEY_MAP: Record<string, string> = {
+  Enter: "\r",
+  "Ctrl+C": "\x03",
+  "Ctrl+D": "\x04",
+  "Ctrl+Z": "\x1a",
+  "Ctrl+L": "\x0c",
+  "Ctrl+A": "\x01",
+  "Ctrl+E": "\x05",
+  "Ctrl+K": "\x0b",
+  "Ctrl+U": "\x15",
+  "Ctrl+W": "\x17",
+  Tab: "\t",
+  Escape: "\x1b",
+  Backspace: "\x7f",
+  ArrowUp: "\x1b[A",
+  ArrowDown: "\x1b[B",
+  ArrowRight: "\x1b[C",
+  ArrowLeft: "\x1b[D",
+  Home: "\x1b[H",
+  End: "\x1b[F",
+  Delete: "\x1b[3~",
+  PageUp: "\x1b[5~",
+  PageDown: "\x1b[6~",
+};
+
+function resolveSpecialKey(special: string): string | null {
+  return SPECIAL_KEY_MAP[special] ?? null;
+}
 
 /** Minimum interval between automatic reconnect attempts (ms). */
 const RECONNECT_DEBOUNCE_MS = 2_000;
@@ -58,12 +90,14 @@ interface SessionTerminalProps {
   sessionId: string;
   sessionState: string;
   active: boolean;
+  projectId?: string | null;
 }
 
 export function SessionTerminal({
   sessionId,
   sessionState,
   active,
+  projectId,
 }: SessionTerminalProps) {
   // --- Refs ---
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -154,6 +188,7 @@ export function SessionTerminal({
   expectsLiveTerminalRef.current = expectsLiveTerminal;
 
   // --- Callback refs for cross-hook wiring (defined before hooks, updated after) ---
+  const markStreamReadyRef = useRef<() => void>(() => {});
   const handleLifecycleInitRef = useRef<(term: XTerminal, fit: XFitAddon, container: HTMLDivElement) => void>(() => {});
   const handleLifecycleCleanupRef = useRef<(term: XTerminal) => void>(() => {});
   const cachedViewportRef = useRef<TerminalViewportState | null>(null);
@@ -228,6 +263,7 @@ export function SessionTerminal({
     snapshotAppliedRef,
     () => updateScrollStateRef.current(),
     () => restorePreferredFocusRef.current(),
+    () => markStreamReadyRef.current(),
   );
 
   // --- useTerminalRestore (snapshot restore + sequence tracking) ---
@@ -238,10 +274,14 @@ export function SessionTerminal({
   const restoreResult = useTerminalRestore({
     sessionId,
     termRef,
-    onWrite: queueTerminalWrite,
-    onSequenceUpdate: (seq) => {
-      lastTerminalSequenceRef.current = seq;
-      syncRestoreRefsRef.current();
+    onStreamData: (payload) => {
+      // ttyd pattern: write stream data directly to xterm with flow control.
+      const term = termRef.current;
+      if (!term) return;
+      trackReceived(payload.length);
+      term.write(payload, () => {
+        trackConsumed(payload.length);
+      });
     },
     onServerEvent: (event) => {
       // Handle server events for SSE transport (WS handles them inline).
@@ -269,6 +309,10 @@ export function SessionTerminal({
     },
   });
   const { handleBinaryFrame, handleTextEvent, reset: resetRestore } = restoreResult;
+
+  // Connect the markStreamReady bridge — writer signals restore flush,
+  // which opens the stream gate in useTerminalRestore.
+  markStreamReadyRef.current = restoreResult.markStreamReady;
 
   // Keep live-stream snapshot refs in sync with the component-level copies.
   syncRestoreRefsRef.current = () => {
@@ -330,24 +374,10 @@ export function SessionTerminal({
     },
   });
 
-  // --- Binary frame builders (ttyd-style protocol) ---
-  const buildBinaryInputFrame = useCallback((data: string): Uint8Array => {
-    const encoder = new TextEncoder();
-    const encoded = encoder.encode(data);
-    const frame = new Uint8Array(1 + encoded.length);
-    frame[0] = 0x00; // WS_MSG_INPUT
-    frame.set(encoded, 1);
-    return frame;
-  }, []);
-
-  const buildBinaryResizeFrame = useCallback((cols: number, rows: number): Uint8Array => {
-    const encoder = new TextEncoder();
-    const json = encoder.encode(JSON.stringify({ cols, rows }));
-    const frame = new Uint8Array(1 + json.length);
-    frame[0] = 0x01; // WS_MSG_RESIZE
-    frame.set(json, 1);
-    return frame;
-  }, []);
+  // --- ttyd flow control (PAUSE/RESUME back-pressure) ---
+  const { trackReceived, trackConsumed, resetFlowControl } = useTtydFlowControl({
+    sendBinary: socketSendBinary,
+  });
 
   // --- Zero-delay input functions ---
   const sendTerminalKeys = useCallback(async (data: string) => {
@@ -359,27 +389,28 @@ export function SessionTerminal({
 
     const ws = socketRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
-      socketSendBinary(buildBinaryInputFrame(keys));
+      socketSendBinary(encodeTtydInput(keys));
       return;
     }
     const result = await postSessionTerminalKeys(sessionId, { keys });
     if (!result.accepted) {
       setTransportNotice("Terminal input queue is full. Input is still being retried when possible.");
     }
-  }, [sessionId, socketRef, socketSendBinary, buildBinaryInputFrame]);
+  }, [sessionId, socketRef, socketSendBinary]);
 
   // W-14: Keep the ref in sync with the latest useCallback identity.
   sendTerminalKeysRef.current = sendTerminalKeys;
 
   const sendTerminalSpecial = useCallback((special: string) => {
     if (!interactiveTerminalRef.current) return;
+    const resolved = resolveSpecialKey(special);
+    if (!resolved) return;
     const ws = socketRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
-      // Special keys still go through the legacy JSON path since resolve_terminal_keys
-      // on the Rust side does the mapping (Enter → \r, C-c → \x03, etc.)
-      ws.send(JSON.stringify({ type: "keys", special }));
+      ws.send(encodeTtydInput(resolved));
       return;
     }
+    // Fallback: POST to HTTP endpoint for when WS is not connected
     postSessionTerminalKeys(sessionId, { special })
       .then((result) => {
         if (!result.accepted) {
@@ -395,12 +426,12 @@ export function SessionTerminal({
   const sendResize = useCallback(async (cols: number, rows: number): Promise<boolean> => {
     const ws = socketRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
-      socketSendBinary(buildBinaryResizeFrame(cols, rows));
+      socketSendBinary(encodeTtydResize(cols, rows));
       return true;
     }
     await postTerminalResize(sessionId, cols, rows);
     return true;
-  }, [sessionId, socketRef, socketSendBinary, buildBinaryResizeFrame]);
+  }, [sessionId, socketRef, socketSendBinary]);
 
   // --- useTerminalResize ---
   const {
@@ -595,13 +626,14 @@ export function SessionTerminal({
       snapshotAppliedRef.current = null;
       liveOutputStartedRef.current = false;
       resetRestore();
+      resetFlowControl();
       // Session completed/failed — close live connection and reset to idle
       // so the "connection lost" overlay doesn't show for finished sessions.
       socketClose();
       setConnectionState("idle");
       setTransportError(null);
     }
-  }, [expectsLiveTerminal, resetRestore, socketClose]);
+  }, [expectsLiveTerminal, resetRestore, resetFlowControl, socketClose]);
 
   // Reset state when sessionId changes
   useEffect(() => {
@@ -612,6 +644,7 @@ export function SessionTerminal({
     lastTerminalSequenceRef.current = cachedSnapshot?.sequence ?? null;
     liveOutputStartedRef.current = false;
     resetRestore();
+    resetFlowControl();
     lastSyncedTerminalSizeRef.current = null;
     pendingResizeSyncRef.current = true;
     preferredFocusTargetRef.current = "none";
@@ -690,7 +723,7 @@ export function SessionTerminal({
     return () => { mounted = false; };
   }, [active, applyFetchedSnapshot, expectsLiveTerminal, sessionId, shouldStreamLiveTerminal]);
 
-  // Connection bootstrap effect (live terminals -- uses fast bootstrap, no snapshot)
+  // Connection bootstrap effect (live terminals -- spawns ttyd session directly)
   useEffect(() => {
     if (!expectsLiveTerminal || !shouldStreamLiveTerminal) {
       setWsUrl(null);
@@ -714,20 +747,22 @@ export function SessionTerminal({
         setWsUrl(null);
         setSseUrl(null);
 
-        const bootstrap = await fetchFastBootstrap(sessionId);
+        const cols = termRef.current?.cols ?? 80;
+        const rows = termRef.current?.rows ?? 24;
+        clearCachedTerminalConnection(sessionId);
+        const ttyd = await spawnTtydSession(sessionId, { cols, rows });
         if (!mounted) return;
 
-        setRuntimeInfo(bootstrap.runtime);
-        setInteractiveTerminal(bootstrap.connection.control.interactive);
-        setTransportNotice(bootstrap.connection.control.fallbackReason ?? bootstrap.runtime?.notice ?? null);
+        setRuntimeInfo(null);
+        setInteractiveTerminal(ttyd.interactive);
         setTransportError(null);
-
-        setWsUrl(bootstrap.connection.stream.wsUrl);
-        setSseUrl(bootstrap.connection.stream.fallbackUrl ?? null);
+        setTransportNotice(ttyd.notice ?? null);
+        setWsUrl(ttyd.wsUrl);
+        // No SSE fallback — ttyd is WebSocket-only
       } catch (err) {
         if (!mounted) return;
         setConnectionState("closed");
-        setTransportError(err instanceof Error ? err.message : "Failed to resolve terminal connection");
+        setTransportError(err instanceof Error ? err.message : "Failed to spawn ttyd session");
         setTransportNotice(null);
         setRuntimeInfo(null);
         setSnapshotReady(true);

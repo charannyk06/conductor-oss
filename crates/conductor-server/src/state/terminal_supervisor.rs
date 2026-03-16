@@ -146,6 +146,19 @@ impl TerminalSupervisor {
         Self { state }
     }
 
+    pub async fn terminal_interactive_allowed(&self, headers: &HeaderMap) -> bool {
+        let access = self.state.config.read().await.access.clone();
+        if !access_control_enabled(&access) {
+            return true;
+        }
+
+        let identity = resolve_access_identity(headers, &access).await;
+        identity
+            .role
+            .map(|role| role.allows(AccessRole::Operator))
+            .unwrap_or(false)
+    }
+
     pub async fn prepare_terminal_runtime(
         &self,
         session_id: &str,
@@ -386,17 +399,8 @@ impl TerminalSupervisor {
         session_id: &str,
         headers: &HeaderMap,
     ) -> Result<TerminalConnectionPayload> {
-        let access = self.state.config.read().await.access.clone();
         let backend_port = self.state.config.read().await.effective_port();
-        let interactive = if access_control_enabled(&access) {
-            let identity = resolve_access_identity(headers, &access).await;
-            identity
-                .role
-                .map(|role| role.allows(AccessRole::Operator))
-                .unwrap_or(false)
-        } else {
-            true
-        };
+        let interactive = self.terminal_interactive_allowed(headers).await;
         let poll_interval_ms = 700; // terminal_poll_interval_ms()
         let encoded = encode_path_component(session_id);
         let send_path = format!("/api/sessions/{encoded}/send");

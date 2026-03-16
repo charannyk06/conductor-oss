@@ -38,6 +38,10 @@ type TerminalConnectionResponsePayload = {
     keysPath?: string | null;
     resizePath?: string | null;
   } | null;
+  /** Direct WebSocket URL to an external ttyd process. */
+  ttydWsUrl?: string | null;
+  /** HTTP URL of the external ttyd process. */
+  ttydHttpUrl?: string | null;
   error?: string;
 };
 
@@ -215,6 +219,17 @@ function normalizeTerminalConnectionInfo(
 
   const defaultControlPaths = defaultTerminalControlPaths(sessionId);
 
+  const rawTtydWsUrl = data?.ttydWsUrl;
+  const ttydWsUrl =
+    typeof rawTtydWsUrl === "string" && rawTtydWsUrl.trim().length > 0
+      ? rawTtydWsUrl.trim()
+      : null;
+  const rawTtydHttpUrl = data?.ttydHttpUrl;
+  const ttydHttpUrl =
+    typeof rawTtydHttpUrl === "string" && rawTtydHttpUrl.trim().length > 0
+      ? rawTtydHttpUrl.trim()
+      : null;
+
   return {
     connectionPath,
     stream: {
@@ -237,6 +252,8 @@ function normalizeTerminalConnectionInfo(
       keysPath: normalizeControlPath(data?.control?.keysPath, defaultControlPaths.keysPath),
       resizePath: normalizeControlPath(data?.control?.resizePath, defaultControlPaths.resizePath),
     },
+    ttydWsUrl,
+    ttydHttpUrl,
   };
 }
 
@@ -458,19 +475,20 @@ export async function postTerminalResize(
 }
 
 export type TtydSessionInfo = {
-  wsUrl: string;
-  httpUrl: string;
   sessionId: string;
+  native: boolean;
+  interactive: boolean;
+  notice: string | null;
+  wsUrl: string;
 };
 
 export async function spawnTtydSession(
   sessionId: string,
-  options?: { cols?: number; rows?: number; writable?: boolean },
+  options?: { cols?: number; rows?: number },
 ): Promise<TtydSessionInfo> {
   const params = new URLSearchParams();
   if (options?.cols) params.set("cols", String(options.cols));
   if (options?.rows) params.set("rows", String(options.rows));
-  if (options?.writable !== undefined) params.set("writable", String(options.writable));
 
   const response = await fetch(
     `/api/sessions/${encodeURIComponent(sessionId)}/ttyd/spawn?${params.toString()}`,
@@ -481,11 +499,21 @@ export async function spawnTtydSession(
     throw new Error(data?.error ?? `Failed to spawn ttyd session: ${response.status}`);
   }
 
-  const data = (await response.json()) as { ws_url: string; http_url: string; session_id: string };
+  const data = (await response.json()) as {
+    session_id: string;
+    native: boolean;
+    interactive?: boolean;
+    notice?: string | null;
+  };
+  // Build the native WebSocket URL from the current origin
+  const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${wsProtocol}//${window.location.host}/api/sessions/${encodeURIComponent(data.session_id)}/ttyd/ws`;
   return {
-    wsUrl: data.ws_url,
-    httpUrl: data.http_url,
     sessionId: data.session_id,
+    native: data.native,
+    interactive: data.interactive !== false,
+    notice: typeof data.notice === "string" && data.notice.trim().length > 0 ? data.notice : null,
+    wsUrl,
   };
 }
 

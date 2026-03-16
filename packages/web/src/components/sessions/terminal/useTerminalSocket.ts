@@ -84,9 +84,22 @@ export function useTerminalSocket(options: UseTerminalSocketOptions): UseTermina
   const teardown = useCallback(() => {
     clearTimer();
     const ws = socketRef.current;
-    if (ws) { socketRef.current = null; ws.close(); }
+    if (ws) {
+      socketRef.current = null;
+      // Null out handlers before closing to prevent stale onclose/onerror
+      // callbacks from firing and causing spurious reconnects or state changes.
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.close();
+    }
     const es = eventSourceRef.current;
-    if (es) { eventSourceRef.current = null; es.close(); }
+    if (es) {
+      eventSourceRef.current = null;
+      es.onmessage = null;
+      es.onerror = null;
+      es.close();
+    }
   }, [clearTimer]);
 
   const scheduleReconnect = useCallback(() => {
@@ -203,6 +216,10 @@ export function useTerminalSocket(options: UseTerminalSocketOptions): UseTermina
 
       ws.onopen = () => {
         if (cancelled) return;
+        // Send ttyd handshake with initial terminal dimensions.
+        // The ttyd server parses messages starting with 0x7B ('{') as a
+        // ClientMessage::Handshake with columns/rows.
+        ws.send(JSON.stringify({ columns: colsRef.current, rows: rowsRef.current }));
         connected = true;
         attemptRef.current = 0;
         const wasReconnect = hasConnectedRef.current;

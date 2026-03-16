@@ -135,7 +135,7 @@ pub struct AppState {
     feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
     #[cfg(unix)]
     terminal_daemon: Option<crate::state::detached::TerminalDaemonManager>,
-    pub ttyd_sessions: RwLock<HashMap<String, tokio::sync::RwLock<Option<conductor_executors::TtydProcess>>>>,
+    pub ttyd_server: conductor_ttyd::TtydServer,
 }
 
 impl AppState {
@@ -178,7 +178,7 @@ impl AppState {
             #[cfg(unix)]
             terminal_daemon: crate::state::detached::resolve_terminal_daemon_metadata()
                 .map(crate::state::detached::TerminalDaemonManager::new),
-            ttyd_sessions: RwLock::new(HashMap::new()),
+            ttyd_server: conductor_ttyd::TtydServer::new(conductor_ttyd::TtydConfig::default()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;

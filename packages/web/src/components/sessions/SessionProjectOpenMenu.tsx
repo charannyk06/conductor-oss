@@ -54,9 +54,10 @@ function CodeEditorIcon({ editorId, label }: { editorId: string; label: string }
 
 interface SessionProjectOpenMenuProps {
   projectId: string | null;
+  compact?: boolean;
 }
 
-export function SessionProjectOpenMenu({ projectId }: SessionProjectOpenMenuProps) {
+export function SessionProjectOpenMenu({ projectId, compact = false }: SessionProjectOpenMenuProps) {
   const { preferences } = usePreferences();
   const [openingEditorId, setOpeningEditorId] = useState<string | null>(null);
   const resolvedCurrentEditor = useMemo(
@@ -95,17 +96,19 @@ export function SessionProjectOpenMenu({ projectId }: SessionProjectOpenMenuProp
         <button
           type="button"
           disabled={!projectId || openingEditorId !== null}
-          className="inline-flex h-9 items-center gap-2 rounded-[6px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-60"
+          className={`inline-flex items-center gap-2 rounded-[6px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-60 ${
+            compact ? "h-[26px]" : "h-9"
+          }`}
           aria-label="Open project in code editor"
           title={projectId ? `Open project in ${resolvedCurrentEditor.label}` : "No project selected"}
         >
           {openingEditorId ? (
             <Loader2 className="h-4 w-4 animate-spin text-[var(--vk-text-muted)]" />
           ) : (
-            <ExternalLink className="h-4 w-4 text-[var(--vk-text-muted)]" />
+            <ExternalLink className={`text-[var(--vk-text-muted)] ${compact ? "h-3.5 w-3.5" : "h-4 w-4"}`} />
           )}
-          <span className="hidden font-medium sm:inline">Open</span>
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
+          {!compact && <span className="hidden font-medium sm:inline">Open</span>}
+          <ChevronDown className={`text-[var(--vk-text-muted)] ${compact ? "h-3 w-3" : "h-3.5 w-3.5"}`} />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>

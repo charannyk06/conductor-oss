@@ -31,7 +31,15 @@ export function SessionPageClient() {
 
   useEffect(() => {
     if (params.id && !openSessionIds.includes(params.id)) {
-      setOpenSessionIds((current) => [...current, params.id]);
+      setOpenSessionIds((current) => {
+        const next = [...current, params.id];
+        // Cap to prevent unbounded memory growth; evict oldest (non-active) entries.
+        const MAX_OPEN_SESSIONS = 20;
+        if (next.length > MAX_OPEN_SESSIONS) {
+          return next.slice(next.length - MAX_OPEN_SESSIONS);
+        }
+        return next;
+      });
     }
   }, [params.id, openSessionIds]);
 

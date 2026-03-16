@@ -49,13 +49,6 @@ export type TerminalModeState = {
 
 const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
 const COMPACT_TERMINAL_CHROME_MAX_EDGE_PX = 700;
-const TERMINAL_FRAME_MAGIC = [0x43, 0x54, 0x50, 0x32] as const;
-const TERMINAL_FRAME_PROTOCOL_VERSION = 2;
-const TERMINAL_FRAME_KIND_RESTORE = 1;
-const TERMINAL_FRAME_KIND_STREAM = 2;
-const TERMINAL_STREAM_FRAME_HEADER_BYTES = 14;
-const TERMINAL_RESTORE_FRAME_HEADER_BYTES_V1 = 20;
-const TERMINAL_RESTORE_FRAME_HEADER_BYTES_V2 = 24;
 const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
   /\x1b\[(?:I|O)/g,
   /\x1b\[\d+;\d+R/g,
@@ -63,60 +56,6 @@ const BROWSER_TERMINAL_RESPONSE_PATTERNS = [
   /\x1b\](?:10|11|12|4;\d+);[\s\S]*?(?:\x07|\x1b\\)/g,
 ];
 const ANSI_ESCAPE_PATTERN = /\u001b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\u0007|\u001b\\))/g;
-
-export type TerminalBinaryFrame =
-  | {
-      kind: "restore";
-      sequence: number;
-      snapshotVersion: number;
-      reason: "attach" | "lagged" | "unknown";
-      cols: number;
-      rows: number;
-      modes?: TerminalModeState;
-      payload: Uint8Array;
-    }
-  | {
-      kind: "stream";
-      sequence: number;
-      payload: Uint8Array;
-    };
-
-function decodeTerminalRestoreReason(code: number): "attach" | "lagged" | "unknown" {
-  if (code === 1) {
-    return "attach";
-  }
-  if (code === 2) {
-    return "lagged";
-  }
-  return "unknown";
-}
-
-function decodeTerminalMouseProtocolMode(code: number): string {
-  if (code === 1) return "Press";
-  if (code === 2) return "PressRelease";
-  if (code === 3) return "ButtonMotion";
-  if (code === 4) return "AnyMotion";
-  return "None";
-}
-
-function decodeTerminalMouseProtocolEncoding(code: number): string {
-  if (code === 1) return "Utf8";
-  if (code === 2) return "Sgr";
-  if (code === 3) return "Urxvt";
-  return "Default";
-}
-
-function decodeTerminalModes(flags: number, mouseModeCode: number, mouseEncodingCode: number): TerminalModeState {
-  return {
-    alternateScreen: (flags & (1 << 0)) !== 0,
-    applicationKeypad: (flags & (1 << 1)) !== 0,
-    applicationCursor: (flags & (1 << 2)) !== 0,
-    hideCursor: (flags & (1 << 3)) !== 0,
-    bracketedPaste: (flags & (1 << 4)) !== 0,
-    mouseProtocolMode: decodeTerminalMouseProtocolMode(mouseModeCode),
-    mouseProtocolEncoding: decodeTerminalMouseProtocolEncoding(mouseEncodingCode),
-  };
-}
 
 function concatTerminalPayload(prefix: Uint8Array, payload: Uint8Array): Uint8Array {
   if (prefix.byteLength === 0) {
@@ -317,61 +256,6 @@ export function decodeTerminalBase64Payload(value: string): Uint8Array {
   }
 
   throw new Error("A base64 decoder is not available in this environment");
-}
-
-export function parseTerminalBinaryFrame(buffer: ArrayBuffer): TerminalBinaryFrame {
-  const bytes = new Uint8Array(buffer);
-  if (bytes.byteLength < TERMINAL_STREAM_FRAME_HEADER_BYTES) {
-    throw new Error("Terminal frame was shorter than the stream header");
-  }
-
-  for (let index = 0; index < TERMINAL_FRAME_MAGIC.length; index += 1) {
-    if (bytes[index] !== TERMINAL_FRAME_MAGIC[index]) {
-      throw new Error("Terminal frame magic did not match the frame protocol");
-    }
-  }
-
-  const view = new DataView(buffer);
-  const version = view.getUint8(4);
-  if (version !== 1 && version !== TERMINAL_FRAME_PROTOCOL_VERSION) {
-    throw new Error(`Unsupported terminal frame protocol version: ${version}`);
-  }
-
-  const kind = view.getUint8(5);
-  const sequence = Number(view.getBigUint64(6, false));
-  if (!Number.isSafeInteger(sequence)) {
-    throw new Error("Terminal frame sequence exceeded the safe integer range");
-  }
-
-  if (kind === TERMINAL_FRAME_KIND_RESTORE) {
-    const headerBytes = version >= 2 ? TERMINAL_RESTORE_FRAME_HEADER_BYTES_V2 : TERMINAL_RESTORE_FRAME_HEADER_BYTES_V1;
-    if (bytes.byteLength < headerBytes) {
-      throw new Error("Terminal restore frame was shorter than the restore header");
-    }
-
-    return {
-      kind: "restore",
-      sequence,
-      snapshotVersion: view.getUint8(14),
-      reason: decodeTerminalRestoreReason(view.getUint8(15)),
-      cols: view.getUint16(16, false),
-      rows: view.getUint16(18, false),
-      modes: version >= 2
-        ? decodeTerminalModes(view.getUint8(20), view.getUint8(21), view.getUint8(22))
-        : undefined,
-      payload: bytes.slice(headerBytes),
-    };
-  }
-
-  if (kind === TERMINAL_FRAME_KIND_STREAM) {
-    return {
-      kind: "stream",
-      sequence,
-      payload: bytes.slice(TERMINAL_STREAM_FRAME_HEADER_BYTES),
-    };
-  }
-
-  throw new Error(`Unsupported terminal frame kind: ${kind}`);
 }
 
 export function normalizeTerminalSnapshot(snapshot: string): string {

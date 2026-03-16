@@ -13,6 +13,7 @@ import { Card, CardContent } from "@/components/ui/Card";
 
 import { useSession } from "@/hooks/useSession";
 import type { DashboardSession } from "@/lib/types";
+import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
 
 const SessionTerminal = dynamic(
   () => import("./SessionTerminal").then((mod) => mod.SessionTerminal),
@@ -158,6 +159,7 @@ export function SessionDetail({
   }
 
   const status = typeof session.status === "string" ? session.status : "unknown";
+  const projectId = session.projectId;
   const compactStatusLabel = getCompactSessionStatusLabel(status);
   const terminalTabActive = active && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
@@ -174,20 +176,23 @@ export function SessionDetail({
           {/* When on preview or diff tab, show the normal tab strip so users can navigate back */}
           {activeTab !== "terminal" ? (
             <div className="flex min-w-0 items-center justify-between gap-2 px-3 pt-3 pb-1">
-              <TabsList className="grid w-full grid-cols-3">
-                <TabsTrigger value="terminal" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
-                  <SquareTerminal className="h-3.5 w-3.5" />
-                  Terminal
-                </TabsTrigger>
-                <TabsTrigger value="preview" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
-                  <Globe className="h-3.5 w-3.5" />
-                  Preview
-                </TabsTrigger>
-                <TabsTrigger value="diff" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
-                  <FileCode className="h-3.5 w-3.5" />
-                  Diff
-                </TabsTrigger>
-              </TabsList>
+              <div className="flex min-w-0 items-center gap-2">
+                <TabsList className="grid w-full grid-cols-3">
+                  <TabsTrigger value="terminal" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
+                    <SquareTerminal className="h-3.5 w-3.5" />
+                    Terminal
+                  </TabsTrigger>
+                  <TabsTrigger value="preview" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
+                    <Globe className="h-3.5 w-3.5" />
+                    Preview
+                  </TabsTrigger>
+                  <TabsTrigger value="diff" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
+                    <FileCode className="h-3.5 w-3.5" />
+                    Diff
+                  </TabsTrigger>
+                </TabsList>
+                <SessionProjectOpenMenu projectId={projectId} />
+              </div>
             </div>
           ) : null}
 
@@ -213,6 +218,9 @@ export function SessionDetail({
                 >
                   <FileCode className="h-3.5 w-3.5" />
                 </button>
+                <div className="flex items-center">
+                  <SessionProjectOpenMenu projectId={projectId} compact />
+                </div>
               </div>
             ) : null}
 
@@ -225,6 +233,7 @@ export function SessionDetail({
                 sessionId={sessionId}
                 sessionState={status}
                 active={terminalTabActive}
+                projectId={projectId}
               />
             </TabsContent>
 

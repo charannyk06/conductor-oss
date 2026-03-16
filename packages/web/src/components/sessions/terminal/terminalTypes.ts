@@ -30,6 +30,11 @@ export type TerminalConnectionInfo = {
     resizePath: string;
   };
   connectionPath: TerminalConnectionPath;
+  /** Direct WebSocket URL to an external ttyd process.  When present the
+   *  frontend should prefer this over the Conductor stream URL. */
+  ttydWsUrl: string | null;
+  /** HTTP URL of the external ttyd process. */
+  ttydHttpUrl: string | null;
 };
 
 export type TerminalRuntimeAuthority = "daemon" | "detached_host" | "session_metadata";
@@ -132,3 +137,9 @@ export type TerminalCoreClientModules = [
   typeof import("@xterm/xterm"),
   typeof import("@xterm/addon-fit"),
 ];
+
+/** Parsed ttyd server message. */
+export type TtydServerMessage =
+  | { type: "output"; payload: Uint8Array }
+  | { type: "title"; title: string }
+  | { type: "prefs"; prefs: Record<string, unknown> };

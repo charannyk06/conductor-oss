@@ -8,6 +8,7 @@ members = [
     "crates/conductor-git",
     "crates/conductor-watcher",
     "crates/conductor-cli", "crates/conductor-terminal-host",
+    "crates/conductor-ttyd",
 ]
 
 [workspace.package]

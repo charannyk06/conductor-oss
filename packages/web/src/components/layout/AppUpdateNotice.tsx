@@ -90,7 +90,19 @@ export function AppUpdateNotice() {
     void refreshUpdate(true);
     const unsubscribe = subscribeToAppUpdateEvents((next) => {
       if (!next) return;
-      setUpdate(next);
+      // Use functional update to deduplicate — every SSE snapshot event
+      // includes appUpdate, so without this guard the component re-renders
+      // on every session output frame, hitting React's update depth limit.
+      setUpdate((prev) => {
+        if (prev && prev.latestVersion === next.latestVersion
+          && prev.jobStatus === next.jobStatus
+          && prev.restarting === next.restarting
+          && prev.enabled === next.enabled
+          && prev.updateAvailable === next.updateAvailable) {
+          return prev;
+        }
+        return next;
+      });
       setLoadError(null);
     });
 

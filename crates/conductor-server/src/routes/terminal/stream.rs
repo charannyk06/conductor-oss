@@ -16,6 +16,8 @@ use axum::response::{
 use axum::Json;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use conductor_ttyd::protocol as ttyd_protocol;
+use conductor_ttyd::websocket::TtydPrefs;
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,9 +46,19 @@ use tokio_stream::{self as stream, StreamExt};
 const WS_MSG_INPUT: u8 = 0x00;
 const WS_MSG_RESIZE: u8 = 0x01;
 const WS_MSG_PING: u8 = 0x02;
+const TTYD_CLIENT_INPUT: u8 = 0x30;
+const TTYD_CLIENT_RESIZE: u8 = 0x31;
+const TTYD_CLIENT_PAUSE: u8 = 0x32;
+const TTYD_CLIENT_RESUME: u8 = 0x33;
 
 const WS_OUT_STREAM: u8 = 0x00;
 const WS_OUT_RESTORE: u8 = 0x01;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminalSocketProtocol {
+    Conductor,
+    Ttyd,
+}
 
 // ---------------------------------------------------------------------------
 // SSE endpoint (fallback transport — unchanged)
@@ -218,8 +230,39 @@ pub async fn terminal_websocket(
         .max(1);
     let client_sequence = query.sequence;
     ws.on_upgrade(move |socket| {
-        handle_terminal_socket(socket, state, id, cols, rows, client_sequence)
+        handle_terminal_socket(
+            socket,
+            state,
+            id,
+            cols,
+            rows,
+            client_sequence,
+            TerminalSocketProtocol::Conductor,
+            true,
+        )
     })
+}
+
+pub async fn handle_ttyd_terminal_socket(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    client_sequence: Option<u64>,
+    interactive: bool,
+) {
+    handle_terminal_socket(
+        socket,
+        state,
+        session_id,
+        cols,
+        rows,
+        client_sequence,
+        TerminalSocketProtocol::Ttyd,
+        interactive,
+    )
+    .await;
 }
 
 async fn handle_terminal_socket(
@@ -229,15 +272,20 @@ async fn handle_terminal_socket(
     mut cols: u16,
     mut rows: u16,
     client_sequence: Option<u64>,
+    protocol: TerminalSocketProtocol,
+    interactive: bool,
 ) {
     let supervisor = TerminalSupervisor::new(state.clone());
 
-    // Send ready as text JSON — lets the client know the connection is live.
-    if socket
-        .send(Message::Text(server_ready_event(&session_id).into()))
-        .await
-        .is_err()
-    {
+    if protocol == TerminalSocketProtocol::Conductor {
+        if socket
+            .send(Message::Text(server_ready_event(&session_id).into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    } else if send_ttyd_prefs(&mut socket).await.is_err() {
         return;
     }
 
@@ -293,9 +341,7 @@ async fn handle_terminal_socket(
                         if should_skip_stream_chunk(stream_sequence_floor, chunk.sequence) {
                             continue;
                         }
-                        let mut frame = Vec::with_capacity(1 + chunk.bytes.len());
-                        frame.push(WS_OUT_STREAM);
-                        frame.extend_from_slice(&chunk.bytes);
+                        let frame = encode_stream_binary(&chunk.bytes, protocol);
                         if socket
                             .send(Message::Binary(frame.into()))
                             .await
@@ -378,6 +424,7 @@ async fn handle_terminal_socket(
                             &mut rows,
                             &mut socket,
                             &payload,
+                            interactive,
                         ).await {
                             if socket
                                 .send(Message::Text(
@@ -394,6 +441,22 @@ async fn handle_terminal_socket(
                     Some(Ok(Message::Text(payload))) => {
                         match serde_json::from_str::<TerminalControlMessage>(&payload) {
                             Ok(command) => {
+                                if !interactive && control_message_requires_interactive(&command) {
+                                    if socket
+                                        .send(Message::Text(
+                                            server_error_event(
+                                                &session_id,
+                                                "Operator access is required for live terminal input.",
+                                            )
+                                            .into(),
+                                        ))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
                                 match crate::routes::terminal::control::handle_control_message(
                                     &state,
                                     &session_id,
@@ -472,6 +535,7 @@ async fn handle_binary_input(
     rows: &mut u16,
     socket: &mut WebSocket,
     payload: &[u8],
+    interactive: bool,
 ) -> anyhow::Result<()> {
     if payload.is_empty() {
         return Ok(());
@@ -481,7 +545,10 @@ async fn handle_binary_input(
     let body = &payload[1..];
 
     match msg_type {
-        WS_MSG_INPUT => {
+        WS_MSG_INPUT | TTYD_CLIENT_INPUT => {
+            if !interactive {
+                anyhow::bail!("Operator access is required for live terminal input.");
+            }
             let input = String::from_utf8_lossy(body).into_owned();
             if input.is_empty() {
                 return Ok(());
@@ -498,9 +565,10 @@ async fn handle_binary_input(
                 }
             }
         }
-        WS_MSG_RESIZE => {
+        WS_MSG_RESIZE | TTYD_CLIENT_RESIZE => {
             #[derive(serde::Deserialize)]
             struct ResizePayload {
+                #[serde(alias = "columns")]
                 cols: u16,
                 rows: u16,
             }
@@ -518,9 +586,45 @@ async fn handle_binary_input(
                 .await;
             Ok(())
         }
+        TTYD_CLIENT_PAUSE | TTYD_CLIENT_RESUME => Ok(()),
         _ => {
             anyhow::bail!("Unknown binary message type: 0x{msg_type:02x}");
         }
+    }
+}
+
+fn control_message_requires_interactive(command: &TerminalControlMessage) -> bool {
+    match command {
+        TerminalControlMessage::Ping => false,
+        TerminalControlMessage::Resize { .. } => false,
+        TerminalControlMessage::Keys { .. } => true,
+        TerminalControlMessage::Batch { operations } => operations.iter().any(|operation| {
+            matches!(
+                operation,
+                crate::routes::terminal::control::TerminalControlBatchOperation::Keys { .. }
+            )
+        }),
+    }
+}
+
+async fn send_ttyd_prefs(socket: &mut WebSocket) -> Result<(), ()> {
+    let prefs_json = serde_json::to_string(&TtydPrefs::default()).map_err(|_| ())?;
+    let prefs_frame = ttyd_protocol::encode_prefs(&prefs_json);
+    socket
+        .send(Message::Binary(prefs_frame.into()))
+        .await
+        .map_err(|_| ())
+}
+
+fn encode_stream_binary(payload: &[u8], protocol: TerminalSocketProtocol) -> Vec<u8> {
+    match protocol {
+        TerminalSocketProtocol::Conductor => {
+            let mut frame = Vec::with_capacity(1 + payload.len());
+            frame.push(WS_OUT_STREAM);
+            frame.extend_from_slice(payload);
+            frame
+        }
+        TerminalSocketProtocol::Ttyd => ttyd_protocol::encode_output(payload),
     }
 }
 
@@ -795,4 +899,59 @@ pub fn should_skip_stream_chunk(sequence_floor: Option<u64>, chunk_sequence: u64
     sequence_floor
         .map(|sequence| chunk_sequence <= sequence)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routes::terminal::control::{
+        TerminalControlBatchOperation, TerminalControlMessage,
+    };
+
+    #[test]
+    fn ttyd_stream_frames_use_native_output_prefix() {
+        let frame = encode_stream_binary(b"hello", TerminalSocketProtocol::Ttyd);
+        assert_eq!(frame[0], ttyd_protocol::SERVER_OUTPUT);
+        assert_eq!(&frame[1..], b"hello");
+    }
+
+    #[test]
+    fn conductor_stream_frames_keep_legacy_prefix() {
+        let frame = encode_stream_binary(b"hello", TerminalSocketProtocol::Conductor);
+        assert_eq!(frame[0], WS_OUT_STREAM);
+        assert_eq!(&frame[1..], b"hello");
+    }
+
+    #[test]
+    fn resize_only_messages_do_not_require_interactive_access() {
+        assert!(!control_message_requires_interactive(
+            &TerminalControlMessage::Resize { cols: 120, rows: 32 },
+        ));
+        assert!(!control_message_requires_interactive(
+            &TerminalControlMessage::Batch {
+                operations: vec![TerminalControlBatchOperation::Resize {
+                    cols: 120,
+                    rows: 32,
+                }],
+            },
+        ));
+    }
+
+    #[test]
+    fn key_messages_require_interactive_access() {
+        assert!(control_message_requires_interactive(
+            &TerminalControlMessage::Keys {
+                keys: Some("ls".to_string()),
+                special: None,
+            },
+        ));
+        assert!(control_message_requires_interactive(
+            &TerminalControlMessage::Batch {
+                operations: vec![TerminalControlBatchOperation::Keys {
+                    keys: None,
+                    special: Some("Enter".to_string()),
+                }],
+            },
+        ));
+    }
 }

@@ -42,3 +42,26 @@ export const TERMINAL_UI_STATE_CACHE_MAX_ENTRIES = 4;
 export const TERMINAL_SNAPSHOT_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
 export const TERMINAL_UI_STATE_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
+// -- ttyd binary protocol constants -------------------------------------------
+
+/** Client -> Server: raw terminal input bytes. */
+export const TTYD_CLIENT_INPUT = 0x30;
+/** Client -> Server: resize JSON {"columns":N,"rows":N}. */
+export const TTYD_CLIENT_RESIZE = 0x31;
+/** Client -> Server: pause PTY output. */
+export const TTYD_CLIENT_PAUSE = 0x32;
+/** Client -> Server: resume PTY output. */
+export const TTYD_CLIENT_RESUME = 0x33;
+
+/** Server -> Client: raw PTY output bytes. */
+export const TTYD_SERVER_OUTPUT = 0x30;
+/** Server -> Client: window title. */
+export const TTYD_SERVER_TITLE = 0x31;
+/** Server -> Client: terminal preferences JSON. */
+export const TTYD_SERVER_PREFS = 0x32;
+
+/** High water mark (bytes pending) triggers PAUSE. */
+export const TTYD_FLOW_HIGH_WATER = 80_000;
+/** Low water mark (bytes pending) triggers RESUME. */
+export const TTYD_FLOW_LOW_WATER = 20_000;
+

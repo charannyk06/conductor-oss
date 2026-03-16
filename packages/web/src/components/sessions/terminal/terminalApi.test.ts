@@ -10,10 +10,12 @@ import {
   fetchTerminalSnapshot,
   postSessionTerminalKeys,
   postTerminalResize,
+  spawnTtydSession,
 } from "./terminalApi";
 import type { TerminalConnectionInfo } from "./terminalTypes";
 
 const originalFetch = global.fetch;
+const originalWindow = global.window;
 
 function makeConnection(
   sessionId: string,
@@ -40,12 +42,20 @@ function makeConnection(
       resizePath: `/api/sessions/${sessionId}/terminal/resize`,
       ...overrides?.control,
     },
+    ttydWsUrl: null,
+    ttydHttpUrl: null,
     ...overrides,
   };
 }
 
 test.afterEach(() => {
   global.fetch = originalFetch;
+  if (originalWindow === undefined) {
+    // @ts-expect-error tests may add a window shim.
+    delete global.window;
+  } else {
+    global.window = originalWindow;
+  }
   clearCachedTerminalConnection("session-1");
   clearCachedTerminalConnection("session-2");
   clearCachedTerminalConnection("session-3");
@@ -300,4 +310,42 @@ test("postSessionTerminalKeys reports queueFull status when terminal input backp
   assert.equal(requestBody, JSON.stringify({ keys: "ls" }));
   assert.equal(result.accepted, false);
   assert.equal(result.queueFull, true);
+});
+
+test("spawnTtydSession returns the direct ttyd websocket URL and interactive metadata", async () => {
+  let requestUrl = "";
+
+  // jsdom-less unit tests provide a minimal window shim.
+  global.window = {
+    location: {
+      protocol: "https:",
+      host: "dashboard.example",
+    },
+  } as Window & typeof globalThis;
+
+  global.fetch = (async (input: string | Request | URL) => {
+    requestUrl = typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.toString()
+        : input.url;
+    return new Response(JSON.stringify({
+      session_id: "session-1",
+      native: true,
+      interactive: false,
+      notice: "read-only",
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const session = await spawnTtydSession("session-1", { cols: 120, rows: 40 });
+
+  assert.equal(requestUrl, "/api/sessions/session-1/ttyd/spawn?cols=120&rows=40");
+  assert.equal(session.sessionId, "session-1");
+  assert.equal(session.native, true);
+  assert.equal(session.interactive, false);
+  assert.equal(session.notice, "read-only");
+  assert.equal(session.wsUrl, "wss://dashboard.example/api/sessions/session-1/ttyd/ws");
 });

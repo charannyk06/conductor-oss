@@ -1,6 +1,8 @@
 /**
  * Hook for terminal write batching. Owns the write queue, flush scheduling,
- * and batch assembly.
+ * and batch assembly.  Now used exclusively for restore snapshots — live
+ * stream data bypasses this pipeline via the direct-write path in
+ * useTerminalRestore (ttyd pattern).
  *
  * Scroll model ported from Superset-sh: xterm handles scroll position
  * natively during writes.  If user is at bottom, xterm auto-scrolls.
@@ -30,6 +32,7 @@ export function useTerminalWriter(
   snapshotAppliedRef: React.MutableRefObject<string | null>,
   updateScrollState: () => void,
   restorePreferredFocus: () => void,
+  onRestoreFlush: () => void,
 ): UseTerminalWriterReturn {
   const terminalWriteQueueRef = useRef<TerminalWriteChunk[]>([]);
   const terminalWriteInFlightRef = useRef(false);
@@ -39,6 +42,10 @@ export function useTerminalWriter(
   const terminalWriteDecoderRef = useRef<TextDecoder | null>(
     typeof TextDecoder === "undefined" ? null : new TextDecoder(),
   );
+
+  // Stable ref so flushTerminalWrites doesn't re-create on every render.
+  const onRestoreFlushRef = useRef(onRestoreFlush);
+  onRestoreFlushRef.current = onRestoreFlush;
 
   const clearScheduledTerminalFlush = useCallback(() => {
     if (terminalWriteTimerRef.current !== null) {
@@ -71,6 +78,7 @@ export function useTerminalWriter(
       if (batch.replace) {
         snapshotAppliedRef.current = sessionId;
         term.reset();
+        onRestoreFlushRef.current();
       }
       updateScrollState();
       if (shouldRestoreFocus) restorePreferredFocus();
@@ -94,9 +102,11 @@ export function useTerminalWriter(
     // - If user is at bottom → xterm auto-scrolls on new content.
     // - If user scrolled up → xterm preserves their position.
     // No manual viewport capture/restore needed.
+    const wasRestore = batch.replace;
     term.write(writePayload, () => {
       terminalWriteInFlightRef.current = false;
       if (termRef.current !== term) return;
+      if (wasRestore) onRestoreFlushRef.current();
       updateScrollState();
       if (shouldRestoreFocus) restorePreferredFocus();
       if (terminalWriteQueueRef.current.length > 0) {

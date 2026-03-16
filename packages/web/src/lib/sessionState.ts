@@ -114,27 +114,38 @@ let activeFeedConsumers = 0;
 let feedFocusHandler: (() => void) | null = null;
 let feedVisibilityHandler: (() => void) | null = null;
 
-// Microtask-batched notification: rapid SSE events (e.g., burst of session
-// updates) each call emitSessionChange synchronously, but we coalesce them
-// into a single React notification to avoid exceeding the 50-iteration
-// "Maximum update depth" guard in useSyncExternalStore.
+// setTimeout-batched notification: rapid SSE events (e.g., burst of session
+// updates) each call emitSessionChange, but we coalesce them into a single
+// React notification via setTimeout(0) to avoid exceeding the 50-iteration
+// "Maximum update depth" guard in useSyncExternalStore.  queueMicrotask is
+// insufficient because each SSE message is its own macrotask, so microtasks
+// fire between messages without batching.
 let sessionEmitScheduled = false;
 
 function emitSessionChange() {
   if (sessionEmitScheduled) return;
   sessionEmitScheduled = true;
-  queueMicrotask(() => {
+  setTimeout(() => {
     sessionEmitScheduled = false;
     for (const listener of sessionListeners) {
       listener();
     }
-  });
+  }, 0);
 }
 
+// Feed change notifications also need batching — the feed SSE stream can
+// fire many append events per second during active agent output.
+const feedEmitScheduled = new WeakSet<FeedRecord>();
+
 function emitFeedChange(record: FeedRecord) {
-  for (const listener of record.listeners) {
-    listener();
-  }
+  if (feedEmitScheduled.has(record)) return;
+  feedEmitScheduled.add(record);
+  setTimeout(() => {
+    feedEmitScheduled.delete(record);
+    for (const listener of record.listeners) {
+      listener();
+    }
+  }, 0);
 }
 
 function sortSessionIdsByCreatedAt(sessionsById: Map<string, DashboardSession>): string[] {
