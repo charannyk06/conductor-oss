@@ -565,7 +565,8 @@ export function SessionTerminal({
       const terminalOptions: ITerminalOptions & { scrollbar?: { showScrollbar: boolean } } = {
         allowProposedApi: true,
         allowTransparency: false,
-        convertEol: true,
+        // convertEol intentionally omitted — the PTY's ONLCR flag already
+        // converts \n→\r\n. Enabling it here would double-convert.
         cursorBlink: true,
         cursorStyle: "block",
         cursorInactiveStyle: "outline",
@@ -717,8 +718,11 @@ export function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, scheduleRendererRecovery]);
 
-  // Snapshot render effect
+  // Snapshot render effect — skip when ttyd owns the terminal output
   useEffect(() => {
+    if (ttydConnected || ttydConnecting) {
+      return;
+    }
     if (!terminalReady || !snapshotReady || !canRenderTerminal) {
       return;
     }
