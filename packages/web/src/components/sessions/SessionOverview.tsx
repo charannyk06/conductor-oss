@@ -270,6 +270,171 @@ function FileTreeNode({
   );
 }
 
+/* ─── File language detection ──────────────────────────────────────── */
+
+const EXT_TO_LANG: Record<string, string> = {
+  // Web
+  js: "javascript", jsx: "jsx", ts: "typescript", tsx: "tsx",
+  mjs: "javascript", cjs: "javascript", mts: "typescript", cts: "typescript",
+  html: "html", htm: "html", css: "css", scss: "scss", sass: "sass", less: "less",
+  vue: "vue", svelte: "svelte", astro: "astro",
+  // Data / Config
+  json: "json", jsonc: "jsonc", json5: "json5",
+  yaml: "yaml", yml: "yaml", toml: "toml", ini: "ini",
+  xml: "xml", svg: "xml", plist: "xml",
+  csv: "csv", tsv: "csv",
+  // Docs / Markup
+  md: "markdown", mdx: "mdx", tex: "latex", rst: "rst",
+  // Systems
+  rs: "rust", go: "go", c: "c", h: "c", cpp: "cpp", cc: "cpp", cxx: "cpp",
+  hpp: "cpp", hh: "cpp", cs: "csharp", java: "java", kt: "kotlin", kts: "kotlin",
+  scala: "scala", swift: "swift", m: "objective-c", mm: "objective-cpp",
+  zig: "zig", nim: "nim", v: "v", d: "d",
+  // Scripting
+  py: "python", pyi: "python", rb: "ruby", php: "php",
+  pl: "perl", pm: "perl", lua: "lua", r: "r", R: "r",
+  jl: "julia", ex: "elixir", exs: "elixir", erl: "erlang", hrl: "erlang",
+  hs: "haskell", lhs: "haskell", clj: "clojure", cljs: "clojure",
+  ml: "ocaml", mli: "ocaml", fs: "fsharp", fsx: "fsharp",
+  // Shell / Ops
+  sh: "bash", bash: "bash", zsh: "bash", fish: "fish",
+  ps1: "powershell", psm1: "powershell", bat: "bat", cmd: "bat",
+  dockerfile: "dockerfile", containerfile: "dockerfile",
+  // DevOps / IaC
+  tf: "hcl", hcl: "hcl", nix: "nix",
+  // Query
+  sql: "sql", graphql: "graphql", gql: "graphql", prisma: "prisma",
+  // Other
+  proto: "protobuf", thrift: "thrift",
+  makefile: "makefile", cmake: "cmake",
+  asm: "asm", s: "asm",
+  diff: "diff", patch: "diff",
+  log: "log", txt: "plaintext",
+  env: "dotenv",
+  lock: "json",
+};
+
+/** Known file names without extensions */
+const FILENAME_TO_LANG: Record<string, string> = {
+  makefile: "makefile", Makefile: "makefile",
+  dockerfile: "dockerfile", Dockerfile: "dockerfile",
+  containerfile: "dockerfile", Containerfile: "dockerfile",
+  gemfile: "ruby", Gemfile: "ruby",
+  rakefile: "ruby", Rakefile: "ruby",
+  cmakelists: "cmake", CMakeLists: "cmake",
+  ".gitignore": "gitignore", ".dockerignore": "gitignore",
+  ".editorconfig": "ini", ".prettierrc": "json",
+  ".eslintrc": "json", ".babelrc": "json",
+  ".env": "dotenv", ".env.local": "dotenv", ".env.production": "dotenv",
+  "tsconfig.json": "jsonc", "jsconfig.json": "jsonc",
+};
+
+/** Image extensions we can show inline */
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "avif"]);
+
+function getLangFromPath(filePath: string): string {
+  const fileName = filePath.split("/").pop() ?? "";
+
+  // Check exact filename match
+  if (FILENAME_TO_LANG[fileName]) return FILENAME_TO_LANG[fileName];
+
+  // Check extension
+  const dotIdx = fileName.lastIndexOf(".");
+  if (dotIdx >= 0) {
+    const ext = fileName.slice(dotIdx + 1).toLowerCase();
+    if (EXT_TO_LANG[ext]) return EXT_TO_LANG[ext];
+  }
+
+  return "plaintext";
+}
+
+function getExtension(filePath: string): string {
+  const fileName = filePath.split("/").pop() ?? "";
+  const dotIdx = fileName.lastIndexOf(".");
+  return dotIdx >= 0 ? fileName.slice(dotIdx + 1).toLowerCase() : "";
+}
+
+function isImageFile(filePath: string): boolean {
+  return IMAGE_EXTS.has(getExtension(filePath));
+}
+
+/* ─── Syntax-highlighted code viewer ───────────────────────────────── */
+
+function HighlightedCode({ code, lang }: { code: string; lang: string }) {
+  const [html, setHtml] = useState<string | null>(null);
+  const codeRef = useRef<string>(code);
+  const langRef = useRef<string>(lang);
+
+  useEffect(() => {
+    codeRef.current = code;
+    langRef.current = lang;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const { codeToHtml } = await import("shiki");
+        if (cancelled) return;
+        const result = await codeToHtml(code, {
+          lang,
+          theme: "github-dark-default",
+        });
+        if (!cancelled && codeRef.current === code && langRef.current === lang) {
+          setHtml(result);
+        }
+      } catch {
+        // If lang isn't supported, fall back to plaintext
+        if (cancelled) return;
+        try {
+          const { codeToHtml } = await import("shiki");
+          if (cancelled) return;
+          const result = await codeToHtml(code, {
+            lang: "plaintext",
+            theme: "github-dark-default",
+          });
+          if (!cancelled) setHtml(result);
+        } catch {
+          // Give up on highlighting
+          if (!cancelled) setHtml(null);
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [code, lang]);
+
+  // Show plain text with line numbers while shiki loads (or if it fails)
+  if (!html) {
+    const lines = code.split("\n");
+    const gutterWidth = String(lines.length).length;
+    return (
+      <div className="overflow-auto">
+        <table className="w-full border-collapse font-mono text-[11px] leading-5">
+          <tbody>
+            {lines.map((line, i) => (
+              <tr key={i} className="hover:bg-white/3">
+                <td className="select-none whitespace-nowrap border-r border-white/6 px-2 text-right text-[var(--vk-text-muted)] opacity-40" style={{ minWidth: `${gutterWidth + 2}ch` }}>
+                  {i + 1}
+                </td>
+                <td className="whitespace-pre-wrap break-all px-3 text-[var(--vk-text-normal)]">
+                  {line || "\u00A0"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="shiki-viewer overflow-auto [&_.shiki]:!bg-transparent [&_.shiki]:p-0 [&_code]:text-[11px] [&_code]:leading-5 [&_pre]:!bg-transparent [&_pre]:!p-0"
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: shiki output is trusted
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
 /* ─── File viewer panel ─────────────────────────────────────────────── */
 
 function FileContentViewer({ sessionId, filePath }: { sessionId: string; filePath: string }) {
@@ -277,6 +442,8 @@ function FileContentViewer({ sessionId, filePath }: { sessionId: string; filePat
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [binary, setBinary] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+  const [fileSize, setFileSize] = useState<number>(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -284,6 +451,8 @@ function FileContentViewer({ sessionId, filePath }: { sessionId: string; filePat
     setError(null);
     setContent(null);
     setBinary(false);
+    setTruncated(false);
+    setFileSize(0);
 
     const params = new URLSearchParams({ path: filePath });
     fetch(`/api/sessions/${encodeURIComponent(sessionId)}/files?${params.toString()}`, { cache: "no-store" })
@@ -298,6 +467,8 @@ function FileContentViewer({ sessionId, filePath }: { sessionId: string; filePat
         } else {
           setContent(typeof data.content === "string" ? data.content : "");
         }
+        setTruncated(Boolean(data.truncated));
+        setFileSize(typeof data.size === "number" ? data.size : 0);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -327,19 +498,60 @@ function FileContentViewer({ sessionId, filePath }: { sessionId: string; filePat
     );
   }
 
-  if (binary) {
+  /* Binary but an image — attempt inline preview */
+  if (binary && isImageFile(filePath)) {
+    const params = new URLSearchParams({ path: filePath, raw: "1" });
+    const src = `/api/sessions/${encodeURIComponent(sessionId)}/files?${params.toString()}`;
     return (
-      <div className="flex h-full items-center justify-center px-4 text-center text-[12px] text-[var(--vk-text-muted)]">
-        Binary file — preview not available
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-4">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt={filePath} className="max-h-[60vh] max-w-full rounded-md object-contain" />
+        <span className="text-[11px] text-[var(--vk-text-muted)]">
+          {filePath.split("/").pop()}
+          {fileSize > 0 ? ` · ${formatBytes(fileSize)}` : ""}
+        </span>
       </div>
     );
   }
 
+  if (binary) {
+    const ext = getExtension(filePath);
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
+        <div className="rounded-lg bg-white/4 p-4">
+          <File className="mx-auto h-8 w-8 text-[var(--vk-text-muted)]" />
+        </div>
+        <p className="text-[12px] text-[var(--vk-text-muted)]">
+          Binary file{ext ? ` (.${ext})` : ""} — preview not available
+        </p>
+        {fileSize > 0 ? (
+          <p className="text-[11px] text-[var(--vk-text-muted)] opacity-60">{formatBytes(fileSize)}</p>
+        ) : null}
+      </div>
+    );
+  }
+
+  const lang = getLangFromPath(filePath);
+  const textContent = content ?? "";
+
   return (
-    <pre className="h-full overflow-auto whitespace-pre-wrap break-words px-3 py-3 font-mono text-[11px] leading-5 text-[var(--vk-text-normal)]">
-      {content}
-    </pre>
+    <div className="flex h-full flex-col">
+      {truncated ? (
+        <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/8 px-3 py-1 text-[11px] text-amber-300">
+          File truncated{fileSize > 0 ? ` (${formatBytes(fileSize)} total)` : ""}
+        </div>
+      ) : null}
+      <div className="min-h-0 flex-1 overflow-auto py-2">
+        <HighlightedCode code={textContent} lang={lang} />
+      </div>
+    </div>
   );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /* ─── Files browser component ───────────────────────────────────────── */
