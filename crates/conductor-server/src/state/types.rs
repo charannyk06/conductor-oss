@@ -130,7 +130,21 @@ impl TerminalRestoreSnapshot {
         if self.is_empty() || max_bytes == 0 {
             return Vec::new();
         }
-        self.render_bytes(max_bytes)
+
+        // Restore payloads should replay the current terminal surface only.
+        // `vt100::Screen::state_formatted()` already returns escape sequences
+        // sufficient to reconstruct the visible screen and input modes. If we
+        // prepend raw history as well, reconnect restores double-apply terminal
+        // state and duplicate full-screen agent UIs (Claude Code, OpenCode,
+        // vim, etc.) in the browser. Keep transcript/history separate for
+        // read-only views; live restore frames should behave like ttyd and
+        // restore the present surface exactly once.
+        let screen = trim_tail_bytes(self.screen.clone(), max_bytes);
+        if !screen.is_empty() {
+            return screen;
+        }
+
+        trim_tail_bytes(self.history.clone(), max_bytes)
     }
 
     pub fn full_render_bytes(&self) -> Vec<u8> {
@@ -175,7 +189,7 @@ impl TerminalStateStore {
         Self::with_size(DEFAULT_TERMINAL_STORE_ROWS, DEFAULT_TERMINAL_STORE_COLS)
     }
 
-    fn with_size(rows: u16, cols: u16) -> Self {
+    pub(crate) fn with_size(rows: u16, cols: u16) -> Self {
         Self {
             parser: vt100::Parser::new(rows.max(1), cols.max(1), DEFAULT_TERMINAL_STORE_SCROLLBACK),
             history: VecDeque::with_capacity(DEFAULT_TERMINAL_HISTORY_BYTES),
@@ -441,12 +455,13 @@ fn trim_utf8_tail_string(value: String, max_bytes: usize) -> String {
 }
 
 fn screen_restore_bytes(screen: &vt100::Screen) -> Vec<u8> {
+    // The alternate screen switch (ESC[?1049h/l) is intentionally NOT included
+    // here.  The frontend's mode prefix (encodeTerminalModesPrefix) handles it
+    // based on the binary frame's mode flags.  Including it here caused the
+    // switch to fire twice — once from the prefix (before history) and once
+    // embedded in the payload (after history) — which put scrollback history
+    // into the alt buffer and produced duplicated/garbled TUI content.
     let mut bytes = Vec::new();
-    if screen.alternate_screen() {
-        bytes.extend_from_slice(b"\x1b[?1049h");
-    } else {
-        bytes.extend_from_slice(b"\x1b[?1049l");
-    }
     bytes.extend_from_slice(&screen.state_formatted());
     bytes
 }
@@ -482,6 +497,7 @@ where
 
 pub struct LiveSessionHandle {
     pub input_tx: RwLock<Option<mpsc::Sender<ExecutorInput>>>,
+    pub input_queue: RwLock<Option<Arc<crate::state::PtyWriteQueue>>>,
     pub resize_tx: RwLock<Option<mpsc::Sender<PtyDimensions>>>,
     pub terminal_tx: broadcast::Sender<TerminalStreamEvent>,
     pub terminal_store: Arc<StdMutex<TerminalStateStore>>,
@@ -640,5 +656,37 @@ mod tests {
             .apply_output(b"/workspace\x07prompt> ")
             .expect("completed osc should produce a state update");
         assert_eq!(second.cwd.as_deref(), Some("/Users/demo/workspace"));
+    }
+
+    #[test]
+    fn terminal_restore_bytes_replay_screen_without_reapplying_history() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: TERMINAL_RESTORE_SNAPSHOT_VERSION,
+            sequence: 8,
+            cols: 120,
+            rows: 32,
+            has_output: true,
+            modes: TerminalModeState::default(),
+            history: b"[Conductor] Runtime attached\r\nreview the repo?\r\n".to_vec(),
+            screen: b"\x1b[H\x1b[JClaude Code live surface".to_vec(),
+        };
+
+        assert_eq!(snapshot.render_restore_bytes(4096), snapshot.screen);
+    }
+
+    #[test]
+    fn terminal_restore_bytes_falls_back_to_history_when_screen_is_empty() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: TERMINAL_RESTORE_SNAPSHOT_VERSION,
+            sequence: 3,
+            cols: 120,
+            rows: 32,
+            has_output: true,
+            modes: TerminalModeState::default(),
+            history: b"prompt> only-history".to_vec(),
+            screen: Vec::new(),
+        };
+
+        assert_eq!(snapshot.render_restore_bytes(4096), snapshot.history);
     }
 }

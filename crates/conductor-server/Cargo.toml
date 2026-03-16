@@ -24,6 +24,7 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
+futures = { workspace = true }
 notify-rust = { path = "../notify-rust" }
 jsonwebtoken = "9"
 regex = "1"

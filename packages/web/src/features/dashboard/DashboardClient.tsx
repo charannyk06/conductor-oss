@@ -1154,6 +1154,7 @@ export default function DashboardClient() {
     mobileSidebarOpen,
     desktopSidebarOpen,
     toggleSidebar,
+    closeSidebar,
     closeSidebarOnMobile,
     syncSidebarForViewport,
   } = useResponsiveSidebarStateWithOptions({ initialDesktopOpen: false });
@@ -1610,7 +1611,7 @@ export default function DashboardClient() {
       return;
     }
 
-    const effectiveAgent = selectedAgent || DEFAULT_AGENT;
+    const effectiveAgent = selectedAgent || selectedProject?.agent || preferences?.codingAgent || DEFAULT_AGENT;
     const selectedAgentState = agentStatesByName[normalizeAgentName(effectiveAgent)] ?? null;
     if (selectedAgentState && !selectedAgentState.ready) {
       setCreateError(
@@ -1786,8 +1787,9 @@ export default function DashboardClient() {
       },
       "push",
     );
-    closeSidebarOnMobile();
-  }, [closeSidebarOnMobile, navigateDashboard, selectedProjectId, sessionsById]);
+    // Close sidebar entirely when selecting a session for immersive terminal experience
+    closeSidebar();
+  }, [closeSidebar, navigateDashboard, selectedProjectId, sessionsById]);
 
   const handleOpenPreferences = useCallback(() => {
     setPreferencesDialogOpen(true);
@@ -1972,7 +1974,12 @@ export default function DashboardClient() {
                   ? "relative h-full"
                   : "pointer-events-none absolute inset-0 overflow-hidden invisible"}
               >
-                <SessionDetail sessionId={sessionId} initialSession={initialSession} active={sessionActive} />
+                <SessionDetail
+                  sessionId={sessionId}
+                  initialSession={initialSession}
+                  immersiveShell={true}
+                  active={sessionActive}
+                />
               </div>
             );
           })}
@@ -2019,10 +2026,13 @@ export default function DashboardClient() {
         onToggleSidebar={toggleSidebar}
         sidebar={sidebarContent}
       >
-        <TopBar
-          title={topBarTitle}
-          onOpenPreferences={handleOpenPreferences}
-        />
+        {/* Hide TopBar when viewing a terminal session for immersive experience */}
+        {!selectedSessionId ? (
+          <TopBar
+            title={topBarTitle}
+            onOpenPreferences={handleOpenPreferences}
+          />
+        ) : null}
 
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           {workspaceContent}

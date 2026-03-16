@@ -12,20 +12,15 @@ export const LIVE_TERMINAL_STATUSES = new Set([
   "stuck",
 ]);
 
-export const RESUMABLE_STATUSES = new Set([
-  "done",
-  "needs_input",
-  "stuck",
-  "errored",
-  "terminated",
-  "killed",
-]);
-
 export const RECONNECT_BASE_DELAY_MS = 300;
 export const RECONNECT_MAX_DELAY_MS = 1600;
+export const RECONNECT_MAX_ATTEMPTS = 6;
+export const RECONNECT_HEALTHY_THRESHOLD_MS = 2_000;
 export const RENDERER_RECOVERY_THROTTLE_MS = 120;
 export const TERMINAL_WRITE_BATCH_MAX_DELAY_MS = 16;
 export const TERMINAL_HTTP_CONTROL_BATCH_MAX_DELAY_MS = 10;
+export const DETACH_DELAY_MS = 120;
+export const SHELL_CRASH_DETECTION_WINDOW_MS = 5_000;
 
 // Keep enough scrollback so users can scroll through recent output without
 // losing context on tab switch or mobile scroll. The backend owns the full
@@ -47,15 +42,3 @@ export const TERMINAL_UI_STATE_CACHE_MAX_ENTRIES = 4;
 export const TERMINAL_SNAPSHOT_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
 export const TERMINAL_UI_STATE_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
-export const LIVE_TERMINAL_HELPER_KEYS = [
-  { label: "Enter", special: "Enter" },
-  { label: "Tab", special: "Tab" },
-  { label: "Esc", special: "Escape" },
-  { label: "Bksp", special: "Backspace" },
-  { label: "Left", special: "ArrowLeft" },
-  { label: "Right", special: "ArrowRight" },
-  { label: "Up", special: "ArrowUp" },
-  { label: "Down", special: "ArrowDown" },
-  { label: "Ctrl+C", special: "C-c" },
-  { label: "Ctrl+D", special: "C-d" },
-] as const;

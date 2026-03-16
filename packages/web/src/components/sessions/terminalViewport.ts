@@ -47,7 +47,14 @@ export function restoreTerminalViewport(
   viewport: TerminalViewportState,
 ): void {
   if (viewport.followOutput) {
-    term.scrollToBottom();
+    // Only scroll if not already at the bottom.  During active streaming
+    // xterm auto-scrolls as new content arrives, so an unconditional
+    // scrollToBottom() would fire a redundant scroll event — triggering
+    // updateScrollState → React re-render → visible flicker.
+    const gap = term.buffer.active.baseY - term.buffer.active.viewportY;
+    if (gap > 0) {
+      term.scrollToBottom();
+    }
     return;
   }
 

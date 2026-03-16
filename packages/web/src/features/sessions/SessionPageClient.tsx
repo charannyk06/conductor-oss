@@ -1,31 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
-import { TopBar } from "@/components/layout/TopBar";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { SessionDetail } from "@/components/sessions/SessionDetail";
-import { detectCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { useConfig } from "@/hooks/useConfig";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
 import type { DashboardSession } from "@/lib/types";
 
-function shouldUseCompactTerminalChrome(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-  return detectCompactTerminalChrome(window.innerWidth, window.innerHeight, coarsePointer, navigator.maxTouchPoints);
-}
-
-export default function SessionPageClient() {
+export function SessionPageClient() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const searchParams = useSearchParams();
   const { projects } = useConfig();
   const { session: currentSession } = useSession(params.id);
   const {
@@ -38,24 +26,14 @@ export default function SessionPageClient() {
   const { sessions, refresh } = useSessions(undefined, { enabled: sidebarVisible });
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [compactTerminalChrome, setCompactTerminalChrome] = useState(() => shouldUseCompactTerminalChrome());
-  const terminalTabActive = useMemo(() => {
-    const tab = searchParams.get("tab");
-    return tab !== "overview" && tab !== "preview" && tab !== "diff";
-  }, [searchParams]);
-  const immersiveTerminalMode = terminalTabActive && compactTerminalChrome;
+  const [openSessionIds, setOpenSessionIds] = useState<string[]>(() => params.id ? [params.id] : []);
+  const immersiveTerminalMode = true;
 
-  const topBarTitle = useMemo(() => {
-    if (currentSession) {
-      return [currentSession.projectId, currentSession.branch].filter(Boolean).join(" \u00b7 ");
+  useEffect(() => {
+    if (params.id && !openSessionIds.includes(params.id)) {
+      setOpenSessionIds((current) => [...current, params.id]);
     }
-
-    if (selectedProjectId) {
-      return selectedProjectId;
-    }
-
-    return "Session";
-  }, [currentSession, selectedProjectId]);
+  }, [params.id, openSessionIds]);
 
   useEffect(() => {
     if (currentSession?.projectId) {
@@ -66,28 +44,6 @@ export default function SessionPageClient() {
       setSelectedProjectId(projects[0]?.id ?? null);
     }
   }, [currentSession?.projectId, projects, selectedProjectId]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const mediaQuery = typeof window.matchMedia === "function"
-      ? window.matchMedia("(pointer: coarse)")
-      : null;
-    const syncCompactTerminalChrome = () => {
-      setCompactTerminalChrome(shouldUseCompactTerminalChrome());
-    };
-
-    syncCompactTerminalChrome();
-    window.addEventListener("resize", syncCompactTerminalChrome);
-    mediaQuery?.addEventListener?.("change", syncCompactTerminalChrome);
-
-    return () => {
-      window.removeEventListener("resize", syncCompactTerminalChrome);
-      mediaQuery?.removeEventListener?.("change", syncCompactTerminalChrome);
-    };
-  }, []);
 
   async function handleArchiveSession(sessionId: string) {
     let res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
@@ -111,6 +67,8 @@ export default function SessionPageClient() {
     if (!res.ok) {
       throw new Error(data?.error ?? `Failed to archive session: ${res.status}`);
     }
+
+    setOpenSessionIds((current) => current.filter((id) => id !== sessionId));
 
     if (sessionId === params.id) {
       router.push("/");
@@ -147,11 +105,11 @@ export default function SessionPageClient() {
           sessions={dashboardSessions}
           selectedSessionId={params.id}
           onSelectSession={(sessionId, options) => {
-            const params = new URLSearchParams();
+            const paramsUrl = new URLSearchParams();
             if (options?.tab) {
-              params.set("tab", options.tab);
+              paramsUrl.set("tab", options.tab);
             }
-            const query = params.toString();
+            const query = paramsUrl.toString();
             router.push(query.length > 0
               ? `/sessions/${encodeURIComponent(sessionId)}?${query}`
               : `/sessions/${encodeURIComponent(sessionId)}`);
@@ -164,18 +122,23 @@ export default function SessionPageClient() {
         />
       ) : null}
     >
-      {immersiveTerminalMode ? null : (
-        <TopBar
-          title={topBarTitle}
-        />
-      )}
-      <div className={`flex min-h-0 flex-1 flex-col overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
-        <SessionDetail
-          key={params.id}
-          sessionId={params.id}
-          initialSession={currentSession}
-          immersiveMobileMode={immersiveTerminalMode}
-        />
+      <div className={`relative flex min-h-0 flex-1 flex-col overflow-clip ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
+        {openSessionIds.map((sessionId) => {
+          const isActive = sessionId === params.id;
+          return (
+            <div
+              key={sessionId}
+              className={`absolute inset-0 flex flex-col ${isActive ? "z-10 opacity-100" : "z-0 opacity-0 pointer-events-none"}`}
+            >
+              <SessionDetail
+                sessionId={sessionId}
+                initialSession={isActive ? currentSession : null}
+                immersiveShell={immersiveTerminalMode}
+                active={isActive}
+              />
+            </div>
+          );
+        })}
       </div>
     </AppShell>
   );

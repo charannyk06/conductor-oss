@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, oneshot, Notify, RwLock};
 
+use std::sync::Mutex as StdMutex;
+
 use super::types::{
     LiveSessionHandle, TerminalCaptureState, TerminalPersistenceState, TerminalRestoreSnapshot,
     TerminalStateStore, TerminalStreamEvent,
@@ -91,19 +93,18 @@ impl TerminalHostRegistry {
             return handle;
         }
 
-        let mut terminal_store = TerminalStateStore::new();
         let mut terminal_persistence = TerminalPersistenceState::default();
-        if let Some(snapshot) = persisted_snapshot {
-            terminal_store.hydrate_from_snapshot(snapshot);
-            terminal_persistence.last_persisted_sequence = snapshot.sequence;
+        if persisted_snapshot.is_some() {
+            // we do not serialize sequence anymore for now, just skip sequence restore
             terminal_persistence.last_persisted_at = Some(Instant::now());
         }
 
         let handle = Arc::new(LiveSessionHandle {
             input_tx: RwLock::new(None),
+            input_queue: RwLock::new(None),
             resize_tx: RwLock::new(None),
             terminal_tx: self.new_stream(),
-            terminal_store: Arc::new(std::sync::Mutex::new(terminal_store)),
+            terminal_store: Arc::new(StdMutex::new(TerminalStateStore::default())),
             terminal_persistence: tokio::sync::Mutex::new(terminal_persistence),
             terminal_capture: tokio::sync::Mutex::new(TerminalCaptureState::default()),
             kill_tx: tokio::sync::Mutex::new(None),
@@ -129,6 +130,13 @@ impl TerminalHostRegistry {
 
     pub(crate) async fn detach_runtime(&self, handle: &Arc<LiveSessionHandle>) {
         *handle.input_tx.write().await = None;
+        let old_queue = {
+            let mut queue_slot = handle.input_queue.write().await;
+            queue_slot.take()
+        };
+        if let Some(queue) = old_queue {
+            let _ = queue.close().await;
+        }
         *handle.resize_tx.write().await = None;
         let _ = handle.kill_tx.lock().await.take();
         let mut tracking = handle.terminal_persistence.lock().await;

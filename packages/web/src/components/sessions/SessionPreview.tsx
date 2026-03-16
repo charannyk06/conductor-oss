@@ -66,7 +66,6 @@ const PREVIEW_SPECIAL_KEYS = new Map<string, string>([
 interface SessionPreviewProps {
   sessionId: string;
   active: boolean;
-  onQueueTerminalInsert: (request: Omit<TerminalInsertRequest, "nonce">) => void;
   onConnectionChange?: (connected: boolean) => void;
 }
 
@@ -192,7 +191,7 @@ function buildLogInsert(
   };
 }
 
-export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onConnectionChange }: SessionPreviewProps) {
+export function SessionPreview({ sessionId, active, onConnectionChange }: SessionPreviewProps) {
   const [status, setStatus] = useState<PreviewStatusResponse | null>(null);
   const [domNodes, setDomNodes] = useState<PreviewDomNode[]>([]);
   const [domLoading, setDomLoading] = useState(false);
@@ -550,10 +549,9 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   }, []);
 
   const queueContextInsert = useCallback((request: Omit<TerminalInsertRequest, "nonce">) => {
-    onQueueTerminalInsert(request);
     setSendError(null);
     setSendSuccess(request.successMessage);
-  }, [onQueueTerminalInsert]);
+  }, []);
 
   const selectElementAtPoint = useCallback(async (
     x: number,

@@ -1,12 +1,23 @@
 import { NextResponse } from "next/server";
 
-const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
+function currentBackendUrl(): string {
+  const explicit = process.env.CONDUCTOR_BACKEND_URL?.trim();
+  if (explicit) return explicit;
+
+  // Fallback: derive from CONDUCTOR_BACKEND_PORT (set by `co start`) or
+  // the Rust CLI default (4747).  This allows the dashboard to work without
+  // a manually-configured CONDUCTOR_BACKEND_URL in both dev and production.
+  const port = process.env.CONDUCTOR_BACKEND_PORT?.trim() || "4747";
+  return `http://127.0.0.1:${port}`;
+}
+
 const INTERNAL_ACCESS_HEADERS = [
   "x-conductor-proxy-authorized",
   "x-conductor-access-authenticated",
   "x-conductor-access-role",
   "x-conductor-access-email",
   "x-conductor-access-provider",
+  "x-conductor-backend-origin",
 ] as const;
 
 const BLOCKED_REQUEST_HEADERS = new Set<string>([
@@ -33,7 +44,7 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
 ]);
 
 export function hasRustBackend(): boolean {
-  return backendUrl.length > 0;
+  return currentBackendUrl().length > 0;
 }
 
 type RustProxyOptions = {
@@ -110,6 +121,7 @@ export async function proxyToRust(
   }
 
   const incomingUrl = new URL(request.url);
+  const backendUrl = currentBackendUrl();
   const target = new URL(pathname, backendUrl);
   target.search = incomingUrl.search;
 
@@ -127,6 +139,7 @@ export async function proxyToRust(
   }
   headers.set("x-forwarded-proto", incomingUrl.protocol.replace(":", ""));
   headers.set("x-forwarded-host", incomingUrl.host);
+  headers.set("x-conductor-backend-origin", backendUrl);
 
   const init: RequestInit = {
     method: request.method,

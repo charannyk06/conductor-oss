@@ -1,18 +1,16 @@
 #[cfg(unix)]
 use anyhow::Context;
 use anyhow::{anyhow, Result};
+#[cfg(unix)]
+use chrono::Utc;
 use conductor_executors::executor::{Executor, ExecutorHandle, SpawnOptions};
 #[cfg(unix)]
 use conductor_executors::executor::{ExecutorInput, ExecutorOutput};
-#[cfg(unix)]
-use chrono::Utc;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(unix)]
-use std::process::Stdio;
 #[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
@@ -29,15 +27,14 @@ use super::daemon::{
 };
 #[cfg(unix)]
 use super::helpers::{
-    configure_detached_process_group, detached_runtime_disabled, ensure_detached_protocol_version,
-    detached_runtime_metadata, ping_detached_runtime, prepare_detached_runtime_env,
-    read_detached_exit_code, resolve_detached_runtime_launcher, wait_for_detached_ready,
-};
-use super::types::{
-    DIRECT_RUNTIME_MODE, RUNTIME_MODE_METADATA_KEY,
+    detached_runtime_disabled, detached_runtime_metadata,
+    detached_runtime_metadata_from_daemon_session, detached_runtime_unreachable,
+    ensure_detached_protocol_version, ping_detached_runtime, prepare_detached_runtime_env,
+    read_detached_exit_code,
 };
 #[cfg(unix)]
 use super::types::*;
+use super::types::{DIRECT_RUNTIME_MODE, RUNTIME_MODE_METADATA_KEY};
 use crate::state::AppState;
 #[cfg(unix)]
 use crate::state::{OutputConsumerConfig, SessionRecord};
@@ -71,6 +68,7 @@ impl AppState {
         let ready_path = runtime_root.join(format!("{session_id}.ready.json"));
         let (control_socket_path, stream_socket_path) = self.detached_socket_paths(session_id);
         let log_path = runtime_root.join(format!("{session_id}.log"));
+        let checkpoint_path = runtime_root.join(format!("{session_id}.checkpoint.json"));
         let exit_path = runtime_root.join(format!("{session_id}.exit"));
         let control_token = uuid::Uuid::new_v4().to_string();
 
@@ -81,11 +79,12 @@ impl AppState {
             args: executor.build_args(&options),
             cwd: options.cwd.clone(),
             env: options.env.clone(),
-            cols: 160,
-            rows: 48,
+            cols: DEFAULT_DETACHED_PTY_COLS,
+            rows: DEFAULT_DETACHED_PTY_ROWS,
             control_socket_path: control_socket_path.clone(),
             stream_socket_path: stream_socket_path.clone(),
             log_path: log_path.clone(),
+            checkpoint_path: checkpoint_path.clone(),
             exit_path: exit_path.clone(),
             ready_path: ready_path.clone(),
             stream_flush_interval_ms: detached_stream_flush_interval_ms(),
@@ -114,36 +113,19 @@ impl AppState {
         {
             Ok(Some((ready, host_pid))) => (ready, host_pid),
             Ok(None) => {
-                let Some(launcher_path) = resolve_detached_runtime_launcher() else {
-                    tracing::warn!("Detached PTY host launcher is unavailable; falling back to in-process direct runtime");
-                    return self.spawn_legacy_direct_runtime(executor, options).await;
-                };
-                let mut command = tokio::process::Command::new(&launcher_path);
-                command
-                    .arg("--workspace")
-                    .arg(&self.workspace_path)
-                    .arg("--config")
-                    .arg(&self.config_path)
-                    .arg("pty-host")
-                    .arg("--spec")
-                    .arg(&spec_path)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .current_dir(&self.workspace_path);
-                configure_detached_process_group(&mut command);
-                let child = command.spawn().with_context(|| {
-                    format!(
-                        "Failed to launch detached PTY host via {}",
-                        launcher_path.display()
-                    )
-                })?;
-                let host_pid = child.id().unwrap_or(0);
-                drop(child);
-                let ready = wait_for_detached_ready(&ready_path, DETACHED_READY_TIMEOUT).await?;
-                (ready, host_pid)
+                tracing::warn!(
+                    "Terminal daemon is unavailable; falling back to in-process direct runtime"
+                );
+                return self.spawn_legacy_direct_runtime(executor, options).await;
             }
             Err(err) => {
+                let error_message = format!("Terminal session failed to start: {err}");
+                tracing::error!(session_id, error = %err, "Detached runtime spawn failed");
+                self.emit_terminal_stream_event(
+                    session_id,
+                    crate::state::types::TerminalStreamEvent::Error(error_message),
+                )
+                .await;
                 let _ = tokio::fs::remove_file(&spec_path).await;
                 let _ = tokio::fs::remove_file(&ready_path).await;
                 return Err(err);
@@ -205,6 +187,10 @@ impl AppState {
                     log_path.to_string_lossy().to_string(),
                 ),
                 (
+                    DETACHED_CHECKPOINT_PATH_METADATA_KEY.to_string(),
+                    checkpoint_path.to_string_lossy().to_string(),
+                ),
+                (
                     DETACHED_EXIT_PATH_METADATA_KEY.to_string(),
                     exit_path.to_string_lossy().to_string(),
                 ),
@@ -253,7 +239,36 @@ impl AppState {
             .get_session(session_id)
             .await
             .with_context(|| format!("Session {session_id} not found"))?;
-        let Some(mut metadata) = detached_runtime_metadata(&session) else {
+        let daemon_session = match self.terminal_daemon() {
+            Some(daemon) => match daemon.remote_session(session_id).await {
+                Ok(session) => session,
+                Err(error) if detached_runtime_unreachable(&error) => {
+                    tracing::debug!(
+                        session_id,
+                        error = %error,
+                        "Terminal daemon session lookup is unreachable; falling back to persisted session metadata"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %error,
+                        "Failed to query terminal daemon session metadata; using persisted session metadata"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let metadata_from_session = detached_runtime_metadata(&session);
+        let metadata_from_daemon = match daemon_session.as_ref() {
+            Some(info) => detached_runtime_metadata_from_daemon_session(info).await?,
+            None => None,
+        };
+        let metadata_recovered_from_daemon =
+            metadata_from_session.is_none() && metadata_from_daemon.is_some();
+        let Some(mut metadata) = metadata_from_session.or(metadata_from_daemon) else {
             return Ok(());
         };
         // For sessions restored from older metadata that predates stream_socket_path
@@ -263,7 +278,20 @@ impl AppState {
             let (_, inferred_stream_path) = self.detached_socket_paths(session_id);
             metadata.stream_socket_path = Some(inferred_stream_path);
         }
-        let Some(response) = ping_detached_runtime(&metadata).await? else {
+        let daemon_session_active = daemon_session.as_ref().map(|info| {
+            matches!(
+                info.status.trim().to_ascii_lowercase().as_str(),
+                "ready" | "spawning"
+            )
+        });
+
+        let response = if daemon_session_active == Some(false) {
+            None
+        } else {
+            ping_detached_runtime(&metadata).await?
+        };
+
+        let Some(response) = response else {
             if let Some(exit_code) = read_detached_exit_code(&metadata.exit_path).await? {
                 let event = if exit_code == 0 {
                     ExecutorOutput::Completed { exit_code }
@@ -281,9 +309,11 @@ impl AppState {
             if let Some(current) = sessions.get_mut(session_id) {
                 current.status = crate::state::SessionStatus::Stuck;
                 current.activity = Some("blocked".to_string());
-                current.summary = Some(
-                    "Detached PTY runtime was not reachable after restart. Send a message to start a fresh runtime in the same workspace.".to_string(),
-                );
+                current.summary = Some(if daemon_session_active == Some(false) {
+                    "Terminal daemon no longer reports this session as active. Send a message to start a fresh runtime in the same workspace.".to_string()
+                } else {
+                    "Detached PTY runtime was not reachable after restart. Send a message to start a fresh runtime in the same workspace.".to_string()
+                });
                 current.metadata.insert(
                     "summary".to_string(),
                     current.summary.clone().unwrap_or_default(),
@@ -336,6 +366,57 @@ impl AppState {
 
         let mut sessions = self.sessions.write().await;
         if let Some(current) = sessions.get_mut(session_id) {
+            if metadata_recovered_from_daemon {
+                current.metadata.insert(
+                    RUNTIME_MODE_METADATA_KEY.to_string(),
+                    DIRECT_RUNTIME_MODE.to_string(),
+                );
+                current
+                    .metadata
+                    .insert("detachedPid".to_string(), metadata.host_pid.to_string());
+                current.metadata.insert(
+                    DETACHED_CONTROL_SOCKET_METADATA_KEY.to_string(),
+                    metadata.control_socket_path.to_string_lossy().to_string(),
+                );
+                if let Some(stream_socket_path) = metadata.stream_socket_path.as_ref() {
+                    current.metadata.insert(
+                        DETACHED_STREAM_SOCKET_METADATA_KEY.to_string(),
+                        stream_socket_path.to_string_lossy().to_string(),
+                    );
+                }
+                current.metadata.insert(
+                    DETACHED_CONTROL_TOKEN_METADATA_KEY.to_string(),
+                    metadata.control_token.clone(),
+                );
+                current.metadata.insert(
+                    DETACHED_LOG_PATH_METADATA_KEY.to_string(),
+                    metadata.log_path.to_string_lossy().to_string(),
+                );
+                if let Some(checkpoint_path) = daemon_session
+                    .as_ref()
+                    .and_then(|info| info.checkpoint_path.as_ref())
+                    .map(|path| path.to_string_lossy().to_string())
+                    .or_else(|| {
+                        session
+                            .metadata
+                            .get(DETACHED_CHECKPOINT_PATH_METADATA_KEY)
+                            .cloned()
+                    })
+                {
+                    current.metadata.insert(
+                        DETACHED_CHECKPOINT_PATH_METADATA_KEY.to_string(),
+                        checkpoint_path,
+                    );
+                }
+                current.metadata.insert(
+                    DETACHED_EXIT_PATH_METADATA_KEY.to_string(),
+                    metadata.exit_path.to_string_lossy().to_string(),
+                );
+                current.metadata.insert(
+                    DETACHED_PROTOCOL_VERSION_METADATA_KEY.to_string(),
+                    metadata.protocol_version.to_string(),
+                );
+            }
             current.pid = response.child_pid.or(current.pid);
             current.activity = match &current.status {
                 crate::state::SessionStatus::NeedsInput => Some("waiting_input".to_string()),
@@ -366,7 +447,7 @@ impl AppState {
     }
 
     fn detached_socket_root(&self) -> PathBuf {
-        PathBuf::from(DETACHED_SOCKET_ROOT)
+        PathBuf::from(detached_socket_root())
     }
 
     pub(super) fn detached_socket_paths(&self, session_id: &str) -> (PathBuf, PathBuf) {
@@ -398,12 +479,25 @@ impl AppState {
         let Some(metadata) = detached_runtime_metadata(&session) else {
             return Ok(false);
         };
-        let response =
-            send_detached_runtime_request(&metadata, DetachedPtyHostCommand::Kill).await?;
-        if response.ok {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        match send_detached_runtime_request(&metadata, DetachedPtyHostCommand::Kill).await {
+            Ok(response) => {
+                if response.ok {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(response.ok)
+            }
+            Err(error) if detached_runtime_unreachable(&error) => {
+                let Some(daemon) = self.terminal_daemon() else {
+                    return Err(error);
+                };
+                let terminated = daemon.terminate_session(session_id).await?;
+                if terminated {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok(terminated)
+            }
+            Err(error) => Err(error),
         }
-        Ok(response.ok)
     }
 
     pub(super) async fn spawn_legacy_direct_runtime(

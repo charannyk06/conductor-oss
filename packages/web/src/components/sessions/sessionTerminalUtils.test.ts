@@ -246,17 +246,17 @@ test("getSessionTerminalViewportOptions keeps compact fonts for phones and large
   assert.deepEqual(getSessionTerminalViewportOptions(390), {
     fontFamily: "'SF Mono', Menlo, Monaco, monospace",
     fontSize: 11,
-    lineHeight: 1,
+    lineHeight: 1.0,
   });
   assert.deepEqual(getSessionTerminalViewportOptions(520), {
     fontFamily: "'SF Mono', Menlo, Monaco, monospace",
     fontSize: 13,
-    lineHeight: 1.08,
+    lineHeight: 1.0,
   });
   assert.deepEqual(getSessionTerminalViewportOptions(1280), {
     fontFamily: TERMINAL_FONT_FAMILY,
-    fontSize: 17,
-    lineHeight: 1.06,
+    fontSize: 14,
+    lineHeight: 1.0,
   });
 });
 

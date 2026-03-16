@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import { resolveDashboardPageRedirect } from "@/lib/auth";
-import SessionPageClient from "@/features/sessions/SessionPageClient";
+import { SessionPageClient } from "@/features/sessions/SessionPageClient";
 
 export const dynamic = "force-dynamic";
 

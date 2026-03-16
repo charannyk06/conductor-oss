@@ -13,12 +13,14 @@ use std::time::Duration;
 #[cfg(unix)]
 use tokio::sync::mpsc;
 
+use super::types::DETACHED_PTY_PROTOCOL_VERSION as PROTOCOL_VERSION_FOR_CHECK;
+use super::types::TERMINAL_DAEMON_PROTOCOL_VERSION as TERMINAL_DAEMON_PROTOCOL_VERSION_FOR_CHECK;
 #[cfg(unix)]
 use super::types::{
-    DetachedPtyHostCommand, DetachedPtyHostReady, DetachedPtyHostResponse,
-    DetachedRuntimeMetadata,
+    DetachedPtyHostCommand, DetachedPtyHostReady, DetachedPtyHostResponse, DetachedRuntimeMetadata,
+    TerminalDaemonSessionInfo, DETACHED_CHECKPOINT_PATH_METADATA_KEY,
+    DETACHED_LOG_PATH_METADATA_KEY, DETACHED_PTY_PROTOCOL_VERSION,
 };
-use super::types::DETACHED_PTY_PROTOCOL_VERSION as PROTOCOL_VERSION_FOR_CHECK;
 #[cfg(unix)]
 use crate::state::types::TerminalStreamEvent;
 use crate::state::AppState;
@@ -26,17 +28,16 @@ use crate::state::AppState;
 use crate::state::SessionRecord;
 
 pub(super) fn prepare_detached_runtime_env(
-    kind: AgentKind,
-    interactive: bool,
+    _kind: AgentKind,
+    _interactive: bool,
     env: &mut HashMap<String, String>,
 ) {
-    if kind == AgentKind::QwenCode && interactive {
-        // Qwen's TUI currently crashes if its active theme resolves to a
-        // gradient with fewer than two stops. Force the no-color theme for
-        // detached interactive launches until the upstream CLI fixes that path.
-        env.entry("NO_COLOR".to_string())
-            .or_insert_with(|| "1".to_string());
-    }
+    // Ensure every agent session gets a sensible TERM and COLORTERM so that
+    // TUI programs emit full-color escape sequences by default.
+    env.entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env.entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
 }
 
 pub(super) fn detached_runtime_disabled() -> bool {
@@ -57,56 +58,19 @@ pub(super) fn ensure_detached_protocol_version(version: u16) -> Result<()> {
     }
 }
 
-pub(super) fn resolve_detached_runtime_launcher() -> Option<PathBuf> {
-    if let Ok(value) = std::env::var("CONDUCTOR_PTY_HOST_LAUNCHER") {
-        let path = PathBuf::from(value);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    let current = std::env::current_exe().ok()?;
-    let current_name = current.file_stem()?.to_string_lossy();
-    if current_name == "conductor" {
-        return Some(current);
-    }
-
-    let parent = current.parent()?;
-    if parent.file_name().and_then(|value| value.to_str()) == Some("deps") {
-        let exe_name = if cfg!(windows) {
-            "conductor.exe"
-        } else {
-            "conductor"
-        };
-        let candidate = parent.parent()?.join(exe_name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    None
-}
-
-pub(super) fn configure_detached_process_group(command: &mut tokio::process::Command) {
-    #[cfg(unix)]
-    {
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = command;
+pub(super) fn ensure_terminal_daemon_protocol_version(version: u16) -> Result<()> {
+    if version == TERMINAL_DAEMON_PROTOCOL_VERSION_FOR_CHECK {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Unsupported terminal daemon protocol version: {version} (expected {})",
+            TERMINAL_DAEMON_PROTOCOL_VERSION_FOR_CHECK
+        ))
     }
 }
 
 #[cfg(unix)]
-pub(super) fn detached_runtime_unreachable(error: &anyhow::Error) -> bool {
+pub(crate) fn detached_runtime_unreachable(error: &anyhow::Error) -> bool {
     if error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -241,7 +205,10 @@ pub(super) async fn wait_for_detached_ready(
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(anyhow!(
-                "Detached PTY host did not become ready before timeout ({})",
+                "Detached PTY host did not become ready within {}s at {} — \
+                 the PTY host process may have crashed on startup or the \
+                 ready file was never written",
+                timeout.as_secs(),
                 path.display()
             ));
         }
@@ -260,11 +227,7 @@ pub(super) fn detached_runtime_metadata(
             .get(DETACHED_PROTOCOL_VERSION_METADATA_KEY)
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(DETACHED_PTY_PROTOCOL_VERSION),
-        host_pid: session
-            .metadata
-            .get("detachedPid")?
-            .parse::<u32>()
-            .ok()?,
+        host_pid: session.metadata.get("detachedPid")?.parse::<u32>().ok()?,
         control_socket_path: PathBuf::from(
             session
                 .metadata
@@ -292,6 +255,73 @@ pub(super) fn detached_runtime_metadata(
                 .clone(),
         ),
     })
+}
+
+#[cfg(unix)]
+pub(super) async fn detached_runtime_metadata_from_daemon_session(
+    session: &TerminalDaemonSessionInfo,
+) -> Result<Option<DetachedRuntimeMetadata>> {
+    let Some(host_pid) = session.host_pid.filter(|pid| *pid > 0) else {
+        return Ok(None);
+    };
+    let Some(control_socket_path) = session.control_socket_path.clone() else {
+        return Ok(None);
+    };
+    let Some(control_token) = session.control_token.clone() else {
+        return Ok(None);
+    };
+    let Some(log_path) = session.log_path.clone() else {
+        return Ok(None);
+    };
+    let Some(exit_path) = session.exit_path.clone() else {
+        return Ok(None);
+    };
+
+    Ok(Some(DetachedRuntimeMetadata {
+        protocol_version: session
+            .protocol_version
+            .unwrap_or(DETACHED_PTY_PROTOCOL_VERSION),
+        host_pid,
+        control_socket_path,
+        stream_socket_path: session.stream_socket_path.clone(),
+        control_token,
+        log_path,
+        exit_path,
+    }))
+}
+
+#[cfg(unix)]
+pub(super) async fn resolve_detached_runtime_log_path(
+    session: &SessionRecord,
+    daemon_session: Option<&TerminalDaemonSessionInfo>,
+) -> Result<Option<PathBuf>> {
+    if let Some(info) = daemon_session {
+        if let Some(log_path) = info.log_path.clone() {
+            return Ok(Some(log_path));
+        }
+    }
+
+    Ok(session
+        .metadata
+        .get(DETACHED_LOG_PATH_METADATA_KEY)
+        .map(PathBuf::from))
+}
+
+#[cfg(unix)]
+pub(super) async fn resolve_detached_runtime_checkpoint_path(
+    session: &SessionRecord,
+    daemon_session: Option<&TerminalDaemonSessionInfo>,
+) -> Result<Option<PathBuf>> {
+    if let Some(info) = daemon_session {
+        if let Some(checkpoint_path) = info.checkpoint_path.clone() {
+            return Ok(Some(checkpoint_path));
+        }
+    }
+
+    Ok(session
+        .metadata
+        .get(DETACHED_CHECKPOINT_PATH_METADATA_KEY)
+        .map(PathBuf::from))
 }
 
 #[cfg(unix)]

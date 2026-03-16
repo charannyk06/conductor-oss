@@ -10,6 +10,9 @@ let terminalSearchAddonModulePromise: Promise<typeof import("@xterm/addon-search
 let terminalWebglAddonModulePromise: Promise<typeof import("@xterm/addon-webgl")> | null = null;
 let terminalUnicode11AddonModulePromise: Promise<typeof import("@xterm/addon-unicode11")> | null = null;
 let terminalWebLinksAddonModulePromise: Promise<typeof import("@xterm/addon-web-links")> | null = null;
+let terminalClipboardAddonModulePromise: Promise<typeof import("@xterm/addon-clipboard")> | null = null;
+let terminalImageAddonModulePromise: Promise<typeof import("@xterm/addon-image")> | null = null;
+let terminalSerializeAddonModulePromise: Promise<typeof import("@xterm/addon-serialize")> | null = null;
 
 export function loadTerminalCoreClientModules(): Promise<TerminalCoreClientModules> {
   if (!terminalCoreClientModulesPromise) {
@@ -63,3 +66,34 @@ export function loadTerminalWebLinksAddonModule(): Promise<typeof import("@xterm
   }
   return terminalWebLinksAddonModulePromise;
 }
+
+export function loadTerminalClipboardAddonModule(): Promise<typeof import("@xterm/addon-clipboard")> {
+  if (!terminalClipboardAddonModulePromise) {
+    terminalClipboardAddonModulePromise = import("@xterm/addon-clipboard").catch((error) => {
+      terminalClipboardAddonModulePromise = null;
+      throw error;
+    });
+  }
+  return terminalClipboardAddonModulePromise;
+}
+
+export function loadTerminalImageAddonModule(): Promise<typeof import("@xterm/addon-image")> {
+  if (!terminalImageAddonModulePromise) {
+    terminalImageAddonModulePromise = import("@xterm/addon-image").catch((error) => {
+      terminalImageAddonModulePromise = null;
+      throw error;
+    });
+  }
+  return terminalImageAddonModulePromise;
+}
+
+export function loadTerminalSerializeAddonModule(): Promise<typeof import("@xterm/addon-serialize")> {
+  if (!terminalSerializeAddonModulePromise) {
+    terminalSerializeAddonModulePromise = import("@xterm/addon-serialize").catch((error) => {
+      terminalSerializeAddonModulePromise = null;
+      throw error;
+    });
+  }
+  return terminalSerializeAddonModulePromise;
+}
+

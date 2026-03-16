@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useReducer, useState } from "react";
+import { useEffect, useMemo, useReducer, useState, useSyncExternalStore } from "react";
 import type { NormalizedChatEntry } from "@/lib/chatFeed";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
@@ -114,10 +114,21 @@ let activeFeedConsumers = 0;
 let feedFocusHandler: (() => void) | null = null;
 let feedVisibilityHandler: (() => void) | null = null;
 
+// Microtask-batched notification: rapid SSE events (e.g., burst of session
+// updates) each call emitSessionChange synchronously, but we coalesce them
+// into a single React notification to avoid exceeding the 50-iteration
+// "Maximum update depth" guard in useSyncExternalStore.
+let sessionEmitScheduled = false;
+
 function emitSessionChange() {
-  for (const listener of sessionListeners) {
-    listener();
-  }
+  if (sessionEmitScheduled) return;
+  sessionEmitScheduled = true;
+  queueMicrotask(() => {
+    sessionEmitScheduled = false;
+    for (const listener of sessionListeners) {
+      listener();
+    }
+  });
 }
 
 function emitFeedChange(record: FeedRecord) {
@@ -132,10 +143,48 @@ function sortSessionIdsByCreatedAt(sessionsById: Map<string, DashboardSession>):
     .map((session) => session.id);
 }
 
+function sessionsStructurallyEqual(
+  prev: Map<string, DashboardSession>,
+  prevIds: string[],
+  next: Map<string, DashboardSession>,
+  nextIds: string[],
+): boolean {
+  if (prevIds.length !== nextIds.length) return false;
+  for (let i = 0; i < nextIds.length; i++) {
+    if (prevIds[i] !== nextIds[i]) return false;
+  }
+  for (const [id, session] of next) {
+    const existing = prev.get(id);
+    if (!existing) return false;
+    // Fast path: same reference (delta events reuse existing entries)
+    if (existing === session) continue;
+    // Slow path: compare key fields that drive UI updates
+    if (
+      existing.status !== session.status ||
+      existing.activity !== session.activity ||
+      existing.summary !== session.summary ||
+      existing.lastActivityAt !== session.lastActivityAt ||
+      existing.branch !== session.branch ||
+      existing.issueId !== session.issueId
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function commitSessionsState(
   sessionsById: Map<string, DashboardSession>,
   orderedIds: string[],
 ) {
+  if (sessionsStructurallyEqual(
+    sessionsStore.sessionsById,
+    sessionsStore.orderedIds,
+    sessionsById,
+    orderedIds,
+  )) {
+    return;
+  }
   sessionsStore.sessionsById = sessionsById;
   sessionsStore.orderedIds = orderedIds;
   sessionsStore.version += 1;
@@ -396,23 +445,26 @@ interface SharedSessionsOptions {
 
 export function useSharedSessions(projectId?: string | null, options?: SharedSessionsOptions) {
   const enabled = options?.enabled ?? true;
-  const [, forceRender] = useReducer((value) => value + 1, 0);
 
   useEffect(() => {
     if (!enabled) {
       return undefined;
     }
     activateSessionsStore();
-    const unsubscribe = subscribeSessions(() => forceRender());
     return () => {
-      unsubscribe();
       deactivateSessionsStore();
     };
   }, [enabled]);
 
+  const version = useSyncExternalStore(
+    subscribeSessions,
+    () => sessionsStore.version,
+    () => sessionsStore.version,
+  );
+
   const sessions = useMemo(
     () => (enabled ? filterProjectSessions(projectId) : []),
-    [enabled, projectId, sessionsStore.version],
+    [enabled, projectId, version],
   );
 
   return {
@@ -429,7 +481,6 @@ export function useSharedSession(
   options?: { enabled?: boolean },
 ) {
   const enabled = options?.enabled ?? true;
-  const [, forceRender] = useReducer((value) => value + 1, 0);
   const normalizedId = typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
   const [sessionOverride, setSessionOverride] = useState<DashboardSession | null>(initialSession);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -443,12 +494,11 @@ export function useSharedSession(
     setSessionError(null);
   }, [initialSession]);
 
-  useEffect(() => {
-    if (!enabled || normalizedId === null) {
-      return undefined;
-    }
-    return subscribeSessions(() => forceRender());
-  }, [enabled, normalizedId]);
+  useSyncExternalStore(
+    subscribeSessions,
+    () => sessionsStore.version,
+    () => sessionsStore.version,
+  );
 
   useEffect(() => {
     if (!enabled || normalizedId === null) {

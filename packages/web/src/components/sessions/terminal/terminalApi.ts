@@ -1,6 +1,7 @@
 /**
  * Fetch/API wrappers for terminal operations:
- * connection info, snapshot fetch, resize POST, input POST, session status, etc.
+ * connection info, bootstrap fetch, snapshot fetch, resize POST, input POST,
+ * and session status.
  */
 
 import {
@@ -9,9 +10,63 @@ import {
 } from "./terminalCache";
 import type {
   TerminalConnectionInfo,
+  TerminalConnectionPath,
+  TerminalRuntimeInfo,
   TerminalSnapshot,
 } from "./terminalTypes";
 import type { TerminalModeState } from "../sessionTerminalUtils";
+
+const DEFAULT_REMOTE_POLL_INTERVAL_MS = 700;
+const TERMINAL_CONNECTION_CACHE_SAFETY_WINDOW_MS = 5_000;
+
+type TerminalConnectionResponsePayload = {
+  connectionPath?: TerminalConnectionPath;
+  stream?: {
+    transport?: "websocket" | "eventstream";
+    wsUrl?: string | null;
+    pollIntervalMs?: number;
+    fallbackUrl?: string | null;
+  } | null;
+  control?: {
+    transport?: "websocket" | "http";
+    wsUrl?: string | null;
+    interactive?: boolean;
+    requiresToken?: boolean;
+    tokenExpiresInSeconds?: number | null;
+    fallbackReason?: string | null;
+    sendPath?: string | null;
+    keysPath?: string | null;
+    resizePath?: string | null;
+  } | null;
+  error?: string;
+};
+
+type TerminalRuntimeResponsePayload = {
+  authority?: string | null;
+  status?: string | null;
+  daemonConnected?: boolean | null;
+  hostPid?: number | null;
+  childPid?: number | null;
+  cols?: number | null;
+  rows?: number | null;
+  startedAt?: string | null;
+  updatedAt?: string | null;
+  error?: string | null;
+  notice?: string | null;
+  recoveryAction?: string | null;
+};
+
+type TerminalSnapshotResponsePayload = {
+  snapshot?: string;
+  snapshotAnsi?: string;
+  transcript?: string;
+  source?: string;
+  live?: boolean;
+  restored?: boolean;
+  sequence?: number;
+  modes?: unknown;
+  error?: string;
+};
 
 export function parseTerminalModes(value: unknown): TerminalModeState | undefined {
   if (!value || typeof value !== "object") {
@@ -37,95 +92,293 @@ export function parseTerminalModes(value: unknown): TerminalModeState | undefine
   };
 }
 
-export async function fetchTerminalConnection(sessionId: string): Promise<TerminalConnectionInfo> {
-  const cached = readCachedTerminalConnection(sessionId);
-  if (cached) {
-    return cached;
+function parseTerminalConnectionPath(value: string | null | undefined): TerminalConnectionPath {
+  switch (value) {
+    case "direct":
+    case "managed_remote":
+    case "dashboard_proxy":
+    case "auth_limited":
+    case "unavailable":
+      return value;
+    default:
+      return "unavailable";
+  }
+}
+
+function defaultTerminalControlPaths(sessionId: string): {
+  sendPath: string;
+  keysPath: string;
+  resizePath: string;
+} {
+  const encodedSessionId = encodeURIComponent(sessionId);
+  return {
+    sendPath: `/api/sessions/${encodedSessionId}/send`,
+    keysPath: `/api/sessions/${encodedSessionId}/keys`,
+    resizePath: `/api/sessions/${encodedSessionId}/terminal/resize`,
+  };
+}
+
+function defaultTerminalStreamFallbackUrl(sessionId: string): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/terminal/stream`;
+}
+
+function normalizeControlPath(value: string | null | undefined, fallback: string): string {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : fallback;
+}
+
+function calculateTerminalConnectionCacheTtlMs(connection: TerminalConnectionInfo): number | undefined {
+  const tokenExpiresInSeconds = connection.control.tokenExpiresInSeconds;
+  if (typeof tokenExpiresInSeconds !== "number" || !Number.isFinite(tokenExpiresInSeconds)) {
+    return undefined;
   }
 
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/connection`, {
-    cache: "no-store",
-  });
-  const data = (await response.json().catch(() => null)) as
-    | {
-        transport?: string;
-        wsUrl?: string | null;
-        interactive?: boolean;
-        fallbackReason?: string | null;
-        stream?: {
-          transport?: string;
-          wsUrl?: string | null;
-        } | null;
-        control?: {
-          transport?: "http";
-          interactive?: boolean;
-          fallbackReason?: string | null;
-        } | null;
-        error?: string;
-      }
-    | null;
-  if (!response.ok) {
-    throw new Error(data?.error ?? `Failed to resolve terminal connection: ${response.status}`);
+  return Math.max(
+    1_000,
+    Math.round(tokenExpiresInSeconds * 1000) - TERMINAL_CONNECTION_CACHE_SAFETY_WINDOW_MS,
+  );
+}
+
+function isAllowedWebSocketOrigin(url: string): boolean {
+  try {
+    const parsed = new URL(url, typeof window !== "undefined" ? window.location.href : undefined);
+    const hostname = parsed.hostname;
+    // Allow loopback addresses (local-first architecture)
+    if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return true;
+    // Allow same hostname as the current page (covers different ports)
+    if (typeof window !== "undefined" && hostname === window.location.hostname) return true;
+    return false;
+  } catch {
+    return false;
   }
+}
+
+function normalizeTerminalConnectionInfo(
+  sessionId: string,
+  response: Response,
+  data: TerminalConnectionResponsePayload | null,
+): TerminalConnectionInfo {
+  const streamTransport = data?.stream?.transport === "eventstream" ? "eventstream" : "websocket";
+  const rawPollMs = data?.stream?.pollIntervalMs;
+  const pollIntervalMs =
+    typeof rawPollMs === "number" && Number.isFinite(rawPollMs) && rawPollMs >= 100
+      ? Math.round(rawPollMs)
+      : DEFAULT_REMOTE_POLL_INTERVAL_MS;
+  const controlTransport = data?.control?.transport === "http" ? "http" : "websocket";
+  const interactive = data?.control?.interactive === true;
+  const requiresToken = data?.control?.requiresToken === true;
+  const rawTokenExpires = data?.control?.tokenExpiresInSeconds;
+  const tokenExpiresInSeconds =
+    typeof rawTokenExpires === "number" && Number.isFinite(rawTokenExpires)
+      ? Math.round(rawTokenExpires)
+      : null;
+  const rawFallbackReason = data?.control?.fallbackReason;
+  const fallbackReason =
+    typeof rawFallbackReason === "string" && rawFallbackReason.trim().length > 0
+      ? rawFallbackReason.trim()
+      : null;
+
   const rawStreamWsUrl = data?.stream?.wsUrl;
-  const rawStreamTransport = data?.stream?.transport ?? data?.transport;
-  if (typeof rawStreamTransport === "string" && rawStreamTransport !== "eventstream") {
-    throw new Error(`Unsupported terminal transport: ${rawStreamTransport}`);
-  }
-  const interactive = data?.control?.interactive === true || data?.interactive === true;
-  const fallbackReason = typeof data?.control?.fallbackReason === "string" && data.control.fallbackReason.trim().length > 0
-    ? data.control.fallbackReason.trim()
-    : (typeof data?.fallbackReason === "string" && data.fallbackReason.trim().length > 0
-      ? data.fallbackReason.trim()
-      : null);
-
-  const streamWsUrl = typeof rawStreamWsUrl === "string" && rawStreamWsUrl.trim().length > 0
-    ? rawStreamWsUrl.trim()
-    : (typeof data?.wsUrl === "string" && data.wsUrl.trim().length > 0 ? data.wsUrl.trim() : null);
+  const streamWsUrl =
+    typeof rawStreamWsUrl === "string" && rawStreamWsUrl.trim().length > 0
+      ? rawStreamWsUrl.trim()
+      : null;
+  const rawControlWsUrl = data?.control?.wsUrl;
+  const controlWsUrl =
+    typeof rawControlWsUrl === "string" && rawControlWsUrl.trim().length > 0
+      ? rawControlWsUrl.trim()
+      : null;
 
   if (streamWsUrl === null) {
     throw new Error("Terminal connection did not include a live stream URL");
   }
+  if (controlTransport === "websocket" && interactive && controlWsUrl === null) {
+    throw new Error("Terminal connection did not include a control websocket URL");
+  }
 
-  const connection: TerminalConnectionInfo = {
+  // Validate WebSocket origins to prevent connecting to attacker-controlled servers.
+  // managed_remote connections explicitly trust the backend's URL construction.
+  const connectionPath = parseTerminalConnectionPath(
+    data?.connectionPath ?? response.headers.get("x-conductor-terminal-connection-path"),
+  );
+  if (connectionPath !== "managed_remote") {
+    if (streamWsUrl && !isAllowedWebSocketOrigin(streamWsUrl)) {
+      console.warn("[terminal] Rejected stream WebSocket URL with untrusted origin:", streamWsUrl);
+      throw new Error("Terminal stream URL has an untrusted origin");
+    }
+    if (controlWsUrl && !isAllowedWebSocketOrigin(controlWsUrl)) {
+      console.warn("[terminal] Rejected control WebSocket URL with untrusted origin:", controlWsUrl);
+      throw new Error("Terminal control URL has an untrusted origin");
+    }
+  }
+
+  const defaultControlPaths = defaultTerminalControlPaths(sessionId);
+
+  return {
+    connectionPath,
     stream: {
-      transport: "eventstream",
+      transport: streamTransport,
       wsUrl: streamWsUrl,
+      pollIntervalMs,
+      fallbackUrl: normalizeControlPath(
+        data?.stream?.fallbackUrl,
+        defaultTerminalStreamFallbackUrl(sessionId),
+      ),
     },
     control: {
-      transport: "http",
+      transport: controlTransport,
+      wsUrl: controlWsUrl,
       interactive,
+      requiresToken,
+      tokenExpiresInSeconds,
       fallbackReason,
+      sendPath: normalizeControlPath(data?.control?.sendPath, defaultControlPaths.sendPath),
+      keysPath: normalizeControlPath(data?.control?.keysPath, defaultControlPaths.keysPath),
+      resizePath: normalizeControlPath(data?.control?.resizePath, defaultControlPaths.resizePath),
     },
   };
-  storeCachedTerminalConnection(sessionId, connection);
-  return connection;
 }
 
-export async function fetchTerminalSnapshot(sessionId: string, lines: number): Promise<TerminalSnapshot> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?lines=${lines}`, {
-    cache: "no-store",
-  });
-  const data = (await response.json().catch(() => null)) as
-    | { snapshot?: string; transcript?: string; source?: string; live?: boolean; restored?: boolean; sequence?: number; modes?: unknown; error?: string }
-    | null;
+function normalizeTerminalRuntimeInfo(data: TerminalRuntimeResponsePayload | null): TerminalRuntimeInfo | null {
+  if (!data) {
+    return null;
+  }
+
+  const authority = (() => {
+    switch (data.authority) {
+      case "daemon":
+      case "detached_host":
+      case "session_metadata":
+        return data.authority;
+      default:
+        return "session_metadata";
+    }
+  })();
+
+  const status = (() => {
+    switch (data.status) {
+      case "ready":
+      case "spawning":
+      case "exited":
+      case "failed":
+      case "missing":
+      case "unknown":
+        return data.status;
+      default:
+        return "unknown";
+    }
+  })();
+
+  return {
+    authority,
+    status,
+    daemonConnected: typeof data.daemonConnected === "boolean" ? data.daemonConnected : null,
+    hostPid: typeof data.hostPid === "number" && Number.isFinite(data.hostPid)
+      ? Math.round(data.hostPid)
+      : null,
+    childPid: typeof data.childPid === "number" && Number.isFinite(data.childPid)
+      ? Math.round(data.childPid)
+      : null,
+    cols: typeof data.cols === "number" && Number.isFinite(data.cols)
+      ? Math.round(data.cols)
+      : null,
+    rows: typeof data.rows === "number" && Number.isFinite(data.rows)
+      ? Math.round(data.rows)
+      : null,
+    startedAt: typeof data.startedAt === "string" && data.startedAt.trim().length > 0
+      ? data.startedAt
+      : null,
+    updatedAt: typeof data.updatedAt === "string" && data.updatedAt.trim().length > 0
+      ? data.updatedAt
+      : null,
+    error: typeof data.error === "string" && data.error.trim().length > 0 ? data.error : null,
+    notice: typeof data.notice === "string" && data.notice.trim().length > 0 ? data.notice : null,
+    recoveryAction: typeof data.recoveryAction === "string" && data.recoveryAction.trim().length > 0
+      ? data.recoveryAction
+      : null,
+  };
+}
+
+function normalizeTerminalSnapshot(
+  response: Response,
+  data: TerminalSnapshotResponsePayload | null,
+): TerminalSnapshot {
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resolve terminal snapshot: ${response.status}`);
   }
-  const rawSnapshot = typeof data?.snapshot === "string" ? data.snapshot : "";
+
+  const modes = parseTerminalModes(data?.modes);
+  const rawSnapshot = typeof data?.snapshot === "string"
+    ? data.snapshot
+    : typeof data?.snapshotAnsi === "string"
+      ? data.snapshotAnsi
+      : "";
   const transcript = typeof data?.transcript === "string" ? data.transcript : "";
-  const compactedSnapshot = transcript.trim().length > 0 ? transcript : rawSnapshot;
+  const compactedSnapshot = transcript.trim().length > 0 && modes?.alternateScreen !== true
+    ? transcript
+    : rawSnapshot;
+
   return {
-    // Keep only one readable payload in the browser for archived/read-only sessions.
     snapshot: compactedSnapshot,
-    transcript: "",
+    transcript,
     source: typeof data?.source === "string" ? data.source : "empty",
     live: data?.live === true,
     restored: data?.restored === true,
     sequence: typeof data?.sequence === "number" && Number.isSafeInteger(data.sequence)
       ? data.sequence
       : null,
-    modes: parseTerminalModes(data?.modes),
+    modes,
+  };
+}
+
+export async function fetchTerminalSnapshot(
+  sessionId: string,
+  lines: number,
+  options?: { live?: boolean },
+): Promise<TerminalSnapshot> {
+  const params = new URLSearchParams({ lines: String(lines) });
+  if (options?.live) {
+    params.set("live", "1");
+  }
+
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/terminal/snapshot?${params.toString()}`,
+    { cache: "no-store" },
+  );
+  const data = (await response.json().catch(() => null)) as TerminalSnapshotResponsePayload | null;
+  return normalizeTerminalSnapshot(response, data);
+}
+
+export async function fetchFastBootstrap(
+  sessionId: string,
+): Promise<{
+  connection: TerminalConnectionInfo;
+  runtime: TerminalRuntimeInfo | null;
+}> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/terminal/fast-bootstrap`,
+    { cache: "no-store" },
+  );
+  const data = (await response.json().catch(() => null)) as {
+    connection?: TerminalConnectionResponsePayload | null;
+    runtime?: TerminalRuntimeResponsePayload | null;
+    error?: string;
+  } | null;
+  if (!response.ok) {
+    throw new Error(data?.error ?? `Failed to resolve terminal fast bootstrap: ${response.status}`);
+  }
+
+  const connection = normalizeTerminalConnectionInfo(sessionId, response, data?.connection ?? null);
+  storeCachedTerminalConnection(
+    sessionId,
+    connection,
+    calculateTerminalConnectionCacheTtlMs(connection),
+  );
+
+  return {
+    connection,
+    runtime: normalizeTerminalRuntimeInfo(data?.runtime ?? null),
   };
 }
 
@@ -146,8 +399,10 @@ export async function fetchSessionStatus(sessionId: string): Promise<string | nu
 export async function postSessionTerminalKeys(
   sessionId: string,
   body: { keys?: string; special?: string },
-): Promise<void> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, {
+): Promise<{ accepted: boolean; queueFull: boolean }> {
+  const connection = readCachedTerminalConnection(sessionId);
+  const path = connection?.control.keysPath ?? defaultTerminalControlPaths(sessionId).keysPath;
+  const response = await fetch(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -158,10 +413,32 @@ export async function postSessionTerminalKeys(
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to send terminal input: ${response.status}`);
   }
+  const responseData = (data ?? {}) as {
+    accepted?: unknown;
+    queueFull?: unknown;
+    error?: unknown;
+  };
+  const accepted =
+    typeof responseData.accepted === "boolean"
+      ? responseData.accepted
+      : response.ok;
+  return {
+    accepted,
+    queueFull:
+      typeof responseData.queueFull === "boolean"
+        ? responseData.queueFull
+        : !accepted,
+  };
 }
 
-export async function postTerminalResize(sessionId: string, cols: number, rows: number): Promise<void> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/resize`, {
+export async function postTerminalResize(
+  sessionId: string,
+  cols: number,
+  rows: number,
+): Promise<void> {
+  const connection = readCachedTerminalConnection(sessionId);
+  const path = connection?.control.resizePath ?? defaultTerminalControlPaths(sessionId).resizePath;
+  const response = await fetch(path, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -172,11 +449,53 @@ export async function postTerminalResize(sessionId: string, cols: number, rows: 
     }),
   });
   if (response.status === 404) {
-    // Older backends do not expose the resize endpoint yet. Keep remote terminals usable.
     return;
   }
   const data = (await response.json().catch(() => null)) as { error?: string } | null;
   if (!response.ok) {
     throw new Error(data?.error ?? `Failed to resize terminal: ${response.status}`);
+  }
+}
+
+export type TtydSessionInfo = {
+  wsUrl: string;
+  httpUrl: string;
+  sessionId: string;
+};
+
+export async function spawnTtydSession(
+  sessionId: string,
+  options?: { cols?: number; rows?: number; writable?: boolean },
+): Promise<TtydSessionInfo> {
+  const params = new URLSearchParams();
+  if (options?.cols) params.set("cols", String(options.cols));
+  if (options?.rows) params.set("rows", String(options.rows));
+  if (options?.writable !== undefined) params.set("writable", String(options.writable));
+
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/ttyd/spawn?${params.toString()}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(data?.error ?? `Failed to spawn ttyd session: ${response.status}`);
+  }
+
+  const data = (await response.json()) as { ws_url: string; http_url: string; session_id: string };
+  return {
+    wsUrl: data.ws_url,
+    httpUrl: data.http_url,
+    sessionId: data.session_id,
+  };
+}
+
+export async function killTtydSession(sessionId: string): Promise<void> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionId)}/ttyd/kill`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(data?.error ?? `Failed to kill ttyd session: ${response.status}`);
   }
 }

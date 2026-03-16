@@ -185,19 +185,39 @@ a:hover {
 .xterm {
   height: 100%;
   width: 100%;
-  overscroll-behavior: contain;
+  overflow: hidden;
 }
 
+/* In xterm.js v6, .xterm-viewport is a background-only element — scrolling is
+   managed by the SmoothScrollableElement (.xterm-scrollable-element).  Setting
+   pointer-events: none prevents the viewport from creating an invisible scroll
+   container (overflow-y: scroll from xterm.css) that intercepts wheel events
+   before they reach xterm's actual scroll/mouse-tracking handlers. */
 .xterm .xterm-viewport {
-  height: 100% !important;
-  width: 100%;
-  overscroll-behavior: contain;
+  pointer-events: none;
   scrollbar-width: none;
+  overflow: hidden !important;
 }
 
+/* The screen element's children (canvas layers) are all absolutely positioned,
+   giving it 0 intrinsic width.  Ensure it fills the viewport so that xterm's
+   internal hit-testing, decoration positioning, and accessibility layers work
+   correctly.  Height is left to xterm.js (it sizes the screen to match the
+   buffer content for proper scrollback). */
 .xterm .xterm-screen {
-  height: 100%;
   width: 100%;
+}
+
+/* xterm.js v6 beta: the scrollable element can show a native scrollbar that
+   leaks through as gray blocks.  Force it hidden and ensure its background
+   matches the terminal to prevent visual artifacts with TUI apps. */
+.xterm .xterm-scrollable-element {
+  scrollbar-width: none;
+  overflow: hidden;
+}
+
+.xterm .xterm-scrollable-element::-webkit-scrollbar {
+  display: none;
 }
 
 .xterm textarea.xterm-helper-textarea {
@@ -206,8 +226,7 @@ a:hover {
 }
 
 .xterm .xterm-viewport::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+  display: none;
 }
 
 /* Mobile responsiveness: prevent iOS auto-zoom on input focus */
@@ -239,9 +258,10 @@ body {
     touch-action: pan-y pinch-zoom;
   }
 
-  .xterm .xterm-viewport {
-    touch-action: pan-y pinch-zoom;
-  }
+  /* Do NOT set touch-action on .xterm-viewport — it has overflow-y: scroll
+     and xterm.js manages its own scroll position internally.  Overriding
+     touch-action here conflicts with that, causing janky/blocked scrolling
+     on mobile. */
 
   .xterm .xterm-screen,
   .xterm .xterm-screen canvas {

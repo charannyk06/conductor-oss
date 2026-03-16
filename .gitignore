@@ -51,3 +51,12 @@ packages/cli/native/
 
 # Local hook configs
 .github/hooks/
+
+# Internal planning/utility scripts
+IMPLEMENTATION_ROADMAP.md
+refactor.py
+rewrite.py
+
+# Research and internal architecture docs
+research/
+docs/SUPERSET_INTEGRATION.md

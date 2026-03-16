@@ -399,7 +399,7 @@ export function getSessionTerminalViewportOptions(width: number): SessionTermina
     return {
       fontFamily: "'SF Mono', Menlo, Monaco, monospace",
       fontSize: 11,
-      lineHeight: 1.2,
+      lineHeight: 1.0,
     };
   }
 
@@ -407,14 +407,14 @@ export function getSessionTerminalViewportOptions(width: number): SessionTermina
     return {
       fontFamily: "'SF Mono', Menlo, Monaco, monospace",
       fontSize: 13,
-      lineHeight: 1.2,
+      lineHeight: 1.0,
     };
   }
 
   return {
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 14,
-    lineHeight: 1.2,
+    lineHeight: 1.0,
   };
 }
 

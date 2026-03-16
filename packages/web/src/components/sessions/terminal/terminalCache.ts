@@ -45,11 +45,18 @@ export function readCachedTerminalConnection(sessionId: string): TerminalConnect
   return cached.value;
 }
 
-export function storeCachedTerminalConnection(sessionId: string, value: TerminalConnectionInfo): void {
+export function storeCachedTerminalConnection(
+  sessionId: string,
+  value: TerminalConnectionInfo,
+  ttlMs = TERMINAL_CONNECTION_CACHE_MAX_TTL_MS,
+): void {
+  const boundedTtlMs = Number.isFinite(ttlMs)
+    ? Math.max(250, Math.round(ttlMs))
+    : TERMINAL_CONNECTION_CACHE_MAX_TTL_MS;
   terminalConnectionCache.delete(sessionId);
   terminalConnectionCache.set(sessionId, {
     value,
-    expiresAt: Date.now() + TERMINAL_CONNECTION_CACHE_MAX_TTL_MS,
+    expiresAt: Date.now() + boundedTtlMs,
   });
   trimTerminalCache(terminalConnectionCache, TERMINAL_CONNECTION_CACHE_MAX_ENTRIES);
 }

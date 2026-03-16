@@ -1,7 +1,5 @@
 #[cfg(unix)]
 use anyhow::{anyhow, Result};
-#[cfg(unix)]
-use tokio::io::AsyncWriteExt;
 
 const DETACHED_STREAM_FRAME_HEADER_BYTES: usize = 13;
 const DETACHED_STREAM_FRAME_MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -115,30 +113,6 @@ impl DetachedPtyStreamFrameDecoder {
 
         Ok(frames)
     }
-}
-
-#[cfg(unix)]
-pub(super) async fn write_detached_stream_frame<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    kind: DetachedPtyStreamFrameKind,
-    offset: u64,
-    payload: &[u8],
-) -> Result<()> {
-    if payload.len() > u32::MAX as usize {
-        return Err(anyhow!(
-            "Detached PTY stream payload is too large: {} bytes",
-            payload.len()
-        ));
-    }
-    writer.write_all(&[kind as u8]).await?;
-    writer.write_all(&offset.to_be_bytes()).await?;
-    writer
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .await?;
-    if !payload.is_empty() {
-        writer.write_all(payload).await?;
-    }
-    Ok(())
 }
 
 #[cfg(unix)]

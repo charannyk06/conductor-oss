@@ -2,19 +2,37 @@ mod app_update;
 mod board_collaboration;
 mod detached;
 mod helpers;
+mod pty_write_queue;
 mod runtime_status;
 mod session_manager;
 mod session_store;
 mod spawn_queue;
+mod terminal_escape_filter;
 mod terminal_hosts;
+pub mod terminal_supervisor;
 pub mod types;
 mod workspace;
 
+pub use pty_write_queue::{
+    PtyWriteEnqueueStatus, PtyWriteError, PtyWriteQueue, PtyWriteQueueConfig, PtyWriteRequest,
+};
+pub use terminal_escape_filter::TerminalEscapeFilter;
+pub use terminal_supervisor::{
+    TerminalConnectionControlPayload, TerminalConnectionPath, TerminalConnectionPayload,
+    TerminalConnectionStreamPayload, TerminalConnectionTransport, TerminalControlTransport,
+    TerminalInputStatus, TerminalSnapshotReason, TerminalSupervisor, TerminalTokenScope,
+    DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS, DEFAULT_TERMINAL_SNAPSHOT_LINES,
+    INTERNAL_BACKEND_ORIGIN_HEADER, LIVE_TERMINAL_SNAPSHOT_MAX_BYTES, MAX_TERMINAL_SNAPSHOT_LINES,
+    READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES, SERVER_TIMING_HEADER, TERMINAL_FRAME_KIND_RESTORE,
+    TERMINAL_FRAME_KIND_STREAM, TERMINAL_FRAME_MAGIC, TERMINAL_FRAME_PROTOCOL_VERSION,
+    TERMINAL_RESIZE_COLS_HEADER, TERMINAL_RESIZE_ROWS_HEADER, TERMINAL_RESTORE_FRAME_MODE_BYTES,
+    TERMINAL_SNAPSHOT_FORMAT_HEADER, TERMINAL_SNAPSHOT_LIVE_HEADER,
+    TERMINAL_SNAPSHOT_RESTORED_HEADER, TERMINAL_SNAPSHOT_SOURCE_HEADER, TERMINAL_TOKEN_TTL_SECONDS,
+};
+
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
-pub use detached::run_detached_pty_host;
-pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
-pub(crate) use helpers::sanitize_terminal_text;
+pub(crate) use detached::TerminalRuntimeState;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
@@ -22,8 +40,9 @@ pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
 pub(crate) use session_manager::OutputConsumerConfig;
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
-    SpawnRequest, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
-    TERMINAL_RESTORE_SNAPSHOT_FORMAT, TERMINAL_RESTORE_SNAPSHOT_VERSION,
+    SpawnRequest, TerminalModeState, TerminalRestoreSnapshot, TerminalStateStore,
+    TerminalStreamChunk, TerminalStreamEvent, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    TERMINAL_RESTORE_SNAPSHOT_VERSION,
 };
 pub use workspace::{expand_path, resolve_workspace_path};
 
@@ -45,6 +64,10 @@ use terminal_hosts::TerminalHostRegistry;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
+
+fn terminal_restore_snapshot_is_valid(snapshot: &TerminalRestoreSnapshot) -> bool {
+    snapshot.version == TERMINAL_RESTORE_SNAPSHOT_VERSION && snapshot.has_output
+}
 
 pub(crate) struct DevServerRecord {
     pub pid: u32,
@@ -110,9 +133,22 @@ pub struct AppState {
     runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
     dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
     feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
+    #[cfg(unix)]
+    terminal_daemon: Option<crate::state::detached::TerminalDaemonManager>,
+    pub ttyd_sessions: RwLock<HashMap<String, tokio::sync::RwLock<Option<conductor_executors::TtydProcess>>>>,
 }
 
 impl AppState {
+    #[cfg(unix)]
+    pub(crate) fn terminal_daemon(&self) -> Option<&crate::state::detached::TerminalDaemonManager> {
+        self.terminal_daemon.as_ref()
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn terminal_daemon(&self) -> Option<()> {
+        None
+    }
+
     pub async fn new(config_path: PathBuf, config: ConductorConfig, db: Database) -> Arc<Self> {
         let workspace_path = resolve_workspace_path(&config_path, &config.workspace);
         let (event_snapshots, _) = broadcast::channel(256);
@@ -139,6 +175,10 @@ impl AppState {
             runtime_status_cache: Mutex::new(HashMap::new()),
             dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
             feed_payload_cache: Mutex::new(HashMap::new()),
+            #[cfg(unix)]
+            terminal_daemon: crate::state::detached::resolve_terminal_daemon_metadata()
+                .map(crate::state::detached::TerminalDaemonManager::new),
+            ttyd_sessions: RwLock::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;
@@ -481,9 +521,63 @@ impl AppState {
         kill_tx: oneshot::Sender<()>,
     ) -> Arc<LiveSessionHandle> {
         let handle = self.ensure_terminal_host(session_id).await;
+
+        let old_queue = {
+            let mut queue_slot = handle.input_queue.write().await;
+            queue_slot.take()
+        };
+        if let Some(queue) = old_queue {
+            let _ = queue.close().await;
+        }
+
+        let (input_queue, mut request_rx) = PtyWriteQueue::new(PtyWriteQueueConfig::default());
+        let input_queue = Arc::new(input_queue);
+        *handle.input_queue.write().await = Some(Arc::clone(&input_queue));
+
         self.terminal_hosts
-            .attach_runtime(&handle, input_tx, resize_tx, kill_tx)
+            .attach_runtime(&handle, input_tx.clone(), resize_tx, kill_tx)
             .await;
+
+        let runtime_input_tx = input_tx.clone();
+        let worker_session_id = session_id.to_string();
+        tokio::spawn(async move {
+            while let Some(request) = request_rx.recv().await {
+                match request {
+                    PtyWriteRequest::Text(text) => {
+                        let result = runtime_input_tx
+                            .send(ExecutorInput::Text(
+                                String::from_utf8_lossy(&text).into_owned(),
+                            ))
+                            .await;
+                        input_queue.release_permit();
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    PtyWriteRequest::Data(raw) => {
+                        let result = runtime_input_tx
+                            .send(ExecutorInput::Raw(
+                                String::from_utf8_lossy(&raw).into_owned(),
+                            ))
+                            .await;
+                        input_queue.release_permit();
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                    PtyWriteRequest::Flush(reply) => {
+                        let _ = reply.send(()).await;
+                    }
+                    PtyWriteRequest::Close => {
+                        break;
+                    }
+                }
+            }
+            tracing::debug!(
+                session_id = worker_session_id,
+                "terminal input queue worker stopped"
+            );
+        });
         handle
     }
 
@@ -776,6 +870,18 @@ impl AppState {
         &self,
         session_id: &str,
     ) -> Option<TerminalRestoreSnapshot> {
+        // 1. Primary: daemon headless xterm checkpoint (most accurate parser)
+        if let Some(snapshot) = self.daemon_terminal_restore_snapshot(session_id).await {
+            if terminal_restore_snapshot_is_valid(&snapshot) {
+                return Some(snapshot);
+            }
+            tracing::debug!(
+                session_id,
+                "Daemon returned invalid terminal restore snapshot, falling back to local sources"
+            );
+        }
+
+        // 2. Fallback: live Rust vt100 store (when daemon is unavailable)
         if let Some(handle) = self.terminal_hosts.get(session_id).await {
             if let Some(snapshot) = handle
                 .terminal_store
@@ -795,7 +901,8 @@ impl AppState {
             }
         }
 
-        match self.load_terminal_restore_snapshot(session_id).await {
+        // 3. Fallback: persisted snapshot from database
+        let persisted = match self.load_terminal_restore_snapshot(session_id).await {
             Ok(snapshot) => snapshot
                 .filter(|snapshot| !snapshot.is_empty())
                 .filter(terminal_restore_snapshot_is_valid),
@@ -807,40 +914,116 @@ impl AppState {
                 );
                 None
             }
+        };
+
+        if persisted.is_some() {
+            persisted
+        } else {
+            // 4. Last resort: rebuild from detached log via Rust vt100
+            self.rebuild_terminal_restore_snapshot_from_detached_log(session_id)
+                .await
         }
     }
 
-    pub(crate) async fn current_terminal_transcript(
+    /// Query the daemon for a headless xterm checkpoint snapshot.
+    /// Returns `Some(snapshot)` only when the daemon responds with a
+    /// non-empty `restore_snapshot` from its `@xterm/headless` emulator.
+    #[cfg(unix)]
+    async fn daemon_terminal_restore_snapshot(
         &self,
         session_id: &str,
-        lines: usize,
-        max_bytes: usize,
-    ) -> Option<String> {
-        if let Some(handle) = self.terminal_hosts.get(session_id).await {
-            if let Some(transcript) = handle
-                .terminal_store
-                .lock()
-                .ok()
-                .map(|mut store| store.transcript_tail(lines, max_bytes))
-                .filter(|transcript| !transcript.trim().is_empty())
-            {
-                return Some(transcript);
-            }
-        }
+    ) -> Option<TerminalRestoreSnapshot> {
+        use detached::helpers::detached_runtime_unreachable;
 
-        match self.load_terminal_restore_snapshot(session_id).await {
-            Ok(snapshot) => snapshot
-                .filter(|snapshot| !snapshot.is_empty())
-                .filter(terminal_restore_snapshot_is_valid)
-                .map(|snapshot| snapshot.transcript(lines, max_bytes))
-                .filter(|transcript| !transcript.trim().is_empty()),
+        let daemon = self.terminal_daemon()?;
+        let max_bytes = 8 * 1024 * 1024;
+        let checkpoint = match daemon
+            .remote_session_checkpoint(session_id, max_bytes)
+            .await
+        {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => return None,
+            Err(error) if detached_runtime_unreachable(&error) => return None,
+            Err(error) => {
+                tracing::debug!(
+                    session_id,
+                    error = %error,
+                    "Daemon checkpoint query failed, falling back to local sources"
+                );
+                return None;
+            }
+        };
+
+        checkpoint
+            .restore_snapshot
+            .filter(|snapshot| !snapshot.is_empty())
+    }
+
+    #[cfg(not(unix))]
+    async fn daemon_terminal_restore_snapshot(
+        &self,
+        _session_id: &str,
+    ) -> Option<TerminalRestoreSnapshot> {
+        None
+    }
+
+    async fn rebuild_terminal_restore_snapshot_from_detached_log(
+        &self,
+        session_id: &str,
+    ) -> Option<TerminalRestoreSnapshot> {
+        let session = self.get_session(session_id).await?;
+        let checkpoint = match self
+            .resolve_detached_runtime_checkpoint(&session, 8 * 1024 * 1024)
+            .await
+        {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => return None,
             Err(err) => {
                 tracing::debug!(
                     session_id,
                     error = %err,
-                    "Failed to load persisted terminal restore transcript"
+                    "Failed to resolve detached runtime replay bytes for restore snapshot rebuild"
                 );
-                None
+                return None;
+            }
+        };
+        match checkpoint {
+            detached::DetachedRuntimeCheckpointData::RestoreSnapshot {
+                snapshot,
+                output_offset,
+            } => {
+                if let Some(offset) = output_offset {
+                    let _ = self
+                        .sync_detached_output_offset_metadata(session_id, offset)
+                        .await;
+                }
+                Some(snapshot)
+            }
+            detached::DetachedRuntimeCheckpointData::ReplayTail { replay, cols, rows } => {
+                if replay.truncated {
+                    tracing::debug!(
+                        session_id,
+                        start_offset = replay.start_offset,
+                        end_offset = replay.end_offset,
+                        "Detached runtime replay payload was truncated while rebuilding restore snapshot"
+                    );
+                }
+                let _ = self
+                    .sync_detached_output_offset_metadata(session_id, replay.end_offset)
+                    .await;
+
+                // Process replay bytes through TerminalStateStore's vt100 parser to
+                // reconstruct a proper restore snapshot server-side.  This replaces
+                // the earlier "degrade to None" path that required Node.js headless
+                // xterm — the Rust vt100 crate handles it natively.
+                let mut store = TerminalStateStore::with_size(rows, cols);
+                store.apply_output(&replay.bytes);
+                let snapshot = store.restore_snapshot();
+                if snapshot.is_empty() {
+                    None
+                } else {
+                    Some(snapshot)
+                }
             }
         }
     }
@@ -915,8 +1098,4 @@ fn detached_runtime_spawn_limit() -> usize {
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_LIMIT)
-}
-
-fn terminal_restore_snapshot_is_valid(snapshot: &TerminalRestoreSnapshot) -> bool {
-    snapshot.screen.is_empty() || snapshot.screen.first() == Some(&0x1b)
 }

@@ -1,5 +1,8 @@
 import type { ITerminalOptions } from "@xterm/xterm";
 
+// Nerd Fonts first — agent CLIs (Claude Code, Gemini, etc.) and shell themes
+// (Oh My Posh, Powerlevel10k, Starship) require them for proper icon/powerline
+// rendering. System monospace fonts are fallbacks for users without Nerd Fonts.
 export const TERMINAL_FONT_FAMILY = [
   "MesloLGM Nerd Font",
   "MesloLGM NF",
@@ -12,8 +15,6 @@ export const TERMINAL_FONT_FAMILY = [
   "Menlo",
   "Monaco",
   '"Courier New"',
-  "SF Mono",
-  "SF Pro",
   "monospace",
 ].join(", ");
 

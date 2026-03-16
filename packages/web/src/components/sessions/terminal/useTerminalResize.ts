@@ -1,12 +1,16 @@
 /**
  * Hook for ResizeObserver, fit addon, debounce, resize API calls,
- * renderer recovery, and viewport state management.
+ * renderer recovery, and scroll-to-bottom state.
+ *
+ * Scroll model ported from Superset-sh: simple `wasAtBottom` check before
+ * fit(), then `scrollToBottom()` if needed.  No complex viewport
+ * capture/restore state machine.
  */
 
 import { useCallback, useRef, useState } from "react";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
 import type { Terminal as XTerminal } from "@xterm/xterm";
-import { captureTerminalViewport, restoreTerminalViewport, type TerminalViewportState } from "../terminalViewport";
+import { captureTerminalViewport } from "../terminalViewport";
 import { RENDERER_RECOVERY_THROTTLE_MS } from "./terminalConstants";
 import type { PreferredFocusTarget } from "./terminalTypes";
 
@@ -15,7 +19,6 @@ export interface UseTerminalResizeReturn {
   lastSyncedTerminalSizeRef: React.MutableRefObject<string | null>;
   lastObservedContainerSizeRef: React.MutableRefObject<string | null>;
   lastViewportOptionKeyRef: React.MutableRefObject<string | null>;
-  pendingViewportRestoreRef: React.MutableRefObject<TerminalViewportState | null>;
   preferredFocusTargetRef: React.MutableRefObject<PreferredFocusTarget>;
   restoreFocusOnRecoveryRef: React.MutableRefObject<boolean>;
   showScrollToBottom: boolean;
@@ -24,43 +27,40 @@ export interface UseTerminalResizeReturn {
   scheduleRendererRecovery: (forceResize: boolean) => void;
   clearScheduledRecovery: () => void;
   clearVisibilityRecoveryTimers: () => void;
-  applyViewportRestore: (term: XTerminal, fallbackViewport: TerminalViewportState) => void;
   updateScrollState: () => void;
-  rememberTerminalViewport: () => void;
   rememberFocusedSurface: () => PreferredFocusTarget;
   restorePreferredFocus: () => void;
 }
 
 export function useTerminalResize(
-  sessionId: string,
+  _sessionId: string,
   termRef: React.MutableRefObject<XTerminal | null>,
   fitRef: React.MutableRefObject<XFitAddon | null>,
   containerRef: React.RefObject<HTMLDivElement | null>,
   resumeTextareaRef: React.RefObject<HTMLTextAreaElement | null>,
   sendResize: (cols: number, rows: number) => Promise<boolean>,
   setTransportError: React.Dispatch<React.SetStateAction<string | null>>,
-  initialViewport: TerminalViewportState | null,
+  _initialViewport: unknown,
 ): UseTerminalResizeReturn {
   const pendingResizeSyncRef = useRef(true);
   const lastSyncedTerminalSizeRef = useRef<string | null>(null);
   const lastObservedContainerSizeRef = useRef<string | null>(null);
   const lastViewportOptionKeyRef = useRef<string | null>(null);
-  const pendingViewportRestoreRef = useRef<TerminalViewportState | null>(initialViewport);
-  const snapshotAppliedRef_local = useRef<string | null>(null);
   const preferredFocusTargetRef = useRef<PreferredFocusTarget>("none");
   const restoreFocusOnRecoveryRef = useRef(false);
-  const activeRef_local = useRef(true);
 
   const recoveryFrameRef = useRef<number | null>(null);
   const recoveryTimerRef = useRef<number | null>(null);
   const recoveryLastRunRef = useRef(0);
   const recoveryPendingResizeRef = useRef(false);
   const visibilityRecoveryTimersRef = useRef<number[]>([]);
+  const scrollStateFrameRef = useRef<number | null>(null);
 
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-
-  // We expose this so the parent can sync snapshotAppliedRef for viewport logic
-  // The parent sets this through the returned pendingViewportRestoreRef
+  // Mirror of the React state, used to skip no-op setState calls.  React does
+  // bail out for same-value primitives, but the bail-out still enters the
+  // reconciler — with rapid scroll events (60fps+) even that overhead adds up.
+  const scrollToBottomValueRef = useRef(false);
 
   const detectFocusedSurface = useCallback((): PreferredFocusTarget => {
     if (typeof document === "undefined") {
@@ -98,7 +98,6 @@ export function useTerminalResize(
     if (
       typeof document === "undefined"
       || document.hidden
-      || !activeRef_local.current
       || !restoreFocusOnRecoveryRef.current
     ) {
       return;
@@ -120,35 +119,24 @@ export function useTerminalResize(
   }, [resumeTextareaRef, termRef]);
 
   const updateScrollState = useCallback(() => {
-    const term = termRef.current;
-    if (!term) {
-      setShowScrollToBottom(false);
-      return;
-    }
-    setShowScrollToBottom(!captureTerminalViewport(term).followOutput);
+    if (typeof window === "undefined") return;
+    // Throttle to one React state update per animation frame.  Without this,
+    // every xterm scroll event triggers setShowScrollToBottom → React re-render,
+    // which at 60fps+ causes visible flickering during streaming and user scroll.
+    if (scrollStateFrameRef.current !== null) return;
+    scrollStateFrameRef.current = window.requestAnimationFrame(() => {
+      scrollStateFrameRef.current = null;
+      const term = termRef.current;
+      const nextValue = term ? !captureTerminalViewport(term).followOutput : false;
+      // Only poke React when the value actually changes.  Even though React
+      // bails out for same-value primitives, skipping the setState call
+      // entirely avoids entering the reconciler on every scroll frame.
+      if (nextValue !== scrollToBottomValueRef.current) {
+        scrollToBottomValueRef.current = nextValue;
+        setShowScrollToBottom(nextValue);
+      }
+    });
   }, [termRef]);
-
-  const rememberTerminalViewport = useCallback(() => {
-    const term = termRef.current;
-    if (!term) {
-      return;
-    }
-    if (pendingViewportRestoreRef.current && snapshotAppliedRef_local.current !== sessionId) {
-      return;
-    }
-    pendingViewportRestoreRef.current = captureTerminalViewport(term);
-  }, [sessionId, termRef]);
-
-  const applyViewportRestore = useCallback((term: XTerminal, fallbackViewport: TerminalViewportState) => {
-    const cachedViewport = pendingViewportRestoreRef.current;
-    if (cachedViewport) {
-      restoreTerminalViewport(term, cachedViewport);
-      pendingViewportRestoreRef.current = captureTerminalViewport(term);
-      return;
-    }
-    restoreTerminalViewport(term, fallbackViewport);
-    pendingViewportRestoreRef.current = captureTerminalViewport(term);
-  }, []);
 
   const syncTerminalDimensions = useCallback((forceSync: boolean) => {
     const term = termRef.current;
@@ -200,7 +188,9 @@ export function useTerminalResize(
       return;
     }
 
-    const viewport = captureTerminalViewport(term);
+    // Superset pattern: simple wasAtBottom check before fit.
+    const buffer = term.buffer.active;
+    const wasAtBottom = buffer.viewportY >= buffer.baseY;
     const previousCols = term.cols;
     const previousRows = term.rows;
 
@@ -210,18 +200,21 @@ export function useTerminalResize(
       return;
     }
 
-    if (forceResize) {
-      term.refresh(0, Math.max(0, term.rows - 1));
-    }
-
     if (forceResize || term.cols !== previousCols || term.rows !== previousRows || pendingResizeSyncRef.current) {
       syncTerminalDimensions(forceResize || pendingResizeSyncRef.current);
     }
 
-    applyViewportRestore(term, viewport);
+    // Superset pattern: if user was at bottom, stay at bottom after resize.
+    // If user scrolled up, xterm preserves their position naturally.
+    if (wasAtBottom) {
+      window.requestAnimationFrame(() => {
+        try { term.scrollToBottom(); } catch { /* disposed */ }
+      });
+    }
+
     updateScrollState();
     restorePreferredFocus();
-  }, [applyViewportRestore, containerRef, fitRef, restorePreferredFocus, syncTerminalDimensions, termRef, updateScrollState]);
+  }, [containerRef, fitRef, restorePreferredFocus, syncTerminalDimensions, termRef, updateScrollState]);
 
   const clearScheduledRecovery = useCallback(() => {
     if (recoveryFrameRef.current !== null) {
@@ -231,6 +224,10 @@ export function useTerminalResize(
     if (recoveryTimerRef.current !== null) {
       window.clearTimeout(recoveryTimerRef.current);
       recoveryTimerRef.current = null;
+    }
+    if (scrollStateFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollStateFrameRef.current);
+      scrollStateFrameRef.current = null;
     }
     recoveryPendingResizeRef.current = false;
   }, []);
@@ -276,7 +273,6 @@ export function useTerminalResize(
     lastSyncedTerminalSizeRef,
     lastObservedContainerSizeRef,
     lastViewportOptionKeyRef,
-    pendingViewportRestoreRef,
     preferredFocusTargetRef,
     restoreFocusOnRecoveryRef,
     showScrollToBottom,
@@ -285,9 +281,7 @@ export function useTerminalResize(
     scheduleRendererRecovery,
     clearScheduledRecovery,
     clearVisibilityRecoveryTimers,
-    applyViewportRestore,
     updateScrollState,
-    rememberTerminalViewport,
     rememberFocusedSurface,
     restorePreferredFocus,
   };

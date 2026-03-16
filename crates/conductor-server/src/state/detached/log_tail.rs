@@ -37,7 +37,10 @@ impl AppState {
             metadata,
             mut offset,
         } = forwarder;
-        tracing::warn!(session_id, "Using deprecated log-tail output path; stream transport is preferred");
+        tracing::warn!(
+            session_id,
+            "Using deprecated log-tail output path; stream transport is preferred"
+        );
         let (_watcher, mut log_events) = watch_detached_log(&metadata.log_path)?;
         let mut partial = Vec::new();
         let mut exit_deadline = None;
@@ -70,11 +73,21 @@ impl AppState {
                 }
 
                 if tokio::time::Instant::now() >= *deadline {
+                    let log_detail = match tokio::fs::metadata(&metadata.log_path).await {
+                        Ok(m) if m.len() == 0 => {
+                            " (no output captured — the agent process likely crashed on startup)"
+                        }
+                        _ => "",
+                    };
                     emit_detached_runtime_error(
                         &self,
                         &session_id,
                         &output_tx,
-                        "Detached PTY runtime exited unexpectedly".to_string(),
+                        format!(
+                            "Detached PTY runtime exited unexpectedly (host pid {} died without writing exit status){}",
+                            metadata.host_pid,
+                            log_detail,
+                        ),
                         None,
                     )
                     .await;
@@ -152,9 +165,7 @@ pub(super) fn detached_log_event_matches(log_path: &Path, event: &Event) -> bool
     let parent = log_path.parent();
     event.paths.iter().any(|path| {
         path == log_path
-            || parent
-                .map(|candidate| path == candidate)
-                .unwrap_or(false)
+            || parent.map(|candidate| path == candidate).unwrap_or(false)
             || (path.parent().is_none() && path.file_name() == log_path.file_name())
     })
 }

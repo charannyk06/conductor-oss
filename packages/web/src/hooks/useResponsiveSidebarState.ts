@@ -35,6 +35,11 @@ export function useResponsiveSidebarStateWithOptions(options?: ResponsiveSidebar
     }
   }, []);
 
+  const closeSidebar = useCallback(() => {
+    setMobileSidebarOpen(false);
+    setDesktopSidebarOpen(false);
+  }, []);
+
   const syncSidebarForViewport = useCallback(() => {
     if (isDesktopViewport()) {
       setDesktopSidebarOpen(true);
@@ -48,6 +53,7 @@ export function useResponsiveSidebarStateWithOptions(options?: ResponsiveSidebar
     mobileSidebarOpen,
     desktopSidebarOpen,
     toggleSidebar,
+    closeSidebar,
     closeSidebarOnMobile,
     syncSidebarForViewport,
   };

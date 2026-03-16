@@ -41,9 +41,15 @@ fn spawn_rate_check() -> bool {
         .as_secs();
     let window_start = SPAWN_RATE_WINDOW_START.load(Ordering::Relaxed);
     if now.saturating_sub(window_start) >= SPAWN_RATE_WINDOW_SECS {
-        SPAWN_RATE_WINDOW_START.store(now, Ordering::Relaxed);
-        SPAWN_RATE_COUNT.store(1, Ordering::Relaxed);
-        return true;
+        // Atomically try to reset the window to avoid TOCTOU race
+        if SPAWN_RATE_WINDOW_START
+            .compare_exchange(window_start, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            SPAWN_RATE_COUNT.store(1, Ordering::Relaxed);
+            return true;
+        }
+        // Another thread reset it, fall through to count check
     }
     let count = SPAWN_RATE_COUNT.fetch_add(1, Ordering::Relaxed);
     count < SPAWN_RATE_LIMIT
@@ -913,8 +919,20 @@ async fn send_keys(
         Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
     };
 
-    match state.send_raw_to_session(&id, message).await {
-        Ok(()) => ok(json!({ "ok": true, "sessionId": id })),
+    match state.try_send_raw_to_session(&id, message).await {
+        Ok(true) => {
+            ok(json!({ "ok": true, "accepted": true, "queueFull": false, "sessionId": id }))
+        }
+        Ok(false) => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "ok": true,
+                "accepted": false,
+                "queueFull": true,
+                "sessionId": id,
+                "error": "Terminal input queue is full",
+            })),
+        ),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }

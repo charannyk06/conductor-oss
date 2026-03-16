@@ -1,0 +1,15 @@
+[package]
+name = "conductor-terminal-host"
+version = "0.3.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/charannyk06/conductor-oss"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+portable-pty = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+

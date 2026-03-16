@@ -3,8 +3,6 @@ use anyhow::{anyhow, Result};
 #[cfg(unix)]
 use conductor_executors::executor::ExecutorOutput;
 #[cfg(unix)]
-use std::path::Path;
-#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
@@ -31,6 +29,10 @@ use super::types::{
 #[cfg(unix)]
 use crate::state::AppState;
 
+/// Maximum line size for detached PTY stream handshake responses (64 KiB).
+#[cfg(unix)]
+const MAX_STREAM_HANDSHAKE_LINE_SIZE: usize = 64 * 1024;
+
 #[cfg(unix)]
 impl AppState {
     pub(super) async fn forward_detached_output(
@@ -42,8 +44,7 @@ impl AppState {
         // using the same hash pattern as detached_socket_paths(). This covers
         // sessions that were persisted before stream_socket_path was stored.
         if forwarder.metadata.stream_socket_path.is_none() {
-            let (_, inferred_stream_path) =
-                self.detached_socket_paths(&forwarder.session_id);
+            let (_, inferred_stream_path) = self.detached_socket_paths(&forwarder.session_id);
             // Check if the inferred socket is reachable before committing to it.
             if tokio::net::UnixStream::connect(&inferred_stream_path)
                 .await
@@ -196,11 +197,24 @@ impl AppState {
                     return Ok(());
                 }
                 if tokio::time::Instant::now() >= *deadline {
+                    // Build a more descriptive error: check if the log file
+                    // is empty (0 bytes) which usually means the agent binary
+                    // crashed before producing any output.
+                    let log_detail = match tokio::fs::metadata(&metadata.log_path).await {
+                        Ok(m) if m.len() == 0 => {
+                            " (no output captured — the agent process likely crashed on startup)"
+                        }
+                        _ => "",
+                    };
                     emit_detached_runtime_error(
                         &self,
                         &session_id,
                         &output_tx,
-                        "Detached PTY runtime exited unexpectedly".to_string(),
+                        format!(
+                            "Detached PTY runtime exited unexpectedly (host pid {} died without writing exit status){}",
+                            metadata.host_pid,
+                            log_detail,
+                        ),
                         None,
                     )
                     .await;
@@ -263,8 +277,13 @@ pub(super) async fn connect_detached_runtime_stream(
     let mut reader = BufReader::new(stream);
     let mut line = Vec::new();
     let count = reader.read_until(b'\n', &mut line).await?;
-    if count == 0 {
+    if count == 0 && line.is_empty() {
         return Err(anyhow!("Detached PTY host closed the stream socket"));
+    }
+    if line.len() > MAX_STREAM_HANDSHAKE_LINE_SIZE {
+        return Err(anyhow!(
+            "Detached PTY stream handshake response exceeded maximum line size ({MAX_STREAM_HANDSHAKE_LINE_SIZE} bytes)"
+        ));
     }
     let response = serde_json::from_slice::<DetachedPtyHostStreamResponse>(&line)?;
     ensure_detached_protocol_version(response.protocol_version)?;
@@ -274,14 +293,5 @@ pub(super) async fn connect_detached_runtime_stream(
         Err(anyhow!(response.error.unwrap_or_else(|| {
             "Detached PTY stream request failed".to_string()
         })))
-    }
-}
-
-#[cfg(unix)]
-pub(super) async fn detached_log_len(log_path: &Path) -> Result<u64> {
-    match tokio::fs::metadata(log_path).await {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
-        Err(err) => Err(err.into()),
     }
 }

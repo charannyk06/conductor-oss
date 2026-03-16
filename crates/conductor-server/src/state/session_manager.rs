@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use conductor_core::types::AgentKind;
 use conductor_executors::agents::build_runtime_env;
-use conductor_executors::executor::{ExecutorInput, ExecutorOutput, SpawnOptions};
+use conductor_executors::executor::{ExecutorOutput, SpawnOptions};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +19,7 @@ use super::types::{
 };
 use super::workspace::{is_process_alive, terminate_process};
 use super::AppState;
+use super::{PtyWriteEnqueueStatus, PtyWriteError};
 
 const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
@@ -1237,8 +1238,8 @@ impl AppState {
             return Err(anyhow::anyhow!("Session {session_id} is not running"));
         }
         let handle = self.ensure_terminal_host(session_id).await;
-        let input_tx = handle
-            .input_tx
+        let input_queue = handle
+            .input_queue
             .read()
             .await
             .clone()
@@ -1339,9 +1340,11 @@ impl AppState {
         drop(sessions);
         self.persist_session(&updated).await?;
         self.publish_snapshot().await;
-        input_tx
-            .send(ExecutorInput::Text(effective_message))
-            .await?;
+        let mut terminal_input = effective_message;
+        if !terminal_input.ends_with('\n') && !terminal_input.ends_with('\r') {
+            terminal_input.push('\r');
+        }
+        input_queue.write_text(terminal_input).await?;
         Ok(())
     }
 
@@ -1555,18 +1558,34 @@ impl AppState {
         session_id: &str,
         keys: String,
     ) -> Result<()> {
+        self.try_send_raw_to_session(session_id, keys)
+            .await?
+            .then_some(())
+            .ok_or_else(|| anyhow::anyhow!("Terminal input queue is full"))
+    }
+
+    pub async fn try_send_raw_to_session(
+        self: &Arc<Self>,
+        session_id: &str,
+        keys: String,
+    ) -> Result<bool> {
         if !self.ensure_session_live(session_id).await? {
             return Err(anyhow::anyhow!("Session {session_id} is not running"));
         }
         let handle = self.ensure_terminal_host(session_id).await;
-        let input_tx = handle
-            .input_tx
+        let input_queue = handle
+            .input_queue
             .read()
             .await
             .clone()
             .with_context(|| format!("Session {session_id} is still launching"))?;
 
-        input_tx.send(ExecutorInput::Raw(keys)).await?;
+        match input_queue.try_write(keys.into_bytes()) {
+            Ok(PtyWriteEnqueueStatus::Queued) => {}
+            Ok(PtyWriteEnqueueStatus::QueueFull) => return Ok(false),
+            Err(PtyWriteError::QueueFull) => return Ok(false),
+            Err(err) => return Err(anyhow::anyhow!("{err}")),
+        }
 
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
@@ -1584,7 +1603,7 @@ impl AppState {
             tracing::warn!("send_raw_to_session: session {session_id} not found in sessions map");
         }
 
-        Ok(())
+        Ok(true)
     }
 
     pub async fn interrupt_session(self: &Arc<Self>, session_id: &str) -> Result<()> {
@@ -1694,6 +1713,7 @@ mod tests {
     use async_trait::async_trait;
     use conductor_core::config::{ConductorConfig, ProjectConfig};
     use conductor_db::Database;
+    use conductor_executors::executor::ExecutorInput;
     use conductor_executors::executor::{Executor, ExecutorHandle};
     use conductor_executors::process::{spawn_process, PtyDimensions};
     use std::collections::BTreeMap;

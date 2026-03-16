@@ -3,36 +3,58 @@
  */
 
 import type { TerminalViewportState } from "../terminalViewport";
-import type { TerminalHttpControlOperation } from "../sessionTerminalUtils";
-import type { TerminalInsertRequest } from "../terminalInsert";
 
-export type { TerminalModeState } from "../sessionTerminalUtils";
-export type { TerminalViewportState } from "../terminalViewport";
-export type { TerminalInsertRequest } from "../terminalInsert";
-export type { TerminalHttpControlOperation } from "../sessionTerminalUtils";
-
-export interface SessionTerminalProps {
-  sessionId: string;
-  agentName: string;
-  projectId: string;
-  sessionModel: string;
-  sessionReasoningEffort: string;
-  sessionState: string;
-  active: boolean;
-  pendingInsert: TerminalInsertRequest | null;
-  immersiveMobileMode?: boolean;
-}
+export type TerminalConnectionPath =
+  | "direct"
+  | "managed_remote"
+  | "dashboard_proxy"
+  | "auth_limited"
+  | "unavailable";
 
 export type TerminalConnectionInfo = {
   stream: {
-    transport: "eventstream";
+    transport: "websocket" | "eventstream";
     wsUrl: string | null;
+    pollIntervalMs: number;
+    fallbackUrl: string | null;
   };
   control: {
-    transport: "http";
+    transport: "websocket" | "http";
+    wsUrl: string | null;
     interactive: boolean;
+    requiresToken: boolean;
+    tokenExpiresInSeconds: number | null;
     fallbackReason: string | null;
+    sendPath: string;
+    keysPath: string;
+    resizePath: string;
   };
+  connectionPath: TerminalConnectionPath;
+};
+
+export type TerminalRuntimeAuthority = "daemon" | "detached_host" | "session_metadata";
+
+export type TerminalRuntimeStatus =
+  | "ready"
+  | "spawning"
+  | "exited"
+  | "failed"
+  | "missing"
+  | "unknown";
+
+export type TerminalRuntimeInfo = {
+  authority: TerminalRuntimeAuthority;
+  status: TerminalRuntimeStatus;
+  daemonConnected: boolean | null;
+  hostPid: number | null;
+  childPid: number | null;
+  cols: number | null;
+  rows: number | null;
+  startedAt: string | null;
+  updatedAt: string | null;
+  error: string | null;
+  notice: string | null;
+  recoveryAction: string | null;
 };
 
 export type TerminalSnapshot = {
@@ -48,10 +70,12 @@ export type TerminalSnapshot = {
 export type TerminalServerEvent =
   | {
       type: "control";
-      event: "ready" | "ack" | "pong" | "exit";
+      event: "ready" | "ack" | "pong" | "exit" | "input_queue_full";
       sessionId: string;
       action?: string;
       exitCode?: number;
+      queueFull?: boolean;
+      status?: "queue_full";
     }
   | {
       type: "recovery";
@@ -88,11 +112,6 @@ export type TerminalStreamEventMessage =
 
 export type PreferredFocusTarget = "none" | "terminal" | "resume";
 
-export type PendingTerminalHttpControlOperation = TerminalHttpControlOperation & {
-  reject: (error: unknown) => void;
-  resolve: () => void;
-};
-
 export type CachedTerminalConnection = {
   value: TerminalConnectionInfo;
   expiresAt: number;
@@ -103,10 +122,8 @@ export type CachedTerminalSnapshot = TerminalSnapshot & {
 };
 
 export type CachedTerminalUiState = {
-  message: string;
   searchOpen: boolean;
   searchQuery: string;
-  helperPanelOpen: boolean;
   viewport: TerminalViewportState | null;
   updatedAt: number;
 };
@@ -115,12 +132,3 @@ export type TerminalCoreClientModules = [
   typeof import("@xterm/xterm"),
   typeof import("@xterm/addon-fit"),
 ];
-
-declare global {
-  interface Window {
-    __conductorSessionTerminalDebug?: {
-      sessionId: string;
-      getState: () => Record<string, unknown>;
-    };
-  }
-}
