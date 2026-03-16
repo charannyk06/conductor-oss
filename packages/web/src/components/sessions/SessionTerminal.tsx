@@ -8,10 +8,8 @@ import { Button } from "@/components/ui/Button";
 import { getTerminalTheme } from "@/components/terminal/xtermTheme";
 import { captureTerminalViewport } from "./terminalViewport";
 import {
-  buildTerminalSnapshotPayload,
   calculateMobileTerminalViewportMetrics,
   getSessionTerminalViewportOptions,
-  type TerminalModeState,
 } from "./sessionTerminalUtils";
 import type { TerminalInsertRequest } from "./terminalInsert";
 
@@ -19,25 +17,16 @@ import type { TerminalInsertRequest } from "./terminalInsert";
 import {
   LIVE_TERMINAL_STATUSES,
   LIVE_TERMINAL_SCROLLBACK,
-  READ_ONLY_TERMINAL_SNAPSHOT_LINES,
 } from "./terminal/terminalConstants";
-import type {
-  TerminalSnapshot,
-} from "./terminal/terminalTypes";
 import {
-  readCachedTerminalSnapshot,
-  storeCachedTerminalSnapshot,
-  clearCachedTerminalSnapshot,
   readCachedTerminalUiState,
   storeCachedTerminalUiState,
   clearCachedTerminalConnection,
 } from "./terminal/terminalCache";
 import {
   fetchTerminalConnection,
-  fetchTerminalSnapshot,
 } from "./terminal/terminalApi";
 import {
-  buildReadableSnapshotPayload,
   terminalHasRenderedContent,
   shouldShowTerminalAccessoryBar,
 } from "./terminal/terminalHelpers";
@@ -48,9 +37,7 @@ import {
   loadTerminalWebLinksAddonModule,
 } from "./terminal/useTerminalAddons";
 import { useTerminalSearch } from "./terminal/useTerminalSearch";
-import { useTerminalInput } from "./terminal/useTerminalInput";
 import { useTerminalResize } from "./terminal/useTerminalResize";
-import { useTerminalSnapshot } from "./terminal/useTerminalSnapshot";
 import { useTtydConnection } from "./terminal/useTtydConnection";
 
 // ---------------------------------------------------------------------------
@@ -89,7 +76,6 @@ export function SessionTerminal({
   const latestStatusRef = useRef(sessionState);
   const activeRef = useRef(active);
   const pageVisibleRef = useRef(typeof document === "undefined" ? true : !document.hidden);
-  const previousLiveTerminalRef = useRef(false);
   const lastAppliedInsertNonceRef = useRef<number>(0);
   const expectsLiveTerminalRef = useRef(false);
 
@@ -100,10 +86,6 @@ export function SessionTerminal({
   const [interactiveTerminal, setInteractiveTerminal] = useState(true);
   const [searchOpen, setSearchOpen] = useState(() => initialUiState?.searchOpen ?? false);
   const [searchQuery, setSearchQuery] = useState(() => initialUiState?.searchQuery ?? "");
-  const [snapshotReady, setSnapshotReady] = useState(false);
-  const [snapshotAnsi, setSnapshotAnsi] = useState("");
-  const [snapshotTranscript, setSnapshotTranscript] = useState("");
-  const [snapshotModes, setSnapshotModes] = useState<TerminalModeState | undefined>(undefined);
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
   const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
@@ -127,21 +109,7 @@ export function SessionTerminal({
   expectsLiveTerminalRef.current = expectsLiveTerminal;
   pageVisibleRef.current = pageVisible;
 
-  // --- Extracted hooks ---
-  const {
-    sendResize,
-    sendTerminalKeys,
-    clearScheduledTerminalHttpControlFlush,
-    terminalHttpControlQueueRef,
-    terminalHttpControlInFlightRef,
-    interactiveTerminalRef: inputInteractiveRef,
-  } = useTerminalInput(sessionId);
-
-  // Keep the input hook's interactivity ref in sync
-  inputInteractiveRef.current = interactiveTerminal;
-
   // TTyD WebSocket connection (for direct PTY I/O via binary protocol)
-  // Must be declared before canSendLiveInput and httpSendResize that use it
   const {
     isConnected: ttydConnected,
     isConnecting: ttydConnecting,
@@ -156,19 +124,17 @@ export function SessionTerminal({
   });
 
   const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && ttydConnected;
-  const canRenderTerminal = shouldAttachTerminalSurface;
 
-  // When TTyD is active, resize is handled directly over the WebSocket.
-  // Otherwise, fall back to HTTP resize.
-  const httpSendResize = useCallback(
+  // Resize is handled directly over the TTyD WebSocket
+  const handleSendResize = useCallback(
     async (cols: number, rows: number): Promise<boolean> => {
       if (ttydConnected) {
         ttydSendResize(cols, rows);
         return true;
       }
-      return sendResize(cols, rows);
+      return false;
     },
-    [ttydConnected, ttydSendResize, sendResize],
+    [ttydConnected, ttydSendResize],
   );
 
   // No-op error setter for useTerminalResize (errors are handled by ttyd hook)
@@ -199,31 +165,9 @@ export function SessionTerminal({
     fitRef,
     containerRef,
     resumeTextareaRef,
-    httpSendResize,
+    handleSendResize,
     noop,
     initialUiState?.viewport ?? null,
-  );
-
-  const {
-    terminalWriteQueueRef,
-    terminalWriteInFlightRef,
-    terminalWriteRestoreFocusRef,
-    terminalWriteDecoderRef,
-    snapshotAppliedRef,
-    snapshotAnsiRef,
-    snapshotTranscriptRef,
-    snapshotModesRef,
-    liveOutputStartedRef,
-    lastTerminalSequenceRef,
-    queueTerminalWrite,
-    requestSnapshotRender,
-    clearScheduledTerminalFlush,
-  } = useTerminalSnapshot(
-    sessionId,
-    termRef,
-    applyViewportRestore,
-    updateScrollState,
-    restorePreferredFocus,
   );
 
   const { searchRef, runSearch } = useTerminalSearch({
@@ -231,11 +175,6 @@ export function SessionTerminal({
     searchQuery,
     termRef,
   });
-
-  // Keep snapshot refs in sync with React state
-  snapshotAnsiRef.current = snapshotAnsi;
-  snapshotTranscriptRef.current = snapshotTranscript;
-  snapshotModesRef.current = snapshotModes;
 
   const floatingOverlayBottomPx = 12;
   const terminalSurfaceStyle = useMemo<CSSProperties | undefined>(() => {
@@ -250,38 +189,16 @@ export function SessionTerminal({
   }, [immersiveMobileMode, mobileViewportHeight]);
 
   // --- Stable callback refs for use inside useEffects ---
-  const requestSnapshotRenderRef = useRef(requestSnapshotRender);
   const updateScrollStateRef = useRef(updateScrollState);
-  const clearScheduledTerminalFlushRef = useRef(clearScheduledTerminalFlush);
   const scheduleRendererRecoveryRef = useRef<(forceResize: boolean) => void>(scheduleRendererRecovery);
 
-  useEffect(() => { requestSnapshotRenderRef.current = requestSnapshotRender; }, [requestSnapshotRender]);
   useEffect(() => { updateScrollStateRef.current = updateScrollState; }, [updateScrollState]);
-  useEffect(() => { clearScheduledTerminalFlushRef.current = clearScheduledTerminalFlush; }, [clearScheduledTerminalFlush]);
   useEffect(() => { scheduleRendererRecoveryRef.current = scheduleRendererRecovery; }, [scheduleRendererRecovery]);
 
   // --- Callbacks ---
-  const applyFetchedSnapshot = useCallback((snapshot: TerminalSnapshot) => {
-    snapshotAppliedRef.current = null;
-    lastTerminalSequenceRef.current = snapshot.sequence;
-    snapshotAnsiRef.current = snapshot.snapshot;
-    snapshotTranscriptRef.current = snapshot.transcript;
-    snapshotModesRef.current = snapshot.modes;
-    storeCachedTerminalSnapshot(sessionId, snapshot);
-    setSnapshotAnsi(snapshot.snapshot);
-    setSnapshotTranscript(snapshot.transcript);
-    setSnapshotModes(snapshot.modes);
-    setSnapshotReady(true);
-    if (typeof window !== "undefined" && termRef.current) {
-      window.requestAnimationFrame(() => {
-        requestSnapshotRender();
-      });
-    }
-  }, [lastTerminalSequenceRef, requestSnapshotRender, sessionId, snapshotAppliedRef, snapshotAnsiRef, snapshotModesRef, snapshotTranscriptRef]);
-
   const persistCachedUiState = useEffectEvent(() => {
     const term = termRef.current;
-    const viewport = term && (snapshotAppliedRef.current === sessionId || terminalHasRenderedContent(term))
+    const viewport = term && terminalHasRenderedContent(term)
       ? captureTerminalViewport(term)
       : pendingViewportRestoreRef.current;
     pendingViewportRestoreRef.current = viewport;
@@ -303,15 +220,6 @@ export function SessionTerminal({
   useEffect(() => () => {
     persistCachedUiState();
   }, [persistCachedUiState]);
-
-  useEffect(() => {
-    const wasLiveTerminal = previousLiveTerminalRef.current;
-    previousLiveTerminalRef.current = expectsLiveTerminal;
-    if (wasLiveTerminal && !expectsLiveTerminal) {
-      snapshotAppliedRef.current = null;
-      liveOutputStartedRef.current = false;
-    }
-  }, [expectsLiveTerminal, liveOutputStartedRef, snapshotAppliedRef]);
 
   useEffect(() => {
     if (!immersiveMobileMode || typeof window === "undefined" || !window.visualViewport) {
@@ -365,24 +273,13 @@ export function SessionTerminal({
 
   // Reset state when sessionId changes
   useEffect(() => {
-    const cachedSnapshot = expectsLiveTerminal ? null : readCachedTerminalSnapshot(sessionId);
     const cachedUiState = readCachedTerminalUiState(sessionId);
-    snapshotAppliedRef.current = null;
-    lastTerminalSequenceRef.current = cachedSnapshot?.sequence ?? null;
-    liveOutputStartedRef.current = false;
     lastAppliedInsertNonceRef.current = 0;
     lastSyncedTerminalSizeRef.current = null;
     pendingResizeSyncRef.current = true;
     preferredFocusTargetRef.current = "none";
     restoreFocusOnRecoveryRef.current = false;
     clearScheduledRecovery();
-    clearScheduledTerminalFlush();
-    clearScheduledTerminalHttpControlFlush();
-    terminalWriteQueueRef.current = [];
-    terminalWriteInFlightRef.current = false;
-    terminalWriteRestoreFocusRef.current = false;
-    terminalHttpControlQueueRef.current = [];
-    terminalHttpControlInFlightRef.current = false;
     lastObservedContainerSizeRef.current = null;
     lastViewportOptionKeyRef.current = null;
     pendingViewportRestoreRef.current = cachedUiState?.viewport ?? null;
@@ -390,12 +287,9 @@ export function SessionTerminal({
     setSearchOpen(cachedUiState?.searchOpen ?? false);
     setSearchQuery(cachedUiState?.searchQuery ?? "");
     _setShowScrollToBottom(false);
-    setSnapshotReady(cachedSnapshot !== null);
-    setSnapshotAnsi(cachedSnapshot?.snapshot ?? "");
-    setSnapshotTranscript(cachedSnapshot?.transcript ?? "");
-    setSnapshotModes(cachedSnapshot?.modes);
     setSessionStatusOverride(null);
     setMobileViewportHeight(null);
+    setPtyWsUrl(null);
     termRef.current?.reset();
     updateScrollState();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -405,66 +299,7 @@ export function SessionTerminal({
     setSessionStatusOverride(null);
   }, [sessionState]);
 
-  // Snapshot fetch effect
-  useEffect(() => {
-    let mounted = true;
-    const cachedSnapshot = expectsLiveTerminal ? null : readCachedTerminalSnapshot(sessionId);
-    const hasCachedSnapshot = cachedSnapshot !== null;
-    setSnapshotReady(hasCachedSnapshot);
-
-    if (!active) {
-      return () => { mounted = false; };
-    }
-
-    if (expectsLiveTerminal) {
-      if (!shouldStreamLiveTerminal) {
-        return () => { mounted = false; };
-      }
-
-      liveOutputStartedRef.current = false;
-      lastTerminalSequenceRef.current = null;
-      snapshotAppliedRef.current = null;
-      snapshotAnsiRef.current = "";
-      snapshotTranscriptRef.current = "";
-      snapshotModesRef.current = undefined;
-      setSnapshotAnsi("");
-      setSnapshotTranscript("");
-      setSnapshotModes(undefined);
-      setSnapshotReady(true);
-
-      return () => { mounted = false; };
-    }
-
-    if (hasCachedSnapshot) {
-      setSnapshotAnsi(cachedSnapshot.snapshot);
-      setSnapshotTranscript(cachedSnapshot.transcript);
-      setSnapshotModes(cachedSnapshot.modes);
-    } else {
-      setSnapshotAnsi("");
-      setSnapshotTranscript("");
-      setSnapshotModes(undefined);
-    }
-    void (async () => {
-      try {
-        const snapshot = await fetchTerminalSnapshot(sessionId, READ_ONLY_TERMINAL_SNAPSHOT_LINES);
-        if (!mounted) return;
-        applyFetchedSnapshot(snapshot);
-      } catch {
-        if (!mounted) return;
-        setSnapshotAnsi("");
-        setSnapshotTranscript("");
-      } finally {
-        if (mounted) {
-          setSnapshotReady(true);
-        }
-      }
-    })();
-
-    return () => { mounted = false; };
-  }, [active, applyFetchedSnapshot, expectsLiveTerminal, lastTerminalSequenceRef, liveOutputStartedRef, sessionId, shouldStreamLiveTerminal, snapshotAppliedRef, snapshotAnsiRef, snapshotModesRef, snapshotTranscriptRef]);
-
-  // Connection resolution effect — clears stale cached connection to ensure
-  // fresh token/URL when a session transitions to live.
+  // Connection resolution effect — fetches ptyWsUrl for TTyD WebSocket
   useEffect(() => {
     let mounted = true;
 
@@ -494,11 +329,7 @@ export function SessionTerminal({
   const handleTerminalData = useEffectEvent((data: string) => {
     if (ttydConnected) {
       ttydSendInput(data);
-      return;
     }
-    void sendTerminalKeys(data).catch(() => {
-      // Ignore transient disconnects while xterm is still flushing local input.
-    });
   });
 
   const handleTerminalScroll = useEffectEvent(() => {
@@ -626,15 +457,9 @@ export function SessionTerminal({
       pendingResizeSyncRef.current = true;
       lastObservedContainerSizeRef.current = `${Math.round(containerRef.current.clientWidth)}x${Math.round(containerRef.current.clientHeight)}`;
       lastViewportOptionKeyRef.current = `${viewportOptions.fontFamily}:${viewportOptions.fontSize}:${viewportOptions.lineHeight}`;
-      term.options.disableStdin = !expectsLiveTerminalRef.current || !inputInteractiveRef.current;
+      term.options.disableStdin = !expectsLiveTerminalRef.current;
       setTerminalReady(true);
       updateScrollStateRef.current();
-      window.requestAnimationFrame(() => {
-        if (!mounted) {
-          return;
-        }
-        requestSnapshotRenderRef.current();
-      });
 
       inputDisposableRef.current = term.onData((data) => {
         handleTerminalData(data);
@@ -665,7 +490,6 @@ export function SessionTerminal({
       if (term) {
         pendingViewportRestoreRef.current = captureTerminalViewport(term);
       }
-      clearScheduledTerminalFlushRef.current();
       inputDisposableRef.current?.dispose();
       inputDisposableRef.current = null;
       scrollDisposableRef.current?.dispose();
@@ -676,15 +500,9 @@ export function SessionTerminal({
       termRef.current = null;
       fitRef.current = null;
       searchRef.current = null;
-      snapshotAppliedRef.current = null;
-      liveOutputStartedRef.current = false;
       lastSyncedTerminalSizeRef.current = null;
       lastObservedContainerSizeRef.current = null;
       lastViewportOptionKeyRef.current = null;
-      terminalWriteQueueRef.current = [];
-      terminalWriteInFlightRef.current = false;
-      terminalWriteRestoreFocusRef.current = false;
-      terminalWriteDecoderRef.current = typeof TextDecoder === "undefined" ? null : new TextDecoder();
       pendingResizeSyncRef.current = true;
       setTerminalReady(false);
     };
@@ -718,60 +536,6 @@ export function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, scheduleRendererRecovery]);
 
-  // Snapshot render effect — skip when ttyd owns the terminal output
-  useEffect(() => {
-    if (ttydConnected || ttydConnecting) {
-      return;
-    }
-    if (!terminalReady || !snapshotReady || !canRenderTerminal) {
-      return;
-    }
-
-    const term = termRef.current;
-    if (!term) {
-      return;
-    }
-
-    const hasRenderedContent = terminalHasRenderedContent(term);
-
-    if (snapshotAppliedRef.current === sessionId && hasRenderedContent) {
-      updateScrollState();
-      return;
-    }
-
-    if (expectsLiveTerminal && liveOutputStartedRef.current && hasRenderedContent) {
-      snapshotAppliedRef.current = sessionId;
-      updateScrollState();
-      return;
-    }
-
-    snapshotAppliedRef.current = sessionId;
-    if (snapshotAnsi.length > 0) {
-      queueTerminalWrite({
-        kind: "snapshot",
-        payload: liveOutputStartedRef.current
-          ? buildTerminalSnapshotPayload(snapshotAnsi, snapshotModes)
-          : buildReadableSnapshotPayload(snapshotAnsi, snapshotTranscript),
-      });
-      return;
-    }
-
-    updateScrollState();
-  }, [
-    expectsLiveTerminal,
-    liveOutputStartedRef,
-    sessionId,
-    snapshotAnsi,
-    snapshotAppliedRef,
-    snapshotTranscript,
-    snapshotModes,
-    snapshotReady,
-    terminalReady,
-    queueTerminalWrite,
-    updateScrollState,
-    canRenderTerminal,
-  ]);
-
   // Debug state effect
   useEffect(() => {
     if (typeof window === "undefined" || process.env.NODE_ENV === "production") {
@@ -784,14 +548,8 @@ export function SessionTerminal({
         sessionId,
         active,
         terminalReady,
-        snapshotReady,
-        snapshotLength: snapshotAnsi.length,
-        snapshotTranscriptLength: snapshotTranscript.length,
-        snapshotPreview: snapshotAnsi.slice(0, 120),
         connectionState: ttydConnected ? "live" : ttydConnecting ? "connecting" : ttydError ? "error" : "closed",
         interactiveTerminal,
-        liveOutputStarted: liveOutputStartedRef.current,
-        snapshotApplied: snapshotAppliedRef.current,
         hasRenderedContent: termRef.current ? terminalHasRenderedContent(termRef.current) : false,
         termRows: termRef.current?.rows ?? null,
         termCols: termRef.current?.cols ?? null,
@@ -820,20 +578,12 @@ export function SessionTerminal({
     ttydError,
     expectsLiveTerminal,
     interactiveTerminal,
-    liveOutputStartedRef,
     pageVisible,
     ptyWsUrl,
     sessionId,
     shouldAttachTerminalSurface,
     shouldStreamLiveTerminal,
-    snapshotAnsi,
-    snapshotAppliedRef,
-    snapshotTranscript,
-    snapshotReady,
     terminalReady,
-    ttydConnected,
-    ttydConnecting,
-    ttydError,
   ]);
 
   // Visibility/focus effect
@@ -874,46 +624,10 @@ export function SessionTerminal({
     };
   }, [rememberFocusedSurface]);
 
-  // Cleanup when not streaming
-  useEffect(() => {
-    if (shouldStreamLiveTerminal) {
-      return;
-    }
-
-    clearScheduledTerminalFlush();
-    clearScheduledTerminalHttpControlFlush();
-    terminalWriteQueueRef.current = [];
-    terminalWriteInFlightRef.current = false;
-    terminalWriteRestoreFocusRef.current = false;
-    terminalHttpControlQueueRef.current = [];
-    terminalHttpControlInFlightRef.current = false;
-    if (expectsLiveTerminal) {
-      clearCachedTerminalSnapshot(sessionId);
-      snapshotAppliedRef.current = null;
-      snapshotAnsiRef.current = "";
-      snapshotTranscriptRef.current = "";
-      snapshotModesRef.current = undefined;
-      lastTerminalSequenceRef.current = null;
-      liveOutputStartedRef.current = false;
-      setSnapshotAnsi("");
-      setSnapshotTranscript("");
-      setSnapshotModes(undefined);
-      setSnapshotReady(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shouldStreamLiveTerminal, sessionId, expectsLiveTerminal]);
-
   // Global cleanup effect
   useEffect(() => () => {
     clearScheduledRecovery();
-    clearScheduledTerminalFlush();
-    clearScheduledTerminalHttpControlFlush();
     clearVisibilityRecoveryTimers();
-    terminalWriteQueueRef.current = [];
-    terminalWriteInFlightRef.current = false;
-    terminalWriteRestoreFocusRef.current = false;
-    terminalHttpControlQueueRef.current = [];
-    terminalHttpControlInFlightRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -928,12 +642,10 @@ export function SessionTerminal({
     if (canSendLiveInput) {
       const inlineText = pendingInsert.inlineText.trim();
       if (inlineText.length > 0) {
-        void sendTerminalKeys(`${inlineText} `).catch(() => {
-          // Ignore transient errors during live input
-        });
+        ttydSendInput(`${inlineText} `);
       }
     }
-  }, [canSendLiveInput, pendingInsert, sendTerminalKeys]);
+  }, [canSendLiveInput, pendingInsert, ttydSendInput]);
 
   const scrollToBottom = useCallback(() => {
     const term = termRef.current;
