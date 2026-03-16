@@ -20,12 +20,6 @@ Conductor OSS is a local-first orchestration platform for AI coding agents. It t
 
 Everything runs on your machine. State lives in local files and SQLite. Agents keep their own authentication and billing. Conductor is the operating layer around them, not a replacement.
 
-<div align="center">
-
-![Conductor full demo](docs/demo/full-demo.gif)
-
-</div>
-
 ## Why Conductor
 
 Running one agent in one terminal works fine for a single task. When you want to queue multiple tasks across multiple repos, dispatch them to different agents, watch them run in parallel, retry failures, review diffs, and coordinate it all from one place — you need an orchestration layer.
@@ -275,20 +269,6 @@ cargo clippy --workspace -- -D warnings  # Rust linting
 | Dashboard (prod) | `http://127.0.0.1:4747` |
 | Rust backend | `http://127.0.0.1:4749` |
 
-## Demos
-
-<div align="center">
-
-| Add a task | Auto-dispatch |
-|:---:|:---:|
-| ![Add task](docs/demo/01-add-task.gif) | ![Auto dispatch](docs/demo/02-auto-dispatch.gif) |
-
-| Live terminal | PR creation |
-|:---:|:---:|
-| ![Live terminal](docs/demo/03-live-terminal.gif) | ![PR creation](docs/demo/05-pr-creation.gif) |
-
-</div>
-
 ## Project Structure
 
 ```
@@ -308,7 +288,7 @@ conductor-oss/
 │   └── core/                   # Shared TypeScript types
 ├── docs/
 │   ├── screenshots/            # Dashboard and session screenshots
-│   ├── demo/                   # Workflow demo GIFs
+│   ├── demo/                   # Workflow demo videos
 │   └── terminal-*.md           # Terminal protocol and QA docs
 ├── .github/workflows/          # CI, release, security, PR checks
 ├── Cargo.toml                  # Rust workspace
