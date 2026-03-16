@@ -141,26 +141,8 @@ impl ClientMessage {
     }
 }
 
-/// Flow control parameters (from ttyd defaults)
-#[derive(Debug, Clone, Copy)]
-pub struct FlowControlConfig {
-    /// Bytes written to xterm.js before checking backpressure
-    pub write_threshold: usize,
-    /// Pending writes before sending PAUSE to server
-    pub high_water: u32,
-    /// Pending writes before sending RESUME to server
-    pub low_water: u32,
-}
-
-impl Default for FlowControlConfig {
-    fn default() -> Self {
-        FlowControlConfig {
-            write_threshold: 100_000,
-            high_water: 10,
-            low_water: 4,
-        }
-    }
-}
+// NOTE: Flow control config lives client-side only (ttydClient.ts).
+// Server-side PAUSE/RESUME support is not yet implemented — see TODO in terminal.rs.
 
 #[cfg(test)]
 mod tests {
@@ -208,11 +190,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_flow_control_config() {
-        let fc = FlowControlConfig::default();
-        assert_eq!(fc.write_threshold, 100_000);
-        assert_eq!(fc.high_water, 10);
-        assert_eq!(fc.low_water, 4);
-    }
 }

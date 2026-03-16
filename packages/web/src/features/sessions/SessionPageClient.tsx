@@ -7,20 +7,11 @@ import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { SessionDetail } from "@/components/sessions/SessionDetail";
-import { detectCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
+import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { useConfig } from "@/hooks/useConfig";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
 import type { DashboardSession } from "@/lib/types";
-
-function shouldUseCompactTerminalChrome(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-  return detectCompactTerminalChrome(window.innerWidth, window.innerHeight, coarsePointer, navigator.maxTouchPoints);
-}
 
 export default function SessionPageClient() {
   const params = useParams<{ id: string }>();
@@ -38,7 +29,7 @@ export default function SessionPageClient() {
   const { sessions, refresh } = useSessions(undefined, { enabled: sidebarVisible });
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [compactTerminalChrome, setCompactTerminalChrome] = useState(() => shouldUseCompactTerminalChrome());
+  const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
     return tab !== "overview" && tab !== "preview" && tab !== "diff";
@@ -133,6 +124,7 @@ export default function SessionPageClient() {
       mobileSidebarOpen={mobileSidebarOpen}
       desktopSidebarOpen={desktopSidebarOpen}
       onToggleSidebar={toggleSidebar}
+      hideMobileSidebarToggle={immersiveTerminalMode}
       sidebar={sidebarVisible ? (
         <WorkspaceSidebarPanel
           projects={projects}
@@ -169,12 +161,13 @@ export default function SessionPageClient() {
           title={topBarTitle}
         />
       )}
-      <div className={`flex min-h-0 flex-1 flex-col overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
+      <div className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
         <SessionDetail
           key={params.id}
           sessionId={params.id}
           initialSession={currentSession}
           immersiveMobileMode={immersiveTerminalMode}
+          onOpenSidebar={toggleSidebar}
         />
       </div>
     </AppShell>

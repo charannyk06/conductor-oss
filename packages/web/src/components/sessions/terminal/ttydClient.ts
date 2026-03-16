@@ -88,11 +88,6 @@ export class TtydClient {
     this.terminal = terminal;
     this.flowControl = flowControl;
     this.callbacks = callbacks;
-    const element = terminal.element;
-    if (element) {
-      const rect = element.getBoundingClientRect();
-    } else {
-    }
   }
 
   /**
@@ -158,11 +153,6 @@ export class TtydClient {
    * Disconnect from the WebSocket.
    */
   disconnect(): void {
-    // Flush any remaining UTF-8 sequence from the decoder
-    const remaining = this.textDecoder.decode();
-    if (remaining) {
-      this.terminal.write(remaining);
-    }
     if (this.socket) {
       this.socket.onopen = null;
       this.socket.onmessage = null;
@@ -252,46 +242,24 @@ export class TtydClient {
   private writeOutput(data: Uint8Array): void {
     const { highWater, lowWater } = this.flowControl;
 
-    // Verify terminal state
     if (!this.terminal) {
       return;
     }
-    const element = this.terminal.element;
-    if (!element) {
-    } else {
-      const rect = element.getBoundingClientRect();
-    }
 
-    // Decode bytes to string for xterm.js parser
-    const str = this.textDecoder.decode(data, { stream: true });
-    if (!str) {
-      return; // Empty or incomplete UTF-8 sequence
-    }
-
-    // Check terminal state before writing
-    const bufferLength = this.terminal.buffer.active.length;
-
-    // For small writes, use fast path (no callback overhead)
-    const byteLength = data.byteLength;
-    if (byteLength < 1024) {
-      // Fast path: direct write without callback
-      try {
-        this.terminal.write(str);
-      } catch (err) {
-      }
+    // Write raw bytes directly to xterm.js — it handles UTF-8 internally.
+    // For small writes, use fast path (no callback overhead).
+    if (data.byteLength < 1024) {
+      this.terminal.write(data);
       return;
     }
 
     // For larger writes, track pending with callback for flow control
-    try {
-      this.terminal.write(str, () => {
-        this.pending = Math.max(this.pending - 1, 0);
-        if (this.pending < lowWater && this.pending > 0) {
-          this.sendResume();
-        }
-      });
-    } catch (err) {
-    }
+    this.terminal.write(data, () => {
+      this.pending = Math.max(this.pending - 1, 0);
+      if (this.pending < lowWater && this.pending > 0) {
+        this.sendResume();
+      }
+    });
 
     this.pending++;
     if (this.pending >= highWater) {

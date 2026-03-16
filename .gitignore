@@ -61,4 +61,5 @@ docs/research/
 docs/SUPERSET_INTEGRATION.md
 refactor.py
 rewrite.py
+research/
 .claude/

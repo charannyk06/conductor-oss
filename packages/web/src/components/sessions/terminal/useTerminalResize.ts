@@ -31,6 +31,45 @@ export interface UseTerminalResizeReturn {
   restorePreferredFocus: () => void;
 }
 
+function parseCssPixels(value: string): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getPreciseTerminalGeometry(
+  term: XTerminal,
+  container: HTMLDivElement,
+): { cols: number; rows: number } | null {
+  const dims = term.dimensions;
+  if (!dims || dims.css.cell.width <= 0 || dims.css.cell.height <= 0 || !term.element) {
+    return null;
+  }
+
+  const rect = container.getBoundingClientRect();
+  if (rect.width <= 1 || rect.height <= 1) {
+    return null;
+  }
+
+  const elementStyle = window.getComputedStyle(term.element);
+  const paddingX = parseCssPixels(elementStyle.paddingLeft) + parseCssPixels(elementStyle.paddingRight);
+  const paddingY = parseCssPixels(elementStyle.paddingTop) + parseCssPixels(elementStyle.paddingBottom);
+  const showScrollbar = term.options.scrollbar?.showScrollbar ?? true;
+  const scrollbarWidth = term.options.scrollback === 0 || !showScrollbar
+    ? 0
+    : (term.options.scrollbar?.width ?? 14);
+
+  // Prefer the painted box over computed CSS width. On narrow mobile layouts,
+  // Safari can report a parent width slightly wider than the visible terminal,
+  // which leaves the last columns clipped even after fit().
+  const availableWidth = Math.max(0, rect.width - paddingX - scrollbarWidth - 1);
+  const availableHeight = Math.max(0, rect.height - paddingY - 1);
+
+  return {
+    cols: Math.max(2, Math.floor(availableWidth / dims.css.cell.width)),
+    rows: Math.max(1, Math.floor(availableHeight / dims.css.cell.height)),
+  };
+}
+
 export function useTerminalResize(
   sessionId: string,
   termRef: React.MutableRefObject<XTerminal | null>,
@@ -208,6 +247,11 @@ export function useTerminalResize(
       fit.fit();
     } catch {
       return;
+    }
+
+    const preciseGeometry = getPreciseTerminalGeometry(term, container);
+    if (preciseGeometry && (term.cols !== preciseGeometry.cols || term.rows !== preciseGeometry.rows)) {
+      term.resize(preciseGeometry.cols, preciseGeometry.rows);
     }
 
     if (forceResize) {

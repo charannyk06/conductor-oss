@@ -875,7 +875,7 @@ fn should_skip_stream_chunk(sequence_floor: Option<u64>, chunk_sequence: u64) ->
         .unwrap_or(false)
 }
 
-/// Wrap raw PTY bytes in a ttyd-style output frame: `[0x00][bytes]`.
+/// Wrap raw PTY bytes in a ttyd-style output frame: `['0' (0x30)][bytes]`.
 fn encode_ttyd_output_frame(bytes: &[u8]) -> Vec<u8> {
     ttyd_protocol::encode_output(bytes)
 }
@@ -958,32 +958,16 @@ async fn handle_terminal_socket(
         if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
             if should_send_initial_restore(&snapshot, client_sequence) {
                 if bidirectional {
-                    // In bidirectional mode, skip the vt100 screen reconstruction
-                    // which produces garbled output when replayed through xterm.js.
-                    // Send only raw history bytes (faithful PTY output) and rely on
-                    // the resize SIGWINCH to trigger the agent's TUI to repaint.
-                    if !snapshot.history.is_empty() {
-                        let mut buf = b"\x1b[2J\x1b[H".to_vec(); // clear screen + cursor home
-                        let max_history = LIVE_TERMINAL_SNAPSHOT_MAX_BYTES.saturating_sub(buf.len());
-                        let history = if snapshot.history.len() > max_history {
-                            &snapshot.history[snapshot.history.len() - max_history..]
-                        } else {
-                            &snapshot.history
-                        };
-                        buf.extend_from_slice(history);
-                        const CHUNK_SIZE: usize = 65536 - 1;
-                        let mut offset = 0;
-                        while offset < buf.len() {
-                            let end = std::cmp::min(offset + CHUNK_SIZE, buf.len());
-                            let chunk = &buf[offset..end];
-                            let frame = encode_ttyd_output_frame(chunk);
-                            if socket.send(Message::Binary(frame.into())).await.is_err() {
-                                return;
-                            }
-                            offset = end;
-                        }
+                    // In bidirectional mode, do NOT replay raw history bytes.
+                    // History contains ANSI cursor positioning for the terminal
+                    // width that was active when the bytes were written. Replaying
+                    // them at the client's current width produces garbled TUI output.
+                    // Instead, clear the screen and force SIGWINCH so the running
+                    // agent repaints its TUI at the correct dimensions.
+                    let clear_frame = encode_ttyd_output_frame(b"\x1b[2J\x1b[H");
+                    if socket.send(Message::Binary(clear_frame.into())).await.is_err() {
+                        return;
                     }
-                    // Force SIGWINCH so TUI agents repaint on top of the history
                     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
                 } else {
                     let restore_frame = encode_terminal_restore_frame(
@@ -1073,27 +1057,16 @@ async fn handle_terminal_socket(
                             if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await
                             {
                                 if bidirectional {
-                                    // Same as initial attach: skip vt100 screen reconstruction,
-                                    // send only raw history bytes + SIGWINCH resize.
-                                    if !snapshot.history.is_empty() {
-                                        let mut buf = b"\x1b[2J\x1b[H".to_vec();
-                                        let max_history = LIVE_TERMINAL_SNAPSHOT_MAX_BYTES.saturating_sub(buf.len());
-                                        let history = if snapshot.history.len() > max_history {
-                                            &snapshot.history[snapshot.history.len() - max_history..]
-                                        } else {
-                                            &snapshot.history
-                                        };
-                                        buf.extend_from_slice(history);
-                                        let frame = encode_ttyd_output_frame(&buf);
-                                        if socket
-                                            .send(Message::Binary(frame.into()))
-                                            .await
-                                            .is_err()
-                                        {
-                                            break;
-                                        }
+                                    // Clear screen and force SIGWINCH so the agent repaints
+                                    // at the correct dimensions (same as initial attach).
+                                    let clear_frame = encode_ttyd_output_frame(b"\x1b[2J\x1b[H");
+                                    if socket
+                                        .send(Message::Binary(clear_frame.into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
                                     }
-                                    // Force SIGWINCH so TUI agents repaint
                                     let _ = state.resize_live_terminal(&session_id, cols, rows).await;
                                 } else {
                                     if socket
@@ -1163,7 +1136,9 @@ async fn handle_terminal_socket(
                                     if let Ok(input_str) = String::from_utf8(bytes.clone()) {
                                         let _ = state.send_raw_to_session(&session_id, input_str).await;
                                     } else {
-                                        // For non-UTF8 input, still send raw bytes
+                                        // Non-UTF8 bytes are lossy-converted (U+FFFD replaces
+                                        // invalid sequences). In practice keyboard input is
+                                        // always UTF-8, so this path only fires for corrupt data.
                                         let input_str = String::from_utf8_lossy(&bytes).to_string();
                                         let _ = state.send_raw_to_session(&session_id, input_str).await;
                                     }
@@ -1172,13 +1147,14 @@ async fn handle_terminal_socket(
                                     let _ = state.resize_live_terminal(&session_id, columns.max(1), rows.max(1)).await;
                                 }
                                 ClientMessage::Pause => {
-                                    // Client requested pause (browser is behind on rendering)
-                                    // We can implement per-session flow control here if needed
-                                    tracing::debug!(session_id = %session_id, "Client pause requested");
+                                    // TODO: implement per-session flow control — gate batch
+                                    // flushing with an AtomicBool toggled here. Currently the
+                                    // server keeps sending output regardless of PAUSE.
+                                    tracing::debug!(session_id = %session_id, "Client pause requested (not yet enforced)");
                                 }
                                 ClientMessage::Resume => {
-                                    // Client ready for more output
-                                    tracing::debug!(session_id = %session_id, "Client resume requested");
+                                    // TODO: clear the paused flag so batch flushing resumes.
+                                    tracing::debug!(session_id = %session_id, "Client resume requested (not yet enforced)");
                                 }
                                 ClientMessage::Handshake(_) => {
                                     // Handshake should be the first message

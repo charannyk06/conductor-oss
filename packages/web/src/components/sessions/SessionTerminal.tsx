@@ -1,9 +1,9 @@
 "use client";
 
-import React, { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import React, { type CSSProperties, type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type { FitAddon as XFitAddon } from "@xterm/addon-fit";
 import type { ITerminalOptions, IDisposable, Terminal as XTerminal } from "@xterm/xterm";
-import { AlertCircle, ChevronDown, Loader2, RefreshCw, Search, X } from "lucide-react";
+import { AlertCircle, ChevronDown, Loader2, RefreshCw, Search, Send, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { getTerminalTheme } from "@/components/terminal/xtermTheme";
 import { captureTerminalViewport } from "./terminalViewport";
@@ -17,6 +17,7 @@ import type { TerminalInsertRequest } from "./terminalInsert";
 import {
   LIVE_TERMINAL_STATUSES,
   LIVE_TERMINAL_SCROLLBACK,
+  RESUMABLE_STATUSES,
 } from "./terminal/terminalConstants";
 import {
   readCachedTerminalUiState,
@@ -89,6 +90,10 @@ export function SessionTerminal({
   const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
   const [sessionStatusOverride, setSessionStatusOverride] = useState<string | null>(null);
   const [mobileViewportHeight, setMobileViewportHeight] = useState<number | null>(null);
+  const [promptMessage, setPromptMessage] = useState("");
+  const [promptSending, setPromptSending] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const promptInputRef = useRef<HTMLInputElement>(null);
 
   // --- Derived state ---
   const normalizedSessionStatus = useMemo(
@@ -223,8 +228,27 @@ export function SessionTerminal({
 
   useEffect(() => {
     if (!immersiveMobileMode || typeof window === "undefined" || !window.visualViewport) {
-      setMobileViewportHeight(null);
-      return;
+      const fallbackSyncMobileViewport = () => {
+        const surface = surfaceRef.current;
+        if (!surface) {
+          return;
+        }
+        const metrics = calculateMobileTerminalViewportMetrics(
+          window.innerHeight,
+          window.innerHeight,
+          0,
+          surface.getBoundingClientRect().top,
+        );
+        setMobileViewportHeight((current) => (current === metrics.usableHeight ? current : metrics.usableHeight));
+      };
+
+      fallbackSyncMobileViewport();
+      window.addEventListener("resize", fallbackSyncMobileViewport);
+      window.addEventListener("orientationchange", fallbackSyncMobileViewport);
+      return () => {
+        window.removeEventListener("resize", fallbackSyncMobileViewport);
+        window.removeEventListener("orientationchange", fallbackSyncMobileViewport);
+      };
     }
 
     const visualViewport = window.visualViewport;
@@ -260,6 +284,7 @@ export function SessionTerminal({
     visualViewport.addEventListener("resize", syncMobileViewport);
     visualViewport.addEventListener("scroll", syncMobileViewport);
     window.addEventListener("resize", syncMobileViewport);
+    window.addEventListener("orientationchange", syncMobileViewport);
 
     return () => {
       if (frameHandle !== null) {
@@ -268,6 +293,7 @@ export function SessionTerminal({
       visualViewport.removeEventListener("resize", syncMobileViewport);
       visualViewport.removeEventListener("scroll", syncMobileViewport);
       window.removeEventListener("resize", syncMobileViewport);
+      window.removeEventListener("orientationchange", syncMobileViewport);
     };
   }, [immersiveMobileMode, scheduleRendererRecovery]);
 
@@ -315,7 +341,7 @@ export function SessionTerminal({
         const connection = await fetchTerminalConnection(sessionId);
         if (!mounted) return;
         setPtyWsUrl(connection.ptyWsUrl);
-        setInteractiveTerminal(connection.control.interactive);
+        setInteractiveTerminal(connection.interactive);
       } catch (err) {
         if (!mounted) return;
         console.error("Failed to resolve terminal connection:", err);
@@ -476,6 +502,7 @@ export function SessionTerminal({
         handleTerminalResizeObserved(term, entry);
       });
       resizeObserverRef.current.observe(containerRef.current);
+      scheduleRendererRecoveryRef.current(true);
     }
 
     if (!shouldAttachTerminalSurface) {
@@ -517,6 +544,56 @@ export function SessionTerminal({
     term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal;
   }, [expectsLiveTerminal, interactiveTerminal]);
 
+  useEffect(() => {
+    if (typeof document === "undefined" || !("fonts" in document)) {
+      return;
+    }
+
+    let cancelled = false;
+    void document.fonts.ready.then(() => {
+      if (cancelled || !activeRef.current) {
+        return;
+      }
+
+      lastObservedContainerSizeRef.current = null;
+      lastViewportOptionKeyRef.current = null;
+      pendingResizeSyncRef.current = true;
+      scheduleRendererRecovery(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    immersiveMobileMode,
+    lastObservedContainerSizeRef,
+    lastViewportOptionKeyRef,
+    pendingResizeSyncRef,
+    scheduleRendererRecovery,
+    sessionId,
+  ]);
+
+  useEffect(() => {
+    const termElement = termRef.current?.element;
+    if (!termElement) {
+      return;
+    }
+
+    termElement.classList.add("session-terminal-xterm");
+    termElement.classList.toggle("session-terminal-xterm-mobile", immersiveMobileMode);
+    lastObservedContainerSizeRef.current = null;
+    lastViewportOptionKeyRef.current = null;
+    pendingResizeSyncRef.current = true;
+    scheduleRendererRecovery(true);
+  }, [
+    immersiveMobileMode,
+    lastObservedContainerSizeRef,
+    lastViewportOptionKeyRef,
+    pendingResizeSyncRef,
+    scheduleRendererRecovery,
+    terminalReady,
+  ]);
+
   // Active pane recovery — fires ONLY on tab activation.
   // A single recovery re-fits the terminal after potential WebGL context loss,
   // plus one delayed retry to handle late-settling layouts.
@@ -525,16 +602,22 @@ export function SessionTerminal({
       return;
     }
 
+    // Reset cached viewport metrics when mobile immersive chrome toggles so
+    // xterm recalculates cols/rows instead of keeping the previous fit result.
+    lastObservedContainerSizeRef.current = null;
+    lastViewportOptionKeyRef.current = null;
+    pendingResizeSyncRef.current = true;
+
     scheduleRendererRecovery(true);
     const retryTimer = window.setTimeout(() => {
-      scheduleRendererRecovery(false);
+      scheduleRendererRecovery(true);
     }, 150);
 
     return () => {
       window.clearTimeout(retryTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, scheduleRendererRecovery]);
+  }, [active, immersiveMobileMode, scheduleRendererRecovery]);
 
   // Debug state effect
   useEffect(() => {
@@ -840,89 +923,118 @@ export function SessionTerminal({
     restorePreferredFocus();
   }, [restorePreferredFocus]);
 
+  // --- Prompt send bar ---
+  const showPromptBar = !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
+  const scrollToBottomOffsetPx = showPromptBar ? 60 : floatingOverlayBottomPx;
+
+  const handlePromptSend = useCallback(async () => {
+    const message = promptMessage.trim();
+    if (message.length === 0 || promptSending) return;
+    setPromptSending(true);
+    setPromptError(null);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "send", message }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(data?.error ?? `Failed to send message (${res.status})`);
+      }
+      setPromptMessage("");
+    } catch (err) {
+      setPromptError(err instanceof Error ? err.message : "Failed to send message");
+    } finally {
+      setPromptSending(false);
+    }
+  }, [promptMessage, promptSending, sessionId]);
+
+  const handlePromptSubmit = useCallback((event: FormEvent) => {
+    event.preventDefault();
+    void handlePromptSend();
+  }, [handlePromptSend]);
+
   // --- Render ---
   return (
     <div
       ref={surfaceRef}
       style={terminalSurfaceStyle}
       className={immersiveMobileMode
-        ? "group/terminal relative flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-[#060404]"
-        : "group/terminal relative flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-white/10 bg-[#060404] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
+        ? "group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[#060404]"
+        : "group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
     >
       {searchOpen ? (
-        <div className={immersiveMobileMode
-          ? "absolute right-3 top-14 z-10 flex max-w-[calc(100%-1.5rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur"
-          : "absolute right-2 top-2 z-10 flex max-w-[calc(100%-1rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur sm:right-3 sm:top-3 sm:max-w-[calc(100%-1.5rem)]"}
-        >
-          <Search className="h-3.5 w-3.5 text-[#8e847d]" />
-          <input
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                runSearch(event.shiftKey ? "prev" : "next");
-              } else if (event.key === "Escape") {
-                event.preventDefault();
-                closeSearch();
-              }
-            }}
-            placeholder="Find"
-            className="h-6 w-24 min-w-0 bg-transparent px-2 text-[11px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] sm:w-28 sm:text-[12px]"
-          />
-          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={() => runSearch("prev")} aria-label="Find previous">
-            <span className="text-[11px]">&#x2191;</span>
-          </Button>
-          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={() => runSearch("next")} aria-label="Find next">
-            <span className="text-[11px]">&#x2193;</span>
-          </Button>
-          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={closeSearch} aria-label="Close search">
-            <X className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      ) : (
-        <div className={`${immersiveMobileMode ? "absolute right-3 top-14" : "absolute right-2 top-2 sm:right-3 sm:top-3"} z-10 flex items-center gap-1.5 transition-opacity sm:gap-2 ${
-          ttydConnected
-            ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
-            : "opacity-100"
-        }`}>
-          {!ttydConnected ? (
+          <div className="absolute right-2 top-2 z-10 flex max-w-[calc(100%-1rem)] items-center rounded bg-[#141010]/95 pl-2 pr-0.5 shadow-lg ring-1 ring-white/10 backdrop-blur sm:right-3 sm:top-3 sm:max-w-[calc(100%-1.5rem)]">
+            <Search className="h-3.5 w-3.5 text-[#8e847d]" />
+            <input
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runSearch(event.shiftKey ? "prev" : "next");
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  closeSearch();
+                }
+              }}
+              placeholder="Find"
+              className="h-6 w-24 min-w-0 bg-transparent px-2 text-[11px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] sm:w-28 sm:text-[12px]"
+            />
+            <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={() => runSearch("prev")} aria-label="Find previous">
+              <span className="text-[11px]">&#x2191;</span>
+            </Button>
+            <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={() => runSearch("next")} aria-label="Find next">
+              <span className="text-[11px]">&#x2193;</span>
+            </Button>
+            <Button type="button" size="icon" variant="ghost" className="h-8 w-8 sm:h-6 sm:w-6 text-[#c9c0b7]" onClick={closeSearch} aria-label="Close search">
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        ) : (
+          <div className={`absolute right-2 top-2 z-10 flex items-center gap-1.5 transition-opacity sm:right-3 sm:top-3 sm:gap-2 ${
+            ttydConnected
+              ? "opacity-0 group-hover/terminal:opacity-100 focus-within:opacity-100"
+              : "opacity-100"
+          }`}>
+            {!ttydConnected ? (
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className={`pointer-events-auto h-10 w-10 sm:h-7 sm:w-7 rounded-full border backdrop-blur-sm ${
+                  ttydError
+                    ? "border-[#ff8f7a]/25 bg-[#2a1616]/92 text-[#ff8f7a] hover:bg-[#351b1b]"
+                    : "border-white/10 bg-[#141010]/92 text-[#c9c0b7] hover:bg-[#201818]"
+                }`}
+                disabled
+                aria-label="Connecting... (auto-managed by TTyD)"
+              >
+                {ttydConnecting
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  : ttydError
+                    ? <AlertCircle className="h-3.5 w-3.5" />
+                    : <RefreshCw className="h-3.5 w-3.5" />}
+              </Button>
+            ) : null}
             <Button
               type="button"
               size="icon"
               variant="ghost"
-              className={`pointer-events-auto h-10 w-10 sm:h-7 sm:w-7 rounded-full border backdrop-blur-sm ${
-                ttydError
-                  ? "border-[#ff8f7a]/25 bg-[#2a1616]/92 text-[#ff8f7a] hover:bg-[#351b1b]"
-                  : "border-white/10 bg-[#141010]/92 text-[#c9c0b7] hover:bg-[#201818]"
-              }`}
-              disabled
-              aria-label="Connecting... (auto-managed by TTyD)"
+              className="pointer-events-auto h-10 w-10 sm:h-7 sm:w-7 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818]"
+              onClick={() => setSearchOpen(true)}
+              aria-label="Search terminal"
             >
-              {ttydConnecting
-                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                : ttydError
-                  ? <AlertCircle className="h-3.5 w-3.5" />
-                  : <RefreshCw className="h-3.5 w-3.5" />}
+              <Search className="h-3.5 w-3.5" />
             </Button>
-          ) : null}
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            className="pointer-events-auto h-10 w-10 sm:h-7 sm:w-7 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818]"
-            onClick={() => setSearchOpen(true)}
-            aria-label="Search terminal"
-          >
-            <Search className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      )}
+          </div>
+        )}
 
-      <div className={immersiveMobileMode ? "min-h-0 flex-1 overflow-hidden px-0 pb-0 pt-0" : "min-h-0 flex-1 overflow-hidden px-0.5 pb-0.5 pt-2 sm:px-1.5 sm:pb-1 sm:pt-3"}>
+      <div className={immersiveMobileMode ? "min-h-0 min-w-0 flex-1 overflow-hidden px-2 pb-0 pt-0 w-full" : "min-h-0 min-w-0 flex-1 overflow-hidden px-1.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"}>
         <div
           ref={containerRef}
-          className="h-full w-full overflow-hidden touch-pan-y"
+          className="h-full w-full min-w-0 max-w-full overflow-hidden touch-pan-y"
           onClick={focusTerminal}
           onPointerDown={handleTerminalPointerDown}
         />
@@ -931,7 +1043,7 @@ export function SessionTerminal({
       {showScrollToBottom ? (
         <div
           className="pointer-events-none absolute left-1/2 z-10 -translate-x-1/2"
-          style={{ bottom: `${floatingOverlayBottomPx}px` }}
+          style={{ bottom: `calc(${scrollToBottomOffsetPx}px + env(safe-area-inset-bottom))` }}
         >
           <Button
             type="button"
@@ -944,6 +1056,46 @@ export function SessionTerminal({
             <ChevronDown className="h-4 w-4" />
             <span className="ml-1 text-[11px] uppercase tracking-[0.16em]">Jump to latest</span>
           </Button>
+        </div>
+      ) : null}
+
+      {showPromptBar ? (
+        <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
+          {promptError ? (
+            <div className="flex items-center gap-1.5 px-3 pt-1.5 text-[11px] text-[#ff8f7a]">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{promptError}</span>
+              <button type="button" className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]" onClick={() => setPromptError(null)}>
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : null}
+          <form onSubmit={handlePromptSubmit} className="flex items-center gap-2 px-2 py-2 lg:px-3">
+            <input
+              ref={promptInputRef}
+              value={promptMessage}
+              onChange={(event) => setPromptMessage(event.target.value)}
+              placeholder="Send a follow-up message…"
+              disabled={promptSending}
+              className="h-8 min-w-0 flex-1 rounded-md border border-white/10 bg-[#0c0808] px-2.5 text-[12px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20 disabled:opacity-50"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            <Button
+              type="submit"
+              size="icon"
+              variant="ghost"
+              disabled={promptSending || promptMessage.trim().length === 0}
+              className="h-8 w-8 shrink-0 rounded-md border border-white/10 bg-[#0c0808] text-[#c9c0b7] hover:bg-[#201818] disabled:opacity-30"
+              aria-label="Send message"
+            >
+              {promptSending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+            </Button>
+          </form>
         </div>
       ) : null}
     </div>

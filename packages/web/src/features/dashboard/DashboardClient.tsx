@@ -60,6 +60,7 @@ import { useAgents } from "@/hooks/useAgents";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
+import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
@@ -1148,6 +1149,10 @@ export default function DashboardClient() {
     () => resolveDashboardWorkspaceView(searchParams.get("view")),
     [searchParams],
   );
+  const terminalTabActive = useMemo(() => {
+    const tab = searchParams.get("tab");
+    return tab !== "overview" && tab !== "preview" && tab !== "diff";
+  }, [searchParams]);
   const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig();
   const { agents } = useAgents();
   const {
@@ -1179,6 +1184,31 @@ export default function DashboardClient() {
   const [preferencesDialogOpen, setPreferencesDialogOpen] = useState(false);
   const [pendingWorkspaceSetup, setPendingWorkspaceSetup] = useState(false);
   const [mountedSessionIds, setMountedSessionIds] = useState<string[]>(() => selectedSessionId ? [selectedSessionId] : []);
+  const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = typeof window.matchMedia === "function"
+      ? window.matchMedia("(pointer: coarse)")
+      : null;
+    const syncCompactTerminalChrome = () => {
+      setCompactTerminalChrome(shouldUseCompactTerminalChrome());
+    };
+
+    syncCompactTerminalChrome();
+    window.addEventListener("resize", syncCompactTerminalChrome);
+    mediaQuery?.addEventListener?.("change", syncCompactTerminalChrome);
+
+    return () => {
+      window.removeEventListener("resize", syncCompactTerminalChrome);
+      mediaQuery?.removeEventListener?.("change", syncCompactTerminalChrome);
+    };
+  }, []);
+
+  const immersiveMobileMode = Boolean(selectedSessionId) && terminalTabActive && compactTerminalChrome;
 
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const sessionsById = useMemo(
@@ -1960,7 +1990,7 @@ export default function DashboardClient() {
   const workspaceContent = useMemo(() => {
     if (selectedSessionId) {
       return (
-        <div className="relative min-h-0 h-full flex-1 overflow-hidden">
+        <div className="relative min-h-0 h-full min-w-0 flex-1 overflow-hidden">
           {mountedSessionIds.map((sessionId) => {
             const sessionActive = sessionId === selectedSessionId;
             const initialSession = sessionActive ? selectedSession : sessionsById.get(sessionId) ?? null;
@@ -1969,10 +1999,16 @@ export default function DashboardClient() {
                 key={sessionId}
                 aria-hidden={!sessionActive}
                 className={sessionActive
-                  ? "relative h-full"
+                  ? "relative h-full min-w-0"
                   : "pointer-events-none absolute inset-0 overflow-hidden invisible"}
               >
-                <SessionDetail sessionId={sessionId} initialSession={initialSession} active={sessionActive} />
+                <SessionDetail
+                  sessionId={sessionId}
+                  initialSession={initialSession}
+                  active={sessionActive}
+                  immersiveMobileMode={sessionActive && immersiveMobileMode}
+                  onOpenSidebar={toggleSidebar}
+                />
               </div>
             );
           })}
@@ -2009,6 +2045,7 @@ export default function DashboardClient() {
     projects,
     selectedProjectId,
     sessionsById,
+    toggleSidebar,
   ]);
 
   return (
@@ -2017,14 +2054,17 @@ export default function DashboardClient() {
         mobileSidebarOpen={mobileSidebarOpen}
         desktopSidebarOpen={desktopSidebarOpen}
         onToggleSidebar={toggleSidebar}
+        hideMobileSidebarToggle={immersiveMobileMode}
         sidebar={sidebarContent}
       >
-        <TopBar
-          title={topBarTitle}
-          onOpenPreferences={handleOpenPreferences}
-        />
+        {immersiveMobileMode ? null : (
+          <TopBar
+            title={topBarTitle}
+            onOpenPreferences={handleOpenPreferences}
+          />
+        )}
 
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${immersiveMobileMode ? "bg-[#060404]" : ""}`}>
           {workspaceContent}
         </div>
       </AppShell>
