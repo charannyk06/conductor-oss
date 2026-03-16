@@ -907,26 +907,26 @@ async fn handle_terminal_socket(
 
             match recv_result {
                 Ok(Some(Ok(msg))) => {
-                    eprintln!("[TERMINAL_SOCKET] ✅ Received client message: {:?}", msg);
+                    eprintln!("[TERMINAL_SOCKET] Received client message: {:?}", msg);
                     // Check if it's a handshake message (JSON starting with '{')
                     if let Message::Binary(data) = &msg {
                         if !data.is_empty() && data[0] == b'{' {
-                            eprintln!("[TERMINAL_SOCKET] ✅✅ Client handshake received! Proceeding with session setup");
+                            eprintln!("[TERMINAL_SOCKET] Client handshake received, proceeding");
                             break;
                         }
                     }
                     // For non-handshake messages, continue waiting
                 }
                 Ok(Some(Err(e))) => {
-                    eprintln!("[TERMINAL_SOCKET] ❌ Error receiving message: {:?}", e);
+                    eprintln!("[TERMINAL_SOCKET] Socket error: {:?}", e);
                     return;
                 }
                 Ok(None) => {
-                    eprintln!("[TERMINAL_SOCKET] ❌ Socket closed prematurely (recv returned None)");
+                    eprintln!("[TERMINAL_SOCKET] Socket closed prematurely");
                     return;
                 }
-                Err(e) => {
-                    eprintln!("[TERMINAL_SOCKET] ❌ Timeout waiting for handshake: {:?}", e);
+                Err(_) => {
+                    eprintln!("[TERMINAL_SOCKET] Timeout or error waiting for handshake");
                     return;
                 }
             }
