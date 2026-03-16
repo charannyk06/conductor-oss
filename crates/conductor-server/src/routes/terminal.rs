@@ -900,7 +900,7 @@ async fn handle_terminal_socket(
                     if let Message::Binary(data) = &msg {
                         if !data.is_empty() && data[0] == b'{' {
                             // Parse cols/rows from the handshake JSON
-                            if let Ok(json_str) = std::str::from_utf8(&data) {
+                            if let Ok(json_str) = std::str::from_utf8(data) {
                                 if let Ok(value) = serde_json::from_str::<Value>(json_str) {
                                     if let Some(c) = value.get("columns").and_then(Value::as_u64) {
                                         handshake_cols = (c as u16).max(1);

@@ -132,7 +132,7 @@ impl ClientMessage {
             }
             CMD_JSON_DATA => {
                 // First message is JSON handshake
-                let json_str = std::str::from_utf8(&data).ok()?;
+                let json_str = std::str::from_utf8(data).ok()?;
                 let value: Value = serde_json::from_str(json_str).ok()?;
                 Some(ClientMessage::Handshake(value))
             }
