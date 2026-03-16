@@ -3,10 +3,7 @@ import test from "node:test";
 import { TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
 import {
   buildTerminalSnapshotPayload,
-  buildTerminalWriteBatch,
-  buildTerminalSocketUrl,
   calculateMobileTerminalViewportMetrics,
-  coalesceTerminalHttpControlOperations,
   decodeTerminalBase64Payload,
   detectCompactTerminalChrome,
   detectMobileTerminalInputRail,
@@ -18,98 +15,9 @@ import {
   stripBrowserTerminalResponses,
 } from "./sessionTerminalUtils";
 
-test("buildTerminalSocketUrl clamps terminal dimensions to positive values", () => {
-  const url = buildTerminalSocketUrl("wss://example.com/api/sessions/session-1/terminal/ws", 0, -12);
-  assert.equal(
-    url,
-    "wss://example.com/api/sessions/session-1/terminal/ws?cols=1&rows=1",
-  );
-});
-
-test("buildTerminalSocketUrl includes the last rendered terminal sequence when provided", () => {
-  const url = buildTerminalSocketUrl(
-    "wss://example.com/api/sessions/session-1/terminal/ws",
-    120,
-    32,
-    42,
-  );
-  assert.equal(
-    url,
-    "wss://example.com/api/sessions/session-1/terminal/ws?cols=120&rows=32&sequence=42",
-  );
-});
-
-test("buildTerminalSocketUrl resolves relative dashboard-proxied endpoints", () => {
-  const url = buildTerminalSocketUrl("/api/sessions/session-1/terminal/stream", 120, 32, 42);
-  assert.equal(
-    url,
-    "http://localhost/api/sessions/session-1/terminal/stream?cols=120&rows=32&sequence=42",
-  );
-});
-
 test("decodeTerminalBase64Payload decodes terminal stream payload bytes", () => {
   const bytes = decodeTerminalBase64Payload("aGVsbG8=");
   assert.deepEqual(Array.from(bytes), [104, 101, 108, 108, 111]);
-});
-
-test("buildTerminalWriteBatch coalesces stream chunks without forcing a reset", () => {
-  const batch = buildTerminalWriteBatch([
-    { kind: "stream", payload: new Uint8Array([0x61, 0x62]) },
-    { kind: "stream", payload: new Uint8Array([0x63]) },
-  ]);
-
-  assert.equal(batch.replace, false);
-  assert.deepEqual(Array.from(batch.payload ?? []), [0x61, 0x62, 0x63]);
-});
-
-test("buildTerminalWriteBatch drops stale pre-snapshot output and keeps trailing live bytes", () => {
-  const batch = buildTerminalWriteBatch([
-    { kind: "stream", payload: new Uint8Array([0x61, 0x62]) },
-    { kind: "snapshot", payload: new Uint8Array([0x73, 0x6e, 0x61, 0x70]) },
-    { kind: "stream", payload: new Uint8Array([0x21]) },
-  ]);
-
-  assert.equal(batch.replace, true);
-  assert.deepEqual(Array.from(batch.payload ?? []), [0x73, 0x6e, 0x61, 0x70, 0x21]);
-});
-
-test("buildTerminalWriteBatch keeps only the latest snapshot batch when multiple restores arrive", () => {
-  const batch = buildTerminalWriteBatch([
-    { kind: "snapshot", payload: new Uint8Array([0x6f, 0x6c, 0x64]) },
-    { kind: "stream", payload: new Uint8Array([0x2e]) },
-    { kind: "snapshot", payload: new Uint8Array([0x6e, 0x65, 0x77]) },
-  ]);
-
-  assert.equal(batch.replace, true);
-  assert.deepEqual(Array.from(batch.payload ?? []), [0x6e, 0x65, 0x77]);
-});
-
-test("coalesceTerminalHttpControlOperations merges adjacent keypresses and drops stale resize updates", () => {
-  assert.deepEqual(coalesceTerminalHttpControlOperations([
-    { kind: "keys", keys: "hel" },
-    { kind: "keys", keys: "lo" },
-    { kind: "resize", cols: 120, rows: 32 },
-    { kind: "resize", cols: 132, rows: 40 },
-    { kind: "keys", keys: "!" },
-  ]), [
-    { kind: "keys", keys: "hello" },
-    { kind: "resize", cols: 132, rows: 40 },
-    { kind: "keys", keys: "!" },
-  ]);
-});
-
-test("coalesceTerminalHttpControlOperations preserves ordering across special key boundaries", () => {
-  assert.deepEqual(coalesceTerminalHttpControlOperations([
-    { kind: "keys", keys: "git status" },
-    { kind: "special", special: "Enter" },
-    { kind: "keys", keys: "clear" },
-    { kind: "special", special: "C-c" },
-  ]), [
-    { kind: "keys", keys: "git status" },
-    { kind: "special", special: "Enter" },
-    { kind: "keys", keys: "clear" },
-    { kind: "special", special: "C-c" },
-  ]);
 });
 
 test("detectMobileTerminalInputRail only enables compact touch layouts on narrow viewports", () => {
@@ -119,11 +27,19 @@ test("detectMobileTerminalInputRail only enables compact touch layouts on narrow
   assert.equal(detectMobileTerminalInputRail(700, false, 0), false);
 });
 
-test("detectCompactTerminalChrome keeps immersive session chrome for phone-sized touch viewports only", () => {
+test("detectCompactTerminalChrome activates immersive mode below lg breakpoint (1024px)", () => {
+  // Phone-sized viewports
   assert.equal(detectCompactTerminalChrome(390, 844, true, 1), true);
+  assert.equal(detectCompactTerminalChrome(390, 844, false, 0), true);
+  // Tablet-sized viewports (still below 1024px)
+  assert.equal(detectCompactTerminalChrome(768, 1024, true, 5), true);
+  assert.equal(detectCompactTerminalChrome(834, 1194, true, 5), true);
+  assert.equal(detectCompactTerminalChrome(640, 960, false, 0), true);
+  // Desktop-sized viewports (>= 1024px)
+  assert.equal(detectCompactTerminalChrome(1024, 768, false, 0), false);
+  assert.equal(detectCompactTerminalChrome(1440, 900, false, 0), false);
+  // Landscape phone (width > 1024 doesn't happen on phones, but edge case)
   assert.equal(detectCompactTerminalChrome(844, 390, false, 1), true);
-  assert.equal(detectCompactTerminalChrome(834, 1194, true, 5), false);
-  assert.equal(detectCompactTerminalChrome(640, 960, false, 0), false);
 });
 
 test("stripBrowserTerminalResponses removes browser-generated device status chatter", () => {
@@ -245,18 +161,28 @@ test("parseTerminalBinaryFrame decodes stream frames", () => {
 test("getSessionTerminalViewportOptions keeps compact fonts for phones and larger fonts for desktop", () => {
   assert.deepEqual(getSessionTerminalViewportOptions(390), {
     fontFamily: "'SF Mono', Menlo, Monaco, monospace",
-    fontSize: 11,
-    lineHeight: 1,
+    fontSize: 10,
+    lineHeight: 1.1,
   });
   assert.deepEqual(getSessionTerminalViewportOptions(520), {
     fontFamily: "'SF Mono', Menlo, Monaco, monospace",
+    fontSize: 11,
+    lineHeight: 1.15,
+  });
+  assert.deepEqual(getSessionTerminalViewportOptions(640), {
+    fontFamily: "'SF Mono', Menlo, Monaco, monospace",
+    fontSize: 12,
+    lineHeight: 1.2,
+  });
+  assert.deepEqual(getSessionTerminalViewportOptions(768), {
+    fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 13,
-    lineHeight: 1.08,
+    lineHeight: 1.2,
   });
   assert.deepEqual(getSessionTerminalViewportOptions(1280), {
     fontFamily: TERMINAL_FONT_FAMILY,
-    fontSize: 17,
-    lineHeight: 1.06,
+    fontSize: 14,
+    lineHeight: 1.2,
   });
 });
 

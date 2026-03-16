@@ -6,31 +6,6 @@ export type SessionTerminalViewportOptions = {
   lineHeight: number;
 };
 
-export type TerminalWriteChunk = {
-  kind: "snapshot" | "stream";
-  payload: Uint8Array;
-};
-
-export type TerminalWriteBatch = {
-  replace: boolean;
-  payload: Uint8Array | null;
-};
-
-export type TerminalHttpControlOperation =
-  | {
-      kind: "keys";
-      keys: string;
-    }
-  | {
-      kind: "special";
-      special: string;
-    }
-  | {
-      kind: "resize";
-      cols: number;
-      rows: number;
-    };
-
 export type MobileTerminalViewportMetrics = {
   usableHeight: number;
   keyboardInset: number;
@@ -48,7 +23,8 @@ export type TerminalModeState = {
 };
 
 const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
-const COMPACT_TERMINAL_CHROME_MAX_EDGE_PX = 700;
+/** Must match the Tailwind `lg:` breakpoint (1024px) used in SessionTerminal / SessionDetail. */
+const COMPACT_TERMINAL_CHROME_MAX_WIDTH_PX = 1024;
 const TERMINAL_FRAME_MAGIC = [0x43, 0x54, 0x50, 0x32] as const;
 const TERMINAL_FRAME_PROTOCOL_VERSION = 2;
 const TERMINAL_FRAME_KIND_RESTORE = 1;
@@ -182,121 +158,6 @@ export function buildTerminalSnapshotPayload(
   return prependTerminalModes(new TextEncoder().encode(normalizeTerminalSnapshot(snapshot)), modes);
 }
 
-function concatTerminalWritePayloads(chunks: readonly Uint8Array[]): Uint8Array | null {
-  if (chunks.length === 0) {
-    return null;
-  }
-
-  if (chunks.length === 1) {
-    return chunks[0] ?? null;
-  }
-
-  let totalLength = 0;
-  for (const chunk of chunks) {
-    totalLength += chunk.byteLength;
-  }
-
-  const combined = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    combined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  return combined;
-}
-
-export function buildTerminalWriteBatch(chunks: readonly TerminalWriteChunk[]): TerminalWriteBatch {
-  if (chunks.length === 0) {
-    return {
-      replace: false,
-      payload: null,
-    };
-  }
-
-  let replace = false;
-  const payloadChunks: Uint8Array[] = [];
-  for (const chunk of chunks) {
-    if (chunk.kind === "snapshot") {
-      replace = true;
-      payloadChunks.length = 0;
-    }
-    if (chunk.payload.byteLength > 0) {
-      payloadChunks.push(chunk.payload);
-    }
-  }
-
-  return {
-    replace,
-    payload: concatTerminalWritePayloads(payloadChunks),
-  };
-}
-
-export function coalesceTerminalHttpControlOperations(
-  operations: readonly TerminalHttpControlOperation[],
-): TerminalHttpControlOperation[] {
-  const coalesced: TerminalHttpControlOperation[] = [];
-
-  for (const operation of operations) {
-    if (operation.kind === "keys") {
-      if (operation.keys.length === 0) {
-        continue;
-      }
-
-      const lastOperation = coalesced[coalesced.length - 1];
-      if (lastOperation?.kind === "keys") {
-        lastOperation.keys += operation.keys;
-      } else {
-        coalesced.push({
-          kind: "keys",
-          keys: operation.keys,
-        });
-      }
-      continue;
-    }
-
-    if (operation.kind === "resize") {
-      const cols = Math.max(1, Math.round(operation.cols));
-      const rows = Math.max(1, Math.round(operation.rows));
-      const lastOperation = coalesced[coalesced.length - 1];
-      if (lastOperation?.kind === "resize") {
-        lastOperation.cols = cols;
-        lastOperation.rows = rows;
-      } else {
-        coalesced.push({
-          kind: "resize",
-          cols,
-          rows,
-        });
-      }
-      continue;
-    }
-
-    coalesced.push({
-      kind: "special",
-      special: operation.special,
-    });
-  }
-
-  return coalesced;
-}
-
-export function buildTerminalSocketUrl(
-  baseUrl: string,
-  cols: number,
-  rows: number,
-  sequence?: number | null,
-): string {
-  const fallbackOrigin = typeof window !== "undefined" ? window.location.origin : "http://localhost";
-  const url = new URL(baseUrl, fallbackOrigin);
-  url.searchParams.set("cols", String(Math.max(1, cols)));
-  url.searchParams.set("rows", String(Math.max(1, rows)));
-  if (typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0) {
-    url.searchParams.set("sequence", String(sequence));
-  }
-  return url.toString();
-}
-
 export function decodeTerminalBase64Payload(value: string): Uint8Array {
   const normalized = value.trim();
   if (normalized.length === 0) {
@@ -398,14 +259,30 @@ export function getSessionTerminalViewportOptions(width: number): SessionTermina
   if (width < 420) {
     return {
       fontFamily: "'SF Mono', Menlo, Monaco, monospace",
+      fontSize: 10,
+      lineHeight: 1.1,
+    };
+  }
+
+  if (width < 560) {
+    return {
+      fontFamily: "'SF Mono', Menlo, Monaco, monospace",
       fontSize: 11,
+      lineHeight: 1.15,
+    };
+  }
+
+  if (width < 768) {
+    return {
+      fontFamily: "'SF Mono', Menlo, Monaco, monospace",
+      fontSize: 12,
       lineHeight: 1.2,
     };
   }
 
-  if (width < 640) {
+  if (width < 1024) {
     return {
-      fontFamily: "'SF Mono', Menlo, Monaco, monospace",
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: 13,
       lineHeight: 1.2,
     };
@@ -428,12 +305,23 @@ export function detectMobileTerminalInputRail(
 
 export function detectCompactTerminalChrome(
   viewportWidth: number,
-  viewportHeight: number,
-  coarsePointer: boolean,
-  maxTouchPoints: number,
+  _viewportHeight: number,
+  _coarsePointer: boolean,
+  _maxTouchPoints: number,
 ): boolean {
-  return Math.min(viewportWidth, viewportHeight) <= COMPACT_TERMINAL_CHROME_MAX_EDGE_PX
-    && (coarsePointer || maxTouchPoints > 0);
+  // Use viewport WIDTH to stay aligned with the Tailwind `lg:` breakpoint
+  // used in SessionTerminal and SessionDetail for border/rounding/padding.
+  return viewportWidth < COMPACT_TERMINAL_CHROME_MAX_WIDTH_PX;
+}
+
+export function shouldUseCompactTerminalChrome(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const coarsePointer = typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+  const maxTouchPoints = typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints;
+  return detectCompactTerminalChrome(window.innerWidth, window.innerHeight, coarsePointer, maxTouchPoints);
 }
 
 export function calculateMobileTerminalViewportMetrics(

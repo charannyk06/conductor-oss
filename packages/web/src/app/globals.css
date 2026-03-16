@@ -188,16 +188,19 @@ a:hover {
   overscroll-behavior: contain;
 }
 
-.xterm .xterm-viewport {
-  height: 100% !important;
-  width: 100%;
-  overscroll-behavior: contain;
-  scrollbar-width: none;
+.session-terminal-xterm {
+  box-sizing: border-box;
 }
 
-.xterm .xterm-screen {
-  height: 100%;
-  width: 100%;
+.session-terminal-xterm-mobile {
+  /* padding is applied to the wrapper div, not here —
+     xterm FitAddon measures this element for column count,
+     so padding here causes right-side clipping on mobile */
+}
+
+.xterm .xterm-viewport {
+  overscroll-behavior: contain;
+  scrollbar-width: none;
 }
 
 .xterm textarea.xterm-helper-textarea {

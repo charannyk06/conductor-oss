@@ -1,15 +1,14 @@
 /**
  * Interfaces, type aliases, and enums used by the terminal subsystem.
+ * TTyD WebSocket is the sole transport — all legacy SSE/HTTP types removed.
  */
 
 import type { TerminalViewportState } from "../terminalViewport";
-import type { TerminalHttpControlOperation } from "../sessionTerminalUtils";
 import type { TerminalInsertRequest } from "../terminalInsert";
 
 export type { TerminalModeState } from "../sessionTerminalUtils";
 export type { TerminalViewportState } from "../terminalViewport";
 export type { TerminalInsertRequest } from "../terminalInsert";
-export type { TerminalHttpControlOperation } from "../sessionTerminalUtils";
 
 export interface SessionTerminalProps {
   sessionId: string;
@@ -24,15 +23,8 @@ export interface SessionTerminalProps {
 }
 
 export type TerminalConnectionInfo = {
-  stream: {
-    transport: "eventstream";
-    wsUrl: string | null;
-  };
-  control: {
-    transport: "http";
-    interactive: boolean;
-    fallbackReason: string | null;
-  };
+  ptyWsUrl: string | null;
+  interactive: boolean;
 };
 
 export type TerminalSnapshot = {
@@ -45,53 +37,7 @@ export type TerminalSnapshot = {
   modes?: import("../sessionTerminalUtils").TerminalModeState;
 };
 
-export type TerminalServerEvent =
-  | {
-      type: "control";
-      event: "ready" | "ack" | "pong" | "exit";
-      sessionId: string;
-      action?: string;
-      exitCode?: number;
-    }
-  | {
-      type: "recovery";
-      sessionId: string;
-      reason: "lagged";
-      skipped: number;
-      sequence: number;
-      snapshotVersion: number;
-      cols: number;
-      rows: number;
-      modes?: TerminalSnapshot["modes"];
-    }
-  | { type: "error"; sessionId: string; error: string };
-
-export type TerminalStreamEventMessage =
-  | TerminalServerEvent
-  | {
-      type: "restore";
-      sessionId: string;
-      sequence: number;
-      snapshotVersion: number;
-      reason: "attach" | "lagged" | "unknown";
-      cols: number;
-      rows: number;
-      modes?: TerminalSnapshot["modes"];
-      payload: string;
-    }
-  | {
-      type: "stream";
-      sessionId: string;
-      sequence: number;
-      payload: string;
-    };
-
 export type PreferredFocusTarget = "none" | "terminal" | "resume";
-
-export type PendingTerminalHttpControlOperation = TerminalHttpControlOperation & {
-  reject: (error: unknown) => void;
-  resolve: () => void;
-};
 
 export type CachedTerminalConnection = {
   value: TerminalConnectionInfo;

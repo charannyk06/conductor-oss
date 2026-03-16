@@ -27,10 +27,11 @@ use super::control::{
 use super::daemon::{
     check_daemon_health, resolve_terminal_daemon_metadata, spawn_detached_runtime_via_daemon,
 };
+use super::helpers::prepare_detached_runtime_env;
 #[cfg(unix)]
 use super::helpers::{
     configure_detached_process_group, detached_runtime_disabled, ensure_detached_protocol_version,
-    detached_runtime_metadata, ping_detached_runtime, prepare_detached_runtime_env,
+    detached_runtime_metadata, ping_detached_runtime,
     read_detached_exit_code, resolve_detached_runtime_launcher, wait_for_detached_ready,
 };
 use super::types::{
@@ -413,6 +414,7 @@ impl AppState {
     ) -> Result<RuntimeLaunch> {
         options.interactive = executor.supports_direct_terminal_ui();
         options.structured_output = false;
+        prepare_detached_runtime_env(executor.kind(), options.interactive, &mut options.env);
         let handle = executor.spawn(options).await?;
         Ok(RuntimeLaunch {
             handle,
@@ -554,6 +556,7 @@ impl AppState {
     ) -> Result<RuntimeLaunch> {
         options.interactive = executor.supports_direct_terminal_ui();
         options.structured_output = false;
+        prepare_detached_runtime_env(executor.kind(), options.interactive, &mut options.env);
         let handle = executor.spawn(options).await?;
         Ok(RuntimeLaunch {
             handle,

@@ -394,7 +394,7 @@ mod tests {
         }
 
         fn binary_path(&self) -> &Path {
-            Path::new("/bin/true")
+            Path::new("/bin/sleep")
         }
 
         async fn is_available(&self) -> bool {
@@ -420,7 +420,7 @@ mod tests {
         }
 
         fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
-            Vec::new()
+            vec!["30".to_string()]
         }
 
         fn parse_output(&self, line: &str) -> ExecutorOutput {

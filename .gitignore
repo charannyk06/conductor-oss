@@ -51,3 +51,15 @@ packages/cli/native/
 
 # Local hook configs
 .github/hooks/
+
+# Implementation docs and research (local only)
+IMPLEMENTATION_COMPLETE.md
+IMPLEMENTATION_ROADMAP.md
+TTYD_IMPLEMENTATION_SUMMARY.md
+docs/TTYD_TERMINAL_IMPLEMENTATION.md
+docs/research/
+docs/SUPERSET_INTEGRATION.md
+refactor.py
+rewrite.py
+research/
+.claude/

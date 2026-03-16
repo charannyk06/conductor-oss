@@ -1267,20 +1267,19 @@ function FeedEntry({
   }
 }
 
-async function postSessionTerminalKeys(
+async function postSessionTerminalInterrupt(
   sessionId: string,
-  body: { keys?: string; special?: string },
 ): Promise<void> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/interrupt`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({}),
   });
   const data = (await response.json().catch(() => null)) as { error?: string } | null;
   if (!response.ok) {
-    throw new Error(data?.error ?? `Failed to send terminal input: ${response.status}`);
+    throw new Error(data?.error ?? `Failed to interrupt session: ${response.status}`);
   }
 }
 
@@ -1566,13 +1565,17 @@ export function ChatPanel({
   const handleSendTerminalSpecial = useCallback(async (special: string) => {
     if (!hasLiveTerminalSession) return;
 
+    // Only Ctrl+C and Ctrl+D trigger an interrupt via the backend.
+    // All other keys are handled directly by the TTyD WebSocket in the terminal.
+    if (special !== "C-c" && special !== "C-d") return;
+
     shouldStickToBottomRef.current = true;
     setSendError(null);
 
     try {
-      await postSessionTerminalKeys(sessionId, { special });
+      await postSessionTerminalInterrupt(sessionId);
     } catch (err) {
-      setSendError(err instanceof Error ? err.message : "Failed to send terminal input");
+      setSendError(err instanceof Error ? err.message : "Failed to interrupt session");
     }
   }, [hasLiveTerminalSession, sessionId]);
 

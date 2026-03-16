@@ -11,6 +11,7 @@ interface AppShellProps {
   mobileSidebarOpen: boolean;
   desktopSidebarOpen: boolean;
   onToggleSidebar: () => void;
+  hideMobileSidebarToggle?: boolean;
 }
 
 const DEFAULT_SIDEBAR_WIDTH = 356;
@@ -24,6 +25,7 @@ export function AppShell({
   mobileSidebarOpen,
   desktopSidebarOpen,
   onToggleSidebar,
+  hideMobileSidebarToggle = false,
 }: AppShellProps) {
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [resizing, setResizing] = useState(false);
@@ -75,7 +77,7 @@ export function AppShell({
   return (
     <div
       style={shellStyle}
-      className="relative flex h-dvh min-h-[100dvh] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)]"
+      className="relative flex h-dvh min-h-[100dvh] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
     >
       {mobileSidebarOpen && (
         <button
@@ -120,8 +122,8 @@ export function AppShell({
         </button>
       )}
 
-      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
-        {!mobileSidebarOpen && (
+      <main className="relative flex min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+        {!mobileSidebarOpen && !hideMobileSidebarToggle && (
           <button
             type="button"
             onClick={onToggleSidebar}

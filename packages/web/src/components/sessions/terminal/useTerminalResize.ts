@@ -31,6 +31,27 @@ export interface UseTerminalResizeReturn {
   restorePreferredFocus: () => void;
 }
 
+function getPreciseTerminalGeometry(
+  _term: XTerminal,
+  container: HTMLDivElement,
+  fit: XFitAddon,
+): { cols: number; rows: number } | null {
+  const rect = container.getBoundingClientRect();
+  if (rect.width <= 1 || rect.height <= 1) {
+    return null;
+  }
+
+  const proposed = fit.proposeDimensions();
+  if (!proposed || !proposed.cols || !proposed.rows) {
+    return null;
+  }
+
+  return {
+    cols: Math.max(2, proposed.cols),
+    rows: Math.max(1, proposed.rows),
+  };
+}
+
 export function useTerminalResize(
   sessionId: string,
   termRef: React.MutableRefObject<XTerminal | null>,
@@ -208,6 +229,11 @@ export function useTerminalResize(
       fit.fit();
     } catch {
       return;
+    }
+
+    const preciseGeometry = getPreciseTerminalGeometry(term, container, fit);
+    if (preciseGeometry && (term.cols !== preciseGeometry.cols || term.rows !== preciseGeometry.rows)) {
+      term.resize(preciseGeometry.cols, preciseGeometry.rows);
     }
 
     if (forceResize) {

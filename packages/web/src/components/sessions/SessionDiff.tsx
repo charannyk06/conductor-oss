@@ -281,9 +281,9 @@ function statusPillClass(file: ChangedFileSummary): string {
 }
 
 function readStoredViewMode(): DiffViewMode {
-  if (typeof window === "undefined") return "side-by-side";
+  if (typeof window === "undefined") return "inline";
   const value = window.localStorage.getItem(STORAGE_KEYS.viewMode);
-  return value === "inline" ? "inline" : "side-by-side";
+  return value === "side-by-side" ? "side-by-side" : "inline";
 }
 
 function readStoredHideUnchanged(): boolean {
@@ -621,7 +621,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
     "against-base": false,
     staged: false,
     unstaged: false,
-    untracked: false,
+    untracked: true,
   });
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
   const [fileContents, setFileContents] = useState<Record<string, FileContentsState>>({});
@@ -865,7 +865,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
       "against-base": false,
       staged: false,
       unstaged: false,
-      untracked: false,
+      untracked: true,
     });
   }, [sessionId]);
 

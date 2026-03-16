@@ -4,16 +4,14 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
-  FileCode,
   Globe,
   LayoutDashboard,
-  SlidersHorizontal,
+  PanelLeftOpen,
   SquareTerminal,
-  X,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
 import { useSession } from "@/hooks/useSession";
 import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
@@ -42,28 +40,19 @@ const SessionPreview = dynamic(
   },
 );
 
-const SessionDiff = dynamic(
-  () => import("./SessionDiff").then((mod) => mod.SessionDiff),
-  {
-    loading: () => (
-      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
-        Loading diff...
-      </div>
-    ),
-  },
-);
 
 interface SessionDetailProps {
   sessionId: string;
   initialSession?: DashboardSession | null;
   immersiveMobileMode?: boolean;
   active?: boolean;
+  onOpenSidebar?: () => void;
 }
 
-type SessionTab = "overview" | "terminal" | "diff" | "preview";
+type SessionTab = "overview" | "terminal" | "preview";
 
 function resolveSessionTab(value: string | null): SessionTab {
-  if (value === "overview" || value === "terminal" || value === "diff" || value === "preview") {
+  if (value === "overview" || value === "terminal" || value === "preview") {
     return value;
   }
   return "terminal";
@@ -72,13 +61,13 @@ function resolveSessionTab(value: string | null): SessionTab {
 function getCompactSessionStatusLabel(status: string): string {
   switch (status) {
     case "needs_input":
-      return "input";
+      return "needs input";
     case "working":
       return "working";
     case "running":
       return "running";
     case "spawning":
-      return "spawn";
+      return "spawning";
     case "queued":
       return "queued";
     default:
@@ -86,11 +75,40 @@ function getCompactSessionStatusLabel(status: string): string {
   }
 }
 
+function getStatusDotClass(status: string): string {
+  switch (status) {
+    case "working":
+    case "running":
+      return "bg-amber-400";
+    case "needs_input":
+      return "bg-blue-400";
+    case "spawning":
+    case "queued":
+      return "bg-gray-400";
+    case "done":
+      return "bg-emerald-400";
+    case "errored":
+      return "bg-red-400";
+    case "stuck":
+      return "bg-orange-500";
+    case "terminated":
+    case "killed":
+      return "bg-gray-500";
+    default:
+      return "bg-gray-400";
+  }
+}
+
+function isStatusAnimated(status: string): boolean {
+  return status === "working" || status === "running" || status === "spawning" || status === "queued" || status === "needs_input";
+}
+
 export function SessionDetail({
   sessionId,
   initialSession = null,
   immersiveMobileMode = false,
   active = true,
+  onOpenSidebar,
 }: SessionDetailProps) {
   const pathname = usePathname();
   const router = useRouter();
@@ -99,13 +117,11 @@ export function SessionDetail({
   const terminalInsertNonceRef = useRef(0);
   const autoPreviewOpenedRef = useRef(false);
   const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
-  const [mobileTerminalPanelOpen, setMobileTerminalPanelOpen] = useState(false);
   const activeTab = useMemo(
     () => resolveSessionTab(searchParams.get("tab")),
     [searchParams],
   );
   const handleTabChange = useCallback((value: string) => {
-    setMobileTerminalPanelOpen(false);
     const nextTab = resolveSessionTab(value);
     const params = new URLSearchParams(searchParams.toString());
     if (nextTab === "terminal") {
@@ -129,16 +145,6 @@ export function SessionDetail({
     terminalInsertNonceRef.current = 0;
     setPendingTerminalInsert(null);
   }, [sessionId]);
-  useEffect(() => {
-    if (!immersiveMobileMode || activeTab !== "terminal") {
-      setMobileTerminalPanelOpen(false);
-    }
-  }, [activeTab, immersiveMobileMode, sessionId]);
-  useEffect(() => {
-    if (!active) {
-      setMobileTerminalPanelOpen(false);
-    }
-  }, [active]);
   const handlePreviewConnectionChange = useCallback((connected: boolean) => {
     if (!connected || !active || activeTab !== "terminal" || autoPreviewOpenedRef.current) {
       return;
@@ -188,97 +194,90 @@ export function SessionDetail({
   const sessionModel = session.metadata["model"]?.trim() ?? "";
   const sessionReasoningEffort = session.metadata["reasoningEffort"]?.trim() ?? "";
   const compactStatusLabel = getCompactSessionStatusLabel(status);
+  const statusDotClass = getStatusDotClass(status);
+  const statusAnimated = isStatusAnimated(status);
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const terminalTabActive = active && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
+  const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
   const sessionTabs = (
-    <TabsList className={immersiveTerminalActive ? "grid w-full grid-cols-4" : "flex w-full overflow-x-auto sm:w-fit sm:inline-flex"}>
-      <TabsTrigger value="overview" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
+    <TabsList className="flex w-full overflow-x-auto sm:w-fit sm:inline-flex">
+      <TabsTrigger value="overview" className={tabTriggerClass}>
         <LayoutDashboard className="h-3.5 w-3.5" />
         Overview
       </TabsTrigger>
-      <TabsTrigger value="terminal" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
+      <TabsTrigger value="terminal" className={tabTriggerClass}>
         <SquareTerminal className="h-3.5 w-3.5" />
         Terminal
       </TabsTrigger>
-      <TabsTrigger value="preview" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
+      <TabsTrigger value="preview" className={tabTriggerClass}>
         <Globe className="h-3.5 w-3.5" />
         Preview
-      </TabsTrigger>
-      <TabsTrigger value="diff" className="min-h-[44px] justify-center px-2 text-[11px] sm:min-h-0 sm:px-2.5 sm:text-[12px]">
-        <FileCode className="h-3.5 w-3.5" />
-        Diff
       </TabsTrigger>
     </TabsList>
   );
 
   return (
-    <div className={`flex h-full min-h-0 flex-col ${immersiveTerminalActive ? "bg-[#060404]" : ""}`}>
+    <div className={`flex h-full min-h-0 min-w-0 w-full flex-col ${immersiveTerminalActive ? "bg-[#060404]" : ""}`}>
       <Tabs
         key={sessionId}
         value={activeTab}
         onValueChange={handleTabChange}
-        className={immersiveTerminalActive ? "flex min-h-0 flex-1 flex-col gap-0 p-0" : "flex min-h-0 flex-1 flex-col gap-1.5 p-1.5 sm:gap-2 sm:p-3"}
+        className={immersiveTerminalActive ? "flex min-h-0 min-w-0 w-full flex-1 flex-col gap-0 p-0" : "flex min-h-0 min-w-0 w-full flex-1 flex-col gap-1 p-1 lg:gap-2 lg:p-3"}
       >
-        {immersiveTerminalActive ? null : (
-          <div className="flex min-w-0 flex-col gap-1.5 sm:gap-2">
+        {immersiveTerminalActive ? (
+          <div className="flex shrink-0 flex-col border-b border-white/10 bg-[#0d0908]">
+            {/* compact info row */}
+            <div className="flex h-10 items-center gap-2 px-2">
+              {onOpenSidebar ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+                  onClick={onOpenSidebar}
+                  aria-label="Open workspace panel"
+                >
+                  <PanelLeftOpen className="h-4 w-4" />
+                </Button>
+              ) : null}
+              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
+                <span className="text-[12px] font-medium text-[#efe8e1]">{compactStatusLabel}</span>
+                <span className="font-mono text-[10px] text-[#8e847d]">· {sessionId.slice(0, 7)}</span>
+              </div>
+              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} /> : null}
+            </div>
+            {/* tab row */}
+            <div className="px-1.5 pb-1.5">
+              {sessionTabs}
+            </div>
+          </div>
+        ) : (
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 sm:flex-nowrap">
             {sessionTabs}
-            <div className="flex min-w-0 items-center justify-between gap-2">
-              <div className="flex min-w-0 items-center gap-2">
-                <Badge variant="outline" className="h-[23px] max-w-full">
-                  <span className="sm:hidden">{compactStatusLabel}</span>
-                  <span className="hidden sm:inline">{status}</span>
-                </Badge>
-                <span className="font-mono text-[10px] text-[var(--vk-text-muted)] sm:hidden">{sessionId.slice(0, 6)}</span>
-                <span className="hidden min-w-0 truncate font-mono text-[10px] text-[var(--vk-text-muted)] sm:block">{sessionId}</span>
+            <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
+              <div className="flex items-center gap-1.5">
+                <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
+                <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
+                <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
               </div>
               {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} /> : null}
             </div>
           </div>
         )}
 
-        <div className="relative min-h-0 flex-1">
-          {immersiveTerminalActive ? (
-            <div className="pointer-events-none absolute inset-x-3 top-3 z-20 flex items-start justify-end gap-2">
-              <Badge variant="outline" className="pointer-events-auto h-[30px] border-white/12 bg-[#141010]/92 px-2.5 text-[#efe8e1] shadow-[0_14px_28px_rgba(0,0,0,0.36)] backdrop-blur-sm">
-                {compactStatusLabel}
-              </Badge>
-              <button
-                type="button"
-                onClick={() => setMobileTerminalPanelOpen((current) => !current)}
-                className="pointer-events-auto inline-flex h-[30px] items-center gap-1.5 rounded-full border border-white/12 bg-[#141010]/92 px-3 text-[11px] font-medium text-[#efe8e1] shadow-[0_14px_28px_rgba(0,0,0,0.36)] backdrop-blur-sm transition hover:bg-[#201818]"
-                aria-label={mobileTerminalPanelOpen ? "Close terminal session controls" : "Open terminal session controls"}
-                aria-expanded={mobileTerminalPanelOpen}
-              >
-                {mobileTerminalPanelOpen ? <X className="h-3.5 w-3.5" /> : <SlidersHorizontal className="h-3.5 w-3.5" />}
-                Controls
-              </button>
-            </div>
-          ) : null}
-          {immersiveTerminalActive && mobileTerminalPanelOpen ? (
-            <div className="absolute inset-x-3 top-14 z-20 rounded-[18px] border border-white/10 bg-[#120d0d]/96 p-3 shadow-[0_28px_60px_rgba(0,0,0,0.45)] backdrop-blur">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-[10px] uppercase tracking-[0.18em] text-[#8e847d]">Session</p>
-                  <p className="truncate font-mono text-[11px] text-[#d7cec7]">{sessionId}</p>
-                </div>
-                {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} /> : null}
-              </div>
-              <div className="mt-3">
-                {sessionTabs}
-              </div>
-            </div>
-          ) : null}
-          <TabsContent value="overview" className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
-            <SessionOverview session={session} />
+        <div className="relative min-h-0 min-w-0 flex-1">
+          <TabsContent value="overview" className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
+            <SessionOverview session={session} sessionId={sessionId} active={active && activeTab === "overview"} />
           </TabsContent>
 
           <TabsContent
             value="terminal"
             className={immersiveTerminalActive
-              ? "flex min-h-0 h-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-              : "flex min-h-0 h-full flex-col overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
+              ? "flex min-h-0 h-full min-w-0 w-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+              : "flex min-h-0 h-full min-w-0 flex-col w-full overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
           >
             <SessionTerminal
               key={sessionId}
@@ -294,9 +293,10 @@ export function SessionDetail({
             />
           </TabsContent>
 
-          <TabsContent
+
+<TabsContent
             value="preview"
-            className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+            className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
           >
             {previewTabActive ? (
               <SessionPreview
@@ -306,12 +306,6 @@ export function SessionDetail({
                 onQueueTerminalInsert={queueTerminalInsert}
                 onConnectionChange={handlePreviewConnectionChange}
               />
-            ) : null}
-          </TabsContent>
-
-          <TabsContent value="diff" className="min-h-0 h-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
-            {activeTab === "diff" ? (
-              <SessionDiff key={sessionId} sessionId={sessionId} active={active && activeTab === "diff"} />
             ) : null}
           </TabsContent>
         </div>
