@@ -50,6 +50,7 @@ export async function fetchTerminalConnection(sessionId: string): Promise<Termin
     | {
         transport?: string;
         wsUrl?: string | null;
+        ptyWsUrl?: string | null;
         interactive?: boolean;
         fallbackReason?: string | null;
         stream?: {
@@ -88,6 +89,10 @@ export async function fetchTerminalConnection(sessionId: string): Promise<Termin
   }
 
   const connection: TerminalConnectionInfo = {
+    ptyWsUrl:
+      typeof data?.ptyWsUrl === "string" && data.ptyWsUrl.trim().length > 0
+        ? data.ptyWsUrl.trim()
+        : null,
     stream: {
       transport: "eventstream",
       wsUrl: streamWsUrl,

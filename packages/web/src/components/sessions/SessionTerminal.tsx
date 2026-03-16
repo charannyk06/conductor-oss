@@ -11,12 +11,9 @@ import { extractLocalFileTransferPath, uploadProjectAttachments } from "./attach
 import { captureTerminalViewport, type TerminalViewportState } from "./terminalViewport";
 import {
   buildTerminalSnapshotPayload,
-  buildTerminalSocketUrl,
   calculateMobileTerminalViewportMetrics,
-  decodeTerminalBase64Payload,
   getSessionTerminalViewportOptions,
-  prependTerminalModes,
-  sanitizeRemoteTerminalSnapshot,
+  stripBrowserTerminalResponses,
   type TerminalModeState,
   type TerminalWriteChunk,
 } from "./sessionTerminalUtils";
@@ -66,9 +63,9 @@ import {
 } from "./terminal/useTerminalAddons";
 import { useTerminalSearch } from "./terminal/useTerminalSearch";
 import { useTerminalInput } from "./terminal/useTerminalInput";
-import { useTerminalConnection } from "./terminal/useTerminalConnection";
 import { useTerminalResize } from "./terminal/useTerminalResize";
 import { useTerminalSnapshot } from "./terminal/useTerminalSnapshot";
+import { useTtydConnection } from "./terminal/useTtydConnection";
 
 // ---------------------------------------------------------------------------
 
@@ -115,16 +112,12 @@ export function SessionTerminal({
   const initialUiState = readCachedTerminalUiState(sessionId);
 
   const [terminalReady, setTerminalReady] = useState(false);
-  const [socketBaseUrl, setSocketBaseUrl] = useState<string | null>(null);
-  const [ttydWsUrl, setTtydWsUrl] = useState<string | null>(null);
-  const ttydSocketRef = useRef<WebSocket | null>(null);
+  const [ptyWsUrl, setPtyWsUrl] = useState<string | null>(null);
+  const ptySocketRef = useRef<WebSocket | null>(null);
+  const ptyActiveRef = useRef(false);
   const [connectionState, setConnectionState] = useState<"connecting" | "live" | "closed" | "error">("connecting");
   const [transportError, setTransportError] = useState<string | null>(null);
   const [interactiveTerminal, setInteractiveTerminal] = useState(true);
-  const [transportNotice, setTransportNotice] = useState<string | null>(null);
-  const [reconnectToken, setReconnectToken] = useState(0);
-  const lastReconnectTokenRef = useRef(0);
-  const requestReconnectRef = useRef<() => void>(() => {});
   const [message, setMessage] = useState(() => initialUiState?.message ?? "");
   const [attachments, setAttachments] = useState<Array<{ file: File }>>([]);
   const [sending, setSending] = useState(false);
@@ -201,6 +194,53 @@ export function SessionTerminal({
   // Keep the input hook's interactivity ref in sync
   inputInteractiveRef.current = interactiveTerminal;
 
+  // TTyD WebSocket connection (for direct PTY I/O via binary protocol)
+  // Must be declared before httpSendResize that uses it
+  const {
+    isConnected: ttydConnected,
+    isConnecting: ttydConnecting,
+    error: ttydError,
+    sendInput: ttydSendInput,
+    sendResize: ttydSendResize,
+  } = useTtydConnection({
+    terminal: termRef.current,
+    fitAddon: fitRef.current,
+    ptyWsUrl,
+    enabled: ptyWsUrl !== null && expectsLiveTerminalRef.current,
+    onConnectionReady: () => {
+      ptyActiveRef.current = true;
+      setConnectionState("live");
+      setTransportError(null);
+    },
+    onConnectionClosed: (code) => {
+      ptyActiveRef.current = false;
+      if (code !== 1000) {
+        setConnectionState("error");
+      } else {
+        setConnectionState("closed");
+      }
+    },
+    onConnectionError: (error) => {
+      ptyActiveRef.current = false;
+      setTransportError(error.message);
+      setConnectionState("error");
+    },
+  });
+
+  // When the bidirectional PTY WS is active, resize is handled directly
+  // over the WS — skip the HTTP resize to avoid double SIGWINCH.
+  const httpSendResize = useCallback(
+    async (cols: number, rows: number): Promise<boolean> => {
+      if (ttydConnected) {
+        ttydSendResize(cols, rows);
+        return true;
+      }
+      if (ptyActiveRef.current) return true;
+      return sendResize(cols, rows);
+    },
+    [ttydConnected, ttydSendResize, sendResize],
+  );
+
   const {
     pendingResizeSyncRef,
     lastSyncedTerminalSizeRef,
@@ -226,7 +266,7 @@ export function SessionTerminal({
     fitRef,
     containerRef,
     resumeTextareaRef,
-    sendResize,
+    httpSendResize,
     setTransportError,
     initialUiState?.viewport ?? null,
   );
@@ -252,27 +292,6 @@ export function SessionTerminal({
     updateScrollState,
     restorePreferredFocus,
   );
-
-  const {
-    eventSourceRef,
-    reconnectCountRef,
-    connectAttemptRef,
-    hasConnectedOnceRef,
-    reconnectNoticeWrittenRef,
-    clearReconnectTimer,
-    scheduleReconnect,
-    requestReconnect,
-  } = useTerminalConnection(
-    sessionId,
-    pendingResizeSyncRef,
-    setTransportError,
-    setTransportNotice,
-    setConnectionState,
-    setSocketBaseUrl,
-    setReconnectToken,
-  );
-
-  requestReconnectRef.current = requestReconnect;
 
   const { searchRef, runSearch } = useTerminalSearch({
     searchOpen,
@@ -341,7 +360,7 @@ export function SessionTerminal({
     setSendError(null);
     try {
       if (expectsLiveTerminal && !interactiveTerminal) {
-        throw new Error(transportNotice ?? "Operator access is required for live terminal input");
+        throw new Error("Operator access is required for live terminal input");
       }
       if (expectsLiveTerminal) {
         if (!canSendLiveInput) {
@@ -354,7 +373,7 @@ export function SessionTerminal({
     } catch (err) {
       setSendError(err instanceof Error ? err.message : "Failed to process files");
     }
-  }, [canSendLiveInput, expectsLiveTerminal, injectFilesIntoTerminal, interactiveTerminal, queueResumeAttachments, transportNotice]);
+  }, [canSendLiveInput, expectsLiveTerminal, injectFilesIntoTerminal, interactiveTerminal, queueResumeAttachments]);
 
   const applyFetchedSnapshot = useCallback((snapshot: TerminalSnapshot) => {
     snapshotAppliedRef.current = null;
@@ -493,19 +512,14 @@ export function SessionTerminal({
   useEffect(() => {
     const cachedSnapshot = expectsLiveTerminal ? null : readCachedTerminalSnapshot(sessionId);
     const cachedUiState = readCachedTerminalUiState(sessionId);
-    hasConnectedOnceRef.current = false;
-    reconnectNoticeWrittenRef.current = false;
     snapshotAppliedRef.current = null;
     lastTerminalSequenceRef.current = cachedSnapshot?.sequence ?? null;
     liveOutputStartedRef.current = false;
-    reconnectCountRef.current = 0;
-    connectAttemptRef.current = 0;
     lastAppliedInsertNonceRef.current = 0;
     lastSyncedTerminalSizeRef.current = null;
     pendingResizeSyncRef.current = true;
     preferredFocusTargetRef.current = "none";
     restoreFocusOnRecoveryRef.current = false;
-    clearReconnectTimer();
     clearScheduledRecovery();
     clearScheduledTerminalFlush();
     clearScheduledTerminalHttpControlFlush();
@@ -517,13 +531,9 @@ export function SessionTerminal({
     lastObservedContainerSizeRef.current = null;
     lastViewportOptionKeyRef.current = null;
     pendingViewportRestoreRef.current = cachedUiState?.viewport ?? null;
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-    setSocketBaseUrl(null);
     setConnectionState("connecting");
     setTransportError(null);
     setInteractiveTerminal(true);
-    setTransportNotice(null);
     setMessage(cachedUiState?.message ?? "");
     setAttachments([]);
     setSending(false);
@@ -612,7 +622,6 @@ export function SessionTerminal({
     let mounted = true;
 
     if (!expectsLiveTerminal || !shouldStreamLiveTerminal) {
-      setSocketBaseUrl(null);
       setConnectionState("closed");
       setTransportError(null);
       return () => { mounted = false; };
@@ -620,114 +629,31 @@ export function SessionTerminal({
 
     void (async () => {
       try {
-        setSocketBaseUrl(null);
         const connection = await fetchTerminalConnection(sessionId);
         if (!mounted) return;
-        // Check for ttyd WebSocket URL (direct PTY streaming)
-        const rawResponse = connection as Record<string, unknown>;
-        const ttydUrl = typeof rawResponse.ttydWsUrl === "string" ? rawResponse.ttydWsUrl : null;
-        setTtydWsUrl(ttydUrl);
-        setSocketBaseUrl(connection.stream.wsUrl);
+        setPtyWsUrl(connection.ptyWsUrl);
         setInteractiveTerminal(connection.control.interactive);
-        setTransportNotice(connection.control.fallbackReason);
         setTransportError(null);
         setConnectionState("connecting");
       } catch (err) {
         if (!mounted) return;
         setTransportError(err instanceof Error ? err.message : "Failed to resolve terminal connection");
-        setTransportNotice(null);
         setConnectionState("error");
       }
     })();
 
     return () => { mounted = false; };
-  }, [expectsLiveTerminal, reconnectToken, sessionId, shouldStreamLiveTerminal]);
+  }, [expectsLiveTerminal, sessionId, shouldStreamLiveTerminal]);
 
   // --- Event handlers (useEffectEvent) ---
-  const handleTerminalServerEvent = useEffectEvent((payload: TerminalServerEvent) => {
-    if (payload.type === "error") {
-      setTransportError(payload.error);
-      setConnectionState("error");
-      return;
-    }
-
-    if (payload.type === "control") {
-      if (payload.event === "exit") {
-        setConnectionState("closed");
-      } else {
-        setTransportError(null);
-        setConnectionState("live");
-      }
-      return;
-    }
-
-    setTransportError(null);
-    setConnectionState("live");
-  });
-
-  const handleTerminalPayloadFrame = useEffectEvent((
-    kind: "restore" | "stream",
-    sequence: number,
-    payload: Uint8Array,
-    modes?: TerminalModeState,
-  ) => {
-    const previousSequence = lastTerminalSequenceRef.current;
-    if (typeof previousSequence === "number") {
-      if (kind === "stream" && sequence <= previousSequence) {
-        return;
-      }
-      if (kind === "restore" && liveOutputStartedRef.current && sequence <= previousSequence) {
-        return;
-      }
-    }
-
-    liveOutputStartedRef.current = true;
-    lastTerminalSequenceRef.current = sequence;
-    setTransportError(null);
-    setConnectionState("live");
-    if (kind === "restore") {
-      const snapshot = decodeTerminalPayloadToString(payload);
-      const transcript = sanitizeRemoteTerminalSnapshot(snapshot);
-      snapshotAnsiRef.current = snapshot;
-      snapshotTranscriptRef.current = transcript;
-      snapshotModesRef.current = modes;
-      clearCachedTerminalSnapshot(sessionId);
-    }
-    const nextPayload = kind === "restore"
-      ? prependTerminalModes(payload, modes)
-      : payload;
-    queueTerminalWrite(
-      {
-        kind: kind === "restore" ? "snapshot" : "stream",
-        payload: nextPayload,
-      },
-      kind === "restore",
-    );
-    if (kind === "restore") {
-      snapshotAppliedRef.current = sessionId;
-    }
-  });
-
-  const handleTerminalEventStreamMessage = useEffectEvent((payload: TerminalStreamEventMessage) => {
-    if (payload.type === "stream" || payload.type === "restore") {
-      try {
-        handleTerminalPayloadFrame(
-          payload.type,
-          payload.sequence,
-          decodeTerminalBase64Payload(payload.payload),
-          payload.type === "restore" ? payload.modes : undefined,
-        );
-      } catch {
-        setTransportError("Received an invalid terminal frame");
-        setConnectionState("error");
-      }
-      return;
-    }
-
-    handleTerminalServerEvent(payload);
-  });
-
   const handleTerminalData = useEffectEvent((data: string) => {
+    // When ttyd WebSocket is active, send input directly over it
+    if (ttydConnected) {
+      ttydSendInput(data);
+      return;
+    }
+    // Otherwise skip if ptyActiveRef is set (legacy bidirectional WS)
+    if (ptyActiveRef.current) return;
     void sendTerminalKeys(data).catch(() => {
       // Ignore transient disconnects while xterm is still flushing local input.
     });
@@ -926,13 +852,6 @@ export function SessionTerminal({
       return;
     }
 
-    // Only reconnect when we would actually stream. When shouldStreamLiveTerminal
-    // is false (e.g. page hidden or terminal tab inactive), the connection
-    // resolution effect sets connectionState to "closed" — reconnecting here
-    // would bounce it back to "connecting" and create an infinite update loop.
-    if (shouldStreamLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
-      requestReconnectRef.current();
-    }
 
     clearVisibilityRecoveryTimers();
     const frameHandle = window.requestAnimationFrame(() => {
@@ -1058,24 +977,12 @@ export function SessionTerminal({
         return;
       }
       normalizeWhitespaceOnlyDraft();
-      if (expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
-        if (reconnectToken !== lastReconnectTokenRef.current) {
-          lastReconnectTokenRef.current = reconnectToken;
-          requestReconnectRef.current();
-        }
-      }
       scheduleRendererRecovery(false);
     };
 
     const handleWindowFocus = () => {
       setPageVisible(!document.hidden);
       normalizeWhitespaceOnlyDraft();
-      if (!document.hidden && expectsLiveTerminal && (connectionState === "closed" || connectionState === "error")) {
-        if (reconnectToken !== lastReconnectTokenRef.current) {
-          lastReconnectTokenRef.current = reconnectToken;
-          requestReconnectRef.current();
-        }
-      }
       scheduleRendererRecovery(false);
     };
 
@@ -1086,7 +993,7 @@ export function SessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [connectionState, expectsLiveTerminal, reconnectToken, normalizeWhitespaceOnlyDraft, rememberFocusedSurface, scheduleRendererRecovery]);
+  }, [connectionState, shouldStreamLiveTerminal, normalizeWhitespaceOnlyDraft, rememberFocusedSurface, scheduleRendererRecovery]);
 
   useEffect(() => {
     const handleDocumentFocusIn = () => {
@@ -1105,7 +1012,6 @@ export function SessionTerminal({
       return;
     }
 
-    clearReconnectTimer();
     clearScheduledTerminalFlush();
     clearScheduledTerminalHttpControlFlush();
     terminalWriteQueueRef.current = [];
@@ -1113,10 +1019,11 @@ export function SessionTerminal({
     terminalWriteRestoreFocusRef.current = false;
     terminalHttpControlQueueRef.current = [];
     terminalHttpControlInFlightRef.current = false;
-    const eventSource = eventSourceRef.current;
-    eventSourceRef.current = null;
-    if (eventSource) {
-      eventSource.close();
+    ptyActiveRef.current = false;
+    const ptyWs = ptySocketRef.current;
+    ptySocketRef.current = null;
+    if (ptyWs) {
+      ptyWs.close();
     }
     if (expectsLiveTerminal) {
       clearCachedTerminalSnapshot(sessionId);
@@ -1134,178 +1041,11 @@ export function SessionTerminal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldStreamLiveTerminal, sessionId, expectsLiveTerminal]);
 
-  // ttyd WebSocket connection (preferred when available)
-  useEffect(() => {
-    if (!ttydWsUrl || !terminalReady || !shouldStreamLiveTerminal) return;
-    const term = termRef.current;
-    if (!term) return;
+  // WebSocket connection is now handled by useTtydConnection hook above
 
-    const ws = new WebSocket(ttydWsUrl);
-    ws.binaryType = "arraybuffer";
-    ttydSocketRef.current = ws;
-
-    ws.onopen = () => {
-      setConnectionState("live");
-      setTransportError(null);
-      setTransportNotice(null);
-      // Send initial resize
-      const resizeJson = JSON.stringify({ columns: term.cols, rows: term.rows });
-      const encoder = new TextEncoder();
-      const resizePayload = encoder.encode("1" + resizeJson);
-      ws.send(resizePayload);
-    };
-
-    ws.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        const data = new Uint8Array(event.data);
-        if (data.length > 0 && data[0] === 0) {
-          // Type 0 = output: write raw PTY bytes directly to xterm
-          term.write(data.subarray(1));
-        }
-        // Type 1 = title change (ignored)
-        // Type 2 = preferences (ignored)
-      }
-    };
-
-    ws.onerror = () => {
-      setTransportError("ttyd WebSocket error");
-      setConnectionState("error");
-    };
-
-    ws.onclose = () => {
-      if (ttydSocketRef.current === ws) {
-        ttydSocketRef.current = null;
-        setConnectionState("closed");
-      }
-    };
-
-    // Handle xterm input → ttyd
-    const inputDisposable = term.onData((data: string) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        const encoder = new TextEncoder();
-        const payload = encoder.encode("0" + data);
-        ws.send(payload);
-      }
-    });
-
-    return () => {
-      inputDisposable.dispose();
-      if (ttydSocketRef.current === ws) {
-        ttydSocketRef.current = null;
-      }
-      ws.close();
-    };
-  }, [ttydWsUrl, terminalReady, shouldStreamLiveTerminal]);
-
-  // EventSource connection effect (fallback when ttyd not available)
-  useEffect(() => {
-    // Skip SSE if ttyd is connected
-    if (ttydWsUrl) return;
-    if (
-      !terminalReady
-      || !socketBaseUrl
-      || !termRef.current
-      || !shouldStreamLiveTerminal
-    ) return;
-
-    const term = termRef.current;
-    const streamUrl = buildTerminalSocketUrl(
-      socketBaseUrl,
-      term.cols,
-      term.rows,
-      lastTerminalSequenceRef.current,
-    );
-    const attemptId = connectAttemptRef.current + 1;
-    connectAttemptRef.current = attemptId;
-    clearReconnectTimer();
-    setConnectionState("connecting");
-
-    const source = new EventSource(streamUrl);
-    eventSourceRef.current = source;
-
-    source.onopen = () => {
-      if (connectAttemptRef.current !== attemptId) return;
-      reconnectCountRef.current = 0;
-      pendingResizeSyncRef.current = true;
-      setTransportError(null);
-      setConnectionState("live");
-      hasConnectedOnceRef.current = true;
-      reconnectNoticeWrittenRef.current = false;
-      updateScrollStateRef.current();
-      scheduleRendererRecoveryRef.current(true);
-    };
-
-    source.onmessage = (event) => {
-      if (connectAttemptRef.current !== attemptId) return;
-      try {
-        handleTerminalEventStreamMessage(JSON.parse(event.data) as TerminalStreamEventMessage);
-      } catch {
-        setTransportError("Received an invalid terminal event");
-        setConnectionState("error");
-      }
-    };
-
-    source.onerror = () => {
-      if (connectAttemptRef.current !== attemptId) return;
-      const shouldRetry = LIVE_TERMINAL_STATUSES.has(latestStatusRef.current);
-      if (shouldRetry) {
-        pendingResizeSyncRef.current = true;
-        const currentTerm = termRef.current;
-        if (currentTerm && hasConnectedOnceRef.current && liveOutputStartedRef.current && !reconnectNoticeWrittenRef.current) {
-          reconnectNoticeWrittenRef.current = true;
-          currentTerm.writeln("\r\n\x1b[90m[Connection lost. Reconnecting...]\x1b[0m");
-        }
-        setConnectionState("connecting");
-        setTransportError(null);
-        return;
-      }
-      clearCachedTerminalConnection(sessionId);
-      if (eventSourceRef.current === source) {
-        eventSourceRef.current = null;
-      }
-      source.close();
-      setTransportError("Terminal connection failed");
-      setConnectionState("error");
-    };
-
-    return () => {
-      if (eventSourceRef.current === source) {
-        eventSourceRef.current = null;
-      }
-      source.close();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    clearReconnectTimer,
-    sessionId,
-    shouldStreamLiveTerminal,
-    socketBaseUrl,
-    terminalReady,
-  ]);
-
-  // Auto-reconnect scheduling effect
-  useEffect(() => {
-    if (!terminalReady || !shouldStreamLiveTerminal) {
-      return;
-    }
-
-    const source = eventSourceRef.current;
-    if (source && (source.readyState === EventSource.CONNECTING || source.readyState === EventSource.OPEN)) {
-      return;
-    }
-
-    if (connectionState !== "closed" && connectionState !== "error") {
-      return;
-    }
-
-    // Don't schedule if timer already pending
-    // (reconnectTimerRef not exposed, but scheduleReconnect clears existing)
-    scheduleReconnect();
-  }, [connectionState, scheduleReconnect, shouldStreamLiveTerminal, terminalReady, eventSourceRef]);
 
   // Global cleanup effect
   useEffect(() => () => {
-    clearReconnectTimer();
     clearScheduledRecovery();
     clearScheduledTerminalFlush();
     clearScheduledTerminalHttpControlFlush();
@@ -1315,8 +1055,9 @@ export function SessionTerminal({
     terminalWriteRestoreFocusRef.current = false;
     terminalHttpControlQueueRef.current = [];
     terminalHttpControlInFlightRef.current = false;
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
+    ptyActiveRef.current = false;
+    ptySocketRef.current?.close();
+    ptySocketRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1398,7 +1139,6 @@ export function SessionTerminal({
         router.push(`/sessions/${encodeURIComponent(data.sessionId)}`);
         return;
       }
-      setReconnectToken((value) => value + 1);
       try {
         const nextStatus = await fetchSessionStatus(sessionId);
         setSessionStatusOverride(nextStatus);
@@ -1432,7 +1172,7 @@ export function SessionTerminal({
     }
 
     if (expectsLiveTerminal && !interactiveTerminal) {
-      setSendError(transportNotice ?? "Operator access is required for live terminal input");
+      setSendError("Operator access is required for live terminal input");
       return;
     }
 
@@ -1442,7 +1182,7 @@ export function SessionTerminal({
     }
 
     setMessage((current) => (current.trim().length > 0 ? `${current}\n\n${draftText}` : draftText));
-  }, [canSendLiveInput, expectsLiveTerminal, interactiveTerminal, pendingInsert, sendTerminalKeys, transportNotice]);
+  }, [canSendLiveInput, expectsLiveTerminal, interactiveTerminal, pendingInsert, sendTerminalKeys]);
 
   const scrollToBottom = useCallback(() => {
     const term = termRef.current;
@@ -1705,7 +1445,7 @@ export function SessionTerminal({
             return;
           }
           if (expectsLiveTerminal && !interactiveTerminal) {
-            setSendError(transportNotice ?? "Operator access is required for live terminal input");
+            setSendError("Operator access is required for live terminal input");
             return;
           }
           if (expectsLiveTerminal) {
@@ -1765,8 +1505,8 @@ export function SessionTerminal({
                   ? "border-[#ff8f7a]/25 bg-[#2a1616]/92 text-[#ff8f7a] hover:bg-[#351b1b]"
                   : "border-white/10 bg-[#141010]/92 text-[#c9c0b7] hover:bg-[#201818]"
               }`}
-              onClick={requestReconnect}
-              aria-label="Reconnect"
+              disabled
+              aria-label="Reconnect (auto-managed by WebSocket)"
             >
               {connectionState === "connecting"
                 ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1839,16 +1579,6 @@ export function SessionTerminal({
         }}
       />
 
-      {transportNotice && !showResumeRail ? (
-        <div
-          className="pointer-events-none absolute left-3 right-3 z-10"
-          style={{ bottom: `${floatingOverlayBottomPx}px` }}
-        >
-          <div className="rounded-[12px] border border-white/8 bg-[#0f0a0a]/92 px-3 py-2 text-[12px] text-[#b8aea6] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur-sm">
-            {transportNotice}
-          </div>
-        </div>
-      ) : null}
 
       {showLiveHelperBar ? (
         <div className="border-t border-white/8 bg-[#0b0808]/96 px-3 py-2">

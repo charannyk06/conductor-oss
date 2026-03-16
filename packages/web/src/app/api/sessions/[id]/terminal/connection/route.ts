@@ -1,5 +1,11 @@
+import type { DashboardRoleBindings } from "@conductor-oss/core/types";
 import { roleMeetsRequirement } from "@/lib/accessControl";
-import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import {
+  getDashboardAccess,
+  getDashboardConfigSnapshot,
+  guardApiAccess,
+} from "@/lib/auth";
+import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -12,6 +18,13 @@ const TERMINAL_CONNECTION_PATH_HEADER = "x-conductor-terminal-connection-path";
 const TERMINAL_CONNECTION_PATH = "dashboard_proxy";
 
 type TerminalConnectionTransport = "eventstream";
+
+type TerminalTokenPayload = {
+  token?: string | null;
+  required?: boolean;
+  expiresInSeconds?: number | null;
+  error?: string;
+};
 
 function buildControlPaths(id: string): {
   sendPath: string;
@@ -27,6 +40,101 @@ function buildControlPaths(id: string): {
 
 function buildTerminalStreamProxyUrl(id: string): string {
   return `/api/sessions/${encodeURIComponent(id)}/terminal/stream`;
+}
+
+function resolveBackendTerminalWsUrl(backendUrl: string, id: string): URL {
+  const wsUrl = new URL(backendUrl);
+  wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+  wsUrl.pathname = `/api/sessions/${encodeURIComponent(id)}/terminal/ws`;
+  wsUrl.search = "";
+  return wsUrl;
+}
+
+function parseCsvEnv(name: string): string[] {
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
+function roleBindingsConfigured(
+  bindings: DashboardRoleBindings | null | undefined
+): boolean {
+  if (!bindings) return false;
+  return (
+    (bindings.viewers?.length ?? 0) > 0 ||
+    (bindings.operators?.length ?? 0) > 0 ||
+    (bindings.admins?.length ?? 0) > 0 ||
+    (bindings.viewerDomains?.length ?? 0) > 0 ||
+    (bindings.operatorDomains?.length ?? 0) > 0 ||
+    (bindings.adminDomains?.length ?? 0) > 0
+  );
+}
+
+function terminalAccessControlEnabled(): boolean {
+  const access = getDashboardConfigSnapshot().access;
+  const requireAuth =
+    access?.requireAuth === true ||
+    (process.env.CONDUCTOR_REQUIRE_AUTH ?? "").trim().toLowerCase() ===
+      "true" ||
+    parseCsvEnv("CONDUCTOR_ALLOWED_EMAILS").length > 0 ||
+    parseCsvEnv("CONDUCTOR_ALLOWED_DOMAINS").length > 0 ||
+    parseCsvEnv("CONDUCTOR_ADMIN_EMAILS").length > 0 ||
+    roleBindingsConfigured(access?.roles);
+
+  const builtinRemoteAuthEnabled =
+    (process.env.CONDUCTOR_REMOTE_ACCESS_TOKEN ?? "").trim().length > 0 &&
+    (process.env.CONDUCTOR_REMOTE_SESSION_SECRET ?? "").trim().length > 0;
+
+  return (
+    requireAuth ||
+    Boolean(access?.allowSignedShareLinks && builtinRemoteAuthEnabled)
+  );
+}
+
+async function resolvePtyWsUrl(
+  request: Request,
+  backendUrl: string,
+  id: string
+): Promise<string> {
+  const wsUrl = resolveBackendTerminalWsUrl(backendUrl, id);
+  wsUrl.searchParams.set("protocol", "ttyd");
+
+  if (!terminalAccessControlEnabled()) {
+    return wsUrl.toString();
+  }
+
+  const tokenUrl = new URL(
+    `/api/sessions/${encodeURIComponent(id)}/terminal/token`,
+    backendUrl
+  );
+  const response = await fetch(tokenUrl, {
+    method: "GET",
+    headers: await buildForwardedAccessHeaders(request),
+    cache: "no-store",
+    signal: request.signal,
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | TerminalTokenPayload
+    | null;
+  if (!response.ok) {
+    throw new Error(
+      payload?.error ?? `Failed to resolve terminal token: ${response.status}`
+    );
+  }
+
+  if (payload?.required !== true) {
+    return wsUrl.toString();
+  }
+
+  const token =
+    typeof payload.token === "string" ? payload.token.trim() : "";
+  if (!token) {
+    throw new Error("Terminal token response did not include a control token");
+  }
+
+  wsUrl.searchParams.set("token", token);
+  return wsUrl.toString();
 }
 
 function formatDurationMs(startedAt: number): number {
@@ -120,63 +228,42 @@ export async function GET(
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
-  if (!process.env.CONDUCTOR_BACKEND_URL?.trim()) {
-    return NextResponse.json(
-      { error: "Rust backend URL is not configured" },
-      { status: 503 }
-    );
-  }
-
   const { id } = await context.params;
   const access = await getDashboardAccess(request);
   const interactive = access.role
     ? roleMeetsRequirement(access.role, "operator")
     : false;
 
-  // Check if ttyd is running for this session
-  let ttydWsUrl: string | null = null;
-  try {
-    const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
-    const ttydRes = await fetch(
-      `${backendUrl}/api/sessions/${encodeURIComponent(id)}/terminal/ttyd`,
-      { cache: "no-store", headers: { "x-conductor-proxy-authorized": "true" } },
-    );
-    if (ttydRes.ok) {
-      const ttydData = (await ttydRes.json()) as { ttydWsUrl?: string | null; available?: boolean };
-      if (ttydData?.available && ttydData?.ttydWsUrl) {
-        ttydWsUrl = ttydData.ttydWsUrl;
-      }
-    }
-  } catch {
-    // Non-fatal: fall through to regular transport
-  }
-
   if (!interactive) {
-    const response = buildEventStreamConnection(
+    return buildEventStreamConnection(
       id,
       false,
       "Live terminal control requires operator access. The terminal stays live in read-only mode.",
       startedAt
     );
-    if (ttydWsUrl) {
-      const body = await response.json();
-      body.ttydWsUrl = ttydWsUrl;
-      return applyTerminalConnectionHeaders(
-        NextResponse.json(body),
-        { startedAt, transport: "eventstream", interactive: false },
-      );
-    }
-    return response;
   }
 
+  // Resolve backend URL with fallback to localhost
+  // In development, if CONDUCTOR_BACKEND_URL is not set,
+  // default to http://127.0.0.1:4749 (standard dev backend port)
+  const configuredBackendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim();
+  const backendUrl = configuredBackendUrl || "http://127.0.0.1:4749";
   const response = buildEventStreamConnection(id, true, null, startedAt);
-  if (ttydWsUrl) {
-    const body = await response.json();
-    body.ttydWsUrl = ttydWsUrl;
-    return applyTerminalConnectionHeaders(
-      NextResponse.json(body),
-      { startedAt, transport: "eventstream", interactive: true },
-    );
+  const body = (await response.json()) as Record<string, unknown>;
+  try {
+    const ptyWsUrl = await resolvePtyWsUrl(request, backendUrl, id);
+    console.log("[Terminal Connection] Resolved ptyWsUrl:", { ptyWsUrl, backendUrl, sessionId: id });
+    body.ptyWsUrl = ptyWsUrl;
+  } catch (error) {
+    console.warn("[Terminal Connection] Failed to resolve direct terminal websocket URL", {
+      error: error instanceof Error ? error.message : String(error),
+      backendUrl,
+      sessionId: id,
+    });
+    body.ptyWsUrl = null;
   }
-  return response;
+  return applyTerminalConnectionHeaders(
+    NextResponse.json(body),
+    { startedAt, transport: "eventstream", interactive: true },
+  );
 }
