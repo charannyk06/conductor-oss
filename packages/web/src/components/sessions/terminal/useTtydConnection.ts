@@ -52,12 +52,14 @@ export function useTtydConnection(
   onConnectionErrorRef.current = onConnectionError;
   onConnectionClosedRef.current = onConnectionClosed;
 
-  // Clear error when ptyWsUrl changes to allow retry with a fresh URL/token
+  // Reset connection state when ptyWsUrl changes (new URL = fresh connection attempt)
   const prevPtyWsUrlRef = useRef(ptyWsUrl);
   useEffect(() => {
     if (ptyWsUrl !== prevPtyWsUrlRef.current) {
       prevPtyWsUrlRef.current = ptyWsUrl;
       setError(null);
+      setIsConnected(false);
+      setIsConnecting(false);
     }
   }, [ptyWsUrl]);
 

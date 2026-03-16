@@ -88,6 +88,13 @@ export class TtydClient {
     this.terminal = terminal;
     this.flowControl = flowControl;
     this.callbacks = callbacks;
+    const element = terminal.element;
+    if (element) {
+      const rect = element.getBoundingClientRect();
+      console.log("[TTyD] Client created. Terminal cols:", terminal.cols, "rows:", terminal.rows, "element:", !!element, "element.class:", element.className, "element.visible:", rect.width > 0 && rect.height > 0, `(${rect.width}x${rect.height})`);
+    } else {
+      console.log("[TTyD] Client created. Terminal cols:", terminal.cols, "rows:", terminal.rows, "element:", !!element, "WARNING: Terminal element not attached to DOM!");
+    }
   }
 
   /**
@@ -98,6 +105,7 @@ export class TtydClient {
     return new Promise((resolve, reject) => {
       try {
         const wsUrl = resolveWebSocketUrl(url);
+        console.log("[TTyD] Connecting to:", wsUrl);
         this.socket = new WebSocket(wsUrl);
         this.socket.binaryType = "arraybuffer";
 
@@ -114,6 +122,7 @@ export class TtydClient {
 
         this.socket.onopen = () => {
           clearTimeout(timeout);
+          console.log("[TTyD] Connected! Sending handshake...");
 
           // ttyd handshake: send JSON_DATA with terminal dimensions
           const handshake = JSON.stringify({
@@ -213,6 +222,7 @@ export class TtydClient {
 
     const cmd = view[0];
     const payload = view.subarray(1);
+    console.log("[TTyD] Received message, cmd:", String.fromCharCode(cmd), "payload length:", payload.length);
 
     switch (cmd) {
       case CMD_OUTPUT:
@@ -236,6 +246,7 @@ export class TtydClient {
         }
         break;
       default:
+        console.log("[TTyD] Unknown command:", cmd);
         break;
     }
   }
@@ -247,25 +258,57 @@ export class TtydClient {
   private writeOutput(data: Uint8Array): void {
     const { highWater, lowWater } = this.flowControl;
 
+    // Verify terminal state
+    if (!this.terminal) {
+      console.log("[TTyD] ERROR: Terminal reference is null");
+      return;
+    }
+    const element = this.terminal.element;
+    if (!element) {
+      console.log("[TTyD] WARNING: Terminal element is null or detached from DOM");
+    } else {
+      const rect = element.getBoundingClientRect();
+      console.log("[TTyD] Terminal element visible:", rect.width > 0 && rect.height > 0, `(${rect.width}x${rect.height})`);
+    }
+
     // Decode bytes to string for xterm.js parser
     const str = this.textDecoder.decode(data, { stream: true });
-    if (!str) return; // Empty or incomplete UTF-8 sequence
+    if (!str) {
+      console.log("[TTyD] Skipped write: empty or incomplete UTF-8 sequence");
+      return; // Empty or incomplete UTF-8 sequence
+    }
+
+    // Check terminal state before writing
+    const bufferLength = this.terminal.buffer.active.length;
+    console.log("[TTyD] Terminal state - buffer lines:", bufferLength, "cols:", this.terminal.cols, "rows:", this.terminal.rows);
 
     // For small writes, use fast path (no callback overhead)
     const byteLength = data.byteLength;
     if (byteLength < 1024) {
       // Fast path: direct write without callback
-      this.terminal.write(str);
+      console.log("[TTyD] Writing", str.length, "chars (fast path), data length:", byteLength);
+      try {
+        this.terminal.write(str);
+        console.log("[TTyD] Write succeeded, buffer lines now:", this.terminal.buffer.active.length);
+      } catch (err) {
+        console.log("[TTyD] ERROR writing to terminal:", err);
+      }
       return;
     }
 
     // For larger writes, track pending with callback for flow control
-    this.terminal.write(str, () => {
-      this.pending = Math.max(this.pending - 1, 0);
-      if (this.pending < lowWater && this.pending > 0) {
-        this.sendResume();
-      }
-    });
+    console.log("[TTyD] Writing", str.length, "chars (flow control), data length:", byteLength);
+    try {
+      this.terminal.write(str, () => {
+        this.pending = Math.max(this.pending - 1, 0);
+        if (this.pending < lowWater && this.pending > 0) {
+          this.sendResume();
+        }
+      });
+      console.log("[TTyD] Write succeeded, buffer lines now:", this.terminal.buffer.active.length);
+    } catch (err) {
+      console.log("[TTyD] ERROR writing to terminal:", err);
+    }
 
     this.pending++;
     if (this.pending >= highWater) {

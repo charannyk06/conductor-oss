@@ -122,8 +122,8 @@ export function SessionTerminal({
   activeRef.current = active;
 
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
-  const shouldAttachTerminalSurface = active && pageVisible;
-  const shouldStreamLiveTerminal = expectsLiveTerminal && shouldAttachTerminalSurface;
+  const shouldAttachTerminalSurface = active;
+  const shouldStreamLiveTerminal = expectsLiveTerminal && active && pageVisible;
   expectsLiveTerminalRef.current = expectsLiveTerminal;
   pageVisibleRef.current = pageVisible;
 
@@ -152,7 +152,7 @@ export function SessionTerminal({
     terminal: termRef.current,
     fitAddon: fitRef.current,
     ptyWsUrl,
-    enabled: ptyWsUrl !== null && expectsLiveTerminalRef.current,
+    enabled: ptyWsUrl !== null && expectsLiveTerminalRef.current && pageVisibleRef.current,
   });
 
   const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && ttydConnected;
