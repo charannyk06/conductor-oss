@@ -27,26 +27,7 @@ export type TerminalConnectionInfo = {
   interactive: boolean;
 };
 
-export type TerminalSnapshot = {
-  snapshot: string;
-  transcript: string;
-  source: string;
-  live: boolean;
-  restored: boolean;
-  sequence: number | null;
-  modes?: import("../sessionTerminalUtils").TerminalModeState;
-};
-
 export type PreferredFocusTarget = "none" | "terminal" | "resume";
-
-export type CachedTerminalConnection = {
-  value: TerminalConnectionInfo;
-  expiresAt: number;
-};
-
-export type CachedTerminalSnapshot = TerminalSnapshot & {
-  updatedAt: number;
-};
 
 export type CachedTerminalUiState = {
   message: string;

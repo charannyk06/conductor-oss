@@ -22,10 +22,9 @@ import {
 import {
   readCachedTerminalUiState,
   storeCachedTerminalUiState,
-  clearCachedTerminalConnection,
 } from "./terminal/terminalCache";
 import {
-  fetchTerminalConnection,
+  resolveTerminalConnection,
 } from "./terminal/terminalApi";
 import {
   terminalHasRenderedContent,
@@ -93,6 +92,7 @@ export function SessionTerminal({
   const [promptMessage, setPromptMessage] = useState("");
   const [promptSending, setPromptSending] = useState(false);
   const [promptError, setPromptError] = useState<string | null>(null);
+  const [connectionRefreshTick, setConnectionRefreshTick] = useState(0);
   const promptInputRef = useRef<HTMLInputElement>(null);
 
   // --- Derived state ---
@@ -109,7 +109,6 @@ export function SessionTerminal({
   activeRef.current = active;
 
   const expectsLiveTerminal = LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus);
-  const shouldAttachTerminalSurface = active;
   const shouldStreamLiveTerminal = expectsLiveTerminal && active && pageVisible;
   expectsLiveTerminalRef.current = expectsLiveTerminal;
   pageVisibleRef.current = pageVisible;
@@ -121,11 +120,18 @@ export function SessionTerminal({
     error: ttydError,
     sendInput: ttydSendInput,
     sendResize: ttydSendResize,
+    disconnect: ttydDisconnect,
   } = useTtydConnection({
     terminal: termRef.current,
     fitAddon: fitRef.current,
     ptyWsUrl,
     enabled: ptyWsUrl !== null && expectsLiveTerminalRef.current && pageVisibleRef.current,
+    onReconnectsExhausted: () => {
+      // All auto-reconnect attempts failed — clear the stale URL so
+      // the connection resolution effect re-fetches a fresh token.
+      setPtyWsUrl(null);
+      setConnectionRefreshTick((c) => c + 1);
+    },
   });
 
   const canSendLiveInput = expectsLiveTerminal && interactiveTerminal && ttydConnected;
@@ -316,6 +322,7 @@ export function SessionTerminal({
     setSessionStatusOverride(null);
     setMobileViewportHeight(null);
     setPtyWsUrl(null);
+    setConnectionRefreshTick(0);
     termRef.current?.reset();
     updateScrollState();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -325,37 +332,41 @@ export function SessionTerminal({
     setSessionStatusOverride(null);
   }, [sessionState]);
 
-  // Connection resolution effect — fetches ptyWsUrl for TTyD WebSocket
+  // Connection resolution — fetch token via Next.js and open direct ttyd WS.
   useEffect(() => {
-    let mounted = true;
-
     if (!expectsLiveTerminal || !shouldStreamLiveTerminal) {
-      return () => { mounted = false; };
+      return;
     }
 
-    // Bust stale cached connection info so we always get a fresh ptyWsUrl/token
-    clearCachedTerminalConnection(sessionId);
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    resolveTerminalConnection(sessionId).then((connection) => {
+      if (cancelled) return;
+      setPtyWsUrl(connection.ptyWsUrl);
+      setInteractiveTerminal(connection.interactive);
+    }).catch(() => {
+      if (cancelled) return;
+      setPtyWsUrl(null);
+      setInteractiveTerminal(false);
+      retryTimer = window.setTimeout(() => {
+        setConnectionRefreshTick((current) => current + 1);
+      }, 1000);
+    });
 
-    void (async () => {
-      try {
-        const connection = await fetchTerminalConnection(sessionId);
-        if (!mounted) return;
-        setPtyWsUrl(connection.ptyWsUrl);
-        setInteractiveTerminal(connection.interactive);
-      } catch (err) {
-        if (!mounted) return;
-        console.error("Failed to resolve terminal connection:", err);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
       }
-    })();
-
-    return () => { mounted = false; };
-  }, [expectsLiveTerminal, sessionId, shouldStreamLiveTerminal]);
+    };
+  }, [connectionRefreshTick, expectsLiveTerminal, sessionId, shouldStreamLiveTerminal]);
 
   // --- Event handlers (useEffectEvent) ---
   const handleTerminalData = useEffectEvent((data: string) => {
-    if (ttydConnected) {
-      ttydSendInput(data);
-    }
+    // Send directly — TtydClient.sendInput() checks WebSocket.readyState
+    // internally, which is more reliable than gating on React state
+    // (ttydConnected) that may lag due to batched state updates.
+    ttydSendInput(data);
   });
 
   const handleTerminalScroll = useEffectEvent(() => {
@@ -404,13 +415,17 @@ export function SessionTerminal({
   });
 
   // --- Terminal init effect ---
+  // The terminal instance is kept alive across tab switches (overview/terminal/preview).
+  // Only sessionId change or component unmount triggers teardown. The inactive tab's
+  // container stays in the DOM (CSS invisible) with proper dimensions, so xterm.js
+  // and the WebSocket connection survive without interruption.
   useEffect(() => {
     let term: XTerminal | null = null;
     let fit: XFitAddon | null = null;
     let mounted = true;
 
     async function init() {
-      if (!shouldAttachTerminalSurface || !containerRef.current || !mounted) return;
+      if (!containerRef.current || !mounted) return;
 
       const [xtermMod, fitMod] = await loadTerminalCoreClientModules();
 
@@ -505,11 +520,6 @@ export function SessionTerminal({
       scheduleRendererRecoveryRef.current(true);
     }
 
-    if (!shouldAttachTerminalSurface) {
-      setTerminalReady(false);
-      return () => { mounted = false; };
-    }
-
     void init();
 
     return () => {
@@ -534,15 +544,38 @@ export function SessionTerminal({
       setTerminalReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, shouldAttachTerminalSurface]);
+  }, [sessionId]);
 
   useEffect(() => {
     const term = termRef.current;
     if (!term) {
       return;
     }
-    term.options.disableStdin = !expectsLiveTerminal || !interactiveTerminal;
+    const shouldDisable = !expectsLiveTerminal || !interactiveTerminal;
+    term.options.disableStdin = shouldDisable;
+    // When stdin is re-enabled, focus the terminal so the user can type immediately
+    if (!shouldDisable && activeRef.current) {
+      try { term.focus(); } catch { /* ignore */ }
+    }
   }, [expectsLiveTerminal, interactiveTerminal]);
+
+  // Auto-focus terminal when ttyd connection goes live.
+  // Without this, keyboard input goes to <body> because nothing explicitly
+  // focuses xterm's hidden textarea after the WebSocket connects.
+  useEffect(() => {
+    if (!ttydConnected || !active || !terminalReady) return;
+    const term = termRef.current;
+    if (!term) return;
+    // Small delay to let xterm finish any pending renders after connection
+    const timer = setTimeout(() => {
+      try {
+        term.focus();
+      } catch {
+        /* ignore */
+      }
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [ttydConnected, active, terminalReady]);
 
   useEffect(() => {
     if (typeof document === "undefined" || !("fonts" in document)) {
@@ -611,6 +644,10 @@ export function SessionTerminal({
     scheduleRendererRecovery(true);
     const retryTimer = window.setTimeout(() => {
       scheduleRendererRecovery(true);
+      // Re-focus terminal after recovery settles when live
+      if (expectsLiveTerminalRef.current) {
+        try { termRef.current?.focus(); } catch { /* ignore */ }
+      }
     }, 150);
 
     return () => {
@@ -644,7 +681,6 @@ export function SessionTerminal({
         ttydError: ttydError?.message ?? null,
         expectsLiveTerminal,
         pageVisible,
-        shouldAttachTerminalSurface,
         shouldStreamLiveTerminal,
       }),
     };
@@ -664,7 +700,6 @@ export function SessionTerminal({
     pageVisible,
     ptyWsUrl,
     sessionId,
-    shouldAttachTerminalSurface,
     shouldStreamLiveTerminal,
     terminalReady,
   ]);
@@ -1008,8 +1043,13 @@ export function SessionTerminal({
                     ? "border-[#ff8f7a]/25 bg-[#2a1616]/92 text-[#ff8f7a] hover:bg-[#351b1b]"
                     : "border-white/10 bg-[#141010]/92 text-[#c9c0b7] hover:bg-[#201818]"
                 }`}
-                disabled
-                aria-label="Connecting... (auto-managed by TTyD)"
+                disabled={ttydConnecting}
+                onClick={() => {
+                  ttydDisconnect();
+                  setPtyWsUrl(null);
+                  setConnectionRefreshTick((c) => c + 1);
+                }}
+                aria-label={ttydConnecting ? "Connecting…" : ttydError ? "Reconnect terminal" : "Reconnect terminal"}
               >
                 {ttydConnecting
                   ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1102,5 +1142,3 @@ export function SessionTerminal({
     </div>
   );
 }
-
-export default SessionTerminal;

@@ -76,9 +76,19 @@ export class TtydClient {
 
   // Flow control state — track pending writes
   private pending = 0;
+  private paused = false;
+
+  // Write batching — accumulate output within a single animation frame
+  // and flush as one terminal.write() call to prevent mid-frame rendering.
+  private batchChunks: Uint8Array[] = [];
+  private batchBytes = 0;
+  private batchFrameId: number | null = null;
 
   private textEncoder = new TextEncoder();
   private textDecoder = new TextDecoder("utf-8", { fatal: false });
+  // Streaming decoder for terminal output — maintains state across flushes
+  // to correctly handle multi-byte UTF-8 sequences split across frames.
+  private streamDecoder = new TextDecoder("utf-8", { fatal: false });
 
   constructor(
     terminal: Terminal,
@@ -106,6 +116,12 @@ export class TtydClient {
           this.socket.close(1000, "Reconnecting");
           this.socket = null;
         }
+
+        // Reset flow control, batch state, and streaming decoder for the new connection
+        this.pending = 0;
+        this.paused = false;
+        this.cancelBatch();
+        this.streamDecoder = new TextDecoder("utf-8", { fatal: false });
 
         const wsUrl = resolveWebSocketUrl(url);
         this.socket = new WebSocket(wsUrl);
@@ -137,12 +153,16 @@ export class TtydClient {
         };
 
         this.socket.onmessage = (event) => {
+          if (typeof event.data === "string") {
+            return;
+          }
           this.handleMessage(event.data as ArrayBuffer);
         };
 
         this.socket.onclose = (event) => {
           clearTimeout(timeout);
           this.socket = null;
+          this.flushBatch(); // flush any pending output before signalling disconnect
           this.callbacks.onDisconnected?.(event.code, event.reason || "");
           // no-op if promise already resolved
           reject(new Error(`WebSocket closed: ${event.code}`));
@@ -163,6 +183,13 @@ export class TtydClient {
    * Disconnect from the WebSocket.
    */
   disconnect(): void {
+    this.flushBatch();
+    // Flush any incomplete UTF-8 bytes remaining in the streaming decoder
+    const trailing = this.streamDecoder.decode(new Uint8Array(0), { stream: false });
+    if (trailing.length > 0 && this.terminal) {
+      this.terminal.write(trailing);
+    }
+    this.cancelBatch();
     if (this.socket) {
       this.socket.onopen = null;
       this.socket.onmessage = null;
@@ -173,22 +200,40 @@ export class TtydClient {
     }
   }
 
-  /** Send keyboard input to the PTY: [INPUT='0'][payload] */
+  /**
+   * Send keyboard/paste input to the PTY: [INPUT='0'][payload]
+   *
+   * Large pastes are chunked into 4 KB frames to avoid overwhelming the PTY
+   * write buffer or hitting WebSocket frame limits — matches the reference
+   * ttyd client behaviour.
+   */
+  private static readonly INPUT_CHUNK_SIZE = 4096;
+
   sendInput(data: string | Uint8Array): void {
     if (!this.isConnected()) return;
 
-    let payload: Uint8Array;
-    if (typeof data === "string") {
-      const buffer = new Uint8Array(data.length * 3 + 1);
-      buffer[0] = CMD_INPUT;
-      const stats = this.textEncoder.encodeInto(data, buffer.subarray(1));
-      payload = buffer.subarray(0, (stats.written ?? 0) + 1);
-    } else {
-      payload = new Uint8Array(data.length + 1);
-      payload[0] = CMD_INPUT;
-      payload.set(data, 1);
+    const bytes = typeof data === "string"
+      ? this.textEncoder.encode(data)
+      : data;
+
+    // Small inputs (single keystrokes, short pastes): send in one frame.
+    if (bytes.length <= TtydClient.INPUT_CHUNK_SIZE) {
+      const frame = new Uint8Array(1 + bytes.length);
+      frame[0] = CMD_INPUT;
+      frame.set(bytes, 1);
+      this.socket?.send(frame);
+      return;
     }
-    this.socket?.send(payload);
+
+    // Large pastes: chunk to avoid PTY buffer overflow.
+    for (let offset = 0; offset < bytes.length; offset += TtydClient.INPUT_CHUNK_SIZE) {
+      const end = Math.min(offset + TtydClient.INPUT_CHUNK_SIZE, bytes.length);
+      const chunk = bytes.subarray(offset, end);
+      const frame = new Uint8Array(1 + chunk.length);
+      frame[0] = CMD_INPUT;
+      frame.set(chunk, 1);
+      this.socket?.send(frame);
+    }
   }
 
   /** Send resize request: [RESIZE='1'][JSON{columns,rows}] */
@@ -221,8 +266,8 @@ export class TtydClient {
 
     switch (cmd) {
       case CMD_OUTPUT:
-        // Terminal output — write directly with flow control
-        this.writeOutput(payload);
+        // Terminal output — accumulate into batch buffer, flush on next frame
+        this.enqueueOutput(payload);
         break;
       case CMD_SET_TITLE:
         try {
@@ -246,28 +291,68 @@ export class TtydClient {
   }
 
   /**
-   * Write output data directly to xterm.js with flow control.
-   * Decodes UTF-8 and applies backpressure via PAUSE/RESUME.
+   * Accumulate output data into the batch buffer. The batch is flushed as a
+   * single terminal.write() call on the next animation frame. This prevents
+   * xterm.js from rendering intermediate partial TUI states when the backend
+   * sends a large update as multiple WebSocket messages within one frame.
    */
-  // Whether PAUSE has been sent and we're waiting for pending to drop
-  private paused = false;
+  private enqueueOutput(data: Uint8Array): void {
+    if (!this.terminal || data.byteLength === 0) return;
 
-  private writeOutput(data: Uint8Array): void {
+    // Copy the data since the underlying ArrayBuffer may be reused
+    this.batchChunks.push(new Uint8Array(data));
+    this.batchBytes += data.byteLength;
+
+    // Schedule flush on next animation frame (only once per frame)
+    if (this.batchFrameId === null) {
+      this.batchFrameId = requestAnimationFrame(() => {
+        this.batchFrameId = null;
+        this.flushBatch();
+      });
+    }
+  }
+
+  /**
+   * Flush all accumulated output to the terminal as a single write.
+   */
+  private flushBatch(): void {
+    if (this.batchChunks.length === 0 || !this.terminal) return;
+
     const { highWater, lowWater } = this.flowControl;
 
-    if (!this.terminal) {
+    // Combine all chunks into a single buffer
+    let combined: Uint8Array;
+    if (this.batchChunks.length === 1) {
+      combined = this.batchChunks[0]!;
+    } else {
+      combined = new Uint8Array(this.batchBytes);
+      let offset = 0;
+      for (const chunk of this.batchChunks) {
+        combined.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    }
+
+    // Reset batch state before writing (in case write triggers synchronous events)
+    this.batchChunks.length = 0;
+    this.batchBytes = 0;
+
+    // Decode bytes to string using the streaming decoder. This correctly
+    // handles multi-byte UTF-8 sequences split across animation frames —
+    // the decoder buffers incomplete trailing bytes and prepends them to
+    // the next flush. Passing { stream: true } is critical; without it,
+    // split sequences produce U+FFFD replacement characters (blocks).
+    const text = this.streamDecoder.decode(combined, { stream: true });
+    if (text.length === 0) return;
+
+    // Small batches: fast path without callback overhead
+    if (text.length < 4096) {
+      this.terminal.write(text);
       return;
     }
 
-    // Write raw bytes directly to xterm.js — it handles UTF-8 internally.
-    // For small writes, use fast path (no callback overhead).
-    if (data.byteLength < 1024) {
-      this.terminal.write(data);
-      return;
-    }
-
-    // For larger writes, track pending with callback for flow control
-    this.terminal.write(data, () => {
+    // Large batches: track pending writes for flow control
+    this.terminal.write(text, () => {
       this.pending = Math.max(this.pending - 1, 0);
       // Send RESUME exactly once when pending drops below lowWater
       if (this.paused && this.pending < lowWater) {
@@ -281,6 +366,16 @@ export class TtydClient {
       this.paused = true;
       this.sendPause();
     }
+  }
+
+  /** Cancel any pending batch flush. */
+  private cancelBatch(): void {
+    if (this.batchFrameId !== null) {
+      cancelAnimationFrame(this.batchFrameId);
+      this.batchFrameId = null;
+    }
+    this.batchChunks.length = 0;
+    this.batchBytes = 0;
   }
 
   private sendPause(): void {
