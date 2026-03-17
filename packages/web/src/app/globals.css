@@ -185,11 +185,14 @@ a:hover {
 .xterm {
   height: 100%;
   width: 100%;
+  max-width: 100%;
+  overflow: hidden;
   overscroll-behavior: contain;
 }
 
 .session-terminal-xterm {
   box-sizing: border-box;
+  max-width: 100%;
 }
 
 .session-terminal-xterm-mobile {
@@ -206,6 +209,11 @@ a:hover {
 .xterm textarea.xterm-helper-textarea {
   opacity: 0 !important;
   pointer-events: auto !important;
+}
+
+.xterm .xterm-screen {
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .xterm .xterm-viewport::-webkit-scrollbar {

@@ -72,6 +72,8 @@ export function useTtydConnection(
   useEffect(() => {
     if (!enabled || !terminal) return;
 
+    let mounted = true;
+
     const client = new TtydClient(terminal, DEFAULT_FLOW_CONTROL, {
       onTitle: (title) => {
         try {
@@ -85,6 +87,7 @@ export function useTtydConnection(
         // Frontend owns terminal theme and font sizing.
       },
       onConnected: () => {
+        if (!mounted) return;
         reconnectAttemptsRef.current = 0;
         setIsConnected(true);
         setIsConnecting(false);
@@ -92,6 +95,7 @@ export function useTtydConnection(
         onConnectionReadyRef.current?.();
       },
       onDisconnected: (code, reason) => {
+        if (!mounted) return;
         setIsConnected(false);
         setIsConnecting(false);
         onConnectionClosedRef.current?.(code, reason);
@@ -107,6 +111,7 @@ export function useTtydConnection(
           // firing immediately — cleared after the backoff delay.
           setError(new Error("Reconnecting…"));
           reconnectTimerRef.current = setTimeout(() => {
+            if (!mounted) return;
             reconnectTimerRef.current = null;
             setError(null); // allow auto-connect effect to fire
           }, delayMs);
@@ -117,6 +122,7 @@ export function useTtydConnection(
         }
       },
       onError: (errorMsg) => {
+        if (!mounted) return;
         const err = new Error(`Terminal error: ${errorMsg}`);
         setError(err);
         onConnectionErrorRef.current?.(err);
@@ -126,6 +132,7 @@ export function useTtydConnection(
     clientRef.current = client;
 
     return () => {
+      mounted = false;
       client.disconnect();
       clientRef.current = null;
       if (reconnectTimerRef.current) {
