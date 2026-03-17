@@ -19,6 +19,7 @@ export interface UseTtydConnectionOptions {
   onConnectionReady?: () => void;
   onConnectionError?: (error: Error) => void;
   onConnectionClosed?: (code: number, reason: string) => void;
+  onReconnectsExhausted?: () => void;
 }
 
 export interface UseTtydConnectionResult {
@@ -34,7 +35,7 @@ export interface UseTtydConnectionResult {
 export function useTtydConnection(
   options: UseTtydConnectionOptions
 ): UseTtydConnectionResult {
-  const { terminal, fitAddon, ptyWsUrl, enabled = true, onConnectionReady, onConnectionError, onConnectionClosed } = options;
+  const { terminal, fitAddon, ptyWsUrl, enabled = true, onConnectionReady, onConnectionError, onConnectionClosed, onReconnectsExhausted } = options;
 
   const clientRef = useRef<TtydClient | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -48,9 +49,11 @@ export function useTtydConnection(
   const onConnectionReadyRef = useRef(onConnectionReady);
   const onConnectionErrorRef = useRef(onConnectionError);
   const onConnectionClosedRef = useRef(onConnectionClosed);
+  const onReconnectsExhaustedRef = useRef(onReconnectsExhausted);
   onConnectionReadyRef.current = onConnectionReady;
   onConnectionErrorRef.current = onConnectionError;
   onConnectionClosedRef.current = onConnectionClosed;
+  onReconnectsExhaustedRef.current = onReconnectsExhausted;
 
   // Reset connection state when ptyWsUrl changes (new URL = fresh connection attempt)
   const prevPtyWsUrlRef = useRef(ptyWsUrl);
@@ -60,6 +63,7 @@ export function useTtydConnection(
       setError(null);
       setIsConnected(false);
       setIsConnecting(false);
+      reconnectAttemptsRef.current = 0;
     }
   }, [ptyWsUrl]);
 
@@ -106,6 +110,10 @@ export function useTtydConnection(
             reconnectTimerRef.current = null;
             setError(null); // allow auto-connect effect to fire
           }, delayMs);
+        } else if (code !== 1000) {
+          // All reconnect attempts exhausted — signal parent to refresh URL/token
+          setError(new Error("Connection lost"));
+          onReconnectsExhaustedRef.current?.();
         }
       },
       onError: (errorMsg) => {
@@ -126,17 +134,6 @@ export function useTtydConnection(
       }
     };
   }, [enabled, terminal]);
-
-  // Wire terminal input → WebSocket
-  useEffect(() => {
-    if (!terminal || !clientRef.current) return;
-
-    const disposable = terminal.onData((data: string) => {
-      clientRef.current?.sendInput(data);
-    });
-
-    return () => disposable.dispose();
-  }, [terminal]);
 
   // Wire terminal resize → WebSocket
   useEffect(() => {
