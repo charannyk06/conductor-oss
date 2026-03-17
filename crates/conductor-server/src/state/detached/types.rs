@@ -12,7 +12,11 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use portable_pty::MasterPty;
 
 pub(crate) const DIRECT_RUNTIME_MODE: &str = "direct";
+pub(crate) const TTYD_RUNTIME_MODE: &str = "ttyd";
 pub(crate) const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
+pub(crate) const TTYD_PORT_METADATA_KEY: &str = "ttydPort";
+pub(crate) const TTYD_WS_URL_METADATA_KEY: &str = "ttydWsUrl";
+pub(crate) const TTYD_PID_METADATA_KEY: &str = "ttydPid";
 pub(crate) const DETACHED_CONTROL_SOCKET_METADATA_KEY: &str = "detachedControlSocket";
 pub(crate) const DETACHED_STREAM_SOCKET_METADATA_KEY: &str = "detachedStreamSocket";
 pub(crate) const DETACHED_CONTROL_TOKEN_METADATA_KEY: &str = "detachedControlToken";

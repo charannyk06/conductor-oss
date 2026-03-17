@@ -8,7 +8,10 @@
 // - '3' (0x33): RESUME (client->server)
 // - '{' (0x7B): JSON_DATA / handshake (client->server)
 
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
 
 pub const CMD_OUTPUT: u8 = b'0';
 pub const CMD_INPUT: u8 = b'0';
@@ -20,6 +23,29 @@ pub const CMD_SET_PREFERENCES: u8 = b'2';
 pub const CMD_PAUSE: u8 = b'2';
 pub const CMD_RESUME: u8 = b'3';
 pub const CMD_JSON_DATA: u8 = b'{';
+
+pub fn upstream_ws_url(port: u16) -> String {
+    format!("ws://127.0.0.1:{port}/ws")
+}
+
+pub fn connect_request(ws_url: &str) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
+    let mut request = ws_url
+        .into_client_request()
+        .context("Failed to create ttyd WebSocket request")?;
+    request
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", WsHeaderValue::from_static("tty"));
+    Ok(request)
+}
+
+pub fn encode_handshake(cols: u16, rows: u16) -> Vec<u8> {
+    json!({
+        "columns": cols,
+        "rows": rows,
+    })
+    .to_string()
+    .into_bytes()
+}
 
 /// Parse RESIZE_TERMINAL message: '1' + JSON{columns, rows}
 pub fn parse_resize_message(payload: &[u8]) -> Option<(u16, u16)> {

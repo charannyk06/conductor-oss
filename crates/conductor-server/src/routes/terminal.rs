@@ -19,6 +19,7 @@ use crate::routes::ttyd_protocol::{self, ClientMessage};
 use crate::state::{
     sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
     TerminalStreamEvent, DETACHED_LOG_PATH_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    TTYD_WS_URL_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -184,6 +185,18 @@ async fn terminal_websocket(
 }
 
 async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    // If this is a ttyd session, return the direct WebSocket URL
+    if let Some(session) = state.get_session(&id).await {
+        if let Some(ttyd_ws_url) = session.metadata.get(TTYD_WS_URL_METADATA_KEY) {
+            return Json(json!({
+                "token": null,
+                "required": false,
+                "ttydWsUrl": ttyd_ws_url,
+                "mode": "ttyd",
+            }))
+            .into_response();
+        }
+    }
     build_terminal_token_response(state, id, TerminalTokenScope::Control).await
 }
 
@@ -477,20 +490,27 @@ async fn handle_terminal_socket(
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await {
             Ok(Some(Ok(msg))) => {
-                if let Message::Binary(data) = &msg {
-                    if !data.is_empty() && data[0] == b'{' {
-                        if let Ok(json_str) = std::str::from_utf8(data) {
-                            if let Ok(value) = serde_json::from_str::<Value>(json_str) {
-                                if let Some(c) = value.get("columns").and_then(Value::as_u64) {
-                                    handshake_cols = (c as u16).max(1);
-                                }
-                                if let Some(r) = value.get("rows").and_then(Value::as_u64) {
-                                    handshake_rows = (r as u16).max(1);
-                                }
+                // Accept handshake as either Binary or Text frame (real ttyd
+                // clients send text, our mirror client may send binary).
+                let json_bytes: Option<&[u8]> = match &msg {
+                    Message::Binary(data) if !data.is_empty() && data[0] == b'{' => {
+                        Some(data.as_ref())
+                    }
+                    Message::Text(text) if text.starts_with('{') => Some(text.as_bytes()),
+                    _ => None,
+                };
+                if let Some(bytes) = json_bytes {
+                    if let Ok(json_str) = std::str::from_utf8(bytes) {
+                        if let Ok(value) = serde_json::from_str::<Value>(json_str) {
+                            if let Some(c) = value.get("columns").and_then(Value::as_u64) {
+                                handshake_cols = (c as u16).max(1);
+                            }
+                            if let Some(r) = value.get("rows").and_then(Value::as_u64) {
+                                handshake_rows = (r as u16).max(1);
                             }
                         }
-                        break;
                     }
+                    break;
                 }
             }
             Ok(Some(Err(_))) | Ok(None) | Err(_) => return,

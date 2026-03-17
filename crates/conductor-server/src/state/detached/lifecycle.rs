@@ -1,18 +1,18 @@
 #[cfg(unix)]
 use anyhow::Context;
 use anyhow::{anyhow, Result};
+#[cfg(unix)]
+use chrono::Utc;
 use conductor_executors::executor::{Executor, ExecutorHandle, SpawnOptions};
 #[cfg(unix)]
 use conductor_executors::executor::{ExecutorInput, ExecutorOutput};
 #[cfg(unix)]
-use chrono::Utc;
-#[cfg(unix)]
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 #[cfg(unix)]
 use std::process::Stdio;
+use std::sync::Arc;
 #[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
@@ -30,15 +30,13 @@ use super::daemon::{
 use super::helpers::prepare_detached_runtime_env;
 #[cfg(unix)]
 use super::helpers::{
-    configure_detached_process_group, detached_runtime_disabled, ensure_detached_protocol_version,
-    detached_runtime_metadata, ping_detached_runtime,
-    read_detached_exit_code, resolve_detached_runtime_launcher, wait_for_detached_ready,
-};
-use super::types::{
-    DIRECT_RUNTIME_MODE, RUNTIME_MODE_METADATA_KEY,
+    configure_detached_process_group, detached_runtime_disabled, detached_runtime_metadata,
+    ensure_detached_protocol_version, ping_detached_runtime, read_detached_exit_code,
+    resolve_detached_runtime_launcher, wait_for_detached_ready,
 };
 #[cfg(unix)]
 use super::types::*;
+use super::types::{DIRECT_RUNTIME_MODE, RUNTIME_MODE_METADATA_KEY};
 use crate::state::AppState;
 #[cfg(unix)]
 use crate::state::{OutputConsumerConfig, SessionRecord};
@@ -242,6 +240,7 @@ impl AppState {
                     "0".to_string(),
                 ),
             ]),
+            streams_terminal_bytes: false,
         })
     }
 
@@ -422,6 +421,7 @@ impl AppState {
                 RUNTIME_MODE_METADATA_KEY.to_string(),
                 DIRECT_RUNTIME_MODE.to_string(),
             )]),
+            streams_terminal_bytes: false,
         })
     }
 
@@ -564,6 +564,7 @@ impl AppState {
                 RUNTIME_MODE_METADATA_KEY.to_string(),
                 DIRECT_RUNTIME_MODE.to_string(),
             )]),
+            streams_terminal_bytes: false,
         })
     }
 }

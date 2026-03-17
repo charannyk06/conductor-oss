@@ -761,6 +761,7 @@ impl AppState {
             }
         };
 
+        let streams_terminal_bytes = runtime_launch.streams_terminal_bytes;
         let (pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
             runtime_launch.handle.into_parts();
         if self
@@ -925,7 +926,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: true,
+                mirror_terminal_output: !streams_terminal_bytes,
                 output_is_parsed: true,
                 timeout: project
                     .agent_config
@@ -1463,6 +1464,7 @@ impl AppState {
                 },
             )
             .await?;
+        let streams_terminal_bytes_resume = runtime_launch.streams_terminal_bytes;
         let (pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
             runtime_launch.handle.into_parts();
 
@@ -1525,7 +1527,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: true,
+                mirror_terminal_output: !streams_terminal_bytes_resume,
                 output_is_parsed: true,
                 timeout: project
                     .agent_config

@@ -14,6 +14,7 @@ pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpd
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
 pub use detached::run_detached_pty_host;
 pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
+pub(crate) use detached::TTYD_WS_URL_METADATA_KEY;
 pub(crate) use helpers::sanitize_terminal_text;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,

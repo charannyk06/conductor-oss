@@ -9,6 +9,7 @@ mod pty_subprocess;
 mod stream;
 #[cfg(test)]
 mod tests;
+pub(crate) mod ttyd_launcher;
 pub mod types;
 
 use anyhow::Result;
@@ -18,32 +19,61 @@ use std::sync::Arc;
 
 use crate::state::AppState;
 
+pub use pty_host::run_detached_pty_host;
 pub(crate) use types::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use types::DIRECT_RUNTIME_MODE;
-pub use pty_host::run_detached_pty_host;
-
-// Re-export constants used in this file's impl AppState methods
-use types::RUNTIME_MODE_METADATA_KEY;
+pub(crate) use types::{RUNTIME_MODE_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY};
 
 pub(crate) struct RuntimeLaunch {
     pub(crate) handle: ExecutorHandle,
     pub(crate) metadata: HashMap<String, String>,
+    /// When true, the runtime already emits terminal bytes directly via
+    /// `emit_terminal_bytes()` (e.g. ttyd mirror client). The output consumer
+    /// should NOT also mirror Stdout lines as terminal bytes, which would
+    /// cause double output.
+    pub(crate) streams_terminal_bytes: bool,
 }
 
 impl AppState {
     pub(crate) async fn spawn_with_runtime(
         self: &Arc<Self>,
-        _project: &conductor_core::config::ProjectConfig,
+        project: &conductor_core::config::ProjectConfig,
         executor: Arc<dyn Executor>,
         session_id: &str,
         options: SpawnOptions,
     ) -> Result<RuntimeLaunch> {
+        // Only try ttyd when runtime is unset (auto) or explicitly "ttyd".
+        // Any other explicit value (e.g. "direct", "tmux") skips ttyd.
+        let use_ttyd = match project.runtime.as_deref() {
+            None => true,
+            Some(r) if r.eq_ignore_ascii_case("ttyd") => true,
+            Some(_) => false,
+        };
+        if use_ttyd && ttyd_launcher::ttyd_available() {
+            match ttyd_launcher::spawn_ttyd_runtime(
+                self,
+                executor.clone(),
+                session_id,
+                options.clone(),
+            )
+            .await
+            {
+                Ok(launch) => return Ok(launch),
+                Err(err) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %err,
+                        "ttyd launch failed, falling back to detached PTY host"
+                    );
+                }
+            }
+        }
         self.spawn_detached_runtime_or_legacy(executor, session_id, options)
             .await
     }
 
     pub(crate) async fn restore_runtime_sessions(self: &Arc<Self>) {
-        let session_ids = {
+        let session_ids_and_modes: Vec<(String, Option<String>)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .values()
@@ -52,16 +82,38 @@ impl AppState {
                     session
                         .metadata
                         .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == DIRECT_RUNTIME_MODE)
+                        .map(|value| value == DIRECT_RUNTIME_MODE || value == TTYD_RUNTIME_MODE)
                         .unwrap_or(false)
                 })
-                .map(|session| session.id.clone())
-                .collect::<Vec<_>>()
+                .map(|session| {
+                    (
+                        session.id.clone(),
+                        session.metadata.get(RUNTIME_MODE_METADATA_KEY).cloned(),
+                    )
+                })
+                .collect()
         };
 
-        for session_id in session_ids {
-            if let Err(err) = self.restore_detached_runtime(&session_id).await {
-                tracing::warn!(session_id, error = %err, "Failed to restore runtime session");
+        for (session_id, mode) in session_ids_and_modes {
+            match mode.as_deref() {
+                Some(TTYD_RUNTIME_MODE) => {
+                    if let Err(err) = ttyd_launcher::restore_ttyd_runtime(self, &session_id).await {
+                        tracing::warn!(
+                            session_id,
+                            error = %err,
+                            "Failed to restore ttyd runtime session"
+                        );
+                    }
+                }
+                _ => {
+                    if let Err(err) = self.restore_detached_runtime(&session_id).await {
+                        tracing::warn!(
+                            session_id,
+                            error = %err,
+                            "Failed to restore runtime session"
+                        );
+                    }
+                }
             }
         }
     }
@@ -82,12 +134,17 @@ impl AppState {
             return Ok(false);
         }
 
-        let is_direct_runtime = session
+        let runtime_mode = session
             .metadata
             .get(RUNTIME_MODE_METADATA_KEY)
-            .map(|value| value == DIRECT_RUNTIME_MODE)
-            .unwrap_or(false);
-        if !is_direct_runtime {
+            .map(String::as_str);
+
+        if runtime_mode == Some(TTYD_RUNTIME_MODE) {
+            ttyd_launcher::restore_ttyd_runtime(self, session_id).await?;
+            return Ok(self.terminal_runtime_attached(session_id).await);
+        }
+
+        if runtime_mode != Some(DIRECT_RUNTIME_MODE) {
             return Ok(false);
         }
 
