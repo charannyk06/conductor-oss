@@ -5,6 +5,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -13,13 +14,15 @@ use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio::sync::broadcast;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::routes::config::access_control_enabled;
 use crate::routes::ttyd_protocol::{self, ClientMessage};
 use crate::state::{
     sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
-    TerminalStreamEvent, DETACHED_LOG_PATH_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TTYD_WS_URL_METADATA_KEY,
+    TerminalStreamEvent, DETACHED_LOG_PATH_METADATA_KEY, RUNTIME_MODE_METADATA_KEY,
+    TERMINAL_RESTORE_SNAPSHOT_FORMAT, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -41,6 +44,21 @@ const TERMINAL_SNAPSHOT_RESTORED_HEADER: &str = "x-conductor-terminal-snapshot-r
 const TERMINAL_SNAPSHOT_FORMAT_HEADER: &str = "x-conductor-terminal-snapshot-format";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+fn ttyd_session_ws_url(session: &SessionRecord) -> Option<String> {
+    let runtime_mode = session
+        .metadata
+        .get(RUNTIME_MODE_METADATA_KEY)
+        .map(String::as_str);
+    if runtime_mode != Some(TTYD_RUNTIME_MODE) {
+        return None;
+    }
+
+    session
+        .metadata
+        .get(TTYD_WS_URL_METADATA_KEY)
+        .cloned()
+}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum TerminalTokenScope {
@@ -166,9 +184,9 @@ async fn terminal_websocket(
     Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if state.get_session(&id).await.is_none() {
+    let Some(session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
-    }
+    };
 
     if query.protocol.as_deref() != Some("ttyd") {
         return error(StatusCode::BAD_REQUEST, "Unsupported terminal protocol").into_response();
@@ -178,6 +196,10 @@ async fn terminal_websocket(
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
 
+    if let Some(ws_url) = ttyd_session_ws_url(&session) {
+        return ws.on_upgrade(move |socket| handle_ttyd_proxy_socket(socket, id, ws_url));
+    }
+
     let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
     let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
 
@@ -185,18 +207,6 @@ async fn terminal_websocket(
 }
 
 async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    // If this is a ttyd session, return the direct WebSocket URL
-    if let Some(session) = state.get_session(&id).await {
-        if let Some(ttyd_ws_url) = session.metadata.get(TTYD_WS_URL_METADATA_KEY) {
-            return Json(json!({
-                "token": null,
-                "required": false,
-                "ttydWsUrl": ttyd_ws_url,
-                "mode": "ttyd",
-            }))
-            .into_response();
-        }
-    }
     build_terminal_token_response(state, id, TerminalTokenScope::Control).await
 }
 
@@ -205,9 +215,9 @@ async fn build_terminal_token_response(
     id: String,
     scope: TerminalTokenScope,
 ) -> Response {
-    if state.get_session(&id).await.is_none() {
+    let Some(session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
-    }
+    };
 
     let access = state.config.read().await.access.clone();
     let token_required = should_issue_terminal_token(&access);
@@ -216,11 +226,14 @@ async fn build_terminal_token_response(
     } else {
         None
     };
+    let ttyd_ws_url = ttyd_session_ws_url(&session);
 
     Json(json!({
         "token": token,
         "required": token_required,
         "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
+        "ttydDirect": ttyd_ws_url.is_some(),
+        "ttydWsUrl": ttyd_ws_url,
     }))
     .into_response()
 }
@@ -672,6 +685,119 @@ async fn handle_terminal_socket(
                     }
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Err(_)) | None => break,
+                }
+            }
+        }
+    }
+}
+
+async fn handle_ttyd_proxy_socket(
+    mut client_socket: WebSocket,
+    session_id: String,
+    ws_url: String,
+) {
+    let request = match ttyd_protocol::connect_request(&ws_url) {
+        Ok(request) => request,
+        Err(err) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "Failed to build ttyd proxy websocket request"
+            );
+            let _ = client_socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let (upstream_socket, _) = match connect_async(request).await {
+        Ok(connection) => connection,
+        Err(err) => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %err,
+                "Failed to connect terminal proxy to ttyd"
+            );
+            let _ = client_socket.send(Message::Close(None)).await;
+            return;
+        }
+    };
+
+    let (mut client_tx, mut client_rx) = client_socket.split();
+    let (mut upstream_tx, mut upstream_rx) = upstream_socket.split();
+
+    loop {
+        tokio::select! {
+            client_message = client_rx.next() => {
+                match client_message {
+                    Some(Ok(Message::Binary(data))) => {
+                        if upstream_tx.send(WsMessage::Binary(data.to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        if upstream_tx.send(WsMessage::Text(text.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if upstream_tx.send(WsMessage::Ping(payload.to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(payload))) => {
+                        if upstream_tx.send(WsMessage::Pong(payload.to_vec().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => {
+                        let _ = upstream_tx.send(WsMessage::Close(None)).await;
+                        break;
+                    }
+                    Some(Err(err)) => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            error = %err,
+                            "Client websocket closed while proxying ttyd"
+                        );
+                        break;
+                    }
+                }
+            }
+            upstream_message = upstream_rx.next() => {
+                match upstream_message {
+                    Some(Ok(WsMessage::Binary(data))) => {
+                        if client_tx.send(Message::Binary(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(WsMessage::Text(text))) => {
+                        if client_tx.send(Message::Text(text.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(WsMessage::Ping(payload))) => {
+                        if client_tx.send(Message::Ping(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(WsMessage::Pong(payload))) => {
+                        if client_tx.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(_))) | None => {
+                        let _ = client_tx.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Some(Ok(WsMessage::Frame(_))) => {}
+                    Some(Err(err)) => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            error = %err,
+                            "Upstream ttyd websocket closed while proxying"
+                        );
+                        break;
+                    }
                 }
             }
         }
