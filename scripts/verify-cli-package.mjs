@@ -854,6 +854,18 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
     throw new Error("tmux is required for packaged streaming verification");
   }
 
+  let ttydAvailable = false;
+  try {
+    execFileSync("which", ["ttyd"], { stdio: "ignore" });
+    ttydAvailable = true;
+  } catch {
+    // ttyd not on PATH
+  }
+  if (!ttydAvailable) {
+    console.warn("ttyd binary not found; skipping packaged streaming verification.");
+    return;
+  }
+
   const { binDir, fixtures } = createFakeAgentBinDir(tempDirs);
   const repoDir = createTempDir("conductor-cli-streaming-", tempDirs);
   const baseUrl = "http://127.0.0.1:4113";
