@@ -9,9 +9,7 @@ use conductor_core::task::Task;
 use conductor_core::types::AgentKind;
 use conductor_db::repo::{ProjectRepo, TaskRepo};
 use conductor_db::Database;
-use conductor_executors::executor::{
-    Executor, ExecutorHandle, ExecutorOutput, SpawnOptions,
-};
+use conductor_executors::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use conductor_executors::process::spawn_process;
 use conductor_server::{routes, state::AppState};
 use std::collections::BTreeMap;
@@ -22,6 +20,10 @@ use std::process::Command as StdCommand;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
+
+pub fn ttyd_available() -> bool {
+    which::which("ttyd").is_ok()
+}
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r#"'\"'\"'"#))

@@ -1,7 +1,7 @@
 mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{build_app, spawn_request, wait_for_condition, TestExecutor, TestHarness};
+use common::{build_app, spawn_request, ttyd_available, wait_for_condition, TestExecutor, TestHarness};
 use conductor_core::board::Board;
 use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
@@ -217,6 +217,9 @@ async fn board_routes_reorder_cards_within_same_column_with_target_index() {
 
 #[tokio::test]
 async fn board_change_events_drive_session_spawns_with_board_metadata() {
+    if !ttyd_available() {
+        return;
+    }
     let harness = TestHarness::new("conductor-board-runtime-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
