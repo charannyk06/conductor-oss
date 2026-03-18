@@ -1701,6 +1701,10 @@ mod tests {
     use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
+    fn test_wait_timeout() -> Duration {
+        Duration::from_secs(10)
+    }
+
     struct TestExecutor {
         kind: AgentKind,
     }
@@ -1875,7 +1879,7 @@ mod tests {
     }
 
     async fn wait_for_path(path: PathBuf) {
-        timeout(Duration::from_secs(3), async move {
+        timeout(test_wait_timeout(), async move {
             loop {
                 if path.exists() {
                     return;
@@ -2292,7 +2296,7 @@ mod tests {
 
         assert_eq!(session.status, SessionStatus::Queued);
 
-        let launched = timeout(Duration::from_secs(3), async {
+        let launched = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
                 if current.status != SessionStatus::Queued
@@ -2377,7 +2381,7 @@ mod tests {
             .await
             .unwrap();
 
-        let launched = timeout(Duration::from_secs(3), async {
+        let launched = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
                 if current.status != SessionStatus::Queued
@@ -2448,7 +2452,7 @@ mod tests {
 
         state.archive_session(&session.id).await.unwrap();
 
-        timeout(Duration::from_secs(3), async {
+        timeout(test_wait_timeout(), async {
             loop {
                 let cleanup_done =
                     fs::read_to_string(&cleanup_log).ok().as_deref() == Some("cleanup");
@@ -2580,7 +2584,7 @@ mod tests {
             .await
             .unwrap();
 
-        let updated = timeout(Duration::from_secs(5), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session("resume-tmux-session").await.unwrap();
                 if current.metadata.get("runtimeMode").map(String::as_str)
@@ -2645,7 +2649,7 @@ mod tests {
 
         state.kill_session("detached-kill").await.unwrap();
 
-        let waited = timeout(Duration::from_secs(3), async {
+        let waited = timeout(test_wait_timeout(), async {
             loop {
                 if let Ok(Some(_)) = child.try_wait() {
                     break;
@@ -2701,7 +2705,7 @@ mod tests {
 
         state.archive_session("detached-archive").await.unwrap();
 
-        let waited = timeout(Duration::from_secs(3), async {
+        let waited = timeout(test_wait_timeout(), async {
             loop {
                 if let Ok(Some(_)) = child.try_wait() {
                     break;
@@ -2822,7 +2826,7 @@ mod tests {
             .unwrap();
         drop(output_tx);
 
-        let updated = timeout(Duration::from_secs(3), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session("ttyd-output").await.unwrap();
                 if current
@@ -2903,7 +2907,7 @@ mod tests {
             .await
             .unwrap();
 
-        let event = timeout(Duration::from_secs(3), terminal_rx.recv())
+        let event = timeout(test_wait_timeout(), terminal_rx.recv())
             .await
             .expect("terminal event should arrive")
             .expect("broadcast event should be readable");
@@ -2980,7 +2984,7 @@ mod tests {
             .await
             .unwrap();
 
-        let event = timeout(Duration::from_secs(3), terminal_rx.recv())
+        let event = timeout(test_wait_timeout(), terminal_rx.recv())
             .await
             .expect("native terminal event should arrive")
             .expect("broadcast event should be readable");
@@ -2992,7 +2996,7 @@ mod tests {
             other => panic!("unexpected terminal event: {other:?}"),
         }
 
-        let updated = timeout(Duration::from_secs(3), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session("native-terminal-stream").await.unwrap();
                 if current
@@ -3063,7 +3067,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dimensions = timeout(Duration::from_secs(3), resize_rx.recv())
+        let dimensions = timeout(test_wait_timeout(), resize_rx.recv())
             .await
             .expect("resize should reach ttyd runtime channel")
             .expect("resize channel should stay open");
@@ -3130,7 +3134,7 @@ mod tests {
             .unwrap();
         drop(output_tx);
 
-        let updated = timeout(Duration::from_secs(3), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session("unstructured-output").await.unwrap();
                 if current

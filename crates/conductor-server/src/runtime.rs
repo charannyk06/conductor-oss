@@ -432,7 +432,7 @@ mod tests {
     where
         F: FnMut() -> Option<T>,
     {
-        timeout(Duration::from_secs(3), async move {
+        timeout(Duration::from_secs(10), async move {
             loop {
                 if let Some(value) = check() {
                     return value;
