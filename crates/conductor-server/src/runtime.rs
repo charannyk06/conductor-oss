@@ -447,6 +447,9 @@ mod tests {
     #[tokio::test]
     async fn board_automation_retries_ready_cards_without_new_board_events() {
         let root = std::env::temp_dir().join(format!("conductor-runtime-test-{}", Uuid::new_v4()));
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         let project_root = root.join("repo");
         fs::create_dir_all(&project_root).unwrap();
         let board_path = project_root.join("CONDUCTOR.md");

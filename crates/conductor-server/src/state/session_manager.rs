@@ -1953,6 +1953,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         fs::create_dir_all(repo.join("config")).unwrap();
         fs::create_dir_all(repo.join("notes")).unwrap();
         fs::write(repo.join("config/.env"), "TOKEN=test\n").unwrap();
@@ -2031,6 +2034,9 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-pref-event-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
@@ -2139,7 +2145,7 @@ mod tests {
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
-        if crate::state::detached::ttyd_launcher::resolve_ttyd_binary(&root).is_none() {
+        if !crate::state::ttyd_binary_available(&root) {
             return;
         }
 
@@ -2202,6 +2208,9 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-dev-server-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         fs::create_dir_all(root.join(".conductor")).unwrap();
         fs::write(root.join(".conductor/rust-backend"), "not-a-directory").unwrap();
 
@@ -2260,6 +2269,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-queue-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
@@ -2325,6 +2337,9 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-queue-paused-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
@@ -2407,6 +2422,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-archive-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         let cleanup_log = root.join("cleanup.log");
         let archive_log = root.join("archive.log");
 
@@ -2534,6 +2552,9 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-resume-tmux-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),

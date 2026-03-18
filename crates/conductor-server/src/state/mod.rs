@@ -41,6 +41,8 @@ use conductor_executors::executor::{Executor, ExecutorInput};
 use conductor_executors::process::PtyDimensions;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -89,6 +91,11 @@ const TERMINAL_RESTORE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_RESTORE_FORCE_SEQUENCE_DELTA: u64 = 24;
 const TERMINAL_HOST_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
 const TERMINAL_HOST_IDLE_EVICTION_TTL: Duration = Duration::from_secs(45);
+
+#[cfg(test)]
+pub(crate) fn ttyd_binary_available(workspace_path: &Path) -> bool {
+    detached::ttyd_launcher::resolve_ttyd_binary(workspace_path).is_some()
+}
 
 /// Shared application state for the HTTP server.
 pub struct AppState {
