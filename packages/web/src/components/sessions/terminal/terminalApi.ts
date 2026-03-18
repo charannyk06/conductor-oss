@@ -56,11 +56,18 @@ function resolveBackendOrigin(): string {
   if (typeof window === "undefined") return "http://127.0.0.1:4749";
 
   const { protocol, hostname, port } = window.location;
+  // dev: dashboard on :3000, backend on :4749
   if (port === "3000") {
     return `${protocol}//${hostname}:4749`;
   }
+  // prod CLI: dashboard on :4747, backend on :4749
+  if (port === "4747") {
+    return `${protocol}//${hostname}:4749`;
+  }
 
-  return window.location.origin;
+  // Tailscale / ngrok / custom domain: the backend is served on :4749
+  // Tailscale explicitly exposes port 4749 so this works externally.
+  return `${protocol}//${hostname}:4749`;
 }
 
 type TerminalTokenResult =
@@ -151,12 +158,12 @@ export async function resolveTerminalConnection(
     };
   }
 
-  // Always resolve the ttyd iframe URL relative to the dashboard origin so
-  // it works on mobile devices (Tailscale, ngrok) where 127.0.0.1 is
-  // unreachable. The Next.js routes /api/sessions/{id}/terminal/ttyd and
-  // /api/sessions/{id}/terminal/ttyd/ws proxy through to the Rust backend.
-  const dashboardOrigin = typeof window !== "undefined" ? window.location.origin : origin;
-  const terminalUrl = resolveProvidedTtydHttpUrl(auth.ttydHttpUrl, auth.ttydWsUrl, dashboardOrigin);
+  // Resolve the ttyd iframe URL against the backend origin so the ttyd
+  // JavaScript inside the iframe connects its WebSocket back to the same
+  // origin. This makes it work on mobile (Tailscale, ngrok) because the
+  // Rust backend WebSocket is directly accessible at the same host:port as
+  // the ttyd HTTP page, while Next.js cannot proxy WebSocket upgrades.
+  const terminalUrl = resolveProvidedTtydHttpUrl(auth.ttydHttpUrl, auth.ttydWsUrl, origin);
   if (!terminalUrl) {
     return {
       terminalUrl: null,
