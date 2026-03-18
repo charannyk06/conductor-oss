@@ -16,8 +16,7 @@ const RECOVERED_AT_METADATA_KEY: &str = "lastRecoveredAt";
 const DASHBOARD_METADATA_MAX_VALUE_BYTES: usize = 2048;
 const LEGACY_DIRECT_RUNTIME_SUMMARY: &str =
     "Legacy direct terminal session is no longer supported. Archive it and start a fresh ttyd session.";
-const LEGACY_TMUX_RUNTIME_SUMMARY: &str =
-    "Archived legacy tmux session after tmux runtime removal";
+const LEGACY_TMUX_RUNTIME_SUMMARY: &str = "Archived legacy tmux session after tmux runtime removal";
 
 fn dashboard_metadata_allowlist() -> &'static [&'static str] {
     &[
@@ -1056,15 +1055,20 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
     let is_active_activity =
         normalized_activity == "active" && !is_terminal_status(&session.status);
 
-    match session.metadata.get(RUNTIME_MODE_METADATA_KEY).map(String::as_str) {
+    match session
+        .metadata
+        .get(RUNTIME_MODE_METADATA_KEY)
+        .map(String::as_str)
+    {
         Some("tmux") => {
             session.status = SessionStatus::Archived;
             session.activity = Some("exited".to_string());
             session.last_activity_at = now.clone();
             session.summary = Some(LEGACY_TMUX_RUNTIME_SUMMARY.to_string());
-            session
-                .metadata
-                .insert("summary".to_string(), LEGACY_TMUX_RUNTIME_SUMMARY.to_string());
+            session.metadata.insert(
+                "summary".to_string(),
+                LEGACY_TMUX_RUNTIME_SUMMARY.to_string(),
+            );
             session
                 .metadata
                 .insert("archivedAt".to_string(), now.clone());
@@ -1076,15 +1080,18 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
             session.activity = Some("blocked".to_string());
             session.last_activity_at = now.clone();
             session.summary = Some(LEGACY_DIRECT_RUNTIME_SUMMARY.to_string());
-            session
-                .metadata
-                .insert("summary".to_string(), LEGACY_DIRECT_RUNTIME_SUMMARY.to_string());
-            session
-                .metadata
-                .insert(RECOVERY_STATE_METADATA_KEY.to_string(), "legacy_runtime".to_string());
-            session
-                .metadata
-                .insert(RECOVERY_ACTION_METADATA_KEY.to_string(), "archive".to_string());
+            session.metadata.insert(
+                "summary".to_string(),
+                LEGACY_DIRECT_RUNTIME_SUMMARY.to_string(),
+            );
+            session.metadata.insert(
+                RECOVERY_STATE_METADATA_KEY.to_string(),
+                "legacy_runtime".to_string(),
+            );
+            session.metadata.insert(
+                RECOVERY_ACTION_METADATA_KEY.to_string(),
+                "archive".to_string(),
+            );
             return true;
         }
         _ => {}
