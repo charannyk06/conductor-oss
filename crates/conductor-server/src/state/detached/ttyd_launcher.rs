@@ -147,7 +147,11 @@ fn build_ttyd_shell_args(shell: &Path, binary: Option<&Path>, args: &[String]) -
 fn resolve_interactive_shell(env: &HashMap<String, String>) -> PathBuf {
     let inherited_shell = std::env::var("SHELL").ok();
     let mut candidates = Vec::new();
-    if let Some(shell) = env.get("SHELL").map(String::as_str).filter(|value| !value.is_empty()) {
+    if let Some(shell) = env
+        .get("SHELL")
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+    {
         candidates.push(PathBuf::from(shell));
     }
     if let Some(shell) = inherited_shell.as_deref().filter(|value| !value.is_empty()) {
@@ -276,18 +280,10 @@ pub async fn spawn_ttyd_runtime(
     let mut child = cmd.spawn().context("Failed to spawn ttyd")?;
     let ttyd_pid = child.id().unwrap_or(0);
     if let Some(stdout) = child.stdout.take() {
-        tokio::spawn(drain_ttyd_log(
-            session_id.to_string(),
-            "stdout",
-            stdout,
-        ));
+        tokio::spawn(drain_ttyd_log(session_id.to_string(), "stdout", stdout));
     }
     if let Some(stderr) = child.stderr.take() {
-        tokio::spawn(drain_ttyd_log(
-            session_id.to_string(),
-            "stderr",
-            stderr,
-        ));
+        tokio::spawn(drain_ttyd_log(session_id.to_string(), "stderr", stderr));
     }
     wait_for_ttyd_startup(&mut child, port, session_id).await?;
     let ttyd_ws_url = ttyd_protocol::upstream_ws_url(port);

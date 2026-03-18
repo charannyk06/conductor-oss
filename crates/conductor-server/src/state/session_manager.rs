@@ -2140,8 +2140,7 @@ mod tests {
 
     #[tokio::test]
     async fn ttyd_runtime_keeps_terminal_alive_after_agent_command_exits() {
-        let root =
-            std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
 

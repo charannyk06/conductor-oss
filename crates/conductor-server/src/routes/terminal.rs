@@ -48,10 +48,7 @@ fn ttyd_session_ws_url(session: &SessionRecord) -> Option<String> {
         return None;
     }
 
-    session
-        .metadata
-        .get(TTYD_WS_URL_METADATA_KEY)
-        .cloned()
+    session.metadata.get(TTYD_WS_URL_METADATA_KEY).cloned()
 }
 
 fn ttyd_http_url_from_ws_url(ws_url: &str) -> Option<String> {
@@ -87,8 +84,7 @@ fn ttyd_http_url_from_ws_url(ws_url: &str) -> Option<String> {
 }
 
 fn ttyd_session_http_url(session: &SessionRecord) -> Option<String> {
-    ttyd_session_ws_url(session)
-        .and_then(|ws_url| ttyd_http_url_from_ws_url(&ws_url))
+    ttyd_session_ws_url(session).and_then(|ws_url| ttyd_http_url_from_ws_url(&ws_url))
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -116,7 +112,10 @@ pub fn ws_router() -> Router<Arc<AppState>> {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
-        .route("/api/sessions/{id}/terminal/ttyd", get(terminal_ttyd_frontend))
+        .route(
+            "/api/sessions/{id}/terminal/ttyd",
+            get(terminal_ttyd_frontend),
+        )
         .route(
             "/api/sessions/{id}/terminal/ttyd/token",
             get(terminal_ttyd_frontend_token),
@@ -256,11 +255,8 @@ async fn terminal_ttyd_frontend_websocket(
     match state.ensure_session_live(&id).await {
         Ok(true) => {}
         Ok(false) => {
-            return error(
-                StatusCode::CONFLICT,
-                format!("Session {id} is not running"),
-            )
-            .into_response();
+            return error(StatusCode::CONFLICT, format!("Session {id} is not running"))
+                .into_response();
         }
         Err(err) => {
             tracing::warn!(
@@ -298,11 +294,8 @@ async fn build_terminal_token_response(
         match state.ensure_session_live(&id).await {
             Ok(true) => {}
             Ok(false) => {
-                return error(
-                    StatusCode::CONFLICT,
-                    format!("Session {id} is not running"),
-                )
-                .into_response();
+                return error(StatusCode::CONFLICT, format!("Session {id} is not running"))
+                    .into_response();
             }
             Err(err) => {
                 tracing::warn!(
@@ -366,11 +359,8 @@ async fn terminal_ttyd_frontend(
     match state.ensure_session_live(&id).await {
         Ok(true) => {}
         Ok(false) => {
-            return error(
-                StatusCode::CONFLICT,
-                format!("Session {id} is not running"),
-            )
-            .into_response();
+            return error(StatusCode::CONFLICT, format!("Session {id} is not running"))
+                .into_response();
         }
         Err(err) => {
             return error(
@@ -1304,9 +1294,12 @@ mod tests {
             .insert(session.id.clone(), session.clone());
         state.config.write().await.access.require_auth = true;
 
-        let response =
-            build_terminal_token_response(state.clone(), session.id.clone(), TerminalTokenScope::Control)
-                .await;
+        let response = build_terminal_token_response(
+            state.clone(),
+            session.id.clone(),
+            TerminalTokenScope::Control,
+        )
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)

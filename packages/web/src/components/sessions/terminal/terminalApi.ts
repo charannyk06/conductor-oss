@@ -151,7 +151,12 @@ export async function resolveTerminalConnection(
     };
   }
 
-  const terminalUrl = resolveProvidedTtydHttpUrl(auth.ttydHttpUrl, auth.ttydWsUrl, origin);
+  // Always resolve the ttyd iframe URL relative to the dashboard origin so
+  // it works on mobile devices (Tailscale, ngrok) where 127.0.0.1 is
+  // unreachable. The Next.js routes /api/sessions/{id}/terminal/ttyd and
+  // /api/sessions/{id}/terminal/ttyd/ws proxy through to the Rust backend.
+  const dashboardOrigin = typeof window !== "undefined" ? window.location.origin : origin;
+  const terminalUrl = resolveProvidedTtydHttpUrl(auth.ttydHttpUrl, auth.ttydWsUrl, dashboardOrigin);
   if (!terminalUrl) {
     return {
       terminalUrl: null,

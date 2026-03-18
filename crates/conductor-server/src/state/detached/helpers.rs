@@ -75,12 +75,7 @@ mod tests {
     fn prepare_detached_runtime_env_sets_term_and_colorterm() {
         let mut env = HashMap::new();
         let mut env_remove = Vec::new();
-        prepare_detached_runtime_env(
-            AgentKind::ClaudeCode,
-            true,
-            &mut env,
-            &mut env_remove,
-        );
+        prepare_detached_runtime_env(AgentKind::ClaudeCode, true, &mut env, &mut env_remove);
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
     }
@@ -90,12 +85,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("TERM".to_string(), "screen-256color".to_string());
         let mut env_remove = Vec::new();
-        prepare_detached_runtime_env(
-            AgentKind::ClaudeCode,
-            true,
-            &mut env,
-            &mut env_remove,
-        );
+        prepare_detached_runtime_env(AgentKind::ClaudeCode, true, &mut env, &mut env_remove);
         assert_eq!(env.get("TERM").map(String::as_str), Some("screen-256color"));
     }
 }
