@@ -18,9 +18,7 @@ use super::types::{
     DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::AppState;
-
-const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
+use super::{AppState, DETACHED_PID_METADATA_KEY};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
 
 const PARSER_STATE_KEY: &str = "parserState";
@@ -412,10 +410,6 @@ impl AppState {
         } else {
             false
         };
-
-        if !signaled_live_runtime {
-            let _ = self.kill_detached_runtime(session_id).await;
-        }
 
         if signaled_live_runtime {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -1896,7 +1890,7 @@ mod tests {
     async fn build_state(root: &Path, project: ProjectConfig, project_id: &str) -> Arc<AppState> {
         let mut project = project;
         if project.runtime.is_none() {
-            project.runtime = Some(crate::state::detached::DIRECT_RUNTIME_MODE.to_string());
+            project.runtime = Some(crate::state::detached::TTYD_RUNTIME_MODE.to_string());
         }
         let config = ConductorConfig {
             workspace: root.to_path_buf(),
@@ -2131,6 +2125,70 @@ mod tests {
             Some(true)
         );
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn ttyd_runtime_keeps_terminal_alive_after_agent_command_exits() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        if crate::state::detached::ttyd_launcher::resolve_ttyd_binary(&root).is_none() {
+            return;
+        }
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: Some("codex".to_string()),
+                    use_worktree: Some(true),
+                    permission_mode: None,
+                    model: None,
+                    reasoning_effort: None,
+                    branch: None,
+                    base_branch: None,
+                    task_id: None,
+                    task_ref: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
+                    brief_path: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        let ttyd_pid = session
+            .metadata
+            .get(crate::state::detached::types::TTYD_PID_METADATA_KEY)
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("spawned session should record ttyd pid");
+
+        assert!(
+            is_process_alive(ttyd_pid),
+            "ttyd should stay alive even after the initial agent command exits"
+        );
+
+        state.archive_session(&session.id).await.unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2526,7 +2584,10 @@ mod tests {
             loop {
                 let current = state.get_session("resume-tmux-session").await.unwrap();
                 if current.metadata.get("runtimeMode").map(String::as_str)
-                    == Some(crate::state::detached::DIRECT_RUNTIME_MODE)
+                    == Some(crate::state::detached::TTYD_RUNTIME_MODE)
+                    && current
+                        .metadata
+                        .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY)
                     && current.pid.is_some()
                 {
                     return current;
@@ -2535,12 +2596,15 @@ mod tests {
             }
         })
         .await
-        .expect("resume should relaunch the session on the direct runtime");
+        .expect("resume should relaunch the session on the ttyd runtime");
 
         assert_eq!(
             updated.metadata.get("runtimeMode").map(String::as_str),
-            Some(crate::state::detached::DIRECT_RUNTIME_MODE)
+            Some(crate::state::detached::TTYD_RUNTIME_MODE)
         );
+        assert!(updated
+            .metadata
+            .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2711,9 +2775,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_output_consumer_skips_reparsing_for_direct_runtime_output() {
+    async fn start_output_consumer_skips_reparsing_for_ttyd_runtime_output() {
         let root =
-            std::env::temp_dir().join(format!("conductor-direct-output-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("conductor-ttyd-output-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
@@ -2726,9 +2790,9 @@ mod tests {
         let state = build_state(&root, project, "demo").await;
 
         let mut session = SessionRecord::new(
-            "direct-output".to_string(),
+            "ttyd-output".to_string(),
             "demo".to_string(),
-            Some("session/direct-output".to_string()),
+            Some("session/ttyd-output".to_string()),
             None,
             Some(repo.to_string_lossy().to_string()),
             "codex".to_string(),
@@ -2742,7 +2806,7 @@ mod tests {
 
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
         state.start_output_consumer(
-            "direct-output".to_string(),
+            "ttyd-output".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
             OutputConsumerConfig {
@@ -2760,7 +2824,7 @@ mod tests {
 
         let updated = timeout(Duration::from_secs(3), async {
             loop {
-                let current = state.get_session("direct-output").await.unwrap();
+                let current = state.get_session("ttyd-output").await.unwrap();
                 if current
                     .conversation
                     .iter()
@@ -2955,9 +3019,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resize_live_terminal_uses_direct_runtime_resize_channel() {
+    async fn resize_live_terminal_uses_ttyd_resize_channel() {
         let root = std::env::temp_dir().join(format!(
-            "conductor-direct-terminal-resize-test-{}",
+            "conductor-ttyd-terminal-resize-test-{}",
             Uuid::new_v4()
         ));
         let repo = root.join("repo");
@@ -2972,9 +3036,9 @@ mod tests {
         let state = build_state(&root, project, "demo").await;
 
         let mut session = SessionRecord::new(
-            "direct-terminal-resize".to_string(),
+            "ttyd-terminal-resize".to_string(),
             "demo".to_string(),
-            Some("session/direct-terminal-resize".to_string()),
+            Some("session/ttyd-terminal-resize".to_string()),
             None,
             Some(repo.to_string_lossy().to_string()),
             "codex".to_string(),
@@ -2991,17 +3055,17 @@ mod tests {
         let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
         state
-            .attach_terminal_runtime("direct-terminal-resize", input_tx, Some(resize_tx), kill_tx)
+            .attach_terminal_runtime("ttyd-terminal-resize", input_tx, Some(resize_tx), kill_tx)
             .await;
 
         state
-            .resize_live_terminal("direct-terminal-resize", 132, 40)
+            .resize_live_terminal("ttyd-terminal-resize", 132, 40)
             .await
             .unwrap();
 
         let dimensions = timeout(Duration::from_secs(3), resize_rx.recv())
             .await
-            .expect("resize should reach direct runtime channel")
+            .expect("resize should reach ttyd runtime channel")
             .expect("resize channel should stay open");
         assert_eq!(
             dimensions,

@@ -15,10 +15,8 @@ use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
 
 pub const CMD_OUTPUT: u8 = b'0';
 pub const CMD_INPUT: u8 = b'0';
-pub const CMD_RESIZE_OR_TITLE: u8 = b'1';
 pub const CMD_SET_WINDOW_TITLE: u8 = b'1';
 pub const CMD_RESIZE_TERMINAL: u8 = b'1';
-pub const CMD_PAUSE_OR_PREFS: u8 = b'2';
 pub const CMD_SET_PREFERENCES: u8 = b'2';
 pub const CMD_PAUSE: u8 = b'2';
 pub const CMD_RESUME: u8 = b'3';
@@ -167,7 +165,7 @@ impl ClientMessage {
     }
 }
 
-// NOTE: Flow control config lives client-side only (ttydClient.ts).
+// NOTE: Flow control config lives in the browser terminal facade.
 // Server-side PAUSE/RESUME support is not yet implemented — see TODO in terminal.rs.
 
 #[cfg(test)]
@@ -205,15 +203,11 @@ mod tests {
         let msg = encode_resize(100, 30);
         let parsed = ClientMessage::from_websocket_frame(&msg).unwrap();
         match parsed {
-            ClientMessage::Resize {
-                columns,
-                rows,
-            } => {
+            ClientMessage::Resize { columns, rows } => {
                 assert_eq!(columns, 100);
                 assert_eq!(rows, 30);
             }
             _ => panic!("Expected Resize variant"),
         }
     }
-
 }

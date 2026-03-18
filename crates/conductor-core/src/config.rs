@@ -4,6 +4,10 @@ use serde_yaml::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub const TTYD_RUNTIME: &str = "ttyd";
+pub const LEGACY_DIRECT_RUNTIME: &str = "direct";
+pub const LEGACY_TMUX_RUNTIME: &str = "tmux";
+
 /// Root configuration for the Rust-first Conductor backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -286,9 +290,7 @@ fn normalized_path(value: Option<&str>) -> String {
 impl ProjectConfig {
     pub fn normalize_runtime(&mut self) {
         trim_to_option(&mut self.runtime);
-        if matches!(self.runtime.as_deref(), Some("tmux")) {
-            self.runtime = Some("direct".to_string());
-        }
+        self.runtime = normalized_runtime_label(self.runtime.as_deref()).into();
     }
 
     pub fn normalize_dev_server(&mut self) {
@@ -366,6 +368,22 @@ impl ProjectConfig {
             normalized_host(self.dev_server_host.as_deref()),
             normalized_path(self.dev_server_path.as_deref())
         ))
+    }
+}
+
+pub fn normalized_runtime_label(value: Option<&str>) -> String {
+    let runtime = value
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .unwrap_or(TTYD_RUNTIME);
+
+    if runtime.eq_ignore_ascii_case(LEGACY_DIRECT_RUNTIME)
+        || runtime.eq_ignore_ascii_case(LEGACY_TMUX_RUNTIME)
+        || runtime.eq_ignore_ascii_case(TTYD_RUNTIME)
+    {
+        TTYD_RUNTIME.to_string()
+    } else {
+        runtime.to_string()
     }
 }
 

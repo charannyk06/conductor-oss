@@ -8,9 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    AgentConfig, ConductorConfig, DashboardAccessConfig, GitHubProjectConfig,
-    ModelAccessPreferences, NotificationPreferences, PreferencesConfig, ProjectConfig,
-    TrustedHeaderAccessConfig,
+    normalized_runtime_label, AgentConfig, ConductorConfig, DashboardAccessConfig,
+    GitHubProjectConfig, ModelAccessPreferences, NotificationPreferences, PreferencesConfig,
+    ProjectConfig, TrustedHeaderAccessConfig,
 };
 
 pub const GENERATED_MARKER_KEY: &str = "_generatedFromWorkspace";
@@ -325,14 +325,8 @@ fn build_project(project_id: &str, project: &ProjectConfig) -> MirrorProject {
         runtime: project
             .runtime
             .clone()
-            .map(|runtime| {
-                if runtime.trim() == "tmux" {
-                    "direct".to_string()
-                } else {
-                    runtime
-                }
-            })
-            .unwrap_or_else(|| "direct".to_string()),
+            .map(|runtime| normalized_runtime_label(Some(runtime.as_str())))
+            .unwrap_or_else(|| normalized_runtime_label(None)),
         agent_config: project.agent_config.clone(),
         scm: extract_scm_plugin(project),
         board_dir: project.board_dir.clone(),
@@ -867,7 +861,7 @@ mod tests {
             session_prefix: Some("dmx".to_string()),
             default_working_directory: None,
             board_dir: None,
-            runtime: Some("tmux".to_string()),
+            runtime: Some("ttyd".to_string()),
             agent: Some("claude-code".to_string()),
             workspace: Some("worktree".to_string()),
             scm: Some(Value::Mapping(serde_yaml::Mapping::from_iter([(

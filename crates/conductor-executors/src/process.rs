@@ -15,6 +15,32 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::executor::{ExecutorInput, ExecutorOutput};
 
+fn apply_pty_command_env(
+    cmd: &mut CommandBuilder,
+    env: &HashMap<String, String>,
+    env_remove: &[String],
+) {
+    for key in env_remove {
+        cmd.env_remove(key);
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+}
+
+fn apply_tokio_command_env(
+    cmd: &mut Command,
+    env: &HashMap<String, String>,
+    env_remove: &[String],
+) {
+    for key in env_remove {
+        cmd.env_remove(key);
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+}
+
 /// PTY dimensions configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtyDimensions {
@@ -149,15 +175,36 @@ pub async fn spawn_process(
     cwd: &Path,
     env: &HashMap<String, String>,
 ) -> Result<ProcessHandle> {
-    spawn_process_with_pty_size(binary, args, cwd, env, PtyDimensions::default()).await
+    spawn_process_with_env_removals(binary, args, cwd, env, &[]).await
 }
 
-/// Spawn a CLI process with PTY support and configurable PTY dimensions.
-pub async fn spawn_process_with_pty_size(
+/// Spawn a CLI process with PTY support and explicit inherited env removals.
+pub async fn spawn_process_with_env_removals(
     binary: &Path,
     args: &[String],
     cwd: &Path,
     env: &HashMap<String, String>,
+    env_remove: &[String],
+) -> Result<ProcessHandle> {
+    spawn_process_with_pty_size_and_env_removals(
+        binary,
+        args,
+        cwd,
+        env,
+        env_remove,
+        PtyDimensions::default(),
+    )
+    .await
+}
+
+/// Spawn a CLI process with PTY support, configurable dimensions, and
+/// inherited env removals.
+pub async fn spawn_process_with_pty_size_and_env_removals(
+    binary: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    env_remove: &[String],
     pty_dims: PtyDimensions,
 ) -> Result<ProcessHandle> {
     let pty_system = native_pty_system();
@@ -173,9 +220,7 @@ pub async fn spawn_process_with_pty_size(
     for arg in args {
         cmd.arg(arg);
     }
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
+    apply_pty_command_env(&mut cmd, env, env_remove);
 
     let child = pair.slave.spawn_command(cmd)?;
     drop(pair.slave);
@@ -368,6 +413,18 @@ pub async fn spawn_process_no_stdin(
     cwd: &Path,
     env: &HashMap<String, String>,
 ) -> Result<ProcessHandle> {
+    spawn_process_no_stdin_with_env_removals(binary, args, cwd, env, &[]).await
+}
+
+/// Spawn a CLI process with stdout/stderr capture, stdin closed, and explicit
+/// inherited env removals.
+pub async fn spawn_process_no_stdin_with_env_removals(
+    binary: &Path,
+    args: &[String],
+    cwd: &Path,
+    env: &HashMap<String, String>,
+    env_remove: &[String],
+) -> Result<ProcessHandle> {
     let mut cmd = Command::new(binary);
     cmd.args(args)
         .current_dir(cwd)
@@ -375,9 +432,7 @@ pub async fn spawn_process_no_stdin(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    for (key, value) in env {
-        cmd.env(key, value);
-    }
+    apply_tokio_command_env(&mut cmd, env, env_remove);
 
     let mut child = cmd.spawn()?;
     let pid = child.id().unwrap_or(0);
@@ -497,6 +552,18 @@ fn drain_terminal_lines(buffer: &mut Vec<u8>) -> Vec<String> {
     lines
 }
 
+fn flush_terminal_line_buffer(buffer: &mut Vec<u8>) -> Option<String> {
+    if buffer.is_empty() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(buffer)
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string();
+    buffer.clear();
+    Some(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_process_alive, spawn_process, ExecutorOutput};
@@ -578,16 +645,4 @@ mod tests {
             "shell child should terminate with parent"
         );
     }
-}
-
-fn flush_terminal_line_buffer(buffer: &mut Vec<u8>) -> Option<String> {
-    if buffer.is_empty() {
-        return None;
-    }
-    let line = String::from_utf8_lossy(buffer)
-        .trim_end_matches('\n')
-        .trim_end_matches('\r')
-        .to_string();
-    buffer.clear();
-    Some(line)
 }

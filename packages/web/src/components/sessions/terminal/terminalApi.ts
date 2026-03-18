@@ -1,8 +1,8 @@
 /**
  * Terminal API utilities.
- * Connection resolution is client-side for the WS URL — the browser builds
- * the ttyd endpoint directly. Authentication still uses a lightweight
- * Next.js proxy to obtain a short-lived terminal token.
+ * Authentication still flows through the Next.js proxy. Interactive terminals
+ * render through a backend-hosted ttyd facade so the browser stays attached
+ * to one persistent terminal session instead of opening a fresh ttyd client.
  */
 
 import type { TerminalConnectionInfo } from "./terminalTypes";
@@ -15,51 +15,114 @@ import type { TerminalConnectionInfo } from "./terminalTypes";
  * Resolve the Rust backend origin from the browser.
  *
  * Priority:
- *  1. `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` (build-time env var)
- *  2. Dev mode heuristic: if the page is served from port 3000 the backend
+ *  1. The runtime meta tag published by the root layout
+ *  2. `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` (build-time env var)
+ *  3. Dev mode heuristic: if the page is served from port 3000 the backend
  *     lives on the same hostname at port 4749.
- *  3. Same origin (production: Rust backend serves the dashboard).
+ *  4. Same origin (production: Rust backend serves the dashboard).
  */
+function readBackendOriginFromMeta(): string | null {
+  if (typeof document === "undefined") return null;
+
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="conductor-backend-url"]');
+  const content = meta?.content?.trim();
+  if (!content) return null;
+
+  try {
+    const url = new URL(content, typeof window === "undefined" ? "http://127.0.0.1" : window.location.origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTerminalPathname(pathname: string): string {
+  if (pathname.length > 1 && pathname.endsWith("/")) {
+    return pathname.replace(/\/+$/, "");
+  }
+  return pathname;
+}
+
 function resolveBackendOrigin(): string {
-  // Build-time env var (NEXT_PUBLIC_ prefix exposes it to the client bundle)
+  const runtimeBackendUrl = readBackendOriginFromMeta();
+  if (runtimeBackendUrl) return runtimeBackendUrl;
+
   const envUrl = process.env.NEXT_PUBLIC_CONDUCTOR_BACKEND_URL?.trim();
   if (envUrl) return envUrl;
 
   if (typeof window === "undefined") return "http://127.0.0.1:4749";
 
   const { protocol, hostname, port } = window.location;
-
-  // Dev mode: Next.js dev server on :3000, Rust backend on :4749
   if (port === "3000") {
     return `${protocol}//${hostname}:4749`;
   }
 
-  // Production / standalone: backend serves dashboard at the same origin
   return window.location.origin;
 }
 
-/**
- * Fetch a terminal token via the Next.js proxy (which handles auth).
- * The token is required by the Rust backend WebSocket endpoint.
- * Fail closed on proxy or backend errors so the browser does not attempt an
- * unauthenticated ttyd websocket with a missing or stale token.
- */
 type TerminalTokenResult =
-  | { interactive: true; token: string | null }
-  | { interactive: false; token: null };
+  | { interactive: true; ttydHttpUrl: string | null; ttydWsUrl: string | null }
+  | { interactive: false; ttydHttpUrl: null; ttydWsUrl: null; reason: string | null };
 
-async function fetchTerminalToken(sessionId: string): Promise<TerminalTokenResult> {
+function resolveProvidedTtydHttpUrl(
+  ttydHttpUrl: string | null,
+  ttydWsUrl: string | null,
+  backendOrigin: string,
+): string | null {
+  const candidate = ttydHttpUrl ?? ttydWsUrl;
+  if (!candidate) return null;
+  try {
+    const resolved = new URL(candidate, backendOrigin);
+
+    if (resolved.protocol === "ws:") resolved.protocol = "http:";
+    if (resolved.protocol === "wss:") resolved.protocol = "https:";
+    if (resolved.pathname === "/ws") {
+      resolved.pathname = "/";
+    } else if (resolved.pathname.endsWith("/ws")) {
+      resolved.pathname = normalizeTerminalPathname(resolved.pathname.slice(0, -3));
+    }
+    resolved.pathname = normalizeTerminalPathname(resolved.pathname);
+    resolved.hash = "";
+
+    return resolved.toString();
+  } catch {
+    return null;
+  }
+}
+
+type ResolveTerminalConnectionOptions = {
+  signal?: AbortSignal;
+};
+
+async function fetchTerminalToken(
+  sessionId: string,
+  options?: ResolveTerminalConnectionOptions,
+): Promise<TerminalTokenResult> {
   const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, {
     cache: "no-store",
+    signal: options?.signal,
   });
   const data = (await res.json().catch(() => null)) as
-    | { token?: string; required?: boolean; error?: string }
+    | { required?: boolean; ttydHttpUrl?: string; ttydWsUrl?: string; error?: string }
     | null;
+  const ttydHttpUrl =
+    typeof data?.ttydHttpUrl === "string" && data.ttydHttpUrl.trim().length > 0
+      ? data.ttydHttpUrl.trim()
+      : null;
+  const ttydWsUrl =
+    typeof data?.ttydWsUrl === "string" && data.ttydWsUrl.trim().length > 0
+      ? data.ttydWsUrl.trim()
+      : null;
 
   if (res.status === 401 || res.status === 403) {
     return {
       interactive: false,
-      token: null,
+      ttydHttpUrl: null,
+      ttydWsUrl: null,
+      reason: data?.error ?? "Terminal access denied",
     };
   }
 
@@ -67,45 +130,39 @@ async function fetchTerminalToken(sessionId: string): Promise<TerminalTokenResul
     throw new Error(data?.error ?? `Failed to resolve terminal token: ${res.status}`);
   }
 
-  if (data?.required !== true) {
-    return {
-      interactive: true,
-      token: null,
-    };
-  }
-
-  const token = typeof data?.token === "string" ? data.token.trim() : "";
-  if (token.length === 0) {
-    throw new Error("Terminal token response did not include a ttyd token");
-  }
-
   return {
     interactive: true,
-    token,
+    ttydHttpUrl,
+    ttydWsUrl,
   };
 }
 
-/**
- * Build the direct ttyd WebSocket URL for a session.
- *
- * 1. Fetch a short-lived token via Next.js proxy (one HTTP call, handles auth).
- * 2. Construct the WebSocket URL pointing directly at the Rust backend.
- *
- * The WebSocket stream itself is direct — no middleware in the data path.
- */
-export async function resolveTerminalConnection(sessionId: string): Promise<TerminalConnectionInfo> {
+export async function resolveTerminalConnection(
+  sessionId: string,
+  options?: ResolveTerminalConnectionOptions,
+): Promise<TerminalConnectionInfo> {
   const origin = resolveBackendOrigin();
-  const wsProtocol = origin.startsWith("https") ? "wss:" : "ws:";
-  const url = new URL(origin);
-  const auth = await fetchTerminalToken(sessionId);
+  const auth = await fetchTerminalToken(sessionId, options);
   if (!auth.interactive) {
     return {
-      ptyWsUrl: null,
+      terminalUrl: null,
       interactive: false,
+      reason: auth.reason,
     };
   }
-  const tokenParam = auth.token ? `&token=${encodeURIComponent(auth.token)}` : "";
-  const ptyWsUrl = `${wsProtocol}//${url.host}/api/sessions/${encodeURIComponent(sessionId)}/terminal/ws?protocol=ttyd${tokenParam}`;
 
-  return { ptyWsUrl, interactive: true };
+  const terminalUrl = resolveProvidedTtydHttpUrl(auth.ttydHttpUrl, auth.ttydWsUrl, origin);
+  if (!terminalUrl) {
+    return {
+      terminalUrl: null,
+      interactive: false,
+      reason: "Failed to resolve the ttyd terminal URL.",
+    };
+  }
+
+  return {
+    terminalUrl,
+    interactive: true,
+    reason: null,
+  };
 }

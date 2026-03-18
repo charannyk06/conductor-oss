@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::config::{
-    AgentConfig, DevServerCompatConfig, GitHubProjectConfig, ModelAccessPreferences,
-    NotificationPreferences, PreferencesConfig, ProjectConfig,
+    normalized_runtime_label, AgentConfig, DevServerCompatConfig, GitHubProjectConfig,
+    ModelAccessPreferences, NotificationPreferences, PreferencesConfig, ProjectConfig,
 };
 pub use crate::support::GENERATED_MARKER_KEY;
 
@@ -226,14 +226,7 @@ pub fn build_project_config(project: &ScaffoldProjectConfig) -> ProjectConfig {
         ),
         default_working_directory: trim_option(project.default_working_directory.clone()),
         board_dir: trim_option(project.board_dir.clone()),
-        runtime: Some({
-            let runtime = normalize_string(project.runtime.as_deref(), "direct".to_string());
-            if runtime == "tmux" {
-                "direct".to_string()
-            } else {
-                runtime
-            }
-        }),
+        runtime: Some(normalized_runtime_label(project.runtime.as_deref())),
         agent: Some(normalize_string(
             Some(project.agent.as_str()),
             "claude-code".to_string(),
@@ -564,14 +557,8 @@ fn build_project_record(project: &ProjectConfig, project_id: &str) -> ScaffoldPr
         runtime: project
             .runtime
             .clone()
-            .map(|runtime| {
-                if runtime.trim() == "tmux" {
-                    "direct".to_string()
-                } else {
-                    runtime
-                }
-            })
-            .unwrap_or_else(|| "direct".to_string()),
+            .map(|runtime| normalized_runtime_label(Some(runtime.as_str())))
+            .unwrap_or_else(|| normalized_runtime_label(None)),
         agent_config: project.agent_config.clone(),
         scm: extract_scm_plugin(project),
         board_dir: trim_option(project.board_dir.clone()),
@@ -970,7 +957,7 @@ mod tests {
         assert_eq!(project.name.as_deref(), Some("MyRepo"));
         assert_eq!(project.session_prefix.as_deref(), Some("mr"));
         assert_eq!(project.workspace.as_deref(), Some("worktree"));
-        assert_eq!(project.runtime.as_deref(), Some("direct"));
+        assert_eq!(project.runtime.as_deref(), Some("ttyd"));
         assert_eq!(project.agent_config.permissions.as_deref(), Some("skip"));
         assert_eq!(project.scm, Some(Value::String("github".to_string())));
     }

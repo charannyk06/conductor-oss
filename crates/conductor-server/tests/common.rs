@@ -10,7 +10,7 @@ use conductor_core::types::AgentKind;
 use conductor_db::repo::{ProjectRepo, TaskRepo};
 use conductor_db::Database;
 use conductor_executors::executor::{
-    Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
+    Executor, ExecutorHandle, ExecutorOutput, SpawnOptions,
 };
 use conductor_executors::process::spawn_process;
 use conductor_server::{routes, state::AppState};
@@ -20,9 +20,31 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r#"'\"'\"'"#))
+}
+
+fn build_test_executor_script(prompt: &str, auto_complete: bool) -> String {
+    let mut segments = vec!["sleep 0.1".to_string()];
+    if !prompt.trim().is_empty() {
+        segments.push(format!("printf 'prompt:%s\\n' {}", shell_quote(prompt)));
+    }
+
+    if auto_complete {
+        segments.push("sleep 0.1".to_string());
+        segments.push("exit 0".to_string());
+    } else {
+        segments.push(
+            "while IFS= read -r line; do if [ \"$line\" = \"__needs_input__\" ]; then printf '__needs_input__\\n'; else printf 'echo:%s\\n' \"$line\"; fi; done"
+                .to_string(),
+        );
+    }
+
+    segments.join("; ")
+}
 
 pub struct TestExecutor {
     pub kind: AgentKind,
@@ -40,7 +62,7 @@ impl Executor for TestExecutor {
     }
 
     fn binary_path(&self) -> &Path {
-        Path::new("/bin/sleep")
+        Path::new("/bin/sh")
     }
 
     async fn is_available(&self) -> bool {
@@ -52,67 +74,34 @@ impl Executor for TestExecutor {
     }
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
-        let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(16);
-        let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(16);
-        let (kill_tx, mut kill_rx) = oneshot::channel();
-        let kind = self.kind.clone();
-        let prompt = options.prompt.clone();
-        let auto_complete = self.auto_complete;
-
-        tokio::spawn(async move {
-            if !prompt.trim().is_empty() {
-                let _ = output_tx
-                    .send(ExecutorOutput::Stdout(format!("prompt:{prompt}")))
-                    .await;
-            }
-
-            if auto_complete {
-                let _ = output_tx
-                    .send(ExecutorOutput::Completed { exit_code: 0 })
-                    .await;
-                return;
-            }
-
-            loop {
-                tokio::select! {
-                    _ = &mut kill_rx => {
-                        let _ = output_tx.send(ExecutorOutput::Failed {
-                            error: "killed".to_string(),
-                            exit_code: None,
-                        }).await;
-                        break;
-                    }
-                    input = input_rx.recv() => {
-                        match input {
-                            Some(ExecutorInput::Text(text)) => {
-                                let event = if text == "__needs_input__" {
-                                    ExecutorOutput::NeedsInput("Follow-up required".to_string())
-                                } else {
-                                    ExecutorOutput::Stdout(format!("echo:{text}"))
-                                };
-                                let _ = output_tx.send(event).await;
-                            }
-                            Some(ExecutorInput::Raw(text)) => {
-                                let _ = output_tx
-                                    .send(ExecutorOutput::Stdout(format!("raw:{text}")))
-                                    .await;
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(ExecutorHandle::new(1, kind, output_rx, input_tx, kill_tx))
+        let args = self.build_args(&options);
+        let handle = spawn_process(self.binary_path(), &args, &options.cwd, &options.env).await?;
+        Ok(ExecutorHandle::new(
+            handle.pid,
+            self.kind(),
+            handle.output_rx,
+            handle.input_tx,
+            handle.kill_tx,
+        ))
     }
 
-    fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
-        vec!["30".to_string()]
+    fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
+        vec![
+            "-lc".to_string(),
+            build_test_executor_script(&options.prompt, self.auto_complete),
+        ]
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
-        ExecutorOutput::Stdout(line.to_string())
+        if line == "__needs_input__" {
+            ExecutorOutput::NeedsInput("Follow-up required".to_string())
+        } else {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
+
+    fn supports_direct_terminal_ui(&self) -> bool {
+        true
     }
 }
 
@@ -162,6 +151,10 @@ impl Executor for ResumeExecutor {
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
         ExecutorOutput::Stdout(line.to_string())
+    }
+
+    fn supports_direct_terminal_ui(&self) -> bool {
+        true
     }
 }
 
@@ -247,10 +240,8 @@ pub async fn build_state(
     mut project: ProjectConfig,
     project_id: &str,
 ) -> Arc<AppState> {
-    std::env::set_var("CONDUCTOR_DISABLE_DETACHED_PTY_HOST", "true");
-
     if project.runtime.is_none() {
-        project.runtime = Some("direct".to_string());
+        project.runtime = Some("ttyd".to_string());
     }
 
     let config = ConductorConfig {
@@ -310,12 +301,24 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-pub async fn wait_for_condition<T, F, Fut>(label: &str, mut check: F) -> T
+pub async fn wait_for_condition<T, F, Fut>(label: &str, check: F) -> T
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Option<T>>,
 {
-    timeout(Duration::from_secs(5), async move {
+    wait_for_condition_with_timeout(label, Duration::from_secs(10), check).await
+}
+
+pub async fn wait_for_condition_with_timeout<T, F, Fut>(
+    label: &str,
+    duration: Duration,
+    mut check: F,
+) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Option<T>>,
+{
+    timeout(duration, async move {
         loop {
             if let Some(value) = check().await {
                 return value;

@@ -9,7 +9,7 @@ use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn smoke_all_route_modules() {
-    let harness = TestHarness::new("conductor-api-test", "direct").await;
+    let harness = TestHarness::new("conductor-api-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {

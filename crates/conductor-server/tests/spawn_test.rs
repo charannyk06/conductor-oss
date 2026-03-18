@@ -6,8 +6,8 @@ use conductor_core::types::SessionStatus;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn spawn_session_runs_from_queue_to_follow_up_ready_state() {
-    let harness = TestHarness::new("conductor-spawn-test", "direct").await;
+async fn spawn_session_runs_from_queue_to_live_ttyd_state() {
+    let harness = TestHarness::new("conductor-spawn-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
@@ -23,13 +23,12 @@ async fn spawn_session_runs_from_queue_to_follow_up_ready_state() {
         .unwrap();
     assert_eq!(queued.status, SessionStatus::Queued);
 
-    let session = wait_for_condition("spawned session to reach follow-up state", || {
+    let session = wait_for_condition("spawned session to reach live ttyd state", || {
         let state = harness.state.clone();
         let session_id = queued.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                (session.status == SessionStatus::NeedsInput
-                    && session.output.contains("prompt:Ship the test harness")
+                (session.status == SessionStatus::Working
                     && session.metadata.contains_key("worktree"))
                 .then_some(session)
             })
@@ -39,15 +38,10 @@ async fn spawn_session_runs_from_queue_to_follow_up_ready_state() {
 
     assert_eq!(session.project_id, "demo");
     assert_eq!(session.agent, "codex");
-    assert_eq!(session.activity.as_deref(), Some("waiting_input"));
-    assert_eq!(
-        session.summary.as_deref(),
-        Some("prompt:Ship the test harness")
-    );
+    assert_eq!(session.activity.as_deref(), Some("active"));
     assert!(session.metadata.contains_key("worktree"));
-    assert!(session
-        .conversation
-        .iter()
-        .any(|entry| entry.kind == "assistant_message"
-            && entry.text.contains("prompt:Ship the test harness")));
+    assert_eq!(
+        session.metadata.get("runtimeMode").map(String::as_str),
+        Some("ttyd")
+    );
 }

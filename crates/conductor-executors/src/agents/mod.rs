@@ -58,6 +58,7 @@ fn fallback_search_dirs_with_path(path_override: Option<&OsStr>) -> Vec<PathBuf>
         push_search_dir(&mut seen, &mut dirs, home.join(".local").join("bin"));
         push_search_dir(&mut seen, &mut dirs, home.join(".cargo").join("bin"));
         push_search_dir(&mut seen, &mut dirs, home.join(".npm-global").join("bin"));
+        push_search_dir(&mut seen, &mut dirs, home.join(".opencode").join("bin"));
         push_search_dir(&mut seen, &mut dirs, home.join(".bun").join("bin"));
         push_search_dir(&mut seen, &mut dirs, home.join(".volta").join("bin"));
         push_search_dir(&mut seen, &mut dirs, home.join(".asdf").join("shims"));
@@ -505,6 +506,49 @@ mod tests {
         );
 
         let discovered = discover_binary(&["cursor-agent"]);
+
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(path) = original_path {
+            env::set_var("PATH", path);
+        } else {
+            env::remove_var("PATH");
+        }
+        fs::remove_dir_all(&home_dir).ok();
+
+        assert_eq!(discovered.as_deref(), Some(wrapper_path.as_path()));
+    }
+
+    #[test]
+    fn discover_binary_accepts_opencode_wrapper_with_real_binary_in_opencode_home() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let home_dir = unique_temp_dir("opencode-wrapper");
+        let wrapper_dir = home_dir.join(legacy_wrapper_compat_root_name()).join("bin");
+        let real_dir = home_dir.join(".opencode").join("bin");
+        fs::create_dir_all(&wrapper_dir).expect("create wrapper dir");
+        fs::create_dir_all(&real_dir).expect("create real dir");
+
+        let wrapper_path = wrapper_dir.join("opencode");
+        fs::write(
+            &wrapper_path,
+            "#!/bin/sh\nREAL_BIN=\"$(find_real_binary \"opencode\")\"\n",
+        )
+        .expect("write fake wrapper");
+        mark_executable(&wrapper_path);
+
+        let real_path = real_dir.join("opencode");
+        fs::write(&real_path, b"#!/bin/sh\n").expect("write real binary");
+        mark_executable(&real_path);
+
+        let original_home = env::var_os("HOME");
+        let original_path = env::var_os("PATH");
+        env::set_var("HOME", &home_dir);
+        env::set_var("PATH", &wrapper_dir);
+
+        let discovered = discover_binary(&["opencode"]);
 
         if let Some(home) = original_home {
             env::set_var("HOME", home);

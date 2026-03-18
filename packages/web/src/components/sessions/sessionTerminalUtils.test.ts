@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TERMINAL_FONT_FAMILY } from "@/components/terminal/xtermTheme";
 import {
   calculateMobileTerminalViewportMetrics,
   detectCompactTerminalChrome,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
   sanitizeRemoteTerminalSnapshot,
+  TERMINAL_FONT_FAMILY,
 } from "./sessionTerminalUtils";
 
 test("detectMobileTerminalInputRail only enables compact touch layouts on narrow viewports", () => {

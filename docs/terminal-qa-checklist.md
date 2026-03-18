@@ -5,7 +5,7 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## Desktop
 
 - [ ] Launch a fresh session from the dashboard on macOS or Linux desktop.
-- [ ] Confirm the session detail terminal opens the native ttyd websocket and reaches a usable prompt without falling back to a secondary transport.
+- [ ] Confirm the session detail terminal reaches a usable ttyd-backed prompt through the backend ttyd facade.
 - [ ] Type directly into the terminal and verify shell editing, Enter, Backspace, Ctrl+C, and paste all work.
 - [ ] Scroll upward while output is streaming and confirm the viewport does not jump back to the live tail until `Jump to latest` is used.
 - [ ] Resize the browser narrower and wider and confirm the prompt reflows without garbling or duplicate redraw noise.
@@ -26,7 +26,7 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## Android Chrome
 
 - [ ] Open the same session on Android Chrome.
-- [ ] Verify direct terminal typing, keyboard open behavior, Enter, Backspace, and paste.
+- [ ] Verify native terminal typing, keyboard open behavior, Enter, Backspace, and paste.
 - [ ] Confirm orientation changes preserve terminal readability and usable font sizing.
 - [ ] Confirm tab switch or short network interruption reconnects cleanly.
 - [ ] Verify `Jump to latest` appears only when the viewport is above the live tail.
@@ -34,10 +34,10 @@ Use this checklist before merging terminal architecture changes. Record the obse
 ## Private Remote Browser
 
 - [ ] Validate an approved private remote path such as Tailscale with the remote runtime in `ready` state.
-- [ ] Confirm the terminal stream stays on direct ttyd WS (`/api/sessions/:id/terminal/ws?protocol=ttyd`) using a live token from `/api/sessions/:id/terminal/token`.
+- [ ] Confirm the remote terminal stream stays on the authenticated ttyd facade WS (`/api/sessions/:id/terminal/ttyd/ws`) using a live token from `/api/sessions/:id/terminal/token`.
 - [ ] Refresh the remote tab and confirm reconnect restores the same session content and prompt.
 - [ ] Confirm direct typing works after reconnect without requiring page navigation.
-- [ ] Trigger an intentional failure path and confirm terminal reconnect behavior is explicit (token refresh + direct ttyd reconnect) before any snapshot recovery path is used.
+- [ ] Trigger an intentional failure path and confirm terminal reconnect behavior is explicit (token refresh + ttyd reconnect) before any snapshot recovery path is used.
 
 ## Diagnostics To Capture On Failure
 
@@ -47,5 +47,5 @@ Use this checklist before merging terminal architecture changes. Record the obse
 - [ ] terminal token headers and payload (`required`, `expiresInSeconds`)
 - [ ] terminal snapshot headers (`Server-Timing`, source, live, restored, format)
 - [ ] terminal snapshot payload (`source`, `live`, `restored`, `sequence`)
-- [ ] websocket close code, query string shape (`protocol=ttyd` and token presence), and reconnect timing
+- [ ] websocket close code, ttyd facade query string shape (token presence), and reconnect timing
 - [ ] browser console and network errors

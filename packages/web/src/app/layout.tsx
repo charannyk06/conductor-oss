@@ -4,6 +4,7 @@ import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { TooltipProvider } from "@/components/ui/Tooltip";
+import { resolveRustBackendUrl } from "@/lib/backendUrl";
 import "./globals.css";
 
 const tomorrow = Tomorrow({
@@ -33,9 +34,12 @@ export const viewport: Viewport = {
 };
 
 function Shell({ children }: { children: React.ReactNode }) {
+  const backendUrl = resolveRustBackendUrl() ?? "";
+
   return (
     <html lang="en" className={`${rootClass} dark`} suppressHydrationWarning>
       <head>
+        <meta name="conductor-backend-url" content={backendUrl} />
         {/* Anti-FOUT theme script: reads localStorage and applies theme class
             before React hydrates. Content is static with no dynamic input. */}
         <script

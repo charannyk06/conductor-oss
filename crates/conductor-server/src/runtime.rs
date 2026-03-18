@@ -477,7 +477,7 @@ mod tests {
                 ProjectConfig {
                     path: project_root.to_string_lossy().to_string(),
                     agent: Some("codex".to_string()),
-                    runtime: Some("direct".to_string()),
+                    runtime: Some("ttyd".to_string()),
                     ..ProjectConfig::default()
                 },
             )]),

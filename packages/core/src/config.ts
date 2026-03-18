@@ -79,7 +79,7 @@ const DEFAULT_AGENT_CONFIG = {
 };
 
 const DEFAULT_PROJECT_PLUGINS = {
-  runtime: "direct" as const,
+  runtime: "ttyd" as const,
   agent: "claude-code" as const,
   workspace: "worktree" as const,
   notifiers: ["desktop"],
@@ -159,7 +159,7 @@ const ProjectConfigSchema = z.object({
 });
 
 const DefaultPluginsSchema = z.object({
-  runtime: z.string().default("direct"),
+  runtime: z.string().default("ttyd"),
   agent: z.string().default("claude-code"),
   workspace: z.string().default("worktree"),
   notifiers: z.array(z.string()).default(["desktop"]),
@@ -365,6 +365,16 @@ function sanitizeOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function normalizeRuntime(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  if (trimmed === "direct" || trimmed === "tmux" || trimmed === "ttyd") {
+    return "ttyd";
+  }
+  return trimmed;
+}
+
 function sanitizeOptionalNumber(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.trunc(value);
@@ -495,7 +505,7 @@ function sanitizeProjectConfig(value: unknown): unknown {
     if (sanitized === undefined) {
       delete project[key];
     } else {
-      project[key] = sanitized;
+      project[key] = key === "runtime" ? normalizeRuntime(sanitized) : sanitized;
     }
   }
 
@@ -614,6 +624,8 @@ function applyProjectDefaults(config: OrchestratorConfig): OrchestratorConfig {
     if (!project.tracker) {
       project.tracker = { plugin: "github" };
     }
+
+    project.runtime = normalizeRuntime(project.runtime) ?? normalizeRuntime(config.defaults.runtime) ?? "ttyd";
   }
 
   return config;

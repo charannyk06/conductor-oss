@@ -12,9 +12,11 @@ mod workspace;
 
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
-pub use detached::run_detached_pty_host;
 pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
-pub(crate) use detached::{RUNTIME_MODE_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY};
+pub(crate) use detached::DETACHED_PID_METADATA_KEY;
+pub(crate) use detached::{
+    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
+};
 pub(crate) use helpers::sanitize_terminal_text;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
@@ -45,7 +47,7 @@ use std::time::{Duration, Instant};
 use terminal_hosts::TerminalHostRegistry;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock, Semaphore};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 
 pub(crate) struct DevServerRecord {
     pub pid: u32,
@@ -106,7 +108,6 @@ pub struct AppState {
     board_collaboration: RwLock<BoardCollaborationStore>,
     /// Serializes board-triggered spawns to prevent TOCTOU races in limit checks.
     pub spawn_guard: Mutex<()>,
-    detached_runtime_spawn_limit: Arc<Semaphore>,
     dev_servers: Mutex<HashMap<String, DevServerRecord>>,
     runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
     dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
@@ -135,7 +136,6 @@ impl AppState {
             started_at: Utc::now(),
             board_collaboration: RwLock::new(BoardCollaborationStore::default()),
             spawn_guard: Mutex::new(()),
-            detached_runtime_spawn_limit: Arc::new(Semaphore::new(detached_runtime_spawn_limit())),
             dev_servers: Mutex::new(HashMap::new()),
             runtime_status_cache: Mutex::new(HashMap::new()),
             dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
@@ -749,6 +749,7 @@ impl AppState {
             .await;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn resize_terminal_store(&self, session_id: &str, cols: u16, rows: u16) {
         if let Some(handle) = self.terminal_hosts.get(session_id).await {
             let snapshot = if let Ok(mut store) = handle.terminal_store.lock() {
@@ -846,10 +847,6 @@ impl AppState {
         }
     }
 
-    pub(crate) fn acquire_detached_runtime_spawn_limit(&self) -> Arc<Semaphore> {
-        self.detached_runtime_spawn_limit.clone()
-    }
-
     async fn update_terminal_cwd(&self, session_id: &str, cwd: &str) {
         let normalized = cwd.trim();
         if normalized.is_empty() {
@@ -906,16 +903,6 @@ impl AppState {
             .collect::<Vec<_>>();
         json!({ "projects": projects })
     }
-}
-
-fn detached_runtime_spawn_limit() -> usize {
-    const DEFAULT_LIMIT: usize = 4;
-
-    std::env::var("CONDUCTOR_DETACHED_RUNTIME_MAX_SPAWNS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_LIMIT)
 }
 
 fn terminal_restore_snapshot_is_valid(snapshot: &TerminalRestoreSnapshot) -> bool {

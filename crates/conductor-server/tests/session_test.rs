@@ -2,11 +2,12 @@ mod common;
 use common::{spawn_request, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
+use conductor_server::state::SessionRecord;
 use std::sync::Arc;
 
 #[tokio::test]
 async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
-    let harness = TestHarness::new("conductor-session-test", "direct").await;
+    let harness = TestHarness::new("conductor-session-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
@@ -46,15 +47,19 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
         .await
         .unwrap();
 
-    let updated = wait_for_condition("echoed follow-up", || {
+    let updated = wait_for_condition("follow-up persisted", || {
         let state = harness.state.clone();
         let session_id = session.id.clone();
         async move {
             state.get_session(&session_id).await.and_then(|session| {
-                session
-                    .output
-                    .contains("echo:Continue with detail")
-                    .then_some(session)
+                (session.model.as_deref() == Some("gpt-5.4")
+                    && session.reasoning_effort.as_deref() == Some("high")
+                    && session
+                        .conversation
+                        .iter()
+                        .any(|entry| entry.kind == "user_message"
+                            && entry.text == "Continue with detail"))
+                .then_some(session)
             })
         }
     })
@@ -136,7 +141,7 @@ async fn archive_restore_and_kill_cover_session_lifecycle_transitions() {
 }
 
 #[tokio::test]
-async fn resume_session_uses_direct_runtime_even_when_project_requests_legacy_tmux() {
+async fn resume_session_uses_ttyd_runtime_even_when_project_requests_legacy_tmux() {
     let harness = TestHarness::new("conductor-session-resume-test", "tmux").await;
     harness
         .state
@@ -145,33 +150,29 @@ async fn resume_session_uses_direct_runtime_even_when_project_requests_legacy_tm
         .await
         .insert(AgentKind::Codex, Arc::new(ResumeExecutor));
 
-    let queued = harness
+    let session = SessionRecord::new(
+        "resume-ttyd-session".to_string(),
+        "demo".to_string(),
+        None,
+        None,
+        Some(harness.repo.to_string_lossy().to_string()),
+        "codex".to_string(),
+        None,
+        None,
+        "Start runtime".to_string(),
+        None,
+    );
+    harness
         .state
-        .spawn_session(spawn_request("Start runtime"))
+        .sessions
+        .write()
         .await
-        .unwrap();
-    let session = wait_for_condition("direct runtime session", || {
-        let state = harness.state.clone();
-        let session_id = queued.id.clone();
-        async move {
-            state.get_session(&session_id).await.and_then(|session| {
-                let is_direct = session
-                    .metadata
-                    .get("runtimeMode")
-                    .filter(|value| value.as_str() == "direct")
-                    .is_some();
-                is_direct.then_some(session)
-            })
-        }
-    })
-    .await;
-
-    let _ = harness.state.take_terminal_host(&session.id).await;
+        .insert(session.id.clone(), session);
 
     harness
         .state
         .resume_session_with_prompt(
-            &session.id,
+            "resume-ttyd-session",
             "Continue after reconnect".to_string(),
             Vec::new(),
             None,
@@ -181,12 +182,11 @@ async fn resume_session_uses_direct_runtime_even_when_project_requests_legacy_tm
         .await
         .unwrap();
 
-    let updated = wait_for_condition("resumed direct session", || {
+    let updated = wait_for_condition("resumed ttyd session", || {
         let state = harness.state.clone();
-        let session_id = session.id.clone();
         async move {
-            state.get_session(&session_id).await.and_then(|session| {
-                (session.metadata.get("runtimeMode").map(String::as_str) == Some("direct")
+            state.get_session("resume-ttyd-session").await.and_then(|session| {
+                (session.metadata.get("runtimeMode").map(String::as_str) == Some("ttyd")
                     && session.pid.is_some())
                 .then_some(session)
             })
@@ -196,8 +196,8 @@ async fn resume_session_uses_direct_runtime_even_when_project_requests_legacy_tm
 
     assert_eq!(
         updated.metadata.get("runtimeMode").map(String::as_str),
-        Some("direct")
+        Some("ttyd")
     );
 
-    harness.state.kill_session(&session.id).await.unwrap();
+    harness.state.kill_session("resume-ttyd-session").await.unwrap();
 }
