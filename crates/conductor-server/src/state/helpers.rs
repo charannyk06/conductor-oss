@@ -1085,7 +1085,9 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
                 "summary".to_string(),
                 LEGACY_DIRECT_RUNTIME_SUMMARY.to_string(),
             );
-            session.metadata.insert("archivedAt".to_string(), now.clone());
+            session
+                .metadata
+                .insert("archivedAt".to_string(), now.clone());
             session.pid = None;
             return true;
         }
@@ -1095,14 +1097,15 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
             session.status = SessionStatus::Archived;
             session.activity = Some("exited".to_string());
             session.last_activity_at = now.clone();
-            session.summary = Some(
-                "Session archived after backend restart (pre-ttyd runtime)".to_string(),
-            );
+            session.summary =
+                Some("Session archived after backend restart (pre-ttyd runtime)".to_string());
             session.metadata.insert(
                 "summary".to_string(),
                 "Session archived after backend restart (pre-ttyd runtime)".to_string(),
             );
-            session.metadata.insert("archivedAt".to_string(), now.clone());
+            session
+                .metadata
+                .insert("archivedAt".to_string(), now.clone());
             session.pid = None;
             return true;
         }

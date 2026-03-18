@@ -17,10 +17,13 @@ import type { TerminalConnectionInfo } from "./terminalTypes";
  * Priority:
  *  1. The runtime meta tag published by the root layout
  *  2. `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` (build-time env var)
- *  3. Dev mode heuristic: if the page is served from port 3000 the backend
- *     lives on the same hostname at port 4749.
- *  4. Same origin (production: Rust backend serves the dashboard).
+ *  3. Dev heuristics for known local dashboard ports
+ *  4. Same origin as a final fallback when no backend hint exists
  */
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+}
+
 function readBackendOriginFromMeta(): string | null {
   if (typeof document === "undefined") return null;
 
@@ -29,10 +32,22 @@ function readBackendOriginFromMeta(): string | null {
   if (!content) return null;
 
   try {
-    const url = new URL(content, typeof window === "undefined" ? "http://127.0.0.1" : window.location.origin);
+    const base = typeof window === "undefined" ? "http://127.0.0.1" : window.location.origin;
+    const url = new URL(content, base);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       return null;
     }
+
+    if (typeof window !== "undefined") {
+      const current = new URL(window.location.origin);
+      if (isLoopbackHostname(url.hostname) && !isLoopbackHostname(current.hostname)) {
+        url.hostname = current.hostname;
+        if (current.protocol === "https:" && url.protocol === "http:") {
+          url.protocol = "https:";
+        }
+      }
+    }
+
     return url.toString();
   } catch {
     return null;
@@ -55,19 +70,12 @@ function resolveBackendOrigin(): string {
 
   if (typeof window === "undefined") return "http://127.0.0.1:4749";
 
-  const { protocol, hostname, port } = window.location;
-  // dev: dashboard on :3000, backend on :4749
-  if (port === "3000") {
-    return `${protocol}//${hostname}:4749`;
-  }
-  // prod CLI: dashboard on :4747, backend on :4749
-  if (port === "4747") {
+  const { protocol, hostname, origin, port } = window.location;
+  if (port === "3000" || port === "4747") {
     return `${protocol}//${hostname}:4749`;
   }
 
-  // Tailscale / ngrok / custom domain: the backend is served on :4749
-  // Tailscale explicitly exposes port 4749 so this works externally.
-  return `${protocol}//${hostname}:4749`;
+  return origin;
 }
 
 type TerminalTokenResult =

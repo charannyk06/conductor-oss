@@ -1,7 +1,9 @@
 mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{build_app, spawn_request, ttyd_available, wait_for_condition, TestExecutor, TestHarness};
+use common::{
+    build_app, spawn_request, ttyd_available, wait_for_condition, TestExecutor, TestHarness,
+};
 use conductor_core::board::Board;
 use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
