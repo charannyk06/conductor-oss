@@ -1,5 +1,7 @@
 mod common;
-use common::{spawn_request, ttyd_available, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness};
+use common::{
+    spawn_request, ttyd_available, wait_for_condition, ResumeExecutor, TestExecutor, TestHarness,
+};
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use conductor_server::state::SessionRecord;

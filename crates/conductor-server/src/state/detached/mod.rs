@@ -57,6 +57,55 @@ impl AppState {
         ttyd_launcher::spawn_ttyd_runtime(self, executor, session_id, options, &ttyd_binary).await
     }
 
+    /// Archive any non-ttyd sessions that survived previous restarts as Stuck/Working.
+    /// These are legacy sessions from before the ttyd runtime was introduced.
+    /// They cannot be recovered and should not pollute the dashboard.
+    pub(crate) async fn archive_stale_non_ttyd_sessions(self: &Arc<Self>) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let session_ids: Vec<String> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .values()
+                .filter(|session| !session.status.is_terminal())
+                .filter(|session| {
+                    // Only non-ttyd sessions
+                    session
+                        .metadata
+                        .get(RUNTIME_MODE_METADATA_KEY)
+                        .map(|value| value != TTYD_RUNTIME_MODE)
+                        .unwrap_or(true) // no runtimeMode = pre-ttyd
+                })
+                .map(|session| session.id.clone())
+                .collect()
+        };
+
+        for session_id in session_ids {
+            let session_to_persist = {
+                let mut sessions = self.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    session.status = crate::state::SessionStatus::Archived;
+                    session.activity = Some("exited".to_string());
+                    session.last_activity_at = now.clone();
+                    session.summary = Some(
+                        "Session archived on restart (pre-ttyd runtime not recoverable)"
+                            .to_string(),
+                    );
+                    session
+                        .metadata
+                        .insert("archivedAt".to_string(), now.clone());
+                    session.pid = None;
+                    Some(session.clone())
+                } else {
+                    None
+                }
+            };
+
+            if let Some(session) = session_to_persist {
+                let _ = self.persist_session(&session).await;
+            }
+        }
+    }
+
     pub(crate) async fn restore_runtime_sessions(self: &Arc<Self>) {
         let session_ids: Vec<String> = {
             let sessions = self.sessions.read().await;

@@ -120,6 +120,25 @@ test("resolveTerminalConnection prefers the runtime backend origin meta tag", as
   );
 });
 
+test("resolveTerminalConnection rewrites loopback backend meta to the current remote host", async () => {
+  setWindowLocation("https://tailnet.example.ts.net/sessions/session-1");
+  setBackendOriginMeta("http://127.0.0.1:4748");
+  setFetchResponse({
+    required: true,
+    ttydHttpUrl: "/api/sessions/session-1/terminal/ttyd?token=test-token",
+    ttydWsUrl: "/api/sessions/session-1/terminal/ttyd/ws?token=test-token",
+  });
+
+  const connection = await resolveTerminalConnection("session-1");
+
+  assert.equal(connection.interactive, true);
+  assert.equal(connection.reason, null);
+  assert.equal(
+    connection.terminalUrl,
+    "https://tailnet.example.ts.net:4748/api/sessions/session-1/terminal/ttyd?token=test-token",
+  );
+});
+
 test("resolveTerminalConnection resolves backend ttyd proxy paths against the backend origin", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-2");
   setFetchResponse({
