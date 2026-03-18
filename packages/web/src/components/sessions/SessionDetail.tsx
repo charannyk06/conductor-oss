@@ -268,7 +268,7 @@ export function SessionDetail({
           </div>
         )}
 
-        <div className="relative min-h-0 min-w-0 flex-1">
+        <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           <TabsContent value="overview" className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
             <SessionOverview session={session} sessionId={sessionId} active={active && activeTab === "overview"} />
           </TabsContent>
