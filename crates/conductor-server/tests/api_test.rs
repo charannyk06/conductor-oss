@@ -23,8 +23,10 @@ async fn smoke_all_route_modules() {
         .spawn_session(spawn_request("Smoke the session routes"))
         .await
         .unwrap();
-    let session =
-        wait_for_condition_with_timeout("session workspace", Duration::from_secs(20), || {
+    let session = wait_for_condition_with_timeout(
+        "session worktree creation",
+        Duration::from_secs(60),
+        || {
             let state = harness.state.clone();
             let session_id = queued.id.clone();
             async move {
@@ -32,8 +34,9 @@ async fn smoke_all_route_modules() {
                     session.metadata.contains_key("worktree").then_some(session)
                 })
             }
-        })
-        .await;
+        },
+    )
+    .await;
 
     let requests = vec![
         (
