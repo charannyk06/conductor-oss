@@ -1076,22 +1076,34 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
             return true;
         }
         Some("direct") => {
-            session.status = SessionStatus::Stuck;
-            session.activity = Some("blocked".to_string());
+            // Direct runtime is legacy — archive immediately.
+            session.status = SessionStatus::Archived;
+            session.activity = Some("exited".to_string());
             session.last_activity_at = now.clone();
             session.summary = Some(LEGACY_DIRECT_RUNTIME_SUMMARY.to_string());
             session.metadata.insert(
                 "summary".to_string(),
                 LEGACY_DIRECT_RUNTIME_SUMMARY.to_string(),
             );
-            session.metadata.insert(
-                RECOVERY_STATE_METADATA_KEY.to_string(),
-                "legacy_runtime".to_string(),
+            session.metadata.insert("archivedAt".to_string(), now.clone());
+            session.pid = None;
+            return true;
+        }
+        // Non-ttyd active sessions cannot be recovered — archive them so they
+        // don't clutter the dashboard after a restart/reinstall.
+        None | Some("") if is_active_status || is_active_activity => {
+            session.status = SessionStatus::Archived;
+            session.activity = Some("exited".to_string());
+            session.last_activity_at = now.clone();
+            session.summary = Some(
+                "Session archived after backend restart (pre-ttyd runtime)".to_string(),
             );
             session.metadata.insert(
-                RECOVERY_ACTION_METADATA_KEY.to_string(),
-                "archive".to_string(),
+                "summary".to_string(),
+                "Session archived after backend restart (pre-ttyd runtime)".to_string(),
             );
+            session.metadata.insert("archivedAt".to_string(), now.clone());
+            session.pid = None;
             return true;
         }
         _ => {}
@@ -1499,7 +1511,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_loaded_session_marks_active_sessions_stuck_when_runtime_is_gone() {
+    fn normalize_loaded_session_archives_active_sessions_without_ttyd_runtime() {
+        // Sessions without runtimeMode="ttyd" that were active are now archived
+        // at restart so they don't pollute the dashboard as stale Stuck entries.
         let mut session = SessionRecord::new(
             "session-2".to_string(),
             "demo".to_string(),
@@ -1518,16 +1532,10 @@ mod tests {
         let changed = normalize_loaded_session(&mut session);
 
         assert!(changed);
-        assert_eq!(session.status, SessionStatus::Stuck);
-        assert_eq!(session.activity.as_deref(), Some("blocked"));
+        assert_eq!(session.status, SessionStatus::Archived);
+        assert_eq!(session.activity.as_deref(), Some("exited"));
         assert_eq!(session.pid, None);
-        assert_eq!(
-            session
-                .metadata
-                .get(RECOVERY_STATE_METADATA_KEY)
-                .map(String::as_str),
-            Some("resume_required")
-        );
+        assert!(session.metadata.contains_key("archivedAt"));
     }
 
     #[test]
@@ -1586,31 +1594,21 @@ mod tests {
         let changed = normalize_loaded_session(&mut session);
 
         assert!(changed);
-        assert_eq!(session.status, SessionStatus::Stuck);
-        assert_eq!(session.activity.as_deref(), Some("blocked"));
+        // Direct runtime sessions are now archived immediately (not left as Stuck)
+        assert_eq!(session.status, SessionStatus::Archived);
+        assert_eq!(session.activity.as_deref(), Some("exited"));
         assert_eq!(
             session.summary.as_deref(),
             Some(LEGACY_DIRECT_RUNTIME_SUMMARY)
         );
-        assert_eq!(
-            session
-                .metadata
-                .get(RECOVERY_STATE_METADATA_KEY)
-                .map(String::as_str),
-            Some("legacy_runtime")
-        );
-        assert_eq!(
-            session
-                .metadata
-                .get(RECOVERY_ACTION_METADATA_KEY)
-                .map(String::as_str),
-            Some("archive")
-        );
-        assert_eq!(session.pid, Some(42));
+        assert!(session.metadata.contains_key("archivedAt"));
+        assert_eq!(session.pid, None);
     }
 
     #[test]
-    fn normalize_loaded_session_flags_detached_runtime_when_pid_is_alive() {
+    fn normalize_loaded_session_archives_non_ttyd_active_session_even_with_live_pid() {
+        // Non-ttyd sessions without runtimeMode are archived regardless of PID
+        // because the old runtime cannot be resumed.
         let mut session = SessionRecord::new(
             "session-3".to_string(),
             "demo".to_string(),
@@ -1629,20 +1627,8 @@ mod tests {
         let changed = normalize_loaded_session(&mut session);
 
         assert!(changed);
-        assert_eq!(session.status, SessionStatus::Stuck);
-        assert_eq!(
-            session
-                .metadata
-                .get(RECOVERY_STATE_METADATA_KEY)
-                .map(String::as_str),
-            Some("detached_runtime")
-        );
-        assert_eq!(
-            session
-                .metadata
-                .get(DETACHED_PID_METADATA_KEY)
-                .map(String::as_str),
-            Some(std::process::id().to_string().as_str())
-        );
+        assert_eq!(session.status, SessionStatus::Archived);
+        assert_eq!(session.activity.as_deref(), Some("exited"));
+        assert!(session.metadata.contains_key("archivedAt"));
     }
 }
