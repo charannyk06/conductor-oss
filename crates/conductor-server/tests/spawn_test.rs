@@ -1,12 +1,15 @@
 mod common;
 
-use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness};
+use common::{spawn_request, ttyd_available, wait_for_condition, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use std::sync::Arc;
 
 #[tokio::test]
 async fn spawn_session_runs_from_queue_to_live_ttyd_state() {
+    if !ttyd_available() {
+        return;
+    }
     let harness = TestHarness::new("conductor-spawn-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
