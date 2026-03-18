@@ -7,7 +7,9 @@ use tokio::process::Command;
 
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::{spawn_process, spawn_process_no_stdin};
+use crate::process::{spawn_process_no_stdin_with_env_removals, spawn_process_with_env_removals};
+
+const QWEN_ENV_REMOVE_KEYS: &[&str] = &["NO_COLOR", "FORCE_COLOR", "CLICOLOR_FORCE"];
 
 #[derive(Clone)]
 pub struct QwenCodeExecutor {
@@ -24,15 +26,18 @@ impl QwenCodeExecutor {
     }
 
     fn runtime_env(&self, options: &SpawnOptions) -> HashMap<String, String> {
-        let mut env = options.env.clone();
-        if options.interactive {
-            // Qwen's TUI can crash when a custom theme exposes fewer than two
-            // gradient stops. NO_COLOR forces its no-color theme and avoids the
-            // invalid gradient path while keeping the session usable.
-            env.entry("NO_COLOR".to_string())
-                .or_insert_with(|| "1".to_string());
+        options.env.clone()
+    }
+
+    fn runtime_env_removals(&self, options: &SpawnOptions) -> Vec<String> {
+        if !options.interactive {
+            return Vec::new();
         }
-        env
+
+        QWEN_ENV_REMOVE_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect()
     }
 }
 
@@ -63,10 +68,19 @@ impl Executor for QwenCodeExecutor {
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let env = self.runtime_env(&options);
+        let env_remove = self.runtime_env_removals(&options);
         let handle = if options.interactive {
-            spawn_process(&self.binary, &args, &options.cwd, &env).await?
+            spawn_process_with_env_removals(&self.binary, &args, &options.cwd, &env, &env_remove)
+                .await?
         } else {
-            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &env).await?
+            spawn_process_no_stdin_with_env_removals(
+                &self.binary,
+                &args,
+                &options.cwd,
+                &env,
+                &env_remove,
+            )
+            .await?
         };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
         Ok(ExecutorHandle::new(
@@ -181,9 +195,30 @@ mod tests {
     }
 
     #[test]
-    fn interactive_runtime_env_disables_qwen_gradient_theme() {
+    fn interactive_runtime_env_preserves_existing_values() {
         let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
         let env = executor.runtime_env(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "review the workspace".to_string(),
+            model: None,
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::from([("EXISTING".to_string(), "1".to_string())]),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert_eq!(env.get("EXISTING").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn interactive_runtime_env_removes_force_color_overrides() {
+        let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
+        let env_remove = executor.runtime_env_removals(&SpawnOptions {
             cwd: PathBuf::from("/tmp/demo"),
             prompt: "review the workspace".to_string(),
             model: None,
@@ -198,7 +233,14 @@ mod tests {
             resume_target: None,
         });
 
-        assert_eq!(env.get("NO_COLOR").map(String::as_str), Some("1"));
+        assert_eq!(
+            env_remove,
+            vec![
+                "NO_COLOR".to_string(),
+                "FORCE_COLOR".to_string(),
+                "CLICOLOR_FORCE".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -219,6 +261,27 @@ mod tests {
             resume_target: None,
         });
 
-        assert!(!env.contains_key("NO_COLOR"));
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn headless_runtime_env_keeps_color_overrides_available() {
+        let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
+        let env_remove = executor.runtime_env_removals(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "generate a plan".to_string(),
+            model: None,
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(env_remove.is_empty());
     }
 }

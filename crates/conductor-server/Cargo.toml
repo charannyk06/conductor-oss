@@ -34,6 +34,9 @@ portable-pty = { workspace = true }
 notify = { workspace = true }
 vt100 = "0.16"
 base64 = "0.22"
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
+which = "7"
 
 [dev-dependencies]
 tower = "0.5"

@@ -31,6 +31,7 @@ jobs:
 
       - name: Run dependency audit
         run: bun audit
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable

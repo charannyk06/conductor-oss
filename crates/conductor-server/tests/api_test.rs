@@ -2,14 +2,15 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness};
+use common::{TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
+use conductor_server::state::SessionRecord;
 use std::sync::Arc;
 use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn smoke_all_route_modules() {
-    let harness = TestHarness::new("conductor-api-test", "direct").await;
+    let harness = TestHarness::new("conductor-api-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {
@@ -17,22 +18,24 @@ async fn smoke_all_route_modules() {
             auto_complete: false,
         }),
     );
-    let queued = harness
+    let session = SessionRecord::new(
+        "api-smoke-session".to_string(),
+        "demo".to_string(),
+        Some("session/api-smoke-session".to_string()),
+        None,
+        Some(harness.repo.to_string_lossy().to_string()),
+        "codex".to_string(),
+        None,
+        None,
+        "Smoke the session routes".to_string(),
+        None,
+    );
+    harness
         .state
-        .spawn_session(spawn_request("Smoke the session routes"))
+        .sessions
+        .write()
         .await
-        .unwrap();
-    let session = wait_for_condition("session workspace", || {
-        let state = harness.state.clone();
-        let session_id = queued.id.clone();
-        async move {
-            state
-                .get_session(&session_id)
-                .await
-                .and_then(|session| session.metadata.contains_key("worktree").then_some(session))
-        }
-    })
-    .await;
+        .insert(session.id.clone(), session.clone());
 
     let requests = vec![
         (

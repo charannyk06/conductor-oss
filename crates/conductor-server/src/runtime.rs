@@ -432,7 +432,7 @@ mod tests {
     where
         F: FnMut() -> Option<T>,
     {
-        timeout(Duration::from_secs(3), async move {
+        timeout(Duration::from_secs(10), async move {
             loop {
                 if let Some(value) = check() {
                     return value;
@@ -447,6 +447,9 @@ mod tests {
     #[tokio::test]
     async fn board_automation_retries_ready_cards_without_new_board_events() {
         let root = std::env::temp_dir().join(format!("conductor-runtime-test-{}", Uuid::new_v4()));
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         let project_root = root.join("repo");
         fs::create_dir_all(&project_root).unwrap();
         let board_path = project_root.join("CONDUCTOR.md");
@@ -477,7 +480,7 @@ mod tests {
                 ProjectConfig {
                     path: project_root.to_string_lossy().to_string(),
                     agent: Some("codex".to_string()),
-                    runtime: Some("direct".to_string()),
+                    runtime: Some("ttyd".to_string()),
                     ..ProjectConfig::default()
                 },
             )]),

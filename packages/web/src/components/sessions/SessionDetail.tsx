@@ -190,15 +190,11 @@ export function SessionDetail({
   }
 
   const status = typeof session.status === "string" ? session.status : "unknown";
-  const agentName = session.metadata["agent"]?.trim() ?? "";
-  const sessionModel = session.metadata["model"]?.trim() ?? "";
-  const sessionReasoningEffort = session.metadata["reasoningEffort"]?.trim() ?? "";
   const compactStatusLabel = getCompactSessionStatusLabel(status);
   const statusDotClass = getStatusDotClass(status);
   const statusAnimated = isStatusAnimated(status);
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
-  const terminalTabActive = active && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
   const sessionTabs = (
@@ -275,19 +271,15 @@ export function SessionDetail({
 
           <TabsContent
             value="terminal"
+            forceMount
             className={immersiveTerminalActive
               ? "flex min-h-0 h-full min-w-0 w-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
               : "flex min-h-0 h-full min-w-0 flex-col w-full overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
           >
             <SessionTerminal
-              key={sessionId}
               sessionId={sessionId}
-              agentName={agentName}
-              projectId={session.projectId}
-              sessionModel={sessionModel}
-              sessionReasoningEffort={sessionReasoningEffort}
               sessionState={status}
-              active={terminalTabActive}
+              runtimeMode={session.metadata["runtimeMode"]?.trim() ?? null}
               pendingInsert={pendingTerminalInsert}
               immersiveMobileMode={immersiveTerminalActive}
             />

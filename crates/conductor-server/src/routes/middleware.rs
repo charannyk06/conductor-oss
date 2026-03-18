@@ -46,12 +46,18 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return None;
     }
 
-    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/ws") {
+    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/token") {
+        return Some(AccessRole::Operator);
+    }
+
+    if path.starts_with("/api/sessions/")
+        && (path.ends_with("/terminal/ttyd") || path.ends_with("/terminal/ttyd/ws"))
+    {
         return None;
     }
 
-    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/token") {
-        return Some(AccessRole::Operator);
+    if path.starts_with("/api/sessions/") && path.ends_with("/terminal/ttyd/token") {
+        return None;
     }
 
     if path.starts_with("/api/access") {
@@ -148,7 +154,15 @@ mod tests {
             Some(AccessRole::Operator)
         );
         assert_eq!(
-            required_access_role(&Method::GET, "/api/sessions/abc/terminal/ws"),
+            required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd"),
+            None
+        );
+        assert_eq!(
+            required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd/ws"),
+            None
+        );
+        assert_eq!(
+            required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd/token"),
             None
         );
     }

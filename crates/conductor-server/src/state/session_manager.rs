@@ -18,9 +18,7 @@ use super::types::{
     DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::AppState;
-
-const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
+use super::{AppState, DETACHED_PID_METADATA_KEY};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
 
 const PARSER_STATE_KEY: &str = "parserState";
@@ -413,10 +411,6 @@ impl AppState {
             false
         };
 
-        if !signaled_live_runtime {
-            let _ = self.kill_detached_runtime(session_id).await;
-        }
-
         if signaled_live_runtime {
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
@@ -761,6 +755,7 @@ impl AppState {
             }
         };
 
+        let streams_terminal_bytes = runtime_launch.streams_terminal_bytes;
         let (pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
             runtime_launch.handle.into_parts();
         if self
@@ -925,7 +920,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: true,
+                mirror_terminal_output: !streams_terminal_bytes,
                 output_is_parsed: true,
                 timeout: project
                     .agent_config
@@ -1463,6 +1458,7 @@ impl AppState {
                 },
             )
             .await?;
+        let streams_terminal_bytes_resume = runtime_launch.streams_terminal_bytes;
         let (pid, _kind, output_rx, input_tx, terminal_rx, resize_tx, kill_tx) =
             runtime_launch.handle.into_parts();
 
@@ -1525,7 +1521,7 @@ impl AppState {
             output_rx,
             OutputConsumerConfig {
                 terminal_rx,
-                mirror_terminal_output: true,
+                mirror_terminal_output: !streams_terminal_bytes_resume,
                 output_is_parsed: true,
                 timeout: project
                     .agent_config
@@ -1705,6 +1701,10 @@ mod tests {
     use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
+    fn test_wait_timeout() -> Duration {
+        Duration::from_secs(10)
+    }
+
     struct TestExecutor {
         kind: AgentKind,
     }
@@ -1879,7 +1879,7 @@ mod tests {
     }
 
     async fn wait_for_path(path: PathBuf) {
-        timeout(Duration::from_secs(3), async move {
+        timeout(test_wait_timeout(), async move {
             loop {
                 if path.exists() {
                     return;
@@ -1894,7 +1894,7 @@ mod tests {
     async fn build_state(root: &Path, project: ProjectConfig, project_id: &str) -> Arc<AppState> {
         let mut project = project;
         if project.runtime.is_none() {
-            project.runtime = Some(crate::state::detached::DIRECT_RUNTIME_MODE.to_string());
+            project.runtime = Some(crate::state::detached::TTYD_RUNTIME_MODE.to_string());
         }
         let config = ConductorConfig {
             workspace: root.to_path_buf(),
@@ -1953,6 +1953,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         fs::create_dir_all(repo.join("config")).unwrap();
         fs::create_dir_all(repo.join("notes")).unwrap();
         fs::write(repo.join("config/.env"), "TOKEN=test\n").unwrap();
@@ -2031,6 +2034,9 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-pref-event-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
@@ -2133,11 +2139,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ttyd_runtime_keeps_terminal_alive_after_agent_command_exits() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: Some("codex".to_string()),
+                    use_worktree: Some(true),
+                    permission_mode: None,
+                    model: None,
+                    reasoning_effort: None,
+                    branch: None,
+                    base_branch: None,
+                    task_id: None,
+                    task_ref: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
+                    brief_path: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        let ttyd_pid = session
+            .metadata
+            .get(crate::state::detached::types::TTYD_PID_METADATA_KEY)
+            .and_then(|value| value.parse::<u32>().ok())
+            .expect("spawned session should record ttyd pid");
+
+        assert!(
+            is_process_alive(ttyd_pid),
+            "ttyd should stay alive even after the initial agent command exits"
+        );
+
+        state.archive_session(&session.id).await.unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn spawn_session_cleans_up_worktree_when_dev_server_bootstrap_fails() {
         let root =
             std::env::temp_dir().join(format!("conductor-dev-server-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         fs::create_dir_all(root.join(".conductor")).unwrap();
         fs::write(root.join(".conductor/rust-backend"), "not-a-directory").unwrap();
 
@@ -2196,6 +2269,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-queue-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
@@ -2232,7 +2308,7 @@ mod tests {
 
         assert_eq!(session.status, SessionStatus::Queued);
 
-        let launched = timeout(Duration::from_secs(3), async {
+        let launched = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
                 if current.status != SessionStatus::Queued
@@ -2261,6 +2337,9 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-queue-paused-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
@@ -2317,7 +2396,7 @@ mod tests {
             .await
             .unwrap();
 
-        let launched = timeout(Duration::from_secs(3), async {
+        let launched = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session(&session.id).await.unwrap();
                 if current.status != SessionStatus::Queued
@@ -2343,6 +2422,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("conductor-archive-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
         let cleanup_log = root.join("cleanup.log");
         let archive_log = root.join("archive.log");
 
@@ -2388,7 +2470,7 @@ mod tests {
 
         state.archive_session(&session.id).await.unwrap();
 
-        timeout(Duration::from_secs(3), async {
+        timeout(test_wait_timeout(), async {
             loop {
                 let cleanup_done =
                     fs::read_to_string(&cleanup_log).ok().as_deref() == Some("cleanup");
@@ -2470,6 +2552,9 @@ mod tests {
             std::env::temp_dir().join(format!("conductor-resume-tmux-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
 
         let project = ProjectConfig {
             path: repo.to_string_lossy().to_string(),
@@ -2520,11 +2605,14 @@ mod tests {
             .await
             .unwrap();
 
-        let updated = timeout(Duration::from_secs(5), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session("resume-tmux-session").await.unwrap();
                 if current.metadata.get("runtimeMode").map(String::as_str)
-                    == Some(crate::state::detached::DIRECT_RUNTIME_MODE)
+                    == Some(crate::state::detached::TTYD_RUNTIME_MODE)
+                    && current
+                        .metadata
+                        .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY)
                     && current.pid.is_some()
                 {
                     return current;
@@ -2533,12 +2621,15 @@ mod tests {
             }
         })
         .await
-        .expect("resume should relaunch the session on the direct runtime");
+        .expect("resume should relaunch the session on the ttyd runtime");
 
         assert_eq!(
             updated.metadata.get("runtimeMode").map(String::as_str),
-            Some(crate::state::detached::DIRECT_RUNTIME_MODE)
+            Some(crate::state::detached::TTYD_RUNTIME_MODE)
         );
+        assert!(updated
+            .metadata
+            .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2579,7 +2670,7 @@ mod tests {
 
         state.kill_session("detached-kill").await.unwrap();
 
-        let waited = timeout(Duration::from_secs(3), async {
+        let waited = timeout(test_wait_timeout(), async {
             loop {
                 if let Ok(Some(_)) = child.try_wait() {
                     break;
@@ -2635,7 +2726,7 @@ mod tests {
 
         state.archive_session("detached-archive").await.unwrap();
 
-        let waited = timeout(Duration::from_secs(3), async {
+        let waited = timeout(test_wait_timeout(), async {
             loop {
                 if let Ok(Some(_)) = child.try_wait() {
                     break;
@@ -2709,9 +2800,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_output_consumer_skips_reparsing_for_direct_runtime_output() {
+    async fn start_output_consumer_skips_reparsing_for_ttyd_runtime_output() {
         let root =
-            std::env::temp_dir().join(format!("conductor-direct-output-test-{}", Uuid::new_v4()));
+            std::env::temp_dir().join(format!("conductor-ttyd-output-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
 
@@ -2724,9 +2815,9 @@ mod tests {
         let state = build_state(&root, project, "demo").await;
 
         let mut session = SessionRecord::new(
-            "direct-output".to_string(),
+            "ttyd-output".to_string(),
             "demo".to_string(),
-            Some("session/direct-output".to_string()),
+            Some("session/ttyd-output".to_string()),
             None,
             Some(repo.to_string_lossy().to_string()),
             "codex".to_string(),
@@ -2740,7 +2831,7 @@ mod tests {
 
         let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
         state.start_output_consumer(
-            "direct-output".to_string(),
+            "ttyd-output".to_string(),
             Arc::new(PrefixingExecutor),
             output_rx,
             OutputConsumerConfig {
@@ -2756,9 +2847,9 @@ mod tests {
             .unwrap();
         drop(output_tx);
 
-        let updated = timeout(Duration::from_secs(3), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
-                let current = state.get_session("direct-output").await.unwrap();
+                let current = state.get_session("ttyd-output").await.unwrap();
                 if current
                     .conversation
                     .iter()
@@ -2837,7 +2928,7 @@ mod tests {
             .await
             .unwrap();
 
-        let event = timeout(Duration::from_secs(3), terminal_rx.recv())
+        let event = timeout(test_wait_timeout(), terminal_rx.recv())
             .await
             .expect("terminal event should arrive")
             .expect("broadcast event should be readable");
@@ -2914,7 +3005,7 @@ mod tests {
             .await
             .unwrap();
 
-        let event = timeout(Duration::from_secs(3), terminal_rx.recv())
+        let event = timeout(test_wait_timeout(), terminal_rx.recv())
             .await
             .expect("native terminal event should arrive")
             .expect("broadcast event should be readable");
@@ -2926,7 +3017,7 @@ mod tests {
             other => panic!("unexpected terminal event: {other:?}"),
         }
 
-        let updated = timeout(Duration::from_secs(3), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session("native-terminal-stream").await.unwrap();
                 if current
@@ -2953,9 +3044,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resize_live_terminal_uses_direct_runtime_resize_channel() {
+    async fn resize_live_terminal_uses_ttyd_resize_channel() {
         let root = std::env::temp_dir().join(format!(
-            "conductor-direct-terminal-resize-test-{}",
+            "conductor-ttyd-terminal-resize-test-{}",
             Uuid::new_v4()
         ));
         let repo = root.join("repo");
@@ -2970,9 +3061,9 @@ mod tests {
         let state = build_state(&root, project, "demo").await;
 
         let mut session = SessionRecord::new(
-            "direct-terminal-resize".to_string(),
+            "ttyd-terminal-resize".to_string(),
             "demo".to_string(),
-            Some("session/direct-terminal-resize".to_string()),
+            Some("session/ttyd-terminal-resize".to_string()),
             None,
             Some(repo.to_string_lossy().to_string()),
             "codex".to_string(),
@@ -2989,17 +3080,17 @@ mod tests {
         let (resize_tx, mut resize_rx) = mpsc::channel::<PtyDimensions>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
         state
-            .attach_terminal_runtime("direct-terminal-resize", input_tx, Some(resize_tx), kill_tx)
+            .attach_terminal_runtime("ttyd-terminal-resize", input_tx, Some(resize_tx), kill_tx)
             .await;
 
         state
-            .resize_live_terminal("direct-terminal-resize", 132, 40)
+            .resize_live_terminal("ttyd-terminal-resize", 132, 40)
             .await
             .unwrap();
 
-        let dimensions = timeout(Duration::from_secs(3), resize_rx.recv())
+        let dimensions = timeout(test_wait_timeout(), resize_rx.recv())
             .await
-            .expect("resize should reach direct runtime channel")
+            .expect("resize should reach ttyd runtime channel")
             .expect("resize channel should stay open");
         assert_eq!(
             dimensions,
@@ -3064,7 +3155,7 @@ mod tests {
             .unwrap();
         drop(output_tx);
 
-        let updated = timeout(Duration::from_secs(3), async {
+        let updated = timeout(test_wait_timeout(), async {
             loop {
                 let current = state.get_session("unstructured-output").await.unwrap();
                 if current

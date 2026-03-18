@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -12,25 +13,22 @@ use std::path::{Path as StdPath, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-use tokio::sync::broadcast;
 
 use crate::routes::config::access_control_enabled;
-use crate::routes::ttyd_protocol::{self, ClientMessage};
+use crate::routes::ttyd_protocol;
 use crate::state::{
     sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
-    TerminalStreamEvent, DETACHED_LOG_PATH_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    DETACHED_LOG_PATH_METADATA_KEY, RUNTIME_MODE_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
+    TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
 type HmacSha256 = Hmac<sha2::Sha256>;
 
-const DEFAULT_TERMINAL_COLS: u16 = 120;
-const DEFAULT_TERMINAL_ROWS: u16 = 32;
 const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 10_000;
 const MAX_TERMINAL_SNAPSHOT_LINES: usize = 12000;
 const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
-const LIVE_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 2 * 1024 * 1024;
-const READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES: usize = 2 * 1024 * 1024;
+const TERMINAL_SNAPSHOT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
 const SERVER_TIMING_HEADER: &str = "server-timing";
@@ -41,16 +39,66 @@ const TERMINAL_SNAPSHOT_FORMAT_HEADER: &str = "x-conductor-terminal-snapshot-for
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
+fn ttyd_session_ws_url(session: &SessionRecord) -> Option<String> {
+    let runtime_mode = session
+        .metadata
+        .get(RUNTIME_MODE_METADATA_KEY)
+        .map(String::as_str);
+    if runtime_mode != Some(TTYD_RUNTIME_MODE) {
+        return None;
+    }
+
+    session
+        .metadata
+        .get(TTYD_WS_URL_METADATA_KEY)
+        .cloned()
+}
+
+fn ttyd_http_url_from_ws_url(ws_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(ws_url).ok()?;
+    match url.scheme() {
+        "ws" => {
+            let _ = url.set_scheme("http");
+        }
+        "wss" => {
+            let _ = url.set_scheme("https");
+        }
+        "http" | "https" => {}
+        _ => return None,
+    }
+
+    let normalized_path = match url.path() {
+        "/ws" => "/".to_string(),
+        path if path.ends_with("/ws") => {
+            let stripped = &path[..path.len().saturating_sub(3)];
+            if stripped.is_empty() {
+                "/".to_string()
+            } else {
+                stripped.to_string()
+            }
+        }
+        "" => "/".to_string(),
+        path => path.to_string(),
+    };
+    url.set_path(&normalized_path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
+fn ttyd_session_http_url(session: &SessionRecord) -> Option<String> {
+    ttyd_session_ws_url(session)
+        .and_then(|ws_url| ttyd_http_url_from_ws_url(&ws_url))
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum TerminalTokenScope {
-    Stream,
     Control,
 }
 
 impl TerminalTokenScope {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Stream => "stream",
             Self::Control => "control",
         }
     }
@@ -58,13 +106,21 @@ impl TerminalTokenScope {
 
 /// WebSocket routes that must bypass CorsLayer to avoid 101 response interference.
 pub fn ws_router() -> Router<Arc<AppState>> {
-    Router::new().route("/api/sessions/{id}/terminal/ws", get(terminal_websocket))
+    Router::new().route(
+        "/api/sessions/{id}/terminal/ttyd/ws",
+        get(terminal_ttyd_frontend_websocket),
+    )
 }
 
 /// Non-WebSocket terminal routes (HTTP) that go through normal CORS middleware.
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{id}/terminal/token", get(terminal_token))
+        .route("/api/sessions/{id}/terminal/ttyd", get(terminal_ttyd_frontend))
+        .route(
+            "/api/sessions/{id}/terminal/ttyd/token",
+            get(terminal_ttyd_frontend_token),
+        )
         .route(
             "/api/sessions/{id}/terminal/snapshot",
             get(terminal_snapshot),
@@ -147,9 +203,6 @@ fn build_terminal_snapshot_response(payload: Value, started_at: Instant) -> Resp
 
 #[derive(Debug, Deserialize)]
 struct TerminalQuery {
-    protocol: Option<String>,
-    cols: Option<u16>,
-    rows: Option<u16>,
     token: Option<String>,
 }
 
@@ -159,28 +212,71 @@ struct TerminalSnapshotQuery {
     live: Option<String>,
 }
 
-async fn terminal_websocket(
+fn ttyd_frontend_proxy_path(session_id: &str, token: Option<&str>) -> String {
+    match token {
+        Some(token) if !token.trim().is_empty() => {
+            format!("/api/sessions/{session_id}/terminal/ttyd?token={token}")
+        }
+        _ => format!("/api/sessions/{session_id}/terminal/ttyd"),
+    }
+}
+
+fn ttyd_frontend_proxy_ws_path(session_id: &str, token: Option<&str>) -> String {
+    match token {
+        Some(token) if !token.trim().is_empty() => {
+            format!("/api/sessions/{session_id}/terminal/ttyd/ws?token={token}")
+        }
+        _ => format!("/api/sessions/{session_id}/terminal/ttyd/ws"),
+    }
+}
+
+async fn terminal_ttyd_frontend_websocket(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if state.get_session(&id).await.is_none() {
+    let ws = ws.protocols(["tty"]);
+    let Some(session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
-    }
-
-    if query.protocol.as_deref() != Some("ttyd") {
-        return error(StatusCode::BAD_REQUEST, "Unsupported terminal protocol").into_response();
-    }
+    };
 
     if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
 
-    let cols = query.cols.unwrap_or(DEFAULT_TERMINAL_COLS).max(1);
-    let rows = query.rows.unwrap_or(DEFAULT_TERMINAL_ROWS).max(1);
+    if ttyd_session_ws_url(&session).is_none() {
+        return error(
+            StatusCode::CONFLICT,
+            format!("Session {id} is not backed by ttyd"),
+        )
+        .into_response();
+    }
 
-    ws.on_upgrade(move |socket| handle_terminal_socket(socket, state, id, cols, rows))
+    match state.ensure_session_live(&id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return error(
+                StatusCode::CONFLICT,
+                format!("Session {id} is not running"),
+            )
+            .into_response();
+        }
+        Err(err) => {
+            tracing::warn!(
+                session_id = %id,
+                error = %err,
+                "Failed to restore live terminal session before ttyd websocket attach"
+            );
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to attach live terminal: {err}"),
+            )
+            .into_response();
+        }
+    }
+
+    ws.on_upgrade(move |socket| handle_ttyd_frontend_socket(state, id, socket))
 }
 
 async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
@@ -192,9 +288,40 @@ async fn build_terminal_token_response(
     id: String,
     scope: TerminalTokenScope,
 ) -> Response {
-    if state.get_session(&id).await.is_none() {
+    let Some(initial_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
+
+    if ttyd_session_ws_url(&initial_session).is_some()
+        && initial_session.metadata.contains_key(TTYD_PID_METADATA_KEY)
+    {
+        match state.ensure_session_live(&id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return error(
+                    StatusCode::CONFLICT,
+                    format!("Session {id} is not running"),
+                )
+                .into_response();
+            }
+            Err(err) => {
+                tracing::warn!(
+                    session_id = %id,
+                    error = %err,
+                    "Failed to restore live terminal session before issuing token"
+                );
+                return error(
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to attach live terminal: {err}"),
+                )
+                .into_response();
+            }
+        }
     }
+
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
 
     let access = state.config.read().await.access.clone();
     let token_required = should_issue_terminal_token(&access);
@@ -203,13 +330,119 @@ async fn build_terminal_token_response(
     } else {
         None
     };
+    let Some(_ttyd_ws_url) = ttyd_session_ws_url(&session) else {
+        return error(
+            StatusCode::CONFLICT,
+            format!("Session {id} does not expose a ttyd terminal"),
+        )
+        .into_response();
+    };
+    let ttyd_http_url = ttyd_frontend_proxy_path(&id, token.as_deref());
+    let ttyd_ws_url = ttyd_frontend_proxy_ws_path(&id, token.as_deref());
 
     Json(json!({
         "token": token,
         "required": token_required,
         "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
+        "ttydHttpUrl": ttyd_http_url,
+        "ttydWsUrl": ttyd_ws_url,
     }))
     .into_response()
+}
+
+async fn terminal_ttyd_frontend(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<TerminalQuery>,
+) -> Response {
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
+
+    if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
+        return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
+    }
+
+    match state.ensure_session_live(&id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return error(
+                StatusCode::CONFLICT,
+                format!("Session {id} is not running"),
+            )
+            .into_response();
+        }
+        Err(err) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to attach live terminal: {err}"),
+            )
+            .into_response();
+        }
+    }
+
+    let Some(ttyd_http_url) = ttyd_session_http_url(&session) else {
+        return error(
+            StatusCode::CONFLICT,
+            format!("Session {id} does not expose a ttyd terminal"),
+        )
+        .into_response();
+    };
+
+    let upstream = match reqwest::get(&ttyd_http_url).await {
+        Ok(upstream) => upstream,
+        Err(err) => {
+            tracing::warn!(session_id = %id, error = %err, "Failed to load ttyd frontend HTML");
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to load ttyd frontend: {err}"),
+            )
+            .into_response();
+        }
+    };
+
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream
+        .headers()
+        .get(CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("text/html; charset=utf-8"));
+    let body = match upstream.bytes().await {
+        Ok(body) => body,
+        Err(err) => {
+            tracing::warn!(session_id = %id, error = %err, "Failed to read ttyd frontend HTML");
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to read ttyd frontend: {err}"),
+            )
+            .into_response();
+        }
+    };
+
+    let mut response = Response::new(body.into());
+    *response.status_mut() = status;
+    response.headers_mut().insert(CONTENT_TYPE, content_type);
+    response
+}
+
+async fn terminal_ttyd_frontend_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
+
+    if ttyd_session_ws_url(&session).is_none() {
+        return error(
+            StatusCode::CONFLICT,
+            format!("Session {id} does not expose a ttyd terminal"),
+        )
+        .into_response();
+    }
+
+    Json(json!({ "token": "" })).into_response()
 }
 
 async fn terminal_snapshot(
@@ -226,11 +459,7 @@ async fn terminal_snapshot(
         .lines
         .unwrap_or(DEFAULT_TERMINAL_SNAPSHOT_LINES)
         .clamp(25, MAX_TERMINAL_SNAPSHOT_LINES);
-    let max_bytes = if terminal_snapshot_live_requested(query.live.as_deref()) {
-        LIVE_TERMINAL_SNAPSHOT_MAX_BYTES
-    } else {
-        READ_ONLY_TERMINAL_SNAPSHOT_MAX_BYTES
-    };
+    let max_bytes = TERMINAL_SNAPSHOT_MAX_BYTES;
     let live_requested = terminal_snapshot_live_requested(query.live.as_deref());
 
     match build_terminal_snapshot(&state, &session, lines, max_bytes, live_requested).await {
@@ -459,203 +688,168 @@ fn utf8_safe_tail_start(bytes: &[u8], preferred_start: usize) -> usize {
     start.min(bytes.len())
 }
 
-/// Wrap raw PTY bytes in a ttyd-style output frame: `['0' (0x30)][bytes]`.
-fn encode_ttyd_output_frame(bytes: &[u8]) -> Vec<u8> {
-    ttyd_protocol::encode_output(bytes)
-}
-
-async fn handle_terminal_socket(
-    mut socket: WebSocket,
+async fn handle_ttyd_frontend_socket(
     state: Arc<AppState>,
     session_id: String,
-    cols: u16,
-    rows: u16,
+    mut client_socket: WebSocket,
 ) {
-    // Wait for ttyd JSON handshake: client sends `{columns, rows}`.
-    let mut handshake_cols = cols;
-    let mut handshake_rows = rows;
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await {
-            Ok(Some(Ok(msg))) => {
-                if let Message::Binary(data) = &msg {
-                    if !data.is_empty() && data[0] == b'{' {
-                        if let Ok(json_str) = std::str::from_utf8(data) {
-                            if let Ok(value) = serde_json::from_str::<Value>(json_str) {
-                                if let Some(c) = value.get("columns").and_then(Value::as_u64) {
-                                    handshake_cols = (c as u16).max(1);
-                                }
-                                if let Some(r) = value.get("rows").and_then(Value::as_u64) {
-                                    handshake_rows = (r as u16).max(1);
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            Ok(Some(Err(_))) | Ok(None) | Err(_) => return,
-        }
-    }
-    let cols = handshake_cols;
-    let rows = handshake_rows;
-
-    // Respond with SET_WINDOW_TITLE and SET_PREFERENCES per ttyd protocol.
-    let title_frame = ttyd_protocol::encode_window_title(&session_id);
-    if socket
-        .send(Message::Binary(title_frame.into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    let prefs_frame = ttyd_protocol::encode_preferences(&ttyd_protocol::default_preferences());
-    if socket
-        .send(Message::Binary(prefs_frame.into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-
-    let _ = state.ensure_session_live(&session_id).await;
     let handle = state.ensure_terminal_host(&session_id).await;
-    // Do NOT resize here — subscribing first, then setting the sequence
-    // floor, then clearing + resizing once prevents a double-SIGWINCH race
-    // where the first repaint's output leaks to the client before the clear
-    // screen, causing duplicated/garbled TUI lines.
-    let mut terminal_events = Some(handle.terminal_tx.subscribe());
-    let mut stream_sequence_floor: u64 = 0;
-
-    // Set the sequence floor so we skip any output already in the broadcast
-    // channel from before this client connected.
-    if let Some(session) = state.get_session(&session_id).await {
-        if let Ok(Some(snapshot)) = build_terminal_restore_snapshot(&state, &session).await {
-            stream_sequence_floor = snapshot.sequence;
-        }
-    }
-
-    // Always clear screen and resize exactly once on connect. The resize
-    // triggers SIGWINCH so the running agent repaints its TUI at the
-    // client's current dimensions. Replaying raw history bytes would
-    // produce garbled output because ANSI cursor positioning is baked for
-    // the width that was active when the bytes were written.
-    let clear_frame = encode_ttyd_output_frame(b"\x1b[2J\x1b[H");
-    if socket
-        .send(Message::Binary(clear_frame.into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let _ = state.resize_live_terminal(&session_id, cols, rows).await;
-
-    // Direct pass-through: forward each PTY output chunk to the WebSocket
-    // immediately as a ttyd binary frame. NO server-side batching — the
-    // frontend's requestAnimationFrame batching in ttydClient.ts handles
-    // combining multiple small chunks into a single terminal.write() call.
-    // This eliminates the 16ms server batch that was splitting TUI escape
-    // sequences across frame boundaries and causing garbled rendering.
+    let mut terminal_rx = handle.terminal_tx.subscribe();
+    let snapshot = state.current_terminal_restore_snapshot(&session_id).await;
+    let mut last_sequence_sent = 0_u64;
+    let mut client_ready = false;
 
     loop {
         tokio::select! {
-            biased;
-
-            attach_event = async {
-                match terminal_events.as_mut() {
-                    Some(receiver) => Some(receiver.recv().await),
-                    None => None,
-                }
-            } => {
-                match attach_event {
-                    Some(Ok(TerminalStreamEvent::Stream(chunk))) => {
-                        if chunk.sequence <= stream_sequence_floor {
-                            continue;
-                        }
-                        let frame = encode_ttyd_output_frame(&chunk.bytes);
-                        if socket.send(Message::Binary(frame.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(TerminalStreamEvent::Exit(exit_code))) => {
-                        tracing::debug!(
-                            session_id = %session_id,
-                            exit_code,
-                            "Terminal session exited"
-                        );
-                        break;
-                    }
-                    Some(Ok(TerminalStreamEvent::Error(err))) => {
-                        tracing::warn!(session_id = %session_id, error = %err, "Terminal stream error");
-                        break;
-                    }
-                    Some(Err(broadcast::error::RecvError::Lagged(_skipped))) => {
-                        // Subscriber fell behind — clear screen and force SIGWINCH
-                        // so the agent repaints at the correct dimensions.
-                        let clear_frame = encode_ttyd_output_frame(b"\x1b[2J\x1b[H");
-                        if socket
-                            .send(Message::Binary(clear_frame.into()))
-                            .await
-                            .is_err()
+            client_message = client_socket.recv() => {
+                match client_message {
+                    Some(Ok(Message::Binary(data))) => {
+                        if handle_ttyd_frontend_client_message(
+                            &state,
+                            &handle,
+                            &session_id,
+                            &mut client_socket,
+                            &snapshot,
+                            &mut client_ready,
+                            &mut last_sequence_sent,
+                            ttyd_protocol::ClientMessage::from_websocket_frame(&data),
+                        )
+                        .await
+                        .is_err()
                         {
                             break;
                         }
-                        let _ = state.resize_live_terminal(&session_id, cols, rows).await;
                     }
-                    Some(Err(broadcast::error::RecvError::Closed)) => {
-                        break;
-                    }
-                    None => {
-                        break;
-                    }
-                }
-            }
-
-            message = socket.recv() => {
-                match message {
-                    Some(Ok(Message::Binary(data))) if !data.is_empty() => {
-                        if let Some(client_msg) = ClientMessage::from_websocket_frame(&data) {
-                            match client_msg {
-                                ClientMessage::Input(bytes) => {
-                                    let input_str = match String::from_utf8(bytes) {
-                                        Ok(s) => s,
-                                        Err(e) => String::from_utf8_lossy(e.as_bytes()).to_string(),
-                                    };
-                                    if let Err(e) = state.send_raw_to_session(&session_id, input_str).await {
-                                        tracing::warn!(session_id = %session_id, error = %e, "Failed to deliver input to PTY");
-                                    }
-                                }
-                                ClientMessage::Resize { columns, rows } => {
-                                    let _ = state.resize_live_terminal(&session_id, columns.max(1), rows.max(1)).await;
-                                }
-                                ClientMessage::Pause => {
-                                    tracing::debug!(session_id = %session_id, "Client pause requested (not yet enforced)");
-                                }
-                                ClientMessage::Resume => {
-                                    tracing::debug!(session_id = %session_id, "Client resume requested (not yet enforced)");
-                                }
-                                ClientMessage::Handshake(_) => {
-                                    tracing::debug!(session_id = %session_id, "Handshake received during session");
-                                }
-                            }
+                    Some(Ok(Message::Text(text))) => {
+                        if handle_ttyd_frontend_client_message(
+                            &state,
+                            &handle,
+                            &session_id,
+                            &mut client_socket,
+                            &snapshot,
+                            &mut client_ready,
+                            &mut last_sequence_sent,
+                            ttyd_protocol::ClientMessage::from_websocket_frame(text.as_bytes()),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
                         }
                     }
-                    Some(Ok(Message::Binary(_))) => {
-                        // Empty binary frame — ignore
-                    }
-                    Some(Ok(Message::Text(_text))) => {}
-                    Some(Ok(Message::Close(_))) => break,
                     Some(Ok(Message::Ping(payload))) => {
-                        if socket.send(Message::Pong(payload)).await.is_err() {
+                        if client_socket.send(Message::Pong(payload)).await.is_err() {
                             break;
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
-                    Some(Err(_)) | None => break,
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(err)) => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            error = %err,
+                            "Browser ttyd websocket closed"
+                        );
+                        break;
+                    }
+                }
+            }
+            event = terminal_rx.recv(), if client_ready => {
+                match event {
+                    Ok(crate::state::TerminalStreamEvent::Stream(chunk)) => {
+                        if chunk.sequence <= last_sequence_sent {
+                            continue;
+                        }
+                        last_sequence_sent = chunk.sequence;
+                        if client_socket.send(Message::Binary(ttyd_protocol::encode_output(&chunk.bytes).into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(crate::state::TerminalStreamEvent::Exit(exit_code)) => {
+                        let message = format!("\r\n[Conductor] Terminal exited ({exit_code}).\r\n");
+                        let _ = client_socket.send(Message::Binary(ttyd_protocol::encode_output(message.as_bytes()).into())).await;
+                        let _ = client_socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Ok(crate::state::TerminalStreamEvent::Error(error_message)) => {
+                        let message = format!("\r\n[Conductor] {error_message}\r\n");
+                        let _ = client_socket.send(Message::Binary(ttyd_protocol::encode_output(message.as_bytes()).into())).await;
+                        let _ = client_socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if let Some(snapshot) = state.current_terminal_restore_snapshot(&session_id).await {
+                            let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
+                            last_sequence_sent = snapshot.sequence;
+                            if !bytes.is_empty()
+                                && client_socket.send(Message::Binary(ttyd_protocol::encode_output(&bytes).into())).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_ttyd_frontend_client_message(
+    state: &Arc<AppState>,
+    handle: &Arc<crate::state::LiveSessionHandle>,
+    session_id: &str,
+    client_socket: &mut WebSocket,
+    snapshot: &Option<TerminalRestoreSnapshot>,
+    client_ready: &mut bool,
+    last_sequence_sent: &mut u64,
+    message: Option<ttyd_protocol::ClientMessage>,
+) -> Result<()> {
+    match message {
+        Some(ttyd_protocol::ClientMessage::Handshake(value)) => {
+            *client_ready = true;
+            if let Some((columns, rows)) = parse_handshake_dimensions(&value) {
+                let _ = state.resize_live_terminal(session_id, columns, rows).await;
+            }
+            client_socket
+                .send(Message::Binary(
+                    ttyd_protocol::encode_preferences(&ttyd_protocol::default_preferences()).into(),
+                ))
+                .await?;
+            if let Some(snapshot) = snapshot.as_ref() {
+                let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
+                if !bytes.is_empty() {
+                    *last_sequence_sent = snapshot.sequence;
+                    client_socket
+                        .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
+                        .await?;
+                }
+            }
+        }
+        Some(ttyd_protocol::ClientMessage::Input(data)) => {
+            let text = String::from_utf8_lossy(&data).into_owned();
+            if let Some(input_tx) = handle.input_tx.read().await.clone() {
+                input_tx
+                    .send(conductor_executors::executor::ExecutorInput::Raw(text))
+                    .await?;
+            }
+        }
+        Some(ttyd_protocol::ClientMessage::Resize { columns, rows }) => {
+            let _ = state.resize_live_terminal(session_id, columns, rows).await;
+        }
+        Some(ttyd_protocol::ClientMessage::Pause)
+        | Some(ttyd_protocol::ClientMessage::Resume)
+        | None => {}
+    }
+
+    Ok(())
+}
+
+fn parse_handshake_dimensions(value: &Value) -> Option<(u16, u16)> {
+    let columns = value.get("columns")?.as_u64()? as u16;
+    let rows = value.get("rows")?.as_u64()? as u16;
+    Some((columns, rows))
 }
 
 pub(crate) fn resolve_terminal_keys(
@@ -715,7 +909,6 @@ fn verify_scoped_terminal_token(
     let (scope, expires_at_raw, payload) =
         if let Some((scope_raw, expires_at_raw)) = raw_payload.split_once(':') {
             let scope = match scope_raw {
-                "stream" => TerminalTokenScope::Stream,
                 "control" => TerminalTokenScope::Control,
                 _ => return Ok(false),
             };
@@ -792,7 +985,8 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
+    use axum::body::{to_bytes, Body};
+    use axum::extract::{Path, State};
     use axum::http::Request;
     use conductor_core::config::ConductorConfig;
     use conductor_db::Database;
@@ -1080,6 +1274,103 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .contains("terminal_snapshot;dur="));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn terminal_token_response_exposes_backend_ttyd_proxy_urls() {
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        let (state, root) = build_test_state().await;
+        let mut session = SessionRecord::builder(
+            "session-ttyd-token".to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "Validate ttyd token metadata".to_string(),
+        )
+        .build();
+        session.metadata.insert(
+            RUNTIME_MODE_METADATA_KEY.to_string(),
+            TTYD_RUNTIME_MODE.to_string(),
+        );
+        session.metadata.insert(
+            TTYD_WS_URL_METADATA_KEY.to_string(),
+            "ws://127.0.0.1:41000/ws".to_string(),
+        );
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+        state.config.write().await.access.require_auth = true;
+
+        let response =
+            build_terminal_token_response(state.clone(), session.id.clone(), TerminalTokenScope::Control)
+                .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("token response body should read");
+        let payload: Value =
+            serde_json::from_slice(&body).expect("token response should be valid json");
+
+        let token = payload["token"]
+            .as_str()
+            .expect("token should be included in ttyd token response");
+        assert_eq!(
+            payload["ttydHttpUrl"],
+            Value::String(format!(
+                "/api/sessions/{}/terminal/ttyd?token={token}",
+                session.id
+            ))
+        );
+        assert_eq!(
+            payload["ttydWsUrl"],
+            Value::String(format!(
+                "/api/sessions/{}/terminal/ttyd/ws?token={token}",
+                session.id
+            ))
+        );
+        assert!(payload.get("token").is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn ttyd_frontend_token_route_returns_empty_token_for_ttyd_sessions() {
+        let (state, root) = build_test_state().await;
+        let mut session = SessionRecord::builder(
+            "session-ttyd-frontend-token".to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "Validate ttyd frontend token route".to_string(),
+        )
+        .build();
+        session.metadata.insert(
+            RUNTIME_MODE_METADATA_KEY.to_string(),
+            TTYD_RUNTIME_MODE.to_string(),
+        );
+        session.metadata.insert(
+            TTYD_WS_URL_METADATA_KEY.to_string(),
+            "ws://127.0.0.1:41001/ws".to_string(),
+        );
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session.id.clone(), session.clone());
+
+        let response =
+            terminal_ttyd_frontend_token(State(state.clone()), Path(session.id.clone())).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("frontend token body should read");
+        let payload: Value =
+            serde_json::from_slice(&body).expect("frontend token response should be valid json");
+        assert_eq!(payload["token"], Value::String(String::new()));
 
         let _ = std::fs::remove_dir_all(root);
     }

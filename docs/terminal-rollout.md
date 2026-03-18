@@ -26,7 +26,7 @@ Use a live session id while the dashboard is running locally.
 bun run bench:terminal -- <session-id>
 ```
 
-The script hits token, live snapshot, and read-only snapshot endpoints through the dashboard and prints status, total request time, response size, and `Server-Timing`. Live terminal streaming remains token- and ttyd-native (`/terminal/ws?protocol=ttyd`).
+The script hits token, live snapshot, and read-only snapshot endpoints through the dashboard and prints status, total request time, response size, and `Server-Timing`. Live terminal streaming stays on the backend ttyd facade and its authenticated `/api/sessions/:id/terminal/ttyd/ws` websocket.
 
 If dashboard auth is enabled, run the benchmark from a local operator environment or reproduce the same requests with equivalent auth headers or cookies.
 
@@ -43,7 +43,7 @@ If dashboard auth is enabled, run the benchmark from a local operator environmen
   - browser-observed ttyd resize round-trip timing
   - visible prompt stability after viewport or orientation changes
 - Reconnect success
-  - whether token refresh and direct ttyd reconnect succeed during nominal flows
+  - whether token refresh and ttyd reconnect succeed during nominal flows
   - whether the terminal returns to live streaming quickly without entering full snapshot mode
   - time from disconnect notice to usable prompt
 - Mobile input reliability

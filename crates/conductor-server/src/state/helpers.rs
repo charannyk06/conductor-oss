@@ -6,15 +6,18 @@ use std::path::Path;
 use super::types::{
     SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT,
 };
+use super::{DETACHED_PID_METADATA_KEY, RUNTIME_MODE_METADATA_KEY};
 
 const SPAWN_REQUEST_METADATA_KEY: &str = "spawnRequest";
-const DETACHED_PID_METADATA_KEY: &str = "detachedPid";
 const RECOVERY_STATE_METADATA_KEY: &str = "recoveryState";
 const RECOVERY_ACTION_METADATA_KEY: &str = "recoveryAction";
 const RECOVERY_COUNT_METADATA_KEY: &str = "restartRecoveryCount";
 const RECOVERED_AT_METADATA_KEY: &str = "lastRecoveredAt";
-const RUNTIME_MODE_METADATA_KEY: &str = "runtimeMode";
 const DASHBOARD_METADATA_MAX_VALUE_BYTES: usize = 2048;
+const LEGACY_DIRECT_RUNTIME_SUMMARY: &str =
+    "Legacy direct terminal session is no longer supported. Archive it and start a fresh ttyd session.";
+const LEGACY_TMUX_RUNTIME_SUMMARY: &str =
+    "Archived legacy tmux session after tmux runtime removal";
 
 fn dashboard_metadata_allowlist() -> &'static [&'static str] {
     &[
@@ -1053,26 +1056,38 @@ pub fn normalize_loaded_session(session: &mut SessionRecord) -> bool {
     let is_active_activity =
         normalized_activity == "active" && !is_terminal_status(&session.status);
 
-    if session
-        .metadata
-        .get(RUNTIME_MODE_METADATA_KEY)
-        .map(|value| value == "tmux")
-        .unwrap_or(false)
-    {
-        session.status = SessionStatus::Archived;
-        session.activity = Some("exited".to_string());
-        session.last_activity_at = now.clone();
-        session.summary =
-            Some("Archived legacy tmux session after tmux runtime removal".to_string());
-        session.metadata.insert(
-            "summary".to_string(),
-            "Archived legacy tmux session after tmux runtime removal".to_string(),
-        );
-        session
-            .metadata
-            .insert("archivedAt".to_string(), now.clone());
-        session.pid = None;
-        return true;
+    match session.metadata.get(RUNTIME_MODE_METADATA_KEY).map(String::as_str) {
+        Some("tmux") => {
+            session.status = SessionStatus::Archived;
+            session.activity = Some("exited".to_string());
+            session.last_activity_at = now.clone();
+            session.summary = Some(LEGACY_TMUX_RUNTIME_SUMMARY.to_string());
+            session
+                .metadata
+                .insert("summary".to_string(), LEGACY_TMUX_RUNTIME_SUMMARY.to_string());
+            session
+                .metadata
+                .insert("archivedAt".to_string(), now.clone());
+            session.pid = None;
+            return true;
+        }
+        Some("direct") => {
+            session.status = SessionStatus::Stuck;
+            session.activity = Some("blocked".to_string());
+            session.last_activity_at = now.clone();
+            session.summary = Some(LEGACY_DIRECT_RUNTIME_SUMMARY.to_string());
+            session
+                .metadata
+                .insert("summary".to_string(), LEGACY_DIRECT_RUNTIME_SUMMARY.to_string());
+            session
+                .metadata
+                .insert(RECOVERY_STATE_METADATA_KEY.to_string(), "legacy_runtime".to_string());
+            session
+                .metadata
+                .insert(RECOVERY_ACTION_METADATA_KEY.to_string(), "archive".to_string());
+            return true;
+        }
+        _ => {}
     }
 
     if is_active_status && has_spawn_request && !has_workspace && session.pid.unwrap_or(0) == 0 {
@@ -1539,6 +1554,52 @@ mod tests {
         );
         assert!(session.metadata.contains_key("archivedAt"));
         assert_eq!(session.pid, None);
+    }
+
+    #[test]
+    fn normalize_loaded_session_flags_legacy_direct_runtime_sessions() {
+        let mut session = SessionRecord::new(
+            "legacy-direct-session".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(42),
+        );
+        session.status = SessionStatus::Working;
+        session.activity = Some("active".to_string());
+        session
+            .metadata
+            .insert(RUNTIME_MODE_METADATA_KEY.to_string(), "direct".to_string());
+
+        let changed = normalize_loaded_session(&mut session);
+
+        assert!(changed);
+        assert_eq!(session.status, SessionStatus::Stuck);
+        assert_eq!(session.activity.as_deref(), Some("blocked"));
+        assert_eq!(
+            session.summary.as_deref(),
+            Some(LEGACY_DIRECT_RUNTIME_SUMMARY)
+        );
+        assert_eq!(
+            session
+                .metadata
+                .get(RECOVERY_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some("legacy_runtime")
+        );
+        assert_eq!(
+            session
+                .metadata
+                .get(RECOVERY_ACTION_METADATA_KEY)
+                .map(String::as_str),
+            Some("archive")
+        );
+        assert_eq!(session.pid, Some(42));
     }
 
     #[test]

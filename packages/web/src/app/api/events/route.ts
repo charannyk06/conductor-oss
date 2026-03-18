@@ -1,4 +1,5 @@
 import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import { requireRustBackendUrl } from "@/lib/backendUrl";
 import { forwardedAccessAuthenticated } from "@/lib/guardedRustProxy";
 import { hasRustBackend } from "@/lib/rustBackendProxy";
 import { NextResponse } from "next/server";
@@ -23,7 +24,7 @@ export async function GET(request: Request): Promise<Response> {
     );
   }
 
-  const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
+  const backendUrl = requireRustBackendUrl();
   const target = new URL("/api/events", backendUrl);
 
   const incomingUrl = new URL(request.url);

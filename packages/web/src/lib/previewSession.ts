@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { requireRustBackendUrl, resolveRustBackendUrl } from "@/lib/backendUrl";
 import type { DashboardSession } from "@/lib/types";
 
 const LOCAL_HOST_PATTERN = /(?:127\.0\.0\.1|0\.0\.0\.0|localhost|::1|\[::1\])/i;
@@ -21,7 +22,7 @@ const DIRECT_URL_METADATA_PRIORITY: Record<string, number> = {
 };
 
 function getBackendUrl(): string {
-  return process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
+  return resolveRustBackendUrl() ?? "";
 }
 
 export interface PreviewSessionContext {
@@ -38,10 +39,7 @@ export async function fetchDashboardSessionForPreview(
   id: string,
   options: PreviewFetchOptions = {},
 ): Promise<DashboardSession | null> {
-  const backendUrl = getBackendUrl();
-  if (!backendUrl) {
-    throw new Error("Rust backend URL is not configured");
-  }
+  const backendUrl = requireRustBackendUrl();
 
   const target = new URL(`/api/sessions/${encodeURIComponent(id)}`, backendUrl);
   const response = await fetch(target, {

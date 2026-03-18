@@ -1,7 +1,7 @@
 mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{build_app, spawn_request, wait_for_condition, TestExecutor, TestHarness};
+use common::{build_app, spawn_request, ttyd_available, wait_for_condition, TestExecutor, TestHarness};
 use conductor_core::board::Board;
 use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
@@ -14,7 +14,7 @@ use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
-    let harness = TestHarness::new("conductor-board-route-test", "direct").await;
+    let harness = TestHarness::new("conductor-board-route-test", "ttyd").await;
     fs::write(
         &harness.board_path,
         [
@@ -105,7 +105,7 @@ async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
 
 #[tokio::test]
 async fn board_routes_reorder_cards_with_target_index() {
-    let harness = TestHarness::new("conductor-board-reorder-test", "direct").await;
+    let harness = TestHarness::new("conductor-board-reorder-test", "ttyd").await;
     fs::write(
         &harness.board_path,
         [
@@ -161,7 +161,7 @@ async fn board_routes_reorder_cards_with_target_index() {
 
 #[tokio::test]
 async fn board_routes_reorder_cards_within_same_column_with_target_index() {
-    let harness = TestHarness::new("conductor-board-same-column-reorder-test", "direct").await;
+    let harness = TestHarness::new("conductor-board-same-column-reorder-test", "ttyd").await;
     fs::write(
         &harness.board_path,
         [
@@ -217,7 +217,10 @@ async fn board_routes_reorder_cards_within_same_column_with_target_index() {
 
 #[tokio::test]
 async fn board_change_events_drive_session_spawns_with_board_metadata() {
-    let harness = TestHarness::new("conductor-board-runtime-test", "direct").await;
+    if !ttyd_available() {
+        return;
+    }
+    let harness = TestHarness::new("conductor-board-runtime-test", "ttyd").await;
     harness.state.executors.write().await.insert(
         AgentKind::Codex,
         Arc::new(TestExecutor {

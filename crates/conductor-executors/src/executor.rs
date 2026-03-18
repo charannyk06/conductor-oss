@@ -338,7 +338,7 @@ pub trait Executor: Send + Sync {
     /// Parse a line of output and classify it.
     fn parse_output(&self, line: &str) -> ExecutorOutput;
 
-    /// Whether this executor can run as a live native PTY terminal in direct runtime mode.
+    /// Whether this executor can run inside Conductor's ttyd-backed live PTY session.
     fn supports_direct_terminal_ui(&self) -> bool {
         false
     }

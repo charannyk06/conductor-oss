@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-
-const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim() ?? "";
+import { requireRustBackendUrl, resolveRustBackendUrl } from "./backendUrl";
 const INTERNAL_ACCESS_HEADERS = [
   "x-conductor-proxy-authorized",
   "x-conductor-access-authenticated",
@@ -33,7 +32,7 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
 ]);
 
 export function hasRustBackend(): boolean {
-  return backendUrl.length > 0;
+  return resolveRustBackendUrl() !== null;
 }
 
 type RustProxyOptions = {
@@ -105,9 +104,7 @@ export async function proxyToRust(
   pathname: string,
   options: RustProxyOptions = {},
 ): Promise<Response> {
-  if (!hasRustBackend()) {
-    throw new Error("Rust backend URL is not configured");
-  }
+  const backendUrl = requireRustBackendUrl();
 
   const incomingUrl = new URL(request.url);
   const target = new URL(pathname, backendUrl);

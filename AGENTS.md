@@ -61,7 +61,7 @@ packages/
 ### Adding a new agent adapter
 
 1. Create `crates/conductor-executors/src/agents/<name>.rs`
-2. Implement `Agent` trait: `get_launch_command()`, `process_name`, `prompt_delivery`
+2. Implement `Executor` trait: `spawn()`, `build_args()`, `kind()`, `binary_path()`
 3. Register in `crates/conductor-executors/src/agents/mod.rs`
 4. Add discovery logic in `crates/conductor-executors/src/discovery.rs`
 
@@ -80,7 +80,7 @@ packages/
 ## Architecture Constraints
 
 - **Local-first:** No cloud relay, no credential proxying, no hosted state
-- **direct-pty:** Runtime defaults to direct PTY sessions; tmux is legacy compatibility-only
+- **ttyd-first:** Runtime defaults to ttyd-backed PTY sessions; tmux is legacy compatibility-only
 - **SQLite-only:** No external database dependencies
 - **Agent-agnostic:** Conductor orchestrates; agents do their own auth and billing
 - **Markdown-native:** Board state lives in `CONDUCTOR.md`, readable by humans and Obsidian

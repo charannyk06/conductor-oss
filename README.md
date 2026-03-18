@@ -50,7 +50,7 @@ npx conductor-oss@latest
 This starts the Rust backend and Next.js dashboard, then opens the browser. Default ports:
 
 - Dashboard: `http://127.0.0.1:4747`
-- Backend: `http://127.0.0.1:4748`
+- Backend: `http://127.0.0.1:4749`
 
 ### Initialize an existing repo
 
@@ -91,7 +91,7 @@ Agents appear in the dashboard picker based on what is installed and authenticat
 
 ## Native Terminal Experience
 
-Conductor launches agents into their real terminal UIs — not a synthetic chat shell. Claude Code runs as Claude Code. Codex runs as Codex. The dashboard terminal is a live viewer over the backend-owned PTY session using the TTyD binary protocol, so reconnecting or switching sessions preserves the native agent experience.
+Conductor launches agents into their real terminal UIs — not a synthetic chat shell. Claude Code runs as Claude Code. Codex runs as Codex. Interactive sessions are now `ttyd`-first: each live agent gets a real ttyd-backed PTY, the dashboard connects either straight to that loopback ttyd socket on local desktops or through Conductor's authenticated websocket relay on remote/private paths, and reconnecting still preserves the native agent experience.
 
 <div align="center">
 
@@ -207,7 +207,7 @@ Additional runtime artifacts:
 
 | Crate | Purpose |
 |-------|---------|
-| `conductor-server` | Axum HTTP server — 24 route modules, session manager, PTY runtime, SSE streaming |
+| `conductor-server` | Axum HTTP server — 22 route modules, session manager, PTY runtime, SSE streaming |
 | `conductor-core` | Shared types, board parser, configuration, task and session models |
 | `conductor-executors` | 10 agent adapters — binary detection, launch commands, prompt delivery |
 | `conductor-db` | SQLite persistence via sqlx with compile-time checked queries |
@@ -227,11 +227,11 @@ Additional runtime artifacts:
 
 - **Local-first** — no cloud relay, no credential proxying, all state on disk
 - **SQLite-only** — single-file database, no external DB dependency
-- **Direct PTY** — shell-backed sessions via `portable-pty`, not synthetic chat shells
+- **TTyd-backed PTY** — shell-backed sessions via real `ttyd`, not synthetic chat shells
 - **Agent-agnostic** — Conductor orchestrates; each agent keeps its own auth and billing
 - **Markdown-native** — boards live in `CONDUCTOR.md`, readable in any editor or Obsidian
 - **Worktree isolation** — each session gets its own git worktree to prevent conflicts
-- **TTyD protocol** — binary WebSocket framing for efficient terminal streaming
+- **TTYD-first streaming** — real `ttyd` sessions with backend-authenticated relay and restore-aware capture
 
 ## Develop From Source
 
@@ -304,7 +304,7 @@ conductor-oss/
 - GitHub-integrated flows (PR creation, check monitoring) work best with `gh` installed and authenticated
 - Preview tooling requires a repo that exposes a local dev server URL
 - Remote access was intentionally removed — use your own network or proxy layer for remote setups
-- The runtime is direct PTY-only; legacy tmux sessions are treated as compatibility data
+- Interactive sessions run through ttyd; legacy tmux and legacy direct sessions are compatibility data that should be archived instead of resumed
 
 ## Links
 

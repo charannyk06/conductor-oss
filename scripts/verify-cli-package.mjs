@@ -144,9 +144,9 @@ if (!args.includes(fixture.prompt)) {
 }
 
 (async () => {
-  // Allow the detached PTY stream forwarder time to connect before emitting
-  // output. Without this, fast-exiting agents can race the stream setup and
-  // early lines are lost when the forwarder has not yet replayed the log.
+  // Allow the ttyd session owner time to attach before emitting output.
+  // Without this, fast-exiting agents can race terminal ownership and lose
+  // early lines before Conductor starts mirroring the ttyd stream.
   await delay(500);
   process.stdout.write("Thinking about the request\\n");
   await delay(25);
@@ -871,7 +871,7 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
       "  streaming-smoke:",
       `    path: ${repoDir}`,
       "    agent: codex",
-      "    runtime: direct",
+      "    runtime: ttyd",
       "    defaultBranch: main",
       "",
     ].join("\n"),

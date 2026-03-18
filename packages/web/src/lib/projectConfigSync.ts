@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { requireRustBackendUrl } from "@/lib/backendUrl";
 
 type MutableConfig = Record<string, unknown>;
 
@@ -47,11 +48,7 @@ function resolveConfiguredProjectPath(value: string): string {
 }
 
 function backendBaseUrl(): string {
-  const backendUrl = process.env.CONDUCTOR_BACKEND_URL?.trim();
-  if (!backendUrl) {
-    throw new Error("Rust backend URL is not configured");
-  }
-  return backendUrl;
+  return requireRustBackendUrl();
 }
 
 async function requestProjectSetup(projectId: string): Promise<void> {

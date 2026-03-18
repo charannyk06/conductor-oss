@@ -1,17 +1,8 @@
-mod control;
-mod daemon;
-mod frame;
 mod helpers;
-mod lifecycle;
-mod log_tail;
-pub mod pty_host;
-mod pty_subprocess;
-mod stream;
-#[cfg(test)]
-mod tests;
-pub mod types;
+pub(crate) mod ttyd_launcher;
+pub(crate) mod types;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use conductor_executors::executor::{Executor, ExecutorHandle, SpawnOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,31 +10,56 @@ use std::sync::Arc;
 use crate::state::AppState;
 
 pub(crate) use types::DETACHED_LOG_PATH_METADATA_KEY;
-pub(crate) use types::DIRECT_RUNTIME_MODE;
-pub use pty_host::run_detached_pty_host;
-
-// Re-export constants used in this file's impl AppState methods
-use types::RUNTIME_MODE_METADATA_KEY;
+pub(crate) use types::DETACHED_PID_METADATA_KEY;
+pub(crate) use types::{
+    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE,
+    TTYD_WS_URL_METADATA_KEY,
+};
+use types::DIRECT_RUNTIME_MODE;
 
 pub(crate) struct RuntimeLaunch {
     pub(crate) handle: ExecutorHandle,
     pub(crate) metadata: HashMap<String, String>,
+    /// When true, the runtime already emits terminal bytes directly via
+    /// `emit_terminal_bytes()` (e.g. ttyd mirror client). The output consumer
+    /// should NOT also mirror Stdout lines as terminal bytes, which would
+    /// cause double output.
+    pub(crate) streams_terminal_bytes: bool,
+}
+
+fn validate_interactive_runtime(runtime: Option<&str>) -> Result<()> {
+    let normalized = runtime.map(str::trim).filter(|value| !value.is_empty());
+    match normalized {
+        None => Ok(()),
+        Some(value) if value.eq_ignore_ascii_case(TTYD_RUNTIME_MODE) => Ok(()),
+        Some(value)
+            if value.eq_ignore_ascii_case(DIRECT_RUNTIME_MODE)
+                || value.eq_ignore_ascii_case("tmux") =>
+        {
+            Ok(())
+        }
+        Some(other) => Err(anyhow!(
+            "Unsupported runtime `{other}`. Conductor now launches interactive sessions through ttyd only."
+        )),
+    }
 }
 
 impl AppState {
     pub(crate) async fn spawn_with_runtime(
         self: &Arc<Self>,
-        _project: &conductor_core::config::ProjectConfig,
+        project: &conductor_core::config::ProjectConfig,
         executor: Arc<dyn Executor>,
         session_id: &str,
         options: SpawnOptions,
     ) -> Result<RuntimeLaunch> {
-        self.spawn_detached_runtime_or_legacy(executor, session_id, options)
-            .await
+        validate_interactive_runtime(project.runtime.as_deref())?;
+        let ttyd_binary = ttyd_launcher::resolve_ttyd_binary(&self.workspace_path)
+            .ok_or_else(|| ttyd_launcher::ttyd_missing_error(&self.workspace_path))?;
+        ttyd_launcher::spawn_ttyd_runtime(self, executor, session_id, options, &ttyd_binary).await
     }
 
     pub(crate) async fn restore_runtime_sessions(self: &Arc<Self>) {
-        let session_ids = {
+        let session_ids: Vec<String> = {
             let sessions = self.sessions.read().await;
             sessions
                 .values()
@@ -52,16 +68,20 @@ impl AppState {
                     session
                         .metadata
                         .get(RUNTIME_MODE_METADATA_KEY)
-                        .map(|value| value == DIRECT_RUNTIME_MODE)
+                        .map(|value| value == TTYD_RUNTIME_MODE)
                         .unwrap_or(false)
                 })
                 .map(|session| session.id.clone())
-                .collect::<Vec<_>>()
+                .collect()
         };
 
         for session_id in session_ids {
-            if let Err(err) = self.restore_detached_runtime(&session_id).await {
-                tracing::warn!(session_id, error = %err, "Failed to restore runtime session");
+            if let Err(err) = ttyd_launcher::restore_ttyd_runtime(self, &session_id).await {
+                tracing::warn!(
+                    session_id,
+                    error = %err,
+                    "Failed to restore ttyd runtime session"
+                );
             }
         }
     }
@@ -82,19 +102,20 @@ impl AppState {
             return Ok(false);
         }
 
-        let is_direct_runtime = session
+        let runtime_mode = session
             .metadata
             .get(RUNTIME_MODE_METADATA_KEY)
-            .map(|value| value == DIRECT_RUNTIME_MODE)
-            .unwrap_or(false);
-        if !is_direct_runtime {
+            .map(String::as_str);
+
+        if runtime_mode != Some(TTYD_RUNTIME_MODE) {
             return Ok(false);
         }
 
-        self.restore_detached_runtime(session_id).await?;
+        ttyd_launcher::restore_ttyd_runtime(self, session_id).await?;
         Ok(self.terminal_runtime_attached(session_id).await)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn resize_live_terminal(
         &self,
         session_id: &str,
