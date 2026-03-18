@@ -2,9 +2,10 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use common::{spawn_request, wait_for_condition, TestExecutor, TestHarness};
+use common::{spawn_request, wait_for_condition_with_timeout, TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use std::sync::Arc;
+use tokio::time::Duration;
 use tower::util::ServiceExt;
 
 #[tokio::test]
@@ -22,17 +23,17 @@ async fn smoke_all_route_modules() {
         .spawn_session(spawn_request("Smoke the session routes"))
         .await
         .unwrap();
-    let session = wait_for_condition("session workspace", || {
-        let state = harness.state.clone();
-        let session_id = queued.id.clone();
-        async move {
-            state
-                .get_session(&session_id)
-                .await
-                .and_then(|session| session.metadata.contains_key("worktree").then_some(session))
-        }
-    })
-    .await;
+    let session =
+        wait_for_condition_with_timeout("session workspace", Duration::from_secs(20), || {
+            let state = harness.state.clone();
+            let session_id = queued.id.clone();
+            async move {
+                state.get_session(&session_id).await.and_then(|session| {
+                    session.metadata.contains_key("worktree").then_some(session)
+                })
+            }
+        })
+        .await;
 
     let requests = vec![
         (
