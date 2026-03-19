@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   FolderGit2,
@@ -22,8 +22,11 @@ interface WorkspaceOverviewProps {
   onSelectSession: (sessionId: string) => void;
 }
 
-function formatRelativeTime(isoDate: string): string {
-  const diffMs = Date.now() - new Date(isoDate).getTime();
+const RELATIVE_TIME_TICK_MS = 60_000;
+
+function formatRelativeTime(isoDate: string, now: number | null): string {
+  if (now === null) return "Updated recently";
+  const diffMs = now - new Date(isoDate).getTime();
   if (!Number.isFinite(diffMs) || diffMs < 60_000) return "Updated now";
   const minutes = Math.floor(diffMs / 60_000);
   if (minutes < 60) return `Updated ${minutes}m ago`;
@@ -92,6 +95,17 @@ export function WorkspaceOverview({
   onCreateWorkspace,
   onSelectSession,
 }: WorkspaceOverviewProps) {
+  const [relativeNow, setRelativeNow] = useState<number | null>(null);
+
+  useEffect(() => {
+    setRelativeNow(Date.now());
+    const interval = window.setInterval(() => {
+      setRelativeNow(Date.now());
+    }, RELATIVE_TIME_TICK_MS);
+
+    return () => window.clearInterval(interval);
+  }, []);
+
   const visibleSessions = useMemo(
     () => sessions.filter((session) => session.status !== "archived"),
     [sessions],
@@ -252,7 +266,9 @@ export function WorkspaceOverview({
                     </p>
                   </div>
                   <div className="shrink-0 text-right">
-                    <p className="text-[11px] text-[var(--vk-text-muted)]">{formatRelativeTime(session.lastActivityAt)}</p>
+                    <p className="text-[11px] text-[var(--vk-text-muted)]">
+                      {formatRelativeTime(session.lastActivityAt, relativeNow)}
+                    </p>
                     <ArrowRight className="ml-auto mt-2 h-4 w-4 text-[var(--vk-text-muted)]" />
                   </div>
                 </button>

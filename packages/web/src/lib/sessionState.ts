@@ -321,8 +321,10 @@ interface SharedSessionsOptions {
 export function useSharedSessions(projectId?: string | null, options?: SharedSessionsOptions) {
   const enabled = options?.enabled ?? true;
   const [, forceRender] = useReducer((value) => value + 1, 0);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
+    setHydrated(true);
     if (!enabled) {
       return undefined;
     }
@@ -335,13 +337,13 @@ export function useSharedSessions(projectId?: string | null, options?: SharedSes
   }, [enabled]);
 
   const sessions = useMemo(
-    () => (enabled ? filterProjectSessions(projectId) : []),
-    [enabled, projectId, sessionsStore.version],
+    () => (enabled && hydrated ? filterProjectSessions(projectId) : []),
+    [enabled, hydrated, projectId, sessionsStore.version],
   );
 
   return {
     sessions,
-    loading: enabled ? sessionsStore.loading : false,
+    loading: enabled ? (hydrated ? sessionsStore.loading : true) : false,
     error: enabled ? sessionsStore.error : null,
     refresh: refreshSessionsStore,
   };
@@ -355,13 +357,15 @@ export function useSharedSession(
   const enabled = options?.enabled ?? true;
   const [, forceRender] = useReducer((value) => value + 1, 0);
   const normalizedId = typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
+  const [hydrated, setHydrated] = useState(false);
   const [sessionOverride, setSessionOverride] = useState<DashboardSession | null>(initialSession);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [loading, setLoading] = useState(
-    enabled && normalizedId !== null && initialSession === null && !sessionsStore.sessionsById.has(normalizedId),
+    enabled && normalizedId !== null && initialSession === null,
   );
 
   useEffect(() => {
+    setHydrated(true);
     primeSessionStore(initialSession);
     setSessionOverride(initialSession);
     setSessionError(null);
@@ -429,7 +433,9 @@ export function useSharedSession(
   }, [enabled, normalizedId, initialSession]);
 
   const session = normalizedId
-    ? sessionsStore.sessionsById.get(normalizedId) ?? sessionOverride ?? initialSession ?? null
+    ? (hydrated
+        ? sessionsStore.sessionsById.get(normalizedId) ?? sessionOverride ?? initialSession ?? null
+        : initialSession ?? null)
     : null;
 
   return {
@@ -438,4 +444,3 @@ export function useSharedSession(
     error: enabled && normalizedId ? sessionError ?? sessionsStore.error : null,
   };
 }
-

@@ -9,6 +9,8 @@ import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel
 import { SessionDetail } from "@/components/sessions/SessionDetail";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { useConfig } from "@/hooks/useConfig";
+import { useNotificationAlerts } from "@/hooks/useNotificationAlerts";
+import { usePreferences } from "@/hooks/usePreferences";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
 import type { DashboardSession } from "@/lib/types";
@@ -19,6 +21,7 @@ export default function SessionPageClient() {
   const searchParams = useSearchParams();
   const { projects } = useConfig();
   const { session: currentSession } = useSession(params.id);
+  const { preferences, loading: preferencesLoading } = usePreferences();
   const {
     mobileSidebarOpen,
     desktopSidebarOpen,
@@ -35,6 +38,13 @@ export default function SessionPageClient() {
     return tab !== "overview" && tab !== "preview" && tab !== "diff";
   }, [searchParams]);
   const immersiveTerminalMode = terminalTabActive && compactTerminalChrome;
+  const notificationProjectId = currentSession?.projectId ?? null;
+
+  useNotificationAlerts({
+    enabled: !preferencesLoading && notificationProjectId !== null,
+    projectId: notificationProjectId,
+    preferences: preferences?.notifications ?? null,
+  });
 
   const topBarTitle = useMemo(() => {
     if (currentSession) {

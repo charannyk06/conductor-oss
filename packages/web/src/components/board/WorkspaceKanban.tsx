@@ -866,6 +866,7 @@ function formatActivityTime(timestamp: string): string {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    timeZone: "UTC",
   }).format(new Date(parsed));
 }
 
@@ -1115,7 +1116,7 @@ export function WorkspaceKanban({
   const pendingMutationCountRef = useRef(0);
   const preferredMarkdownEditor = preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
-  const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
+  const [pageVisible, setPageVisible] = useState(true);
 
   const orderedAgentOptions = useMemo(() => {
     const normalized = [...new Set(agentOptions.filter(Boolean))];
