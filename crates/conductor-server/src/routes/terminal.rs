@@ -67,13 +67,14 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
     document.documentElement.classList.add('conductor-ttyd-touch-shim-enabled');
 
     const bindTouchScroll = () => {
+        const terminalRoot = document.querySelector('.xterm');
         const scrollHost = document.querySelector('.xterm-viewport')
             || document.querySelector('.xterm-scrollable-element');
-        if (!scrollHost || scrollHost.dataset.conductorTouchShimBound === 'true') {
+        if (!terminalRoot || !scrollHost || terminalRoot.dataset.conductorTouchShimBound === 'true') {
             return false;
         }
 
-        scrollHost.dataset.conductorTouchShimBound = 'true';
+        terminalRoot.dataset.conductorTouchShimBound = 'true';
 
         let active = false;
         let lastX = 0;
@@ -83,7 +84,96 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
             active = false;
         };
 
-        scrollHost.addEventListener('touchstart', (event) => {
+        const resolveXtermCore = () => window.term?._core || window.term?.core || null;
+        const resolveCoreMouseService = () => {
+            const core = resolveXtermCore();
+            return core?.coreMouseService || core?._coreMouseService || null;
+        };
+
+        const isMouseProtocolActive = () => {
+            const coreMouseService = resolveCoreMouseService();
+            return Boolean(coreMouseService && coreMouseService.areMouseEventsActive);
+        };
+
+        const dispatchCoreMouseWheel = (deltaY, clientX, clientY) => {
+            const core = resolveXtermCore();
+            const mouseService = core?._mouseService || core?.mouseService;
+            const coreMouseService = resolveCoreMouseService();
+            const viewport = core?.viewport;
+            const screenElement = core?.screenElement || terminalRoot.querySelector('.xterm-screen');
+            if (!mouseService
+                || typeof mouseService.getMouseReportCoords !== 'function'
+                || !coreMouseService
+                || typeof coreMouseService.triggerMouseEvent !== 'function'
+                || !coreMouseService.areMouseEventsActive
+                || !viewport
+                || typeof viewport.getLinesScrolled !== 'function'
+                || !screenElement) {
+                return false;
+            }
+
+            const wheelDeltaModePixel = typeof WheelEvent === 'function'
+                && typeof WheelEvent.DOM_DELTA_PIXEL === 'number'
+                ? WheelEvent.DOM_DELTA_PIXEL
+                : 0;
+            const wheelLikeEvent = {
+                clientX,
+                clientY,
+                deltaY,
+                deltaMode: wheelDeltaModePixel,
+                altKey: false,
+                ctrlKey: false,
+                shiftKey: false,
+            };
+            const amount = viewport.getLinesScrolled(wheelLikeEvent);
+            if (!amount) {
+                return false;
+            }
+
+            const pos = mouseService.getMouseReportCoords(wheelLikeEvent, screenElement);
+            if (!pos) {
+                return false;
+            }
+
+            return coreMouseService.triggerMouseEvent({
+                col: pos.col,
+                row: pos.row,
+                x: pos.x,
+                y: pos.y,
+                button: 4,
+                action: deltaY < 0 ? 0 : 1,
+                ctrl: false,
+                alt: false,
+                shift: false,
+            });
+        };
+
+        const dispatchTerminalWheel = (deltaX, deltaY, clientX, clientY) => {
+            if (typeof WheelEvent !== 'function') {
+                return false;
+            }
+
+            const term = window.term;
+            const eventTarget = document.elementFromPoint(clientX, clientY)
+                || term?.element
+                || terminalRoot;
+            const beforeScrollTop = scrollHost.scrollTop;
+            const wheelEvent = new WheelEvent('wheel', {
+                deltaX,
+                deltaY,
+                deltaMode: 0,
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                clientX,
+                clientY,
+            });
+
+            const cancelled = !eventTarget.dispatchEvent(wheelEvent);
+            return cancelled || wheelEvent.defaultPrevented || scrollHost.scrollTop !== beforeScrollTop;
+        };
+
+        terminalRoot.addEventListener('touchstart', (event) => {
             if (event.touches.length !== 1) {
                 reset();
                 return;
@@ -92,10 +182,11 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
             const touch = event.touches[0];
             lastX = touch.clientX;
             lastY = touch.clientY;
+            window.term?.focus?.();
             active = true;
         }, { passive: true });
 
-        scrollHost.addEventListener('touchmove', (event) => {
+        terminalRoot.addEventListener('touchmove', (event) => {
             if (!active || event.touches.length !== 1) {
                 return;
             }
@@ -110,27 +201,37 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
                 return;
             }
 
-            event.preventDefault();
-            // xterm's viewport is the actual scroll container in current ttyd builds.
-            // Update scrollTop directly so mobile browsers do not depend on synthetic wheel support.
-            const maxScrollTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
-            scrollHost.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollHost.scrollTop + deltaY));
+            // xterm already handles touch scrolling when mouse reporting is off. Only
+            // intercept the gesture when the app has enabled mouse mode, which is
+            // the OpenCode case that blocks native touch scrolling on mobile.
+            if (!isMouseProtocolActive()) {
+                return;
+            }
+
+            if (event.cancelable) {
+                event.preventDefault();
+            }
+
+            // OpenCode enables xterm mouse reporting, which disables xterm's built-in
+            // touchmove scrolling. Translate the drag into xterm's internal wheel mouse
+            // reports so OpenCode receives real scroll input for its own panes.
+            if (!dispatchCoreMouseWheel(deltaY, touch.clientX, touch.clientY)) {
+                if (!dispatchTerminalWheel(deltaX, deltaY, touch.clientX, touch.clientY)) {
+                    const maxScrollTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+                    scrollHost.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollHost.scrollTop + deltaY));
+                }
+            }
         }, { passive: false });
 
-        scrollHost.addEventListener('touchend', reset, { passive: true });
-        scrollHost.addEventListener('touchcancel', reset, { passive: true });
+        terminalRoot.addEventListener('touchend', reset, { passive: true });
+        terminalRoot.addEventListener('touchcancel', reset, { passive: true });
         return true;
     };
 
-    if (bindTouchScroll()) {
-        return;
-    }
-
     const observer = new MutationObserver(() => {
-        if (bindTouchScroll()) {
-            observer.disconnect();
-        }
+        bindTouchScroll();
     });
+    bindTouchScroll();
     observer.observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
 })();
@@ -1205,8 +1306,20 @@ mod tests {
 
         assert!(injected.contains(TTYD_MOBILE_TOUCH_SHIM_MARKER));
         assert!(injected.contains("window.__conductorTtydMobileTouchShimInstalled"));
+        assert!(injected.contains("const terminalRoot = document.querySelector('.xterm');"));
         assert!(injected.contains(".xterm-viewport"));
         assert!(injected.contains(".xterm-scrollable-element"));
+        assert!(injected.contains("const resolveXtermCore = () => window.term?._core || window.term?.core || null;"));
+        assert!(injected.contains("coreMouseService.areMouseEventsActive"));
+        assert!(injected.contains("mouseService.getMouseReportCoords"));
+        assert!(injected.contains("viewport.getLinesScrolled(wheelLikeEvent)"));
+        assert!(injected.contains("button: 4,"));
+        assert!(injected.contains("action: deltaY < 0 ? 0 : 1,"));
+        assert!(injected.contains("new WheelEvent('wheel'"));
+        assert!(injected.contains("eventTarget.dispatchEvent(wheelEvent)"));
+        assert!(injected.contains("terminalRoot.addEventListener('touchmove'"));
+        assert!(injected.contains("if (!isMouseProtocolActive()) {"));
+        assert!(injected.contains("window.term?.focus?.();"));
         assert!(
             injected.find(TTYD_MOBILE_TOUCH_SHIM_MARKER).unwrap()
                 < injected.rfind("</body>").unwrap()

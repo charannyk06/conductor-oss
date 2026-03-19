@@ -45,10 +45,15 @@ fn dashboard_metadata_allowlist() -> &'static [&'static str] {
         "recoveryAction",
         "recoveryState",
         "reviewDecision",
+        "runtimeMode",
         "startedAt",
         "summary",
         "taskId",
         "taskRef",
+        "ttydHttpUrl",
+        "ttydPid",
+        "ttydPort",
+        "ttydWsUrl",
         "worktree",
     ]
 }
