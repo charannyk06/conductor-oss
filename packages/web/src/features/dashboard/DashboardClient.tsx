@@ -56,6 +56,7 @@ import {
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
 import { useConfig, type ConfigProject } from "@/hooks/useConfig";
+import { useNotificationAlerts } from "@/hooks/useNotificationAlerts";
 import { useAgents } from "@/hooks/useAgents";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
@@ -242,9 +243,10 @@ function formatRepoUpdatedLabel(value: string | null | undefined): string | null
   if (!value) return null;
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return null;
-  return `Updated ${new Intl.DateTimeFormat(undefined, {
+  return `Updated ${new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
+    timeZone: "UTC",
   }).format(new Date(timestamp))}`;
 }
 
@@ -494,16 +496,6 @@ const IDE_SUBMENU_OPTIONS = IDE_OPTIONS.filter((option) => option.id !== "custom
 function resolveIdeOption(editorId: string): { id: string; label: string } {
   return IDE_OPTIONS.find((option) => option.id === editorId) ?? { id: editorId, label: editorId };
 }
-
-const NOTIFICATION_SOUND_OPTIONS = [
-  { id: "abstract-sound-1", label: "Abstract Sound 1" },
-  { id: "abstract-sound-2", label: "Abstract Sound 2" },
-  { id: "abstract-sound-3", label: "Abstract Sound 3" },
-  { id: "abstract-sound-4", label: "Abstract Sound 4" },
-  { id: "cow-mooing", label: "Cow Mooing" },
-  { id: "phone-vibration", label: "Phone Vibration" },
-  { id: "rooster", label: "Rooster" },
-];
 
 function toObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -1791,6 +1783,13 @@ export default function DashboardClient() {
   const onboardingRequired = !preferencesLoading && !!preferences && !preferences.onboardingAcknowledged;
   const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || DEFAULT_AGENT);
   const resolvedCodingAgent = selectedAgent || resolvedPreferences.codingAgent || DEFAULT_AGENT;
+  const notificationProjectId = selectedProjectId ?? selectedSessionRecord?.projectId ?? null;
+
+  useNotificationAlerts({
+    enabled: !preferencesLoading,
+    projectId: notificationProjectId,
+    preferences: resolvedPreferences.notifications,
+  });
 
   const handleSelectProject = useCallback((projectId: string | null) => {
     navigateDashboard(

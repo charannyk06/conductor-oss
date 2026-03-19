@@ -1,6 +1,5 @@
 "use client";
 
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { GitBranchIcon, LockIcon, MarkGithubIcon, RepoIcon } from "@primer/octicons-react";
 import {
   getAvailableAgentModels,
@@ -25,7 +24,6 @@ import {
   Building2,
   Check,
   ChevronDown,
-  ChevronsRight,
   Copy,
   FolderGit2,
   FolderKanban,
@@ -46,6 +44,7 @@ import {
 import { normalizeAgentName } from "@/lib/agentUtils";
 import { getKnownAgent, KNOWN_AGENT_ORDER } from "@/lib/knownAgents";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { playNotificationSound } from "@/lib/notificationSounds";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
   getRuntimeCatalogDefaultModelForAccess,
@@ -161,9 +160,10 @@ function formatRepoUpdatedLabel(value: string | null | undefined): string | null
   if (!value) return null;
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return null;
-  return `Updated ${new Intl.DateTimeFormat(undefined, {
+  return `Updated ${new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
+    timeZone: "UTC",
   }).format(new Date(timestamp))}`;
 }
 
@@ -387,18 +387,6 @@ const ONBOARDING_TABS: SettingsTab[] = [
   { id: "repositories", label: "Repository", icon: FolderGit2, implemented: true },
 ];
 
-const IDE_OPTIONS = [
-  { id: "vscode", label: "VS Code" },
-  { id: "vscode-insiders", label: "VS Code Insiders" },
-  { id: "cursor", label: "Cursor" },
-  { id: "windsurf", label: "Windsurf" },
-  { id: "intellij-idea", label: "IntelliJ IDEA" },
-  { id: "zed", label: "Zed" },
-  { id: "xcode", label: "Xcode" },
-  { id: "antigravity", label: "Antigravity" },
-  { id: "custom", label: "Custom" },
-];
-
 const MARKDOWN_EDITOR_OPTIONS = [
   { id: "obsidian", label: "Obsidian" },
   { id: "vscode", label: "VS Code" },
@@ -407,12 +395,6 @@ const MARKDOWN_EDITOR_OPTIONS = [
   { id: "logseq", label: "Logseq" },
   { id: "custom", label: "Custom" },
 ];
-
-const IDE_SUBMENU_OPTIONS = IDE_OPTIONS.filter((option) => option.id !== "custom");
-
-function resolveIdeOption(editorId: string): { id: string; label: string } {
-  return IDE_OPTIONS.find((option) => option.id === editorId) ?? { id: editorId, label: editorId };
-}
 
 const NOTIFICATION_SOUND_OPTIONS = [
   { id: "abstract-sound-1", label: "Abstract Sound 1" },
@@ -822,35 +804,6 @@ function getAgentModelAccessLabel(agent: string, modelAccess: ModelAccessPrefere
 }
 
 const MARKDOWN_EDITOR_ICON_CLASS = "block h-4 w-4 shrink-0";
-const CODE_EDITOR_ICON_CLASS = "block h-4 w-4 shrink-0 object-contain";
-
-type CodeEditorIconSpec =
-  | { kind: "icon"; icon: IconType; className: string }
-  | { kind: "image"; imageSrc: string; className: string };
-
-const CODE_EDITOR_ICON_MAP: Record<string, CodeEditorIconSpec> = {
-  vscode: { kind: "image", imageSrc: "/icons/ide/vscode-dark.svg", className: CODE_EDITOR_ICON_CLASS },
-  "vscode-insiders": { kind: "image", imageSrc: "/icons/ide/vscode-insiders.svg", className: CODE_EDITOR_ICON_CLASS },
-  cursor: { kind: "image", imageSrc: "/icons/ide/cursor-dark.svg", className: CODE_EDITOR_ICON_CLASS },
-  windsurf: { kind: "image", imageSrc: "/icons/ide/windsurf-dark.svg", className: CODE_EDITOR_ICON_CLASS },
-  "intellij-idea": { kind: "image", imageSrc: "/icons/ide/intellij.svg", className: CODE_EDITOR_ICON_CLASS },
-  zed: { kind: "image", imageSrc: "/icons/ide/zed-dark.svg", className: CODE_EDITOR_ICON_CLASS },
-  xcode: { kind: "image", imageSrc: "/icons/ide/xcode.svg", className: CODE_EDITOR_ICON_CLASS },
-  antigravity: { kind: "image", imageSrc: "/icons/ide/antigravity-dark.svg", className: CODE_EDITOR_ICON_CLASS },
-  custom: { kind: "icon", icon: Settings2, className: `${CODE_EDITOR_ICON_CLASS} text-[var(--vk-text-muted)]` },
-};
-
-function CodeEditorIcon({ editorId, label }: { editorId: string; label: string }) {
-  const iconSpec = CODE_EDITOR_ICON_MAP[editorId];
-  if (!iconSpec) {
-    return <Settings2 className={`${CODE_EDITOR_ICON_CLASS} text-[var(--vk-text-muted)]`} />;
-  }
-  if (iconSpec.kind === "image") {
-    return <img src={iconSpec.imageSrc} alt={`${label} logo`} className={iconSpec.className} />;
-  }
-  const Icon = iconSpec.icon;
-  return <Icon className={iconSpec.className} />;
-}
 
 function shellQuote(value: string): string {
   return JSON.stringify(value);
@@ -2577,7 +2530,6 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   const managedRemoteProvider = remoteAccessSettings.provider ?? remoteAccessSettings.recommendedProvider;
   const usingPrivateNetworkFlow = managedRemoteProvider === "tailscale";
   const showManagedTunnelControls = managedRemoteProvider !== null || remoteAccessSettings.managed;
-  const selectedIdeOption = resolveIdeOption(ide);
   const settingsMenuClass = "z-50 min-w-[240px] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
   const settingsSubMenuClass = `${settingsMenuClass} min-w-[280px]`;
   const settingsMenuItemClass = "flex min-h-[40px] cursor-default items-center gap-2 rounded-[4px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
@@ -2955,97 +2907,6 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
 
                   {(isPreferencesTab || isGeneralTab) && (
                     <>
-                      <section className="space-y-3">
-                        <div className="space-y-1">
-                          <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Choose Your Code Editor</h4>
-                          <p className="text-[12px] text-[var(--vk-text-muted)]">
-                            This editor will be used when opening attempts and files.
-                          </p>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <DropdownMenu.Root>
-                            <DropdownMenu.Trigger asChild>
-                              <button
-                                type="button"
-                                className="inline-flex h-11 items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[14px] text-[var(--vk-text-normal)] outline-none transition hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)]"
-                                aria-label="Choose code editor"
-                              >
-                                <span className="inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-muted)]">
-                                  <FolderOpen className="h-3.5 w-3.5" />
-                                </span>
-                                <span className="font-medium text-[var(--vk-text-strong)]">Open</span>
-                                <ChevronDown className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
-                              </button>
-                            </DropdownMenu.Trigger>
-                            <DropdownMenu.Portal>
-                              <DropdownMenu.Content align="start" sideOffset={6} className={settingsMenuClass}>
-                                <p className="px-3 pb-1 text-[12px] font-medium uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                                  Open With
-                                </p>
-                                <DropdownMenu.Sub>
-                                  <DropdownMenu.SubTrigger className={`${settingsMenuItemClass} min-w-[220px] justify-between`}>
-                                    <div className="flex min-w-0 items-center gap-2">
-                                      <CodeEditorIcon editorId={selectedIdeOption.id} label={selectedIdeOption.label} />
-                                      <span>IDE</span>
-                                    </div>
-                                    <div className="ml-4 flex min-w-0 items-center gap-2">
-                                      <span className="truncate text-[12px] text-[var(--vk-text-muted)]">
-                                        {selectedIdeOption.label}
-                                      </span>
-                                      <ChevronsRight className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
-                                    </div>
-                                  </DropdownMenu.SubTrigger>
-                                  <DropdownMenu.Portal>
-                                    <DropdownMenu.SubContent
-                                      sideOffset={8}
-                                      alignOffset={-4}
-                                      className={settingsSubMenuClass}
-                                    >
-                                      <p className="px-3 pb-1 text-[12px] font-medium uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                                        Editors
-                                      </p>
-                                      {IDE_SUBMENU_OPTIONS.map((option) => (
-                                        <DropdownMenu.Item
-                                          key={option.id}
-                                          onSelect={() => setIde(option.id)}
-                                          className={settingsMenuItemClass}
-                                        >
-                                          <CodeEditorIcon editorId={option.id} label={option.label} />
-                                          <span className="flex-1">{option.label}</span>
-                                          <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
-                                            {ide === option.id ? <Check className="h-4 w-4 text-[var(--vk-orange)]" /> : null}
-                                          </span>
-                                        </DropdownMenu.Item>
-                                      ))}
-                                    </DropdownMenu.SubContent>
-                                  </DropdownMenu.Portal>
-                                </DropdownMenu.Sub>
-                                <DropdownMenu.Separator className="my-1 h-px bg-[var(--vk-border)]" />
-                                <DropdownMenu.Item onSelect={() => setIde("custom")} className={settingsMenuItemClass}>
-                                  <CodeEditorIcon editorId="custom" label="Custom" />
-                                  <span className="flex-1">Custom</span>
-                                  <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
-                                    {ide === "custom" ? <Check className="h-4 w-4 text-[var(--vk-orange)]" /> : null}
-                                  </span>
-                                </DropdownMenu.Item>
-                              </DropdownMenu.Content>
-                            </DropdownMenu.Portal>
-                          </DropdownMenu.Root>
-
-                          <div className="inline-flex min-h-11 max-w-full items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2">
-                            <span className="inline-flex h-7 w-7 items-center justify-center rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
-                              <CodeEditorIcon editorId={selectedIdeOption.id} label={selectedIdeOption.label} />
-                            </span>
-                            <div className="min-w-0">
-                              <div className="truncate text-[14px] font-medium text-[var(--vk-text-strong)]">
-                                {selectedIdeOption.label}
-                              </div>
-                              <div className="truncate text-[11px] text-[var(--vk-text-muted)]">Current editor</div>
-                            </div>
-                          </div>
-                        </div>
-                      </section>
-
                       <section className="space-y-2">
                         <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Markdown Editor</h4>
                         <p className="text-[12px] text-[var(--vk-text-muted)]">
@@ -3127,6 +2988,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                                 onClick={() => {
                                   setSoundEnabled(true);
                                   setSoundFile(option.id);
+                                  void playNotificationSound(option.id);
                                 }}
                                 className={`flex items-center gap-2 rounded-[4px] border px-3 py-2 text-left ${
                                   selected
