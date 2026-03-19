@@ -38,6 +38,104 @@ const TERMINAL_SNAPSHOT_RESTORED_HEADER: &str = "x-conductor-terminal-snapshot-r
 const TERMINAL_SNAPSHOT_FORMAT_HEADER: &str = "x-conductor-terminal-snapshot-format";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+const TTYD_MOBILE_TOUCH_SHIM_MARKER: &str = "conductor-ttyd-mobile-touch-shim";
+const TTYD_MOBILE_TOUCH_SHIM: &str = r#"
+<!-- conductor-ttyd-mobile-touch-shim -->
+<style>
+html.conductor-ttyd-touch-shim-enabled,
+html.conductor-ttyd-touch-shim-enabled body {
+    overscroll-behavior: contain;
+}
+
+html.conductor-ttyd-touch-shim-enabled .xterm,
+html.conductor-ttyd-touch-shim-enabled .xterm-viewport,
+html.conductor-ttyd-touch-shim-enabled .xterm-scrollable-element,
+html.conductor-ttyd-touch-shim-enabled .xterm-screen {
+    touch-action: none;
+}
+</style>
+<script>
+(() => {
+    if (window.__conductorTtydMobileTouchShimInstalled) return;
+    window.__conductorTtydMobileTouchShimInstalled = true;
+
+    const coarsePointer = typeof window.matchMedia === 'function'
+        && window.matchMedia('(pointer: coarse)').matches;
+    const maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints || 0;
+    if (!coarsePointer && maxTouchPoints <= 0) return;
+
+    document.documentElement.classList.add('conductor-ttyd-touch-shim-enabled');
+
+    const bindTouchScroll = () => {
+        const scrollHost = document.querySelector('.xterm-viewport')
+            || document.querySelector('.xterm-scrollable-element');
+        if (!scrollHost || scrollHost.dataset.conductorTouchShimBound === 'true') {
+            return false;
+        }
+
+        scrollHost.dataset.conductorTouchShimBound = 'true';
+
+        let active = false;
+        let lastX = 0;
+        let lastY = 0;
+
+        const reset = () => {
+            active = false;
+        };
+
+        scrollHost.addEventListener('touchstart', (event) => {
+            if (event.touches.length !== 1) {
+                reset();
+                return;
+            }
+
+            const touch = event.touches[0];
+            lastX = touch.clientX;
+            lastY = touch.clientY;
+            active = true;
+        }, { passive: true });
+
+        scrollHost.addEventListener('touchmove', (event) => {
+            if (!active || event.touches.length !== 1) {
+                return;
+            }
+
+            const touch = event.touches[0];
+            const deltaX = lastX - touch.clientX;
+            const deltaY = lastY - touch.clientY;
+            lastX = touch.clientX;
+            lastY = touch.clientY;
+
+            if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) {
+                return;
+            }
+
+            event.preventDefault();
+            // xterm's viewport is the actual scroll container in current ttyd builds.
+            // Update scrollTop directly so mobile browsers do not depend on synthetic wheel support.
+            const maxScrollTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+            scrollHost.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollHost.scrollTop + deltaY));
+        }, { passive: false });
+
+        scrollHost.addEventListener('touchend', reset, { passive: true });
+        scrollHost.addEventListener('touchcancel', reset, { passive: true });
+        return true;
+    };
+
+    if (bindTouchScroll()) {
+        return;
+    }
+
+    const observer = new MutationObserver(() => {
+        if (bindTouchScroll()) {
+            observer.disconnect();
+        }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
+})();
+</script>
+"#;
 
 fn ttyd_session_ws_url(session: &SessionRecord) -> Option<String> {
     let runtime_mode = session
@@ -85,6 +183,45 @@ fn ttyd_http_url_from_ws_url(ws_url: &str) -> Option<String> {
 
 fn ttyd_session_http_url(session: &SessionRecord) -> Option<String> {
     ttyd_session_ws_url(session).and_then(|ws_url| ttyd_http_url_from_ws_url(&ws_url))
+}
+
+fn content_type_is_html(content_type: &HeaderValue) -> bool {
+    content_type
+        .to_str()
+        .ok()
+        .map(|value| value.to_ascii_lowercase().starts_with("text/html"))
+        .unwrap_or(false)
+}
+
+fn should_inject_ttyd_mobile_touch_shim(session: &SessionRecord) -> bool {
+    session.agent.trim().eq_ignore_ascii_case("opencode")
+}
+
+fn inject_ttyd_mobile_touch_shim(html: &str) -> String {
+    if html.contains(TTYD_MOBILE_TOUCH_SHIM_MARKER) {
+        return html.to_string();
+    }
+
+    if let Some(index) = html.rfind("</body>") {
+        let mut output = String::with_capacity(html.len() + TTYD_MOBILE_TOUCH_SHIM.len());
+        output.push_str(&html[..index]);
+        output.push_str(TTYD_MOBILE_TOUCH_SHIM);
+        output.push_str(&html[index..]);
+        return output;
+    }
+
+    if let Some(index) = html.rfind("</html>") {
+        let mut output = String::with_capacity(html.len() + TTYD_MOBILE_TOUCH_SHIM.len());
+        output.push_str(&html[..index]);
+        output.push_str(TTYD_MOBILE_TOUCH_SHIM);
+        output.push_str(&html[index..]);
+        return output;
+    }
+
+    let mut output = String::with_capacity(html.len() + TTYD_MOBILE_TOUCH_SHIM.len());
+    output.push_str(html);
+    output.push_str(TTYD_MOBILE_TOUCH_SHIM);
+    output
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -409,6 +546,12 @@ async fn terminal_ttyd_frontend(
             .into_response();
         }
     };
+    let body =
+        if content_type_is_html(&content_type) && should_inject_ttyd_mobile_touch_shim(&session) {
+            inject_ttyd_mobile_touch_shim(&String::from_utf8_lossy(&body)).into_bytes()
+        } else {
+            body.to_vec()
+        };
 
     let mut response = Response::new(body.into());
     *response.status_mut() = status;
@@ -1053,6 +1196,55 @@ mod tests {
         assert!(!terminal_snapshot_live_requested(Some("0")));
         assert!(!terminal_snapshot_live_requested(Some("false")));
         assert!(!terminal_snapshot_live_requested(None));
+    }
+
+    #[test]
+    fn inject_ttyd_mobile_touch_shim_inserts_before_body_close() {
+        let html = "<html><body><main>terminal</main></body></html>";
+        let injected = inject_ttyd_mobile_touch_shim(html);
+
+        assert!(injected.contains(TTYD_MOBILE_TOUCH_SHIM_MARKER));
+        assert!(injected.contains("window.__conductorTtydMobileTouchShimInstalled"));
+        assert!(injected.contains(".xterm-viewport"));
+        assert!(injected.contains(".xterm-scrollable-element"));
+        assert!(
+            injected.find(TTYD_MOBILE_TOUCH_SHIM_MARKER).unwrap()
+                < injected.rfind("</body>").unwrap()
+        );
+    }
+
+    #[test]
+    fn inject_ttyd_mobile_touch_shim_is_idempotent() {
+        let html = "<html><body><main>terminal</main></body></html>";
+        let once = inject_ttyd_mobile_touch_shim(html);
+        let twice = inject_ttyd_mobile_touch_shim(&once);
+
+        assert_eq!(
+            twice.matches(TTYD_MOBILE_TOUCH_SHIM_MARKER).count(),
+            1,
+            "touch shim should only be injected once"
+        );
+    }
+
+    #[test]
+    fn should_inject_ttyd_mobile_touch_shim_only_for_opencode_sessions() {
+        let opencode_session = SessionRecord::builder(
+            "session-opencode".to_string(),
+            "project-1".to_string(),
+            "opencode".to_string(),
+            "prompt".to_string(),
+        )
+        .build();
+        let codex_session = SessionRecord::builder(
+            "session-codex".to_string(),
+            "project-1".to_string(),
+            "codex".to_string(),
+            "prompt".to_string(),
+        )
+        .build();
+
+        assert!(should_inject_ttyd_mobile_touch_shim(&opencode_session));
+        assert!(!should_inject_ttyd_mobile_touch_shim(&codex_session));
     }
 
     #[test]
