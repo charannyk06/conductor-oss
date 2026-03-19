@@ -81,10 +81,11 @@ type SelectionComposerState = {
 function formatTime(value: string): string {
   const parsed = Date.parse(value);
   if (Number.isNaN(parsed)) return value;
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
     minute: "2-digit",
     second: "2-digit",
+    timeZone: "UTC",
   }).format(new Date(parsed));
 }
 
@@ -217,7 +218,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const previewCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const imageRef = useRef<HTMLImageElement | null>(null);
   const previewSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const [pageVisible, setPageVisible] = useState(() => (typeof document === "undefined" ? true : !document.hidden));
+  const [pageVisible, setPageVisible] = useState(true);
   const shouldRunPreview = active && pageVisible;
 
   useEffect(() => {

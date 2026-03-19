@@ -126,7 +126,7 @@ async function refreshAgents(force = false): Promise<void> {
 }
 
 export function useAgents(): UseAgentsReturn {
-  const [snapshot, setSnapshot] = useState<AgentsStoreSnapshot>(() => currentSnapshot());
+  const [snapshot, setSnapshot] = useState<AgentsStoreSnapshot>({ agents: [], loading: true });
 
   useEffect(() => {
     const applySnapshot = () => setSnapshot(currentSnapshot());

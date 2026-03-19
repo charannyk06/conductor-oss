@@ -100,7 +100,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setPromptSending(false);
     setPromptError(null);
     setQueuedInsertError(null);
-  }, [sessionId]);
+  }, [expectsLiveTerminal, sessionId]);
 
   useEffect(() => {
     if (!expectsLiveTerminal) {

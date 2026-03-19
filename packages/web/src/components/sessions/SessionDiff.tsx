@@ -245,12 +245,13 @@ function formatGeneratedAt(value: string): string {
   if (!value) return "Not generated";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return "Not generated";
-  return parsed.toLocaleString(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-  });
+    timeZone: "UTC",
+  }).format(parsed);
 }
 
 function statusLabel(file: ChangedFileSummary): string {
