@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/charannyk06/conductor-oss/bridge/daemon"
+	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/charannyk06/conductor-oss/bridge/pair"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
@@ -46,6 +47,8 @@ func run(args []string) error {
 		return runDaemon(ctx, args[1:])
 	case "status":
 		return runStatus()
+	case "install":
+		return runInstall(args[1:])
 	case "help", "--help", "-h":
 		fmt.Fprintln(os.Stdout, usageText())
 		return nil
@@ -87,6 +90,18 @@ func runDaemon(ctx context.Context, args []string) error {
 	})
 }
 
+func runInstall(args []string) error {
+	fs := flag.NewFlagSet("install", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	binaryPath := fs.String("binary", "", "Path to conductor-bridge binary (defaults to this binary)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	return install.Install(*binaryPath)
+}
+
 func runStatus() error {
 	store, err := token.NewStore("")
 	if err != nil {
@@ -124,5 +139,6 @@ func usageText() string {
 	return `Usage:
   conductor-bridge pair --code CODE [--relay-url URL]
   conductor-bridge daemon [--relay-url URL]
-  conductor-bridge status`
+  conductor-bridge status
+  conductor-bridge install`
 }
