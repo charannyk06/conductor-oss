@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Loader2, RefreshCw, Send, X } from "lucide-react";
+import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
+import { Terminal } from "xterm";
+import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import { useBridgeTunnel } from "@/hooks/useBridgeTunnel";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
@@ -24,15 +26,43 @@ function extractOutputText(response: unknown): string {
   return "";
 }
 
-function getTerminalColumns(): number {
-  if (typeof window === "undefined") return 120;
-  return window.innerWidth < 640 ? 80 : 120;
+function calculateTerminalGeometry(element: HTMLElement): { cols: number; rows: number } {
+  const { width, height } = element.getBoundingClientRect();
+  const cols = Math.max(48, Math.floor(Math.max(width - 28, 320) / 9));
+  const rows = Math.max(14, Math.floor(Math.max(height - 20, 280) / 20));
+  return { cols, rows };
 }
 
-function getTerminalRows(): number {
-  if (typeof window === "undefined") return 32;
-  return window.innerWidth < 640 ? 24 : 36;
+function resetTerminalOutput(terminal: Terminal, value: string) {
+  terminal.reset();
+  if (value.length > 0) {
+    terminal.write(value);
+  }
 }
+
+const TERMINAL_THEME = {
+  background: "#060404",
+  foreground: "#efe8e1",
+  cursor: "#f4b37c",
+  cursorAccent: "#060404",
+  selectionBackground: "rgba(244, 179, 124, 0.24)",
+  black: "#060404",
+  red: "#ff8f7a",
+  green: "#18c58f",
+  yellow: "#f0b35d",
+  blue: "#8ea6ff",
+  magenta: "#d19be8",
+  cyan: "#75d6d0",
+  white: "#efe8e1",
+  brightBlack: "#7d746e",
+  brightRed: "#ffb39e",
+  brightGreen: "#5be0b0",
+  brightYellow: "#ffd089",
+  brightBlue: "#b6c7ff",
+  brightMagenta: "#e4c0f1",
+  brightCyan: "#9fe8e2",
+  brightWhite: "#fff8f2",
+} as const;
 
 export function BridgeSessionTerminal({
   sessionId,
@@ -52,30 +82,137 @@ export function BridgeSessionTerminal({
     sendTerminalInput,
     sendTerminalResize,
   } = useBridgeTunnel(scope);
-  const [output, setOutput] = useState("");
-  const [inputValue, setInputValue] = useState("");
+  const terminalHostRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const bridgeInputRef = useRef({ connected, readOnly, sendTerminalInput });
+  const lastAppliedInsertNonceRef = useRef(0);
+  const [hasOutput, setHasOutput] = useState(false);
   const [loadingOutput, setLoadingOutput] = useState(true);
   const [requestError, setRequestError] = useState<string | null>(null);
-  const lastAppliedInsertNonceRef = useRef(0);
-  const outputScrollRef = useRef<HTMLDivElement>(null);
   const sessionLabel = sessionState.trim().replace(/[_-]+/g, " ");
 
   useEffect(() => {
+    bridgeInputRef.current = { connected, readOnly, sendTerminalInput };
+    if (terminalRef.current) {
+      terminalRef.current.options.disableStdin = readOnly || !connected;
+      terminalRef.current.options.cursorBlink = !readOnly && connected;
+    }
+  }, [connected, readOnly, sendTerminalInput]);
+
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.options.fontSize = immersiveMobileMode ? 12 : 13;
+      terminalRef.current.options.lineHeight = immersiveMobileMode ? 1.34 : 1.44;
+    }
+  }, [immersiveMobileMode]);
+
+  useEffect(() => {
+    const host = terminalHostRef.current;
+    if (!host) {
+      return;
+    }
+
+    host.textContent = "";
+    const terminal = new Terminal({
+      allowTransparency: true,
+      convertEol: true,
+      cursorBlink: !readOnly,
+      disableStdin: readOnly || !connected,
+      fontFamily: '"JetBrains Mono", "SFMono-Regular", ui-monospace, monospace',
+      fontSize: immersiveMobileMode ? 12 : 13,
+      lineHeight: immersiveMobileMode ? 1.34 : 1.44,
+      letterSpacing: 0.2,
+      scrollback: 4_000,
+      theme: TERMINAL_THEME,
+    });
+
+    terminal.open(host);
+    terminalRef.current = terminal;
+    const dataSubscription = terminal.onData((data) => {
+      const bridgeInput = bridgeInputRef.current;
+      if (bridgeInput.readOnly || !bridgeInput.connected) {
+        return;
+      }
+      bridgeInput.sendTerminalInput(data);
+    });
+
+    const focusTerminal = () => {
+      terminal.focus();
+    };
+
+    host.addEventListener("click", focusTerminal);
+    terminal.focus();
+
+    return () => {
+      host.removeEventListener("click", focusTerminal);
+      dataSubscription.dispose();
+      terminal.dispose();
+      terminalRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
-    setOutput("");
-    setInputValue("");
+    setHasOutput(false);
     setLoadingOutput(true);
     setRequestError(null);
+    if (terminalRef.current) {
+      resetTerminalOutput(terminalRef.current, "");
+    }
   }, [sessionId]);
 
   useEffect(() => {
-    if (!terminalChunk) return;
-    setOutput((current) => {
-      if (terminalChunk.startsWith("\u000c")) {
-        return terminalChunk.slice(1);
+    const host = terminalHostRef.current;
+    const terminal = terminalRef.current;
+    if (!host || !terminal) {
+      return;
+    }
+
+    const applyGeometry = () => {
+      const next = calculateTerminalGeometry(host);
+      if (terminal.cols !== next.cols || terminal.rows !== next.rows) {
+        terminal.resize(next.cols, next.rows);
       }
-      return `${current}${terminalChunk}`;
-    });
+      if (connected) {
+        sendTerminalResize(next.cols, next.rows);
+      }
+    };
+
+    applyGeometry();
+
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(() => {
+        applyGeometry();
+      });
+
+    observer?.observe(host);
+    window.addEventListener("resize", applyGeometry);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", applyGeometry);
+    };
+  }, [connected, immersiveMobileMode, sendTerminalResize]);
+
+  useEffect(() => {
+    if (!terminalChunk) {
+      return;
+    }
+
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    if (terminalChunk.startsWith("\u000c")) {
+      const nextOutput = terminalChunk.slice(1);
+      resetTerminalOutput(terminal, nextOutput);
+      setHasOutput(nextOutput.length > 0);
+      return;
+    }
+
+    terminal.write(terminalChunk);
+    setHasOutput((current) => current || terminalChunk.length > 0);
   }, [terminalChunk, terminalSequence]);
 
   useEffect(() => {
@@ -89,12 +226,20 @@ export function BridgeSessionTerminal({
 
     void requestApi("GET", `/api/sessions/${encodeURIComponent(sessionId)}/output?lines=500`)
       .then((response) => {
-        if (cancelled) return;
-        setOutput(extractOutputText(response));
+        if (cancelled) {
+          return;
+        }
+        const output = extractOutputText(response);
+        if (terminalRef.current) {
+          resetTerminalOutput(terminalRef.current, output);
+        }
+        setHasOutput(output.length > 0);
         setLoadingOutput(false);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled) {
+          return;
+        }
         setLoadingOutput(false);
         setRequestError(err instanceof Error ? err.message : "Failed to load bridge terminal output.");
       });
@@ -103,22 +248,6 @@ export function BridgeSessionTerminal({
       cancelled = true;
     };
   }, [connected, requestApi, sessionId]);
-
-  useEffect(() => {
-    if (!connected) {
-      return;
-    }
-
-    const emitResize = () => {
-      sendTerminalResize(getTerminalColumns(), getTerminalRows());
-    };
-
-    emitResize();
-    window.addEventListener("resize", emitResize);
-    return () => {
-      window.removeEventListener("resize", emitResize);
-    };
-  }, [connected, sendTerminalResize]);
 
   useEffect(() => {
     if (!connected) {
@@ -137,13 +266,6 @@ export function BridgeSessionTerminal({
 
     sendTerminalInput(`${inlineText} `);
   }, [connected, pendingInsert, sendTerminalInput]);
-
-  useEffect(() => {
-    const viewport = outputScrollRef.current;
-    if (viewport) {
-      viewport.scrollTop = viewport.scrollHeight;
-    }
-  }, [output]);
 
   const statusLine = connected
     ? bridgeStatus?.connected === false
@@ -176,7 +298,11 @@ export function BridgeSessionTerminal({
             setLoadingOutput(true);
             void requestApi("GET", `/api/sessions/${encodeURIComponent(sessionId)}/output?lines=500`)
               .then((response) => {
-                setOutput(extractOutputText(response));
+                const output = extractOutputText(response);
+                if (terminalRef.current) {
+                  resetTerminalOutput(terminalRef.current, output);
+                }
+                setHasOutput(output.length > 0);
                 setLoadingOutput(false);
                 setRequestError(null);
               })
@@ -196,97 +322,45 @@ export function BridgeSessionTerminal({
       </div>
 
       <div
-        className={
-          immersiveMobileMode
-            ? "min-h-0 min-w-0 flex-1 overflow-hidden px-0 pb-0 pt-0 w-full"
-            : "min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"
-        }
+        className={immersiveMobileMode
+          ? "min-h-0 min-w-0 flex-1 overflow-hidden w-full"
+          : "min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"}
       >
-        <div className="flex h-full flex-col overflow-hidden rounded-[10px] border border-white/10 bg-[#060404] text-[#efe8e1]">
-          <div ref={outputScrollRef} className="min-h-0 flex-1 overflow-auto px-3 py-3">
-            {output.length > 0 ? (
-              <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-[#efe8e1]">
-                {output}
-              </pre>
-            ) : (
-              <div className="flex h-full items-center justify-center">
-                <div className="max-w-lg rounded-[16px] border border-white/10 bg-[#141010]/92 p-5 text-[#efe8e1] shadow-[0_24px_48px_rgba(0,0,0,0.34)]">
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 rounded-full border border-white/10 bg-[#201818] p-2 text-[#c9c0b7]">
-                      {error || requestError ? (
-                        <AlertCircle className="h-4 w-4" />
-                      ) : (
-                        <Loader2 className={`h-4 w-4 ${loadingOutput ? "animate-spin" : ""}`} />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[14px] font-medium">Connecting bridge terminal</div>
-                      <div className="mt-1 text-[12px] leading-5 text-[#a79c94]">
-                        {emptyStateDescription}
-                      </div>
+        <div className="relative flex h-full flex-col overflow-hidden rounded-[10px] border border-white/10 bg-[#060404] text-[#efe8e1]">
+          <div
+            ref={terminalHostRef}
+            className="h-full min-h-0 flex-1 overflow-hidden px-2 py-2 text-left [&_.xterm]:h-full [&_.xterm]:px-1 [&_.xterm-viewport]:overflow-y-auto"
+          />
+
+          {!hasOutput ? (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 py-12">
+              <div className="max-w-lg rounded-[16px] border border-white/10 bg-[#141010]/92 p-5 text-[#efe8e1] shadow-[0_24px_48px_rgba(0,0,0,0.34)] backdrop-blur-sm">
+                <div className="flex items-start gap-3">
+                  <div className="mt-0.5 rounded-full border border-white/10 bg-[#201818] p-2 text-[#c9c0b7]">
+                    {error || requestError ? (
+                      <AlertCircle className="h-4 w-4" />
+                    ) : (
+                      <Loader2 className={`h-4 w-4 ${loadingOutput ? "animate-spin" : ""}`} />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[14px] font-medium">Connecting bridge terminal</div>
+                    <div className="mt-1 text-[12px] leading-5 text-[#a79c94]">
+                      {emptyStateDescription}
                     </div>
                   </div>
                 </div>
               </div>
-            )}
-          </div>
-
-          {readOnly ? (
-            <div className="border-t border-white/10 bg-[#101010] px-3 py-2 text-[11px] text-[#a79c94]">
-              Read-only share
             </div>
-          ) : (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (!connected) return;
-                const value = inputValue.trim();
-                if (value.length === 0) return;
-                sendTerminalInput(`${value}\n`);
-                setInputValue("");
-              }}
-              className="border-t border-white/10 bg-[#101010] px-2 py-2"
-            >
-              {error || requestError ? (
-                <div className="mb-2 flex items-center gap-1.5 rounded-md border border-[rgba(255,143,122,0.22)] bg-[rgba(255,143,122,0.08)] px-2 py-1.5 text-[11px] text-[#ffb39e]">
-                  <AlertCircle className="h-3 w-3 shrink-0" />
-                  <span className="truncate">{error ?? requestError}</span>
-                  <button
-                    type="button"
-                    className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-                    onClick={() => {
-                      setRequestError(null);
-                    }}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              ) : null}
-              <div className="flex items-center gap-2">
-                <input
-                  value={inputValue}
-                  onChange={(event) => setInputValue(event.target.value)}
-                  placeholder="Type a command and press Enter…"
-                  className="h-9 min-w-0 flex-1 rounded-md border border-white/10 bg-[#0c0808] px-3 text-[12px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20"
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      event.currentTarget.blur();
-                    }
-                  }}
-                />
-                <Button
-                  type="submit"
-                  size="icon"
-                  variant="ghost"
-                  disabled={inputValue.trim().length === 0 || !connected}
-                  className="h-9 w-9 shrink-0 rounded-md border border-white/10 bg-[#0c0808] text-[#c9c0b7] hover:bg-[#201818] disabled:opacity-30"
-                  aria-label="Send terminal input"
-                >
-                  <Send className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            </form>
-          )}
+          ) : null}
+
+          <div className="border-t border-white/10 bg-[#101010] px-3 py-2 text-[11px] text-[#a79c94]">
+            {readOnly
+              ? "Read-only share"
+              : connected
+                ? "Live input is attached to this terminal."
+                : "Reconnect the bridge to resume live terminal control."}
+          </div>
         </div>
       </div>
     </div>
