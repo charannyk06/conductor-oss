@@ -104,8 +104,6 @@ func startClient(parent context.Context, relayURL string, refreshToken string, s
 		done <- relay.Run(clientCtx, relay.Options{
 			RelayURL:     relayURL,
 			RefreshToken: refreshToken,
-			Stdin:        nil,
-			Stdout:       io.Discard,
 			Stderr:       stderr,
 		})
 	}()
