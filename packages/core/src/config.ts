@@ -315,7 +315,9 @@ function deriveLegacyProjectKey(project: Record<string, unknown>, index: number)
 
   const path = asNonEmptyString(project["path"]);
   if (path) {
-    const pathBase = basename(path.replace(/[\\/]+$/, ""));
+    // Limit path length to prevent polynomial-time regex on pathologically long inputs.
+    const capped = path.length > 10_000 ? path.slice(0, 10_000) : path;
+    const pathBase = basename(capped.replace(/[\\/]+$/, ""));
     if (pathBase.trim().length > 0) return slugifyProjectId(pathBase);
   }
 
