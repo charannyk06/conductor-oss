@@ -1,0 +1,306 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, Copy, Laptop, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Button } from "@/components/ui/Button";
+
+type Device = {
+  device_id: string;
+  device_name: string;
+  hostname: string;
+  os: string;
+  arch: string;
+  connected: boolean;
+  last_status: {
+    hostname: string;
+    os: string;
+    connected: boolean;
+  } | null;
+};
+
+type DevicesResponse = {
+  devices?: Device[];
+  error?: string;
+};
+
+type PairingCodeResponse = {
+  code?: string;
+  expires_in?: number;
+  error?: string;
+};
+
+function statusClasses(connected: boolean): string {
+  return connected
+    ? "border-[rgba(24,197,143,0.35)] bg-[rgba(24,197,143,0.12)] text-[var(--vk-green)]"
+    : "border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.04)] text-[var(--vk-text-muted)]";
+}
+
+export default function BridgeConnectClient() {
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [pairingCode, setPairingCode] = useState<string | null>(null);
+  const [expiresIn, setExpiresIn] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [creatingCode, setCreatingCode] = useState(false);
+  const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  const command = useMemo(() => (
+    pairingCode ? `conductor-bridge pair --code ${pairingCode}` : "conductor-bridge pair --code ABC123"
+  ), [pairingCode]);
+
+  async function refreshDevices(): Promise<void> {
+    setLoading(true);
+    try {
+      const response = await fetch("/api/bridge/devices", { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as DevicesResponse | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Failed to load devices (${response.status})`);
+      }
+      setDevices(payload?.devices ?? []);
+      setError(null);
+    } catch (err) {
+      setDevices([]);
+      setError(err instanceof Error ? err.message : "Failed to load paired devices.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleGenerateCode(): Promise<void> {
+    setCreatingCode(true);
+    setCopyState("idle");
+    try {
+      const response = await fetch("/api/bridge/devices/code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const payload = await response.json().catch(() => null) as PairingCodeResponse | null;
+      if (!response.ok || !payload?.code) {
+        throw new Error(payload?.error ?? `Failed to create pairing code (${response.status})`);
+      }
+      setPairingCode(payload.code);
+      setExpiresIn(payload.expires_in ?? null);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create pairing code.");
+    } finally {
+      setCreatingCode(false);
+    }
+  }
+
+  async function handleCopyCommand(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopyState("copied");
+      setError(null);
+    } catch (err) {
+      setCopyState("error");
+      setError(err instanceof Error ? err.message : "Failed to copy command.");
+    }
+  }
+
+  async function handleDeleteDevice(deviceId: string): Promise<void> {
+    setBusyDeviceId(deviceId);
+    try {
+      const response = await fetch(`/api/bridge/devices/${encodeURIComponent(deviceId)}`, {
+        method: "DELETE",
+      });
+      const payload = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Failed to revoke device (${response.status})`);
+      }
+      await refreshDevices();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to revoke device.");
+    } finally {
+      setBusyDeviceId(null);
+    }
+  }
+
+  useEffect(() => {
+    void refreshDevices();
+  }, []);
+
+  return (
+    <main className="min-h-dvh bg-[var(--vk-bg-main)] px-6 py-8 text-[var(--vk-text-normal)]">
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
+        <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--vk-text-muted)]">
+                Conductor Bridge
+              </p>
+              <div>
+                <h1 className="text-2xl font-semibold text-[var(--vk-text-strong)]">Connect a laptop</h1>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--vk-text-muted)]">
+                  Pair a terminal-only bridge once, keep the refresh token on the laptop, and manage every paired machine from this dashboard.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                onClick={() => {
+                  void refreshDevices();
+                }}
+              >
+                <RefreshCw className="h-4 w-4" />
+                Refresh
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                size="lg"
+                disabled={creatingCode}
+                onClick={() => {
+                  void handleGenerateCode();
+                }}
+              >
+                {creatingCode ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Add a laptop
+              </Button>
+            </div>
+          </div>
+        </section>
+
+        {error ? (
+          <section className="rounded-[20px] border border-[color:color-mix(in_srgb,var(--vk-red)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-5 py-4 text-sm text-[var(--vk-red)]">
+            {error}
+          </section>
+        ) : null}
+
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+          <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--vk-text-strong)]">Pairing code</h2>
+                <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
+                  Generate a one-time code, run the command on the laptop, and the bridge will store its refresh token at{" "}
+                  <code className="rounded bg-[var(--vk-bg-main)] px-1.5 py-0.5 text-[12px] text-[var(--vk-text-normal)]">
+                    ~/.conductor/bridge-refresh-token
+                  </code>
+                  .
+                </p>
+              </div>
+              <span className="inline-flex items-center gap-2 rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-1.5 text-xs text-[var(--vk-text-muted)]">
+                <Laptop className="h-3.5 w-3.5" />
+                {pairingCode ? "Ready to pair" : "Generate a code"}
+              </span>
+            </div>
+
+            <div className="mt-6 rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
+                One-time code
+              </div>
+              <div className="mt-3 font-mono text-4xl font-semibold tracking-[0.18em] text-[var(--vk-text-strong)]">
+                {pairingCode ?? "------"}
+              </div>
+              <div className="mt-3 text-sm text-[var(--vk-text-muted)]">
+                {pairingCode
+                  ? `Valid for about ${Math.max(1, Math.round((expiresIn ?? 600) / 60))} minutes and invalid after the first successful pair.`
+                  : "Click \"Add a laptop\" to mint the next pairing code."}
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
+                Command to run
+              </div>
+              <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
+                {command}
+              </pre>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="md"
+                  disabled={!pairingCode}
+                  onClick={() => {
+                    void handleCopyCommand();
+                  }}
+                >
+                  {copyState === "copied" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  {copyState === "copied" ? "Command copied" : "Copy command"}
+                </Button>
+              </div>
+            </div>
+          </section>
+
+          <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-[var(--vk-text-strong)]">Paired devices</h2>
+                <p className="mt-2 text-sm text-[var(--vk-text-muted)]">
+                  Online status comes from the live bridge websocket. Revoking a device removes its refresh token on the relay side.
+                </p>
+              </div>
+              <span className="rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-1.5 text-xs text-[var(--vk-text-muted)]">
+                {devices.length} paired
+              </span>
+            </div>
+
+            <div className="mt-6 space-y-3">
+              {loading ? (
+                <div className="flex items-center gap-3 rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-4 text-sm text-[var(--vk-text-muted)]">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading paired devices...
+                </div>
+              ) : devices.length > 0 ? (
+                devices.map((device) => (
+                  <div
+                    key={device.device_id}
+                    className="rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-4"
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="truncate text-sm font-medium text-[var(--vk-text-strong)]">
+                            {device.device_name}
+                          </p>
+                          <span className={`inline-flex rounded-full border px-2 py-1 text-[11px] font-medium ${statusClasses(device.connected)}`}>
+                            {device.connected ? "Online" : "Offline"}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-xs text-[var(--vk-text-muted)]">
+                          {device.hostname} · {device.os}/{device.arch}
+                        </p>
+                        <p className="mt-1 text-xs text-[var(--vk-text-muted)]">
+                          Relay status: {device.last_status?.hostname ?? device.hostname}
+                        </p>
+                      </div>
+
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        disabled={busyDeviceId === device.device_id}
+                        onClick={() => {
+                          void handleDeleteDevice(device.device_id);
+                        }}
+                        aria-label={`Revoke ${device.device_name}`}
+                      >
+                        {busyDeviceId === device.device_id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-[20px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-6 text-sm text-[var(--vk-text-muted)]">
+                  No laptops have been paired yet. Generate a code, run the bridge command on a machine, and it will appear here.
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+    </main>
+  );
+}

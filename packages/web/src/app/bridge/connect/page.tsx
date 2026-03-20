@@ -1,101 +1,52 @@
-"use client";
+import Link from "next/link";
+import { Button } from "@/components/ui/Button";
+import BridgeConnectClient from "@/features/bridge/BridgeConnectClient";
+import { getDashboardAccess } from "@/lib/auth";
 
-import { useState } from "react";
+export const dynamic = "force-dynamic";
 
-export default function BridgeConnectPage() {
-  const [token, setToken] = useState("");
-  const [status, setStatus] = useState<"idle" | "connecting" | "success" | "error">("idle");
-  const [errorMessage, setErrorMessage] = useState("");
+export default async function BridgeConnectPage() {
+  const access = await getDashboardAccess();
+  const requiresSignIn = access.provider === "clerk" && !access.authenticated;
 
-  async function handleConnect(e: React.FormEvent) {
-    e.preventDefault();
-    if (!token.trim()) return;
-
-    setStatus("connecting");
-    setErrorMessage("");
-
-    try {
-      const res = await fetch("/api/bridge/connect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token: token.trim() }),
-      });
-
-      if (res.ok) {
-        setStatus("success");
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setStatus("error");
-        setErrorMessage(data.error || `Connection failed (${res.status})`);
-      }
-    } catch (err) {
-      setStatus("error");
-      setErrorMessage(err instanceof Error ? err.message : "Failed to connect");
-    }
+  if (requiresSignIn) {
+    return (
+      <main className="min-h-dvh bg-[var(--vk-bg-main)] px-6 py-8 text-[var(--vk-text-normal)]">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+          <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-8 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
+            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--vk-text-muted)]">
+              Conductor Bridge
+            </p>
+            <h1 className="mt-4 text-3xl font-semibold text-[var(--vk-text-strong)]">Sign in to pair a laptop</h1>
+            <p className="mt-3 max-w-xl text-sm leading-6 text-[var(--vk-text-muted)]">
+              Pairing codes are scoped to your authenticated dashboard session. Sign in first, then generate the one-time code for the laptop you want to connect.
+            </p>
+            <div className="mt-8">
+              <Button asChild variant="primary" size="lg">
+                <Link href="/sign-in?redirect_url=%2Fbridge%2Fconnect">Sign in with GitHub</Link>
+              </Button>
+            </div>
+          </section>
+        </div>
+      </main>
+    );
   }
 
-  return (
-    <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center p-8">
-      <div className="w-full max-w-md">
-        <div className="border border-white/10 rounded-xl bg-[#111113] p-8">
-          <h1 className="text-2xl font-bold text-white mb-2">Connect your laptop</h1>
-          <p className="text-white/50 text-sm mb-6">
-            Connect a local bridge to access your development environment from anywhere.
+  if (!access.ok) {
+    return (
+      <main className="min-h-dvh bg-[var(--vk-bg-main)] px-6 py-8 text-[var(--vk-text-normal)]">
+        <div className="mx-auto w-full max-w-3xl rounded-[24px] border border-[color:color-mix(in_srgb,var(--vk-red)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] p-8 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--vk-text-muted)]">
+            Conductor Bridge
           </p>
-
-          <div className="bg-[#0d0d0f] border border-white/5 rounded-lg p-4 mb-6">
-            <p className="text-white/40 text-xs mb-2 font-mono">Step 1 — Start the bridge</p>
-            <code className="text-white/70 text-sm">
-              conductor bridge connect --relay ws://localhost:8080
-            </code>
-          </div>
-
-          <div className="bg-[#0d0d0f] border border-white/5 rounded-lg p-4 mb-6">
-            <p className="text-white/40 text-xs mb-2 font-mono">Step 2 — Paste the token</p>
-            <p className="text-white/50 text-xs">
-              Copy the token from your terminal and paste it below. The token expires in 5 minutes.
-            </p>
-          </div>
-
-          <form onSubmit={handleConnect} className="space-y-4">
-            <div>
-              <textarea
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="Paste your bridge token here..."
-                className="w-full bg-[#0d0d0f] border border-white/10 rounded-lg px-4 py-3 text-white text-sm placeholder:text-white/30 focus:outline-none focus:border-white/30 resize-none font-mono"
-                rows={4}
-                disabled={status === "connecting"}
-              />
-            </div>
-
-            {errorMessage && (
-              <p className="text-red-400 text-xs">{errorMessage}</p>
-            )}
-
-            {status === "success" ? (
-              <div className="flex items-center gap-2 text-emerald-400 text-sm">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                Connected! Your laptop is now linked to this dashboard.
-              </div>
-            ) : (
-              <button
-                type="submit"
-                disabled={status === "connecting" || !token.trim()}
-                className="w-full bg-white text-black font-medium py-3 rounded-lg text-sm hover:bg-white/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {status === "connecting" ? "Connecting..." : "Connect"}
-              </button>
-            )}
-          </form>
-
-          <div className="mt-6 pt-6 border-t border-white/5">
-            <p className="text-white/30 text-xs">
-              Your data never leaves your laptop. The relay only passes encrypted bytes between your bridge and this dashboard.
-            </p>
-          </div>
+          <h1 className="mt-4 text-3xl font-semibold text-[var(--vk-text-strong)]">Bridge pairing is unavailable</h1>
+          <p className="mt-3 text-sm leading-6 text-[var(--vk-text-muted)]">
+            {access.reason ?? "The dashboard access policy denied this request."}
+          </p>
         </div>
-      </div>
-    </div>
-  );
+      </main>
+    );
+  }
+
+  return <BridgeConnectClient />;
 }
