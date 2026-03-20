@@ -89,6 +89,7 @@ impl AppState {
             request.prompt.clone(),
             None,
         );
+        record.bridge_id = request.bridge_id.clone();
         record.status = SessionStatus::Queued;
         record.activity = Some("idle".to_string());
         record.summary = Some("Queued for launch".to_string());

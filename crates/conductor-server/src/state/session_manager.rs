@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use conductor_core::types::AgentKind;
 use conductor_executors::agents::build_runtime_env;
 use conductor_executors::executor::{ExecutorInput, ExecutorOutput, SpawnOptions};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +31,225 @@ pub(crate) struct OutputConsumerConfig {
     pub mirror_terminal_output: bool,
     pub output_is_parsed: bool,
     pub timeout: Option<std::time::Duration>,
+}
+
+const BRIDGE_OFFLINE_STATUS: &str = "bridge_offline";
+const BRIDGE_HEARTBEAT_TIMEOUT_SECS: i64 = 60;
+
+#[derive(Clone, Debug)]
+pub(crate) struct BridgeConnectionRecord {
+    pub bridge_id: String,
+    pub hostname: String,
+    pub os: String,
+    pub capabilities: Vec<String>,
+    pub connected: bool,
+    pub connected_at: chrono::DateTime<Utc>,
+    pub last_seen_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BridgeConnectionStatus {
+    pub bridge_id: String,
+    pub hostname: String,
+    pub os: String,
+    pub capabilities: Vec<String>,
+    pub connected: bool,
+    pub status: String,
+    pub connected_at: String,
+    pub last_seen_at: String,
+}
+
+impl From<&BridgeConnectionRecord> for BridgeConnectionStatus {
+    fn from(value: &BridgeConnectionRecord) -> Self {
+        Self {
+            bridge_id: value.bridge_id.clone(),
+            hostname: value.hostname.clone(),
+            os: value.os.clone(),
+            capabilities: value.capabilities.clone(),
+            connected: value.connected,
+            status: if value.connected { "online" } else { "offline" }.to_string(),
+            connected_at: value.connected_at.to_rfc3339(),
+            last_seen_at: value.last_seen_at.to_rfc3339(),
+        }
+    }
+}
+
+fn normalize_bridge_text(value: String, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_bridge_capabilities(capabilities: Vec<String>) -> Vec<String> {
+    let mut normalized = capabilities
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn bridge_offline_status() -> SessionStatus {
+    SessionStatus::Other(BRIDGE_OFFLINE_STATUS.to_string())
+}
+
+impl AppState {
+    pub(crate) async fn list_bridges(&self) -> Vec<BridgeConnectionStatus> {
+        let registry = self.bridge_registry.read().await;
+        let mut bridges = registry
+            .values()
+            .map(BridgeConnectionStatus::from)
+            .collect::<Vec<_>>();
+        bridges.sort_by(|left, right| {
+            right
+                .connected
+                .cmp(&left.connected)
+                .then(left.hostname.cmp(&right.hostname))
+                .then(left.bridge_id.cmp(&right.bridge_id))
+        });
+        bridges
+    }
+
+    pub(crate) async fn bridge_connection(
+        &self,
+        bridge_id: &str,
+    ) -> Option<BridgeConnectionStatus> {
+        let registry = self.bridge_registry.read().await;
+        registry.get(bridge_id).map(BridgeConnectionStatus::from)
+    }
+
+    pub(crate) async fn register_bridge(
+        &self,
+        bridge_id: String,
+        hostname: String,
+        os: String,
+        capabilities: Vec<String>,
+    ) -> BridgeConnectionStatus {
+        let bridge_id = normalize_bridge_text(bridge_id, "unknown-bridge");
+        let now = Utc::now();
+        let status = {
+            let mut registry = self.bridge_registry.write().await;
+            let record = registry
+                .entry(bridge_id.clone())
+                .or_insert_with(|| BridgeConnectionRecord {
+                    bridge_id: bridge_id.clone(),
+                    hostname: normalize_bridge_text(hostname.clone(), "unknown"),
+                    os: normalize_bridge_text(os.clone(), "unknown"),
+                    capabilities: normalize_bridge_capabilities(capabilities.clone()),
+                    connected: true,
+                    connected_at: now,
+                    last_seen_at: now,
+                });
+            record.hostname = normalize_bridge_text(hostname, "unknown");
+            record.os = normalize_bridge_text(os, "unknown");
+            record.capabilities = normalize_bridge_capabilities(capabilities);
+            if !record.connected {
+                record.connected_at = now;
+            }
+            record.connected = true;
+            record.last_seen_at = now;
+            BridgeConnectionStatus::from(&*record)
+        };
+        self.publish_snapshot().await;
+        status
+    }
+
+    pub(crate) async fn heartbeat_bridge(
+        &self,
+        bridge_id: &str,
+        hostname: Option<String>,
+        os: Option<String>,
+        capabilities: Option<Vec<String>>,
+    ) -> Option<BridgeConnectionStatus> {
+        let now = Utc::now();
+        let status = {
+            let mut registry = self.bridge_registry.write().await;
+            let record = registry.get_mut(bridge_id)?;
+            if let Some(hostname) = hostname {
+                record.hostname = normalize_bridge_text(hostname, &record.hostname);
+            }
+            if let Some(os) = os {
+                record.os = normalize_bridge_text(os, &record.os);
+            }
+            if let Some(capabilities) = capabilities {
+                record.capabilities = normalize_bridge_capabilities(capabilities);
+            }
+            if !record.connected {
+                record.connected_at = now;
+            }
+            record.connected = true;
+            record.last_seen_at = now;
+            BridgeConnectionStatus::from(&*record)
+        };
+        self.publish_snapshot().await;
+        Some(status)
+    }
+
+    pub(crate) async fn disconnect_bridge(&self, bridge_id: &str) -> Option<BridgeConnectionStatus> {
+        let status = {
+            let mut registry = self.bridge_registry.write().await;
+            let record = registry.get_mut(bridge_id)?;
+            record.connected = false;
+            record.last_seen_at = Utc::now();
+            BridgeConnectionStatus::from(&*record)
+        };
+        self.mark_bridge_sessions_offline(bridge_id).await;
+        self.publish_snapshot().await;
+        Some(status)
+    }
+
+    pub(crate) async fn maintain_bridge_registry(&self) {
+        let stale_ids = {
+            let registry = self.bridge_registry.read().await;
+            let cutoff = Utc::now() - ChronoDuration::seconds(BRIDGE_HEARTBEAT_TIMEOUT_SECS);
+            registry
+                .values()
+                .filter(|bridge| bridge.connected && bridge.last_seen_at < cutoff)
+                .map(|bridge| bridge.bridge_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        for bridge_id in stale_ids {
+            let _ = self.disconnect_bridge(&bridge_id).await;
+        }
+    }
+
+    async fn mark_bridge_sessions_offline(&self, bridge_id: &str) {
+        let offline_at = Utc::now().to_rfc3339();
+        let mut changed = Vec::new();
+        {
+            let mut sessions = self.sessions.write().await;
+            for session in sessions.values_mut() {
+                if session.bridge_id.as_deref() != Some(bridge_id) || session.status.is_terminal() {
+                    continue;
+                }
+                session.status = bridge_offline_status();
+                session.activity = Some("blocked".to_string());
+                session.summary = Some("Bridge offline".to_string());
+                session.last_activity_at = offline_at.clone();
+                session
+                    .metadata
+                    .insert("summary".to_string(), "Bridge offline".to_string());
+                session
+                    .metadata
+                    .insert("bridgeStatus".to_string(), "offline".to_string());
+                session
+                    .metadata
+                    .insert("bridgeDisconnectedAt".to_string(), offline_at.clone());
+                changed.push(session.clone());
+            }
+        }
+
+        for session in &changed {
+            let _ = self.persist_session(session).await;
+        }
+    }
 }
 
 /// Enforce a hard limit on conversation entries to prevent unbounded memory growth.
@@ -1654,6 +1874,7 @@ impl AppState {
 
         self.spawn_session(SpawnRequest {
             project_id: session.project_id.clone(),
+            bridge_id: session.bridge_id.clone(),
             prompt: session.prompt.clone(),
             issue_id: session.issue_id.clone(),
             agent: Some(session.agent.clone()),

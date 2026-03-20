@@ -48,10 +48,24 @@ export type AttentionLevel =
   | "working"
   | "done";
 
+export interface DashboardBridgeConnection {
+  bridgeId: string;
+  hostname: string;
+  os: string;
+  capabilities: string[];
+  connected: boolean;
+  status: string;
+  connectedAt: string;
+  lastSeenAt: string;
+}
+
 /** Flattened session for dashboard rendering. String dates for JSON safety. */
 export interface DashboardSession {
   id: string;
   projectId: string;
+  bridgeId?: string | null;
+  bridgeConnected?: boolean | null;
+  bridgeConnection?: DashboardBridgeConnection | null;
   status: SessionStatus;
   activity: ActivityState | null;
   branch: string | null;
@@ -111,6 +125,9 @@ export interface AppUpdateStatus {
 
 export interface SSESnapshotSession {
   id: string;
+  bridgeId?: string | null;
+  bridgeConnected?: boolean | null;
+  bridgeConnection?: DashboardBridgeConnection | null;
   status: SessionStatus;
   activity: ActivityState | null;
   attentionLevel: AttentionLevel;

@@ -21,8 +21,9 @@ pub(crate) use helpers::sanitize_terminal_text;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
+pub(crate) use helpers::session_to_dashboard_value_with_bridge;
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
-pub(crate) use session_manager::OutputConsumerConfig;
+pub(crate) use session_manager::{BridgeConnectionRecord, BridgeConnectionStatus, OutputConsumerConfig};
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
     SpawnRequest, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
@@ -91,6 +92,7 @@ const TERMINAL_RESTORE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_RESTORE_FORCE_SEQUENCE_DELTA: u64 = 24;
 const TERMINAL_HOST_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
 const TERMINAL_HOST_IDLE_EVICTION_TTL: Duration = Duration::from_secs(45);
+const BRIDGE_REGISTRY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(test)]
 pub(crate) fn ttyd_binary_available(workspace_path: &Path) -> bool {
@@ -106,6 +108,7 @@ pub struct AppState {
     pub executors: RwLock<HashMap<AgentKind, Arc<dyn Executor>>>,
     pub sessions: RwLock<HashMap<String, SessionRecord>>,
     terminal_hosts: TerminalHostRegistry,
+    bridge_registry: RwLock<HashMap<String, BridgeConnectionRecord>>,
     pub event_snapshots: broadcast::Sender<String>,
     /// Sends (session_id, delta_line) for incremental output updates.
     pub output_updates: broadcast::Sender<(String, String)>,
@@ -136,6 +139,7 @@ impl AppState {
             executors: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
             terminal_hosts: TerminalHostRegistry::default(),
+            bridge_registry: RwLock::new(HashMap::new()),
             event_snapshots,
             output_updates,
             app_update: Mutex::new(app_update_state),
@@ -160,6 +164,14 @@ impl AppState {
         *executors = discovered;
         drop(executors);
         self.kick_spawn_supervisor().await;
+    }
+
+    pub(crate) async fn serialize_dashboard_session(&self, session: &SessionRecord) -> Value {
+        let bridge = match session.bridge_id.as_deref() {
+            Some(bridge_id) => self.bridge_connection(bridge_id).await,
+            None => None,
+        };
+        session_to_dashboard_value_with_bridge(session, bridge.as_ref())
     }
 
     pub async fn save_config(&self) -> Result<()> {
@@ -253,7 +265,7 @@ impl AppState {
                     .insert("queueDepth".to_string(), queue_depth.to_string());
             }
 
-            let value = session_to_dashboard_value(&session);
+            let value = self.serialize_dashboard_session(&session).await;
             let serialized = serde_json::to_string(&value).unwrap_or_default();
             let session_id = session.id.clone();
             ordered_ids.push(session_id.clone());
@@ -342,9 +354,10 @@ impl AppState {
             return cached;
         }
 
-        self.get_session(session_id)
-            .await
-            .map(|session| session_to_dashboard_value(&session))
+        match self.get_session(session_id).await {
+            Some(session) => Some(self.serialize_dashboard_session(&session).await),
+            None => None,
+        }
     }
 
     pub async fn session_runtime_status(
@@ -415,6 +428,17 @@ impl AppState {
                     _ = state.terminal_hosts.wait_for_flush_request() => {}
                 }
                 state.maintain_terminal_hosts().await;
+            }
+        });
+    }
+
+    pub(crate) fn start_bridge_registry_watchdog(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(BRIDGE_REGISTRY_MAINTENANCE_INTERVAL);
+            loop {
+                interval.tick().await;
+                state.maintain_bridge_registry().await;
             }
         });
     }

@@ -46,7 +46,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import type { DashboardSession } from "@/lib/types";
+import type { DashboardBridgeConnection, DashboardSession } from "@/lib/types";
 import { normalizeAgentName } from "@/lib/agentUtils";
 import {
   getKnownAgent,
@@ -271,6 +271,11 @@ type CreateSessionOptions = {
   useWorktree?: boolean;
   permissionMode?: CreatePermissionMode;
   issueId?: string;
+  bridgeId?: string;
+};
+
+type BridgesResponse = {
+  bridges?: DashboardBridgeConnection[];
 };
 
 type LinkedBoardTask = {
@@ -1167,6 +1172,8 @@ export default function DashboardClient() {
   const [launchModelSelection, setLaunchModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [bridges, setBridges] = useState<DashboardBridgeConnection[]>([]);
+  const [selectedBridgeId, setSelectedBridgeId] = useState("");
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [newWorkspaceError, setNewWorkspaceError] = useState<string | null>(null);
@@ -1200,6 +1207,44 @@ export default function DashboardClient() {
       mediaQuery?.removeEventListener?.("change", syncCompactTerminalChrome);
     };
   }, []);
+
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshBridges() {
+      try {
+        const response = await fetch("/api/bridges", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch bridges: ${response.status}`);
+        }
+        const payload = (await response.json().catch(() => null)) as BridgesResponse | null;
+        if (!cancelled) {
+          setBridges(payload?.bridges ?? []);
+        }
+      } catch {
+        if (!cancelled) {
+          setBridges([]);
+        }
+      }
+    }
+
+    void refreshBridges();
+    const intervalId = window.setInterval(() => {
+      void refreshBridges();
+    }, 15_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (selectedBridgeId && !bridges.some((bridge) => bridge.bridgeId === selectedBridgeId && bridge.connected)) {
+      setSelectedBridgeId("");
+    }
+  }, [bridges, selectedBridgeId]);
 
   const immersiveMobileMode = Boolean(selectedSessionId) && terminalTabActive && compactTerminalChrome;
 
@@ -1649,13 +1694,14 @@ export default function DashboardClient() {
     setCreateError(null);
 
     try {
-      const res = await fetch("/api/spawn", {
+      const res = await fetch("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           projectId,
           prompt: trimmedPrompt,
           ...(options?.issueId?.trim() ? { issueId: options.issueId.trim() } : {}),
+          ...(options?.bridgeId?.trim() ? { bridgeId: options.bridgeId.trim() } : {}),
           agent: effectiveAgent,
           ...(options?.branch ? { branch: options.branch } : {}),
           ...(options?.baseBranch ? { baseBranch: options.baseBranch } : {}),
@@ -1906,6 +1952,9 @@ export default function DashboardClient() {
         runtimeModelCatalogs={runtimeModelCatalogs}
         agentOptions={agentOptions}
         projects={projects}
+        bridges={bridges}
+        selectedBridgeId={selectedBridgeId}
+        setSelectedBridgeId={setSelectedBridgeId}
         selectedProjectId={selectedProjectId}
         onSelectProject={handleSelectProject}
         projectLabel={selectedProjectId ?? "All projects"}
@@ -1920,6 +1969,7 @@ export default function DashboardClient() {
   }, [
     agentOptions,
     agentStatesByName,
+    bridges,
     creating,
     handleCreateSession,
     launchModelSelection,
@@ -1931,6 +1981,7 @@ export default function DashboardClient() {
     resolvedCodingAgent,
     resolvedPreferences.modelAccess,
     runtimeModelCatalogs,
+    selectedBridgeId,
     selectedProjectId,
     setPrompt,
     workspaceError,
@@ -2120,6 +2171,9 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   runtimeModelCatalogs,
   agentOptions,
   projects,
+  bridges,
+  selectedBridgeId,
+  setSelectedBridgeId,
   selectedProjectId,
   onSelectProject,
   projectLabel,
@@ -2141,6 +2195,9 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   agentOptions: string[];
   projects: ConfigProject[];
+  bridges: DashboardBridgeConnection[];
+  selectedBridgeId: string;
+  setSelectedBridgeId: (value: string) => void;
   selectedProjectId: string | null;
   onSelectProject: (projectId: string | null) => void;
   projectLabel: string;
@@ -2171,6 +2228,10 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   const selectedProject = useMemo(
     () => projectOptions.find((project) => project.id === effectiveProjectId) ?? null,
     [effectiveProjectId, projectOptions],
+  );
+  const availableBridges = useMemo(
+    () => bridges.filter((bridge) => bridge.connected),
+    [bridges],
   );
   const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [branchLoading, setBranchLoading] = useState(false);
@@ -2661,6 +2722,31 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                     </DropdownMenu.Portal>
                   </DropdownMenu.Root>
 
+
+
+                  {availableBridges.length > 0 ? (
+                    <label className="inline-flex h-[29px] max-w-[260px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)]">
+                      <PlugZap className="h-[14px] w-[14px] text-[var(--vk-text-muted)]" />
+                      <select
+                        value={selectedBridgeId}
+                        onChange={(event) => setSelectedBridgeId(event.target.value)}
+                        className="min-w-0 flex-1 bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none"
+                      >
+                        <option value="">Run locally</option>
+                        {availableBridges.map((bridge) => (
+                          <option key={bridge.bridgeId} value={bridge.bridgeId}>
+                            {bridge.hostname} · {bridge.os}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <div className="inline-flex h-[29px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-muted)]">
+                      <PlugZap className="h-[14px] w-[14px]" />
+                      <span>Run locally</span>
+                    </div>
+                  )}
+
                   <DropdownMenu.Root onOpenChange={setBranchMenuOpen}>
                     <DropdownMenu.Trigger asChild>
                       <button
@@ -2715,6 +2801,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         ? { baseBranch: selectedBranch || selectedProject?.defaultBranch || undefined }
                         : { branch: selectedBranch || selectedProject?.defaultBranch || undefined }),
                       issueId: issueId.trim() || undefined,
+                      bridgeId: selectedBridgeId || undefined,
                       useWorktree,
                       permissionMode,
                     })}

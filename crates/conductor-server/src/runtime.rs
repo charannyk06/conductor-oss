@@ -269,6 +269,7 @@ async fn process_board_change(
         let spawn_result = state
             .enqueue_session_spawn_deferred(SpawnRequest {
                 project_id: project_id.clone(),
+                bridge_id: None,
                 prompt: context.prompt,
                 issue_id: None,
                 agent: Some(agent),

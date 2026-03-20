@@ -68,6 +68,7 @@ impl McpBackend for AppStateMcpBackend {
             .state
             .spawn_session(SpawnRequest {
                 project_id,
+                bridge_id: None,
                 prompt: args
                     .prompt
                     .clone()

@@ -69,6 +69,9 @@ function mapSnapshotSession(session: SSESnapshotSession): DashboardSession {
   return {
     id: session.id,
     projectId: session.projectId,
+    bridgeId: session.bridgeId ?? null,
+    bridgeConnected: session.bridgeConnected ?? null,
+    bridgeConnection: session.bridgeConnection ?? null,
     status: session.status,
     activity: session.activity,
     branch: session.branch,
