@@ -332,3 +332,22 @@ conductor-oss/
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Conductor Bridge
+
+Conductor Bridge lets you keep the backend on your machine while accessing the dashboard from a browser through a relay.
+
+### CLI commands
+
+```bash
+conductor bridge connect --relay ws://127.0.0.1:8080
+conductor bridge status
+conductor bridge disconnect
+```
+
+### Runtime ports
+
+- Relay: `http://127.0.0.1:8080`
+- Dashboard: `http://127.0.0.1:3000`
+- Backend: `http://127.0.0.1:4749`
+

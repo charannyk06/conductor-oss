@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
+import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { SessionDetail } from "@/components/sessions/SessionDetail";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
@@ -169,6 +170,7 @@ export default function SessionPageClient() {
       {immersiveTerminalMode ? null : (
         <TopBar
           title={topBarTitle}
+          rightContent={<BridgeStatusPill />}
         />
       )}
       <div className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>

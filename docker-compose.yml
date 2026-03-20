@@ -1,0 +1,9 @@
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: crates/conductor-relay/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info

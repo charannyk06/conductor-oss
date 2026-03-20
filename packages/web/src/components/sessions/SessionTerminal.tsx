@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { BridgeSessionTerminal } from "@/components/bridge/BridgeSessionTerminal";
+import { hasBridgeSettings } from "@/lib/bridge";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
@@ -495,4 +497,33 @@ function sessionTerminalPropsEqual(
   );
 }
 
-export const SessionTerminal = memo(SessionTerminalView, sessionTerminalPropsEqual);
+function SessionTerminalContainer(props: SessionTerminalProps) {
+  const [bridgeMode, setBridgeMode] = useState(false);
+
+  useEffect(() => {
+    const syncBridgeMode = () => {
+      setBridgeMode(hasBridgeSettings());
+    };
+
+    syncBridgeMode();
+    window.addEventListener("storage", syncBridgeMode);
+    return () => {
+      window.removeEventListener("storage", syncBridgeMode);
+    };
+  }, []);
+
+  if (bridgeMode) {
+    return (
+      <BridgeSessionTerminal
+        sessionId={props.sessionId}
+        sessionState={props.sessionState}
+        pendingInsert={props.pendingInsert}
+        immersiveMobileMode={props.immersiveMobileMode}
+      />
+    );
+  }
+
+  return <SessionTerminalView {...props} />;
+}
+
+export const SessionTerminal = memo(SessionTerminalContainer, sessionTerminalPropsEqual);

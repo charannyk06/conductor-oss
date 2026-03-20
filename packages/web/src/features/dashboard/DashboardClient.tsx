@@ -61,6 +61,7 @@ import { useAgents } from "@/hooks/useAgents";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
+import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
@@ -2060,6 +2061,7 @@ export default function DashboardClient() {
           <TopBar
             title={topBarTitle}
             onOpenPreferences={handleOpenPreferences}
+            rightContent={<BridgeStatusPill />}
           />
         )}
 
