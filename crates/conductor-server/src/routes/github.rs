@@ -837,7 +837,7 @@ async fn fetch_accessible_github_repositories() -> anyhow::Result<Vec<Value>> {
     let mut cursor: Option<String> = None;
     let mut pages_fetched = 0_usize;
 
-    while repos.len() < 200 && pages_fetched < MAX_PAGINATION_PAGES {
+    while pages_fetched < MAX_PAGINATION_PAGES {
         pages_fetched += 1;
         let output = run_github_repository_query(cursor.as_deref()).await?;
         let response = serde_json::from_slice::<GraphQlResponse>(&output.stdout)?;
@@ -862,7 +862,6 @@ async fn fetch_accessible_github_repositories() -> anyhow::Result<Vec<Value>> {
         }
     }
 
-    repos.truncate(200);
     Ok(repos)
 }
 
