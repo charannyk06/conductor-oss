@@ -47,10 +47,13 @@ Conductor adds:
 npx conductor-oss@latest
 ```
 
-This starts the Rust backend and Next.js dashboard, then opens the browser. Default ports:
+This starts the Rust backend and Next.js dashboard, then opens the browser.
 
-- Dashboard: `http://127.0.0.1:4747`
-- Backend: `http://127.0.0.1:4749`
+- Default dashboard port: `http://127.0.0.1:4747` (overridable)
+- Backend port: `http://127.0.0.1:4749` in the launcher flow (or whatever you configure for CLI)
+- Rust CLI direct `conductor start` defaults to `http://127.0.0.1:4747` unless `--port` is set.
+
+For source checkouts, `bun run dev:full` launches the same stack with dashboard defaulting to `3000` in this repo.
 
 ### Initialize an existing repo
 
@@ -65,7 +68,7 @@ This scaffolds `conductor.yaml`, `CONDUCTOR.md`, and `.conductor/conductor.db` i
 
 ```bash
 npm install -g conductor-oss
-co
+co start
 ```
 
 The launcher registers three aliases: `conductor-oss`, `conductor`, and `co`.
@@ -253,12 +256,21 @@ bun install
 ```bash
 bun run dev:full     # Dashboard (port 3000) + Rust backend (port 4749)
 bun run dev          # Dashboard only
-bun run dev:backend  # Backend only (or: cargo run --bin conductor-server)
+bun run dev:backend  # Backend only (or: `cargo run --bin conductor -- --workspace . start --port 4749`)
 bun run build        # Full production build
 bun run typecheck    # TypeScript type checking
 
+export CONDUCTOR_DEV_DASHBOARD_PORT=3000 # optional
+export CONDUCTOR_DEV_BACKEND_PORT=4749    # optional
+
 cargo test --workspace                   # Rust tests
 cargo clippy --workspace -- -D warnings  # Rust linting
+```
+
+```bash
+# If you want only the frontend on port 3000 and backend separately:
+bun run --cwd packages/web dev
+cargo run --bin conductor -- --workspace . start --port 4749
 ```
 
 ### Dev Ports
