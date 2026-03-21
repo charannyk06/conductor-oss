@@ -1,19 +1,60 @@
 import { isLoopbackHost } from "@/lib/accessControl";
 
 export type ClerkConfigurationReason =
-  | "missing-keys"
+  | "missing-publishable-key"
   | "hosted-development-keys";
 
 export type ClerkConfiguration = {
   enabled: boolean;
   publishableKey: string | null;
+  secretKeyAvailable: boolean;
   proxyUrl: string | null;
   clerkJSUrl: string | null;
+  allowedRedirectOrigins: string[];
   reason: ClerkConfigurationReason | null;
 };
 
 function normalizeEnvValue(value?: string | null): string {
   return (value ?? "").trim();
+}
+
+function normalizeOrigin(value?: string | null): string | null {
+  const normalized = normalizeEnvValue(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const candidate = normalized.includes("://") ? normalized : `https://${normalized}`;
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function resolveAllowedRedirectOrigins(baseUrl?: string | null): string[] {
+  const origins = new Set<string>();
+
+  const addOrigin = (value?: string | null) => {
+    const origin = normalizeOrigin(value);
+    if (origin) {
+      origins.add(origin);
+    }
+  };
+
+  addOrigin(baseUrl);
+
+  for (const entry of normalizeEnvValue(process.env.CONDUCTOR_ALLOWED_ORIGINS).split(",")) {
+    addOrigin(entry);
+  }
+
+  return [...origins];
 }
 
 function decodeBase64Url(value: string): string | null {
@@ -85,14 +126,18 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
   const publishableKey = normalizeEnvValue(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) || null;
   const secretKey = normalizeEnvValue(process.env.CLERK_SECRET_KEY);
   const trimmedBaseUrl = normalizeEnvValue(baseUrl) || null;
+  const allowedRedirectOrigins = resolveAllowedRedirectOrigins(trimmedBaseUrl);
+  const secretKeyAvailable = Boolean(secretKey);
 
-  if (!publishableKey || !secretKey) {
+  if (!publishableKey) {
     return {
       enabled: false,
       publishableKey,
+      secretKeyAvailable,
       proxyUrl: null,
       clerkJSUrl: null,
-      reason: "missing-keys",
+      allowedRedirectOrigins,
+      reason: "missing-publishable-key",
     };
   }
 
@@ -100,14 +145,16 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
     return {
       enabled: false,
       publishableKey,
+      secretKeyAvailable,
       proxyUrl: null,
       clerkJSUrl: null,
+      allowedRedirectOrigins,
       reason: "hosted-development-keys",
     };
   }
 
   // Hosted preview/prod should proxy Clerk through our stable app origin.
-  // This avoids preview-domain/client-host mismatches while keeping the Clerk UI intact.
+  // Direct access to the custom Clerk frontend host can reject preview/prod requests.
   const shouldProxyFrontendApi = !isLoopbackHost(hostname) && Boolean(trimmedBaseUrl);
   const proxyUrl = shouldProxyFrontendApi ? `${trimmedBaseUrl}/__clerk` : null;
   const clerkJSUrl = proxyUrl ? `${proxyUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js` : null;
@@ -115,8 +162,10 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
   return {
     enabled: true,
     publishableKey,
+    secretKeyAvailable,
     proxyUrl,
     clerkJSUrl,
+    allowedRedirectOrigins,
     reason: null,
   };
 }
