@@ -19,7 +19,7 @@ import (
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
 
-const defaultRelayURL = "https://relay.conductor.dev"
+const defaultRelayURL = "https://relay.conductross.com"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {

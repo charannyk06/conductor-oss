@@ -328,29 +328,29 @@ fn build_router(state: RelayState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/bridges", get(list_bridges))
-        .route("/api/bridges/:bridge_id", delete(delete_bridge))
+        .route("/api/bridges/{bridge_id}", delete(delete_bridge))
         .route("/api/devices/claims", post(create_device_claim))
         .route("/api/devices/claims/complete", post(complete_device_claim))
         .route(
-            "/api/devices/claims/poll/:poll_token",
+            "/api/devices/claims/poll/{poll_token}",
             get(poll_device_claim),
         )
         .route("/api/devices/code", post(create_pairing_code))
         .route("/api/devices/pair", post(pair_device))
         .route("/api/devices/list", get(list_devices))
         .route("/api/devices/auth", get(resolve_device_from_token))
-        .route("/api/devices/:device_id/proxy", post(proxy_device_api))
+        .route("/api/devices/{device_id}/proxy", post(proxy_device_api))
         .route(
-            "/api/devices/:device_id/terminals",
+            "/api/devices/{device_id}/terminals",
             post(create_terminal_session),
         )
-        .route("/api/devices/:device_id", delete(delete_device))
+        .route("/api/devices/{device_id}", delete(delete_device))
         .route("/api/shares", get(list_shares).post(create_share))
-        .route("/api/shares/:share_id", delete(delete_share))
-        .route("/bridge/:scope", get(bridge_ws))
-        .route("/browser/:scope", get(browser_ws))
-        .route("/terminal/:terminal_id/browser", get(browser_terminal_ws))
-        .route("/terminal/:terminal_id/bridge", get(bridge_terminal_ws))
+        .route("/api/shares/{share_id}", delete(delete_share))
+        .route("/bridge/{scope}", get(bridge_ws))
+        .route("/browser/{scope}", get(browser_ws))
+        .route("/terminal/{terminal_id}/browser", get(browser_terminal_ws))
+        .route("/terminal/{terminal_id}/bridge", get(bridge_terminal_ws))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -359,8 +359,7 @@ fn build_router(state: RelayState) -> Router {
                     AUTHORIZATION,
                     axum::http::header::ACCEPT,
                     axum::http::header::CONTENT_TYPE,
-                ])
-                .allow_credentials(true),
+                ]),
         )
         .with_state(state)
 }
