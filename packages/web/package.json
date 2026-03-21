@@ -4,7 +4,6 @@
   "description": "Web dashboard for Conductor v2",
   "private": true,
   "license": "MIT",
-  "type": "module",
   "scripts": {
     "dev": "next dev --webpack -p ${PORT:-3000}",
     "build": "bun run --cwd ../core build && next build",
