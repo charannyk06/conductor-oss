@@ -9,8 +9,6 @@ const FORWARDED_REQUEST_HEADERS = [
   "authorization",
   "content-type",
   "cookie",
-  "origin",
-  "referer",
   "user-agent",
 ] as const;
 
