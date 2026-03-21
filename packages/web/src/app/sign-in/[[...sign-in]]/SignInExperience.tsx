@@ -32,8 +32,8 @@ const SIGN_IN_APPEARANCE = {
     formButtonPrimary:
       "min-h-11 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-muted)] text-[var(--text-strong)] shadow-none transition hover:bg-[var(--bg-panel-2)]",
     socialButtonsBlockButton:
-      "min-h-12 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)] text-[var(--text-strong)] shadow-none transition hover:bg-[var(--bg-panel-2)]",
-    socialButtonsBlockButtonText: "font-semibold text-[var(--text-strong)]",
+      "min-h-12 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-white text-[#111111] shadow-none transition hover:bg-[#f4f4f5]",
+    socialButtonsBlockButtonText: "font-semibold text-[#111111]",
     dividerText: "text-[11px] uppercase tracking-[0.24em] text-[var(--text-muted)]",
     dividerLine: "bg-[var(--border-soft)]",
     footerActionText: "text-[13px] text-[var(--text-muted)]",
