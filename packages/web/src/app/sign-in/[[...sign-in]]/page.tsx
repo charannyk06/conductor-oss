@@ -7,11 +7,9 @@ import { Button } from "@/components/ui/Button";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import {
   buildHostedSignInPath,
-  buildHostedSignInRedirectUrl,
   getDashboardAccess,
   resolvePostSignInRedirectTarget,
 } from "@/lib/auth";
-import { isLoopbackHost } from "@/lib/accessControl";
 import { resolveClerkConfiguration, resolveRequestBaseUrl, resolveRequestHostname } from "@/lib/clerkConfig";
 
 const LOCAL_RUNTIME_POINTS = [
@@ -80,13 +78,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   const hostname = resolveRequestHostname(headerStore);
   const baseUrl = resolveRequestBaseUrl(headerStore);
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
-  const hostedSignInUrl = isLoopbackHost(hostname)
-    ? null
-    : buildHostedSignInRedirectUrl(clerkConfiguration.signInUrl, baseUrl, redirectTarget);
-
-  if (hostedSignInUrl) {
-    redirect(hostedSignInUrl);
-  }
+  const hostedSignInPath = clerkConfiguration.signInUrl ? buildHostedSignInPath(redirectTarget) : null;
 
   return (
     <PublicPageShell>
@@ -125,11 +117,13 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
                     If the embedded sign-in form does not appear in this browser, continue on the hosted Clerk
                     sign-in page instead.
                   </p>
-                  <div className="mt-3">
-                    <Button asChild variant="outline" size="lg">
-                      <Link href={buildHostedSignInPath(redirectTarget)}>Use hosted sign-in</Link>
-                    </Button>
-                  </div>
+                  {hostedSignInPath ? (
+                    <div className="mt-3">
+                      <Button asChild variant="outline" size="lg">
+                        <Link href={hostedSignInPath}>Use hosted sign-in</Link>
+                      </Button>
+                    </div>
+                  ) : null}
                 </div>
               </>
             ) : clerkConfiguration.reason === "hosted-development-keys" ? (

@@ -92,25 +92,6 @@ function normalizeRedirectUrl(value?: string | null): string | null {
   }
 }
 
-function deriveAccountPortalUrl(pathname: "sign-in" | "sign-up"): string | null {
-  const frontendApiUrl = resolveClerkFrontendApiUrl();
-  if (!frontendApiUrl) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(frontendApiUrl);
-    if (!parsed.hostname.startsWith("clerk.")) {
-      return null;
-    }
-
-    const accountPortalHost = `accounts.${parsed.hostname.slice("clerk.".length)}`;
-    return `${parsed.protocol}//${accountPortalHost}/${pathname}`;
-  } catch {
-    return null;
-  }
-}
-
 function resolveAllowedRedirectOrigins(baseUrl?: string | null): string[] {
   const origins = new Set<string>();
 
@@ -182,14 +163,14 @@ function resolveConfiguredSignInUrl(): string | null {
   return normalizeRedirectUrl(
     process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL
     ?? process.env.CLERK_SIGN_IN_URL,
-  ) ?? deriveAccountPortalUrl("sign-in");
+  );
 }
 
 function resolveConfiguredSignUpUrl(): string | null {
   return normalizeRedirectUrl(
     process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL
     ?? process.env.CLERK_SIGN_UP_URL,
-  ) ?? deriveAccountPortalUrl("sign-up");
+  );
 }
 
 export function isDevelopmentClerkKey(value?: string | null): boolean {
