@@ -4,12 +4,10 @@ import { NextRequest } from "next/server";
 export const runtime = "nodejs";
 
 const FORWARDED_REQUEST_HEADERS = [
-  "accept",
   "accept-language",
   "authorization",
   "content-type",
   "cookie",
-  "user-agent",
 ] as const;
 
 function resolveProxyBaseUrl(request: NextRequest): string {
@@ -55,6 +53,10 @@ function buildUpstreamHeaders(request: NextRequest, secretKey: string): Headers 
   }
 
   headers.set("Clerk-Secret-Key", secretKey);
+  headers.set("User-Agent", "ConductorClerkProxy/1.0");
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "*/*");
+  }
 
   const clientIp = resolveClientIp(request);
   if (clientIp) {
