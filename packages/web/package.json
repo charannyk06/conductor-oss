@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev --webpack -p ${PORT:-3000}",
-    "build": "next build",
+    "build": "bun run --cwd ../core build && next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf .next"
@@ -30,6 +30,7 @@
     "jose": "^6.1.3",
     "lucide-react": "^0.576.0",
     "next": "^16.1.6",
+    "@puppeteer/browsers": "^2.13.0",
     "puppeteer-core": "^24.38.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",

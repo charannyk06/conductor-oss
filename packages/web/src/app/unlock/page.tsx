@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { isLoopbackHost } from "@/lib/accessControl";
 import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
 
@@ -34,30 +35,28 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-4 py-10">
-      <section className="surface-card w-full max-w-md rounded-[var(--radius-lg)] border p-6 shadow-[var(--shadow-card)]">
-        <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[var(--text-muted)]">
-            Secure Remote Access
-          </p>
-          <h1 className="text-2xl font-semibold text-[var(--text-strong)]">Unlock Conductor</h1>
-          <p className="text-sm leading-6 text-[var(--text-muted)]">
-            Public share-link remote access has been removed. Use the private Tailscale link from Settings, or open the protected enterprise URL from Cloudflare Access or Clerk instead.
-          </p>
-        </div>
+    <PublicPageShell className="flex items-center">
+      <div className="mx-auto w-full max-w-2xl">
+        <PublicPanel className="p-6 sm:p-8">
+          <PublicSection
+            eyebrow="Secure Remote Access"
+            title="Unlock Conductor"
+            description="Public share-link remote access has been removed. Use the private Tailscale link from Settings, or open the protected enterprise URL from Cloudflare Access or Clerk instead."
+          />
 
-        {errorMessage ? (
-          <p className="mt-6 rounded-[var(--radius-md)] border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-            {errorMessage}
-          </p>
-        ) : null}
+          {errorMessage ? (
+            <p className="mt-6 rounded-[var(--radius-md)] border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              {errorMessage}
+            </p>
+          ) : null}
 
-        {nextPath !== "/" ? (
-          <p className="mt-6 text-sm leading-6 text-[var(--text-muted)]">
-            Requested path: <code>{nextPath}</code>
-          </p>
-        ) : null}
-      </section>
-    </main>
+          {nextPath !== "/" ? (
+            <p className="mt-6 text-sm leading-6 text-[var(--text-muted)]">
+              Requested path: <code>{nextPath}</code>
+            </p>
+          ) : null}
+        </PublicPanel>
+      </div>
+    </PublicPageShell>
   );
 }

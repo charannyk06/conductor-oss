@@ -5,13 +5,10 @@ import type { DashboardAccessConfig, DashboardRole, OrchestratorConfig } from "@
 import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRoleForEmail, roleMeetsRequirement, isLoopbackHost } from "@/lib/accessControl";
+import { resolveClerkConfiguration } from "@/lib/clerkConfig";
 import { verifyTrustedEdgeIdentity } from "@/lib/edgeAuth";
 import { readRemoteAccessRuntimeState } from "@/lib/remoteAccessRuntime";
 import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
-
-const clerkConfigured = Boolean(
-  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY && process.env.CLERK_SECRET_KEY,
-);
 
 type DashboardIdentityProvider =
   | "local"
@@ -27,6 +24,19 @@ export interface DashboardAccess {
   email?: string;
   provider?: DashboardIdentityProvider;
   reason?: string;
+}
+
+function envRequiresPairedDeviceScope(): boolean {
+  const value = (
+    process.env.CONDUCTOR_REQUIRE_PAIRED_DEVICE
+    ?? process.env.NEXT_PUBLIC_CONDUCTOR_REQUIRE_PAIRED_DEVICE
+    ?? ""
+  ).trim().toLowerCase();
+  return value === "true" || value === "1" || value === "yes";
+}
+
+export function requiresPairedDeviceScope(access: DashboardAccess): boolean {
+  return envRequiresPairedDeviceScope() || Boolean(access.provider && access.provider !== "local");
 }
 
 export type DashboardConfigSnapshot = {
@@ -344,8 +354,22 @@ async function resolveTailscaleAccess(
   };
 }
 
-async function resolveClerkAccess(access: DashboardAccessConfig | null): Promise<DashboardAccess | null> {
-  if (!clerkConfigured) return null;
+async function resolveClerkAccess(
+  access: DashboardAccessConfig | null,
+  hostname: string,
+): Promise<DashboardAccess | null> {
+  const clerkConfiguration = resolveClerkConfiguration(hostname);
+  if (!clerkConfiguration.enabled) {
+    if (clerkConfiguration.reason === "hosted-development-keys") {
+      return {
+        ok: false,
+        authenticated: false,
+        reason: "Hosted Clerk auth is misconfigured. Replace Clerk development keys with production keys for this domain.",
+        provider: "clerk",
+      };
+    }
+    return null;
+  }
 
   try {
     const { currentUser } = await import("@clerk/nextjs/server");
@@ -426,7 +450,7 @@ export async function getDashboardAccess(request?: Request): Promise<DashboardAc
   const tailscaleAccess = await resolveTailscaleAccess(request, access, loopbackRequest);
   if (tailscaleAccess) return tailscaleAccess;
 
-  const clerkAccess = await resolveClerkAccess(access);
+  const clerkAccess = await resolveClerkAccess(access, host);
   if (clerkAccess) return clerkAccess;
 
   const requireAuth = access?.requireAuth === true || envRequiresAuth() || hasLegacyAllowListConfigured();

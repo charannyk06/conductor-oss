@@ -257,6 +257,15 @@ struct DeviceListItem {
     last_status: Option<BridgeStatus>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DeviceAuthResolveResponse {
+    device_id: String,
+    device_name: String,
+    hostname: String,
+    os: String,
+    arch: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct DeviceProxyRequest {
     method: String,
@@ -329,6 +338,7 @@ fn build_router(state: RelayState) -> Router {
         .route("/api/devices/code", post(create_pairing_code))
         .route("/api/devices/pair", post(pair_device))
         .route("/api/devices/list", get(list_devices))
+        .route("/api/devices/auth", get(resolve_device_from_token))
         .route("/api/devices/:device_id/proxy", post(proxy_device_api))
         .route(
             "/api/devices/:device_id/terminals",
@@ -489,6 +499,39 @@ async fn list_devices(State(state): State<RelayState>, headers: HeaderMap) -> Re
 
     let devices = state.list_devices_for_user(&user_id).await;
     (StatusCode::OK, Json(json!({ "devices": devices }))).into_response()
+}
+
+async fn resolve_device_from_token(
+    State(state): State<RelayState>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = resolve_token(&headers, None) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Missing device refresh token." })),
+        )
+            .into_response();
+    };
+
+    let Some(device) = state.resolve_device_auth(&token).await else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Invalid device refresh token." })),
+        )
+            .into_response();
+    };
+
+    (
+        StatusCode::OK,
+        Json(DeviceAuthResolveResponse {
+            device_id: device.device_id,
+            device_name: device.name,
+            hostname: device.hostname,
+            os: device.os,
+            arch: device.arch,
+        }),
+    )
+        .into_response()
 }
 
 async fn proxy_device_api(

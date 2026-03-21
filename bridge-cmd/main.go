@@ -15,6 +15,7 @@ import (
 	"github.com/charannyk06/conductor-oss/bridge/device"
 	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/charannyk06/conductor-oss/bridge/pair"
+	"github.com/charannyk06/conductor-oss/bridge/relayurl"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
 
@@ -162,6 +163,14 @@ func resolveRelayURL() string {
 			return value
 		}
 	}
+
+	store, err := relayurl.NewStore("")
+	if err == nil {
+		if value, loadErr := store.Load(); loadErr == nil && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+
 	return defaultRelayURL
 }
 

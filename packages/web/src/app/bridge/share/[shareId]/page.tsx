@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
+import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { BridgeSessionTerminal } from "@/components/bridge/BridgeSessionTerminal";
 import type { TerminalInsertRequest } from "@/components/sessions/terminalInsert";
 import { buildBridgeHttpUrl, hasBridgeSettings } from "@/lib/bridge";
@@ -78,34 +79,36 @@ export default function BridgeSharePage() {
 
   if (loading) {
     return (
-      <main className="flex min-h-dvh items-center justify-center bg-[linear-gradient(180deg,#05070b_0%,#0a1018_100%)] px-6 text-white">
-        <div className="rounded-[24px] border border-white/10 bg-white/5 px-6 py-5 text-sm text-white/70">
-          Loading shared terminal…
+      <PublicPageShell className="flex items-center">
+        <div className="mx-auto w-full max-w-xl">
+          <PublicPanel className="px-6 py-5 text-sm text-[var(--text-muted)]">Loading shared terminal...</PublicPanel>
         </div>
-      </main>
+      </PublicPageShell>
     );
   }
 
   if (error || !sessionScope) {
     return (
-      <main className="flex min-h-dvh items-center justify-center bg-[linear-gradient(180deg,#05070b_0%,#0a1018_100%)] px-6 text-white">
-        <div className="max-w-xl rounded-[24px] border border-white/10 bg-white/5 p-6 shadow-2xl backdrop-blur">
-          <p className="text-sm uppercase tracking-[0.24em] text-cyan-300">Conductor Bridge</p>
-          <h1 className="mt-3 text-3xl font-semibold">Shared terminal unavailable</h1>
-          <p className="mt-3 text-sm leading-6 text-white/68">
-            {error ?? "The shared terminal could not be resolved from this browser."}
-          </p>
+      <PublicPageShell className="flex items-center">
+        <div className="mx-auto w-full max-w-xl">
+          <PublicPanel className="p-6">
+            <PublicSection
+              eyebrow="Conductor Bridge"
+              title="Shared terminal unavailable"
+              description={error ?? "The shared terminal could not be resolved from this browser."}
+            />
+          </PublicPanel>
         </div>
-      </main>
+      </PublicPageShell>
     );
   }
 
   const emptyInsert: TerminalInsertRequest | null = null;
 
   return (
-    <main className="min-h-dvh bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.14),_transparent_35%),linear-gradient(180deg,#05070b_0%,#0a1018_100%)] px-3 py-3 text-white sm:px-6 sm:py-6">
-      <div className="mx-auto flex min-h-[calc(100dvh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-[28px] border border-white/10 bg-white/5 shadow-2xl backdrop-blur">
-        <div className="border-b border-white/10 px-4 py-3 text-[12px] text-white/70 sm:px-6">
+    <main className="min-h-dvh bg-[var(--bg-canvas)] px-3 py-3 text-[var(--text-strong)] sm:px-6 sm:py-6">
+      <div className="mx-auto flex min-h-[calc(100dvh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-soft)] bg-[var(--bg-panel)]">
+        <div className="border-b border-[var(--border-soft)] px-4 py-3 text-[12px] text-[var(--text-muted)] sm:px-6">
           Read-only shared terminal
         </div>
         <div className="min-h-0 flex-1">

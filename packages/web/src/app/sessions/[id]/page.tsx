@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { resolveDashboardPageRedirect } from "@/lib/auth";
+import { getDashboardAccess, requiresPairedDeviceScope, resolveDashboardPageRedirect } from "@/lib/auth";
 import SessionPageClient from "@/features/sessions/SessionPageClient";
 
 export const dynamic = "force-dynamic";
@@ -36,5 +36,7 @@ export default async function SessionPage({ params, searchParams }: SessionPageP
     redirect(redirectPath);
   }
 
-  return <SessionPageClient />;
+  const access = await getDashboardAccess();
+
+  return <SessionPageClient requiresPairedDeviceScope={requiresPairedDeviceScope(access)} />;
 }

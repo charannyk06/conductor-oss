@@ -4,5 +4,5 @@ export const dynamic = "force-dynamic";
 
 export const DELETE = guardedProxyParamRoute(
   ({ id }) => `/api/repositories/${encodeURIComponent(id ?? "")}`,
-  { role: "operator", requireActionGuard: true },
+  { role: "operator", requireActionGuard: true, bridgeAware: true },
 );

@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useReducer, useState } from "react";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import {
   type DashboardSession,
@@ -9,6 +11,8 @@ import {
 } from "@/lib/types";
 
 const ACTIVE_SESSIONS_POLL_INTERVAL_MS = 15_000;
+const REMOTE_SESSION_REFRESH_INTERVAL_MS = 5_000;
+const LOCAL_SCOPE_KEY = "local";
 
 type Listener = () => void;
 
@@ -27,25 +31,50 @@ type SessionsStoreState = {
   visibilityHandler: (() => void) | null;
 };
 
-const sessionsStore: SessionsStoreState = {
-  sessionsById: new Map(),
-  orderedIds: [],
-  version: 0,
-  loading: true,
-  error: null,
-  listInitialized: false,
-  refreshPromise: null,
-  unsubscribeSnapshots: null,
-  activeConsumers: 0,
-  pollTimer: null,
-  focusHandler: null,
-  visibilityHandler: null,
-};
+const sessionsStores = new Map<string, SessionsStoreState>();
+const sessionListenersByScope = new Map<string, Set<Listener>>();
 
-const sessionListeners = new Set<Listener>();
+function createSessionsStoreState(): SessionsStoreState {
+  return {
+    sessionsById: new Map(),
+    orderedIds: [],
+    version: 0,
+    loading: true,
+    error: null,
+    listInitialized: false,
+    refreshPromise: null,
+    unsubscribeSnapshots: null,
+    activeConsumers: 0,
+    pollTimer: null,
+    focusHandler: null,
+    visibilityHandler: null,
+  };
+}
 
-function emitSessionChange() {
-  for (const listener of sessionListeners) {
+function resolveScopeKey(bridgeId?: string | null): string {
+  return normalizeBridgeId(bridgeId) ?? LOCAL_SCOPE_KEY;
+}
+
+function getSessionsStore(scopeKey: string): SessionsStoreState {
+  let store = sessionsStores.get(scopeKey);
+  if (!store) {
+    store = createSessionsStoreState();
+    sessionsStores.set(scopeKey, store);
+  }
+  return store;
+}
+
+function getSessionListeners(scopeKey: string): Set<Listener> {
+  let listeners = sessionListenersByScope.get(scopeKey);
+  if (!listeners) {
+    listeners = new Set();
+    sessionListenersByScope.set(scopeKey, listeners);
+  }
+  return listeners;
+}
+
+function emitSessionChange(scopeKey: string) {
+  for (const listener of getSessionListeners(scopeKey)) {
     listener();
   }
 }
@@ -57,12 +86,14 @@ function sortSessionIdsByCreatedAt(sessionsById: Map<string, DashboardSession>):
 }
 
 function commitSessionsState(
+  scopeKey: string,
   sessionsById: Map<string, DashboardSession>,
   orderedIds: string[],
 ) {
-  sessionsStore.sessionsById = sessionsById;
-  sessionsStore.orderedIds = orderedIds;
-  sessionsStore.version += 1;
+  const store = getSessionsStore(scopeKey);
+  store.sessionsById = sessionsById;
+  store.orderedIds = orderedIds;
+  store.version += 1;
 }
 
 function mapSnapshotSession(session: SSESnapshotSession): DashboardSession {
@@ -84,16 +115,17 @@ function mapSnapshotSession(session: SSESnapshotSession): DashboardSession {
   };
 }
 
-function applySessionEvent(event: SSESessionEvent) {
+function applySessionEvent(scopeKey: string, event: SSESessionEvent) {
+  const store = getSessionsStore(scopeKey);
   if (event.type === "snapshot") {
-    commitSessionsState(new Map(
+    commitSessionsState(scopeKey, new Map(
       event.sessions.map((session) => {
         const mapped = mapSnapshotSession(session);
         return [mapped.id, mapped] as const;
       }),
     ), event.sessions.map((session) => session.id));
   } else {
-    const nextSessions = new Map(sessionsStore.sessionsById);
+    const nextSessions = new Map(store.sessionsById);
     for (const session of event.sessions) {
       const mapped = mapSnapshotSession(session);
       nextSessions.set(mapped.id, mapped);
@@ -101,11 +133,11 @@ function applySessionEvent(event: SSESessionEvent) {
     for (const sessionId of event.removedSessionIds ?? []) {
       nextSessions.delete(sessionId);
     }
-    commitSessionsState(nextSessions, sortSessionIdsByCreatedAt(nextSessions));
+    commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
   }
-  sessionsStore.loading = false;
-  sessionsStore.error = null;
-  emitSessionChange();
+  store.loading = false;
+  store.error = null;
+  emitSessionChange(scopeKey);
 }
 
 function normalizeSessionsPayload(json: unknown): DashboardSession[] {
@@ -117,44 +149,51 @@ function normalizeSessionsPayload(json: unknown): DashboardSession[] {
   return list;
 }
 
-async function refreshSessionsStore(): Promise<void> {
-  if (sessionsStore.refreshPromise) {
-    await sessionsStore.refreshPromise;
+async function refreshSessionsStore(scopeKey: string, bridgeId?: string | null): Promise<void> {
+  const store = getSessionsStore(scopeKey);
+  if (store.refreshPromise) {
+    await store.refreshPromise;
     return;
   }
 
   const load = (async () => {
     try {
-      const response = await fetch("/api/sessions", { cache: "no-store" });
+      const response = await fetch(withBridgeQuery("/api/sessions", bridgeId), { cache: "no-store" });
       if (!response.ok) {
-        throw new Error(`Failed to fetch sessions: ${response.status}`);
+        const payload = (await response.json().catch(() => null)) as { error?: string; reason?: string } | null;
+        throw new Error(payload?.error ?? payload?.reason ?? `Failed to fetch sessions: ${response.status}`);
       }
       const payload = normalizeSessionsPayload(await response.json().catch(() => null));
       const sessionsById = new Map(payload.map((session) => [session.id, session] as const));
-      commitSessionsState(sessionsById, sortSessionIdsByCreatedAt(sessionsById));
-      sessionsStore.error = null;
+      commitSessionsState(scopeKey, sessionsById, sortSessionIdsByCreatedAt(sessionsById));
+      store.error = null;
     } catch (error) {
-      sessionsStore.error = error instanceof Error ? error.message : "Failed to fetch sessions";
+      store.error = error instanceof Error ? error.message : "Failed to fetch sessions";
     } finally {
-      sessionsStore.loading = false;
-      emitSessionChange();
+      store.loading = false;
+      emitSessionChange(scopeKey);
     }
   })();
 
-  sessionsStore.refreshPromise = load.finally(() => {
-    if (sessionsStore.refreshPromise === load) {
-      sessionsStore.refreshPromise = null;
+  store.refreshPromise = load.finally(() => {
+    if (store.refreshPromise === load) {
+      store.refreshPromise = null;
     }
   });
   await load;
 }
 
-function ensureSessionsSnapshotSubscription() {
-  if (sessionsStore.unsubscribeSnapshots) {
+function ensureSessionsSnapshotSubscription(scopeKey: string) {
+  if (scopeKey !== LOCAL_SCOPE_KEY) {
     return;
   }
-  sessionsStore.unsubscribeSnapshots = subscribeToSnapshotEvents((event) => {
-    applySessionEvent(event);
+
+  const store = getSessionsStore(scopeKey);
+  if (store.unsubscribeSnapshots) {
+    return;
+  }
+  store.unsubscribeSnapshots = subscribeToSnapshotEvents((event) => {
+    applySessionEvent(scopeKey, event);
   });
 }
 
@@ -166,163 +205,180 @@ function sessionsRealtimeEnabled(): boolean {
   return document.visibilityState === "visible";
 }
 
-function clearSessionsPolling() {
-  if (sessionsStore.pollTimer !== null) {
-    window.clearTimeout(sessionsStore.pollTimer);
-    sessionsStore.pollTimer = null;
+function clearSessionsPolling(scopeKey: string) {
+  const store = getSessionsStore(scopeKey);
+  if (store.pollTimer !== null) {
+    window.clearTimeout(store.pollTimer);
+    store.pollTimer = null;
   }
 }
 
-function scheduleSessionsPolling() {
-  clearSessionsPolling();
-  if (sessionsStore.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
+function scheduleSessionsPolling(scopeKey: string, bridgeId?: string | null) {
+  const store = getSessionsStore(scopeKey);
+  clearSessionsPolling(scopeKey);
+  if (store.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
     return;
   }
 
-  sessionsStore.pollTimer = window.setTimeout(async () => {
-    if (sessionsStore.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
+  store.pollTimer = window.setTimeout(async () => {
+    const latestStore = getSessionsStore(scopeKey);
+    if (latestStore.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
       return;
     }
-    await refreshSessionsStore();
-    scheduleSessionsPolling();
+    await refreshSessionsStore(scopeKey, bridgeId);
+    scheduleSessionsPolling(scopeKey, bridgeId);
   }, sessionsPollDelay());
 }
 
-function attachSessionsLifecycleListeners() {
-  if (sessionsStore.focusHandler || sessionsStore.visibilityHandler) {
+function attachSessionsLifecycleListeners(scopeKey: string, bridgeId?: string | null) {
+  const store = getSessionsStore(scopeKey);
+  if (store.focusHandler || store.visibilityHandler) {
     return;
   }
 
   const handleFocus = () => {
-    if (sessionsStore.activeConsumers === 0) {
+    if (store.activeConsumers === 0) {
       return;
     }
-    void refreshSessionsStore();
-    scheduleSessionsPolling();
+    void refreshSessionsStore(scopeKey, bridgeId);
+    scheduleSessionsPolling(scopeKey, bridgeId);
   };
   const handleVisibilityChange = () => {
-    if (sessionsStore.activeConsumers === 0) {
+    if (store.activeConsumers === 0) {
       return;
     }
     if (document.visibilityState === "visible") {
-      void refreshSessionsStore();
+      void refreshSessionsStore(scopeKey, bridgeId);
     }
-    clearSessionsPolling();
-    scheduleSessionsPolling();
+    clearSessionsPolling(scopeKey);
+    scheduleSessionsPolling(scopeKey, bridgeId);
   };
 
-  sessionsStore.focusHandler = handleFocus;
-  sessionsStore.visibilityHandler = handleVisibilityChange;
+  store.focusHandler = handleFocus;
+  store.visibilityHandler = handleVisibilityChange;
   window.addEventListener("focus", handleFocus);
   document.addEventListener("visibilitychange", handleVisibilityChange);
 }
 
-function detachSessionsLifecycleListeners() {
-  if (sessionsStore.focusHandler) {
-    window.removeEventListener("focus", sessionsStore.focusHandler);
-    sessionsStore.focusHandler = null;
+function detachSessionsLifecycleListeners(scopeKey: string) {
+  const store = getSessionsStore(scopeKey);
+  if (store.focusHandler) {
+    window.removeEventListener("focus", store.focusHandler);
+    store.focusHandler = null;
   }
-  if (sessionsStore.visibilityHandler) {
-    document.removeEventListener("visibilitychange", sessionsStore.visibilityHandler);
-    sessionsStore.visibilityHandler = null;
+  if (store.visibilityHandler) {
+    document.removeEventListener("visibilitychange", store.visibilityHandler);
+    store.visibilityHandler = null;
   }
 }
 
-function activateSessionsStore() {
-  sessionsStore.activeConsumers += 1;
-  if (sessionsStore.activeConsumers > 1) {
+function activateSessionsStore(scopeKey: string, bridgeId?: string | null) {
+  const store = getSessionsStore(scopeKey);
+  store.activeConsumers += 1;
+  if (store.activeConsumers > 1) {
     return;
   }
 
-  ensureSessionsSnapshotSubscription();
-  if (!sessionsStore.listInitialized) {
-    sessionsStore.listInitialized = true;
+  ensureSessionsSnapshotSubscription(scopeKey);
+  if (!store.listInitialized) {
+    store.listInitialized = true;
   }
-  attachSessionsLifecycleListeners();
+  attachSessionsLifecycleListeners(scopeKey, bridgeId);
   if (sessionsRealtimeEnabled()) {
-    void refreshSessionsStore();
+    void refreshSessionsStore(scopeKey, bridgeId);
   }
-  scheduleSessionsPolling();
+  scheduleSessionsPolling(scopeKey, bridgeId);
 }
 
-function deactivateSessionsStore() {
-  sessionsStore.activeConsumers = Math.max(0, sessionsStore.activeConsumers - 1);
-  if (sessionsStore.activeConsumers > 0) {
+function deactivateSessionsStore(scopeKey: string) {
+  const store = getSessionsStore(scopeKey);
+  store.activeConsumers = Math.max(0, store.activeConsumers - 1);
+  if (store.activeConsumers > 0) {
     return;
   }
 
-  clearSessionsPolling();
-  detachSessionsLifecycleListeners();
-  sessionsStore.unsubscribeSnapshots?.();
-  sessionsStore.unsubscribeSnapshots = null;
+  clearSessionsPolling(scopeKey);
+  detachSessionsLifecycleListeners(scopeKey);
+  store.unsubscribeSnapshots?.();
+  store.unsubscribeSnapshots = null;
 }
 
-function subscribeSessions(listener: Listener): () => void {
-  sessionListeners.add(listener);
+function subscribeSessions(scopeKey: string, listener: Listener): () => void {
+  const listeners = getSessionListeners(scopeKey);
+  listeners.add(listener);
   return () => {
-    sessionListeners.delete(listener);
+    listeners.delete(listener);
   };
 }
 
-async function refreshSessionRecord(id: string): Promise<DashboardSession | null> {
+async function refreshSessionRecord(id: string, scopeKey: string): Promise<DashboardSession | null> {
+  const store = getSessionsStore(scopeKey);
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { cache: "no-store" });
     if (response.status === 404) {
-      const nextSessions = new Map(sessionsStore.sessionsById);
+      const nextSessions = new Map(store.sessionsById);
       nextSessions.delete(id);
-      commitSessionsState(nextSessions, sortSessionIdsByCreatedAt(nextSessions));
-      sessionsStore.error = null;
-      emitSessionChange();
+      commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
+      store.error = null;
+      emitSessionChange(scopeKey);
       return null;
     }
     if (!response.ok) {
-      throw new Error(`Failed to fetch session: ${response.status}`);
+      const payload = (await response.json().catch(() => null)) as { error?: string; reason?: string } | null;
+      throw new Error(payload?.error ?? payload?.reason ?? `Failed to fetch session: ${response.status}`);
     }
 
     const session = await response.json() as DashboardSession;
-    const nextSessions = new Map(sessionsStore.sessionsById);
+    const nextSessions = new Map(store.sessionsById);
     nextSessions.set(session.id, session);
-    commitSessionsState(nextSessions, sortSessionIdsByCreatedAt(nextSessions));
-    sessionsStore.error = null;
+    commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
+    store.error = null;
     return session;
   } catch (error) {
-    sessionsStore.error = error instanceof Error ? error.message : "Failed to fetch session";
+    store.error = error instanceof Error ? error.message : "Failed to fetch session";
     throw error;
   } finally {
-    sessionsStore.loading = false;
-    emitSessionChange();
+    store.loading = false;
+    emitSessionChange(scopeKey);
   }
 }
 
-export function primeSessionStore(session: DashboardSession | null | undefined) {
+export function primeSessionStore(scopeKey: string, session: DashboardSession | null | undefined) {
   if (!session) {
     return;
   }
-  const existing = sessionsStore.sessionsById.get(session.id);
+
+  const store = getSessionsStore(scopeKey);
+  const existing = store.sessionsById.get(session.id);
   if (existing && JSON.stringify(existing) === JSON.stringify(session)) {
     return;
   }
-  const nextSessions = new Map(sessionsStore.sessionsById);
+
+  const nextSessions = new Map(store.sessionsById);
   nextSessions.set(session.id, session);
-  commitSessionsState(nextSessions, sortSessionIdsByCreatedAt(nextSessions));
-  sessionsStore.loading = false;
-  emitSessionChange();
+  commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
+  store.loading = false;
+  emitSessionChange(scopeKey);
 }
 
-function filterProjectSessions(projectId?: string | null): DashboardSession[] {
+function filterProjectSessions(scopeKey: string, projectId?: string | null): DashboardSession[] {
+  const store = getSessionsStore(scopeKey);
   const normalized = projectId?.trim();
-  return sessionsStore.orderedIds
-    .map((sessionId) => sessionsStore.sessionsById.get(sessionId))
+  return store.orderedIds
+    .map((sessionId) => store.sessionsById.get(sessionId))
     .filter((session): session is DashboardSession => Boolean(session))
     .filter((session) => !normalized || session.projectId === normalized);
 }
 
 interface SharedSessionsOptions {
   enabled?: boolean;
+  bridgeId?: string | null;
 }
 
 export function useSharedSessions(projectId?: string | null, options?: SharedSessionsOptions) {
   const enabled = options?.enabled ?? true;
+  const scopeKey = resolveScopeKey(options?.bridgeId);
+  const store = getSessionsStore(scopeKey);
   const [, forceRender] = useReducer((value) => value + 1, 0);
   const [hydrated, setHydrated] = useState(false);
 
@@ -331,35 +387,48 @@ export function useSharedSessions(projectId?: string | null, options?: SharedSes
     if (!enabled) {
       return undefined;
     }
-    activateSessionsStore();
-    const unsubscribe = subscribeSessions(() => forceRender());
+    activateSessionsStore(scopeKey, options?.bridgeId);
+    const unsubscribe = subscribeSessions(scopeKey, () => forceRender());
     return () => {
       unsubscribe();
-      deactivateSessionsStore();
+      deactivateSessionsStore(scopeKey);
     };
-  }, [enabled]);
+  }, [enabled, options?.bridgeId, scopeKey]);
 
   const sessions = useMemo(
-    () => (enabled && hydrated ? filterProjectSessions(projectId) : []),
-    [enabled, hydrated, projectId, sessionsStore.version],
+    () => (enabled && hydrated ? filterProjectSessions(scopeKey, projectId) : []),
+    [enabled, hydrated, projectId, scopeKey, store.version],
   );
 
   return {
     sessions,
-    loading: enabled ? (hydrated ? sessionsStore.loading : true) : false,
-    error: enabled ? sessionsStore.error : null,
-    refresh: refreshSessionsStore,
+    loading: enabled ? (hydrated ? store.loading : true) : false,
+    error: enabled ? store.error : null,
+    refresh: () => refreshSessionsStore(scopeKey, options?.bridgeId),
   };
 }
+
+type SharedSessionOptions = {
+  enabled?: boolean;
+  bridgeId?: string | null;
+};
 
 export function useSharedSession(
   id: string | null | undefined,
   initialSession: DashboardSession | null = null,
-  options?: { enabled?: boolean },
+  options?: SharedSessionOptions,
 ) {
   const enabled = options?.enabled ?? true;
-  const [, forceRender] = useReducer((value) => value + 1, 0);
   const normalizedId = typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
+  const inferredBridgeId = normalizeBridgeId(
+    options?.bridgeId
+      ?? initialSession?.bridgeId
+      ?? decodeBridgeSessionId(normalizedId)?.bridgeId
+      ?? null,
+  );
+  const scopeKey = resolveScopeKey(inferredBridgeId);
+  const store = getSessionsStore(scopeKey);
+  const [, forceRender] = useReducer((value) => value + 1, 0);
   const [hydrated, setHydrated] = useState(false);
   const [sessionOverride, setSessionOverride] = useState<DashboardSession | null>(initialSession);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -369,27 +438,48 @@ export function useSharedSession(
 
   useEffect(() => {
     setHydrated(true);
-    primeSessionStore(initialSession);
+    primeSessionStore(scopeKey, initialSession);
     setSessionOverride(initialSession);
     setSessionError(null);
-  }, [initialSession]);
+  }, [initialSession, scopeKey]);
 
   useEffect(() => {
     if (!enabled || normalizedId === null) {
       return undefined;
     }
-    return subscribeSessions(() => forceRender());
-  }, [enabled, normalizedId]);
+    return subscribeSessions(scopeKey, () => forceRender());
+  }, [enabled, normalizedId, scopeKey]);
 
   useEffect(() => {
     if (!enabled || normalizedId === null) {
       return undefined;
     }
-    activateSessionsStore();
+    activateSessionsStore(scopeKey, inferredBridgeId);
     return () => {
-      deactivateSessionsStore();
+      deactivateSessionsStore(scopeKey);
     };
-  }, [enabled, normalizedId]);
+  }, [enabled, inferredBridgeId, normalizedId, scopeKey]);
+
+  useEffect(() => {
+    if (!enabled || normalizedId === null || scopeKey === LOCAL_SCOPE_KEY) {
+      return undefined;
+    }
+
+    const refresh = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      void refreshSessionRecord(normalizedId, scopeKey).catch(() => {
+        // Ignore transient remote refresh failures.
+      });
+    };
+
+    refresh();
+    const intervalId = window.setInterval(refresh, REMOTE_SESSION_REFRESH_INTERVAL_MS);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [enabled, normalizedId, scopeKey]);
 
   useEffect(() => {
     if (!enabled || normalizedId === null) {
@@ -399,8 +489,8 @@ export function useSharedSession(
       return;
     }
 
-    if (initialSession || sessionsStore.sessionsById.has(normalizedId)) {
-      setSessionOverride((current) => sessionsStore.sessionsById.get(normalizedId) ?? current ?? initialSession);
+    if (initialSession || store.sessionsById.has(normalizedId)) {
+      setSessionOverride((current) => store.sessionsById.get(normalizedId) ?? current ?? initialSession);
       setSessionError(null);
       setLoading(false);
       return;
@@ -409,7 +499,7 @@ export function useSharedSession(
     let cancelled = false;
     setLoading(true);
     setSessionError(null);
-    void refreshSessionRecord(normalizedId)
+    void refreshSessionRecord(normalizedId, scopeKey)
       .then((session) => {
         if (cancelled) {
           return;
@@ -433,17 +523,17 @@ export function useSharedSession(
     return () => {
       cancelled = true;
     };
-  }, [enabled, normalizedId, initialSession]);
+  }, [enabled, initialSession, normalizedId, scopeKey, store]);
 
   const session = normalizedId
     ? (hydrated
-        ? sessionsStore.sessionsById.get(normalizedId) ?? sessionOverride ?? initialSession ?? null
+        ? store.sessionsById.get(normalizedId) ?? sessionOverride ?? initialSession ?? null
         : initialSession ?? null)
     : null;
 
   return {
     session,
     loading,
-    error: enabled && normalizedId ? sessionError ?? sessionsStore.error : null,
+    error: enabled && normalizedId ? sessionError ?? store.error : null,
   };
 }

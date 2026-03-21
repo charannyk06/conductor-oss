@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { usePreferences } from "@/hooks/usePreferences";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
 
 type BoardRole =
@@ -160,6 +161,7 @@ type ProjectSession = {
 
 interface WorkspaceKanbanProps {
   projectId: string | null;
+  bridgeId?: string | null;
   defaultAgent: string;
   agentOptions: string[];
   projectSessions: ProjectSession[];
@@ -1041,12 +1043,13 @@ function compareProjectSessions(
 
 export function WorkspaceKanban({
   projectId,
+  bridgeId,
   defaultAgent,
   agentOptions,
   projectSessions,
 }: WorkspaceKanbanProps) {
   const router = useRouter();
-  const { preferences } = usePreferences();
+  const { preferences } = usePreferences(bridgeId);
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1151,7 +1154,7 @@ export function WorkspaceKanban({
       setContextError(null);
       try {
         const res = await fetch(
-          `/api/context-files?projectId=${encodeURIComponent(projectId)}`
+          withBridgeQuery(`/api/context-files?projectId=${encodeURIComponent(projectId)}`, bridgeId)
         );
         const payload = (await res.json().catch(() => null)) as
           | ContextFilesResponse
@@ -1185,7 +1188,7 @@ export function WorkspaceKanban({
     return () => {
       cancelled = true;
     };
-  }, [composerOpen, editingTask, projectId]);
+  }, [bridgeId, composerOpen, editingTask, projectId]);
 
   useEffect(() => {
     hasLoadedBoardRef.current = false;
@@ -1193,7 +1196,7 @@ export function WorkspaceKanban({
     setProjectSyncError(null);
     setProjectSyncData(null);
     setSelectedGitHubProjectId("");
-  }, [projectId]);
+  }, [bridgeId, projectId]);
 
   const loadBoard = useCallback(
     async (options?: { silent?: boolean }) => {
@@ -1218,7 +1221,7 @@ export function WorkspaceKanban({
       }
       try {
         const res = await fetch(
-          `/api/boards?projectId=${encodeURIComponent(projectId)}`
+          withBridgeQuery(`/api/boards?projectId=${encodeURIComponent(projectId)}`, bridgeId)
         );
         const data = (await res.json().catch(() => null)) as
           | BoardResponse
@@ -1249,7 +1252,7 @@ export function WorkspaceKanban({
         boardRequestInFlightRef.current = false;
       }
     },
-    [projectId]
+    [bridgeId, projectId]
   );
 
   const scheduleBoardRefresh = useCallback((options?: { silent?: boolean }) => {
@@ -1281,7 +1284,7 @@ export function WorkspaceKanban({
     setProjectSyncError(null);
     try {
       const res = await fetch(
-        `/api/github/projects?projectId=${encodeURIComponent(projectId)}`
+        withBridgeQuery(`/api/github/projects?projectId=${encodeURIComponent(projectId)}`, bridgeId)
       );
       const payload = (await res.json().catch(() => null)) as
         | GitHubProjectsResponse
@@ -1313,7 +1316,7 @@ export function WorkspaceKanban({
     } finally {
       setProjectSyncLoading(false);
     }
-  }, [projectId]);
+  }, [bridgeId, projectId]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -1618,7 +1621,7 @@ export function WorkspaceKanban({
     setSubmitError(null);
 
     try {
-      const res = await fetch("/api/boards", {
+      const res = await fetch(withBridgeQuery("/api/boards", bridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1659,7 +1662,7 @@ export function WorkspaceKanban({
         for (const file of uploadFiles) {
           formData.append("files", file);
         }
-        const uploadRes = await fetch("/api/attachments", {
+        const uploadRes = await fetch(withBridgeQuery("/api/attachments", bridgeId), {
           method: "POST",
           body: formData,
         });
@@ -1678,7 +1681,7 @@ export function WorkspaceKanban({
           .filter((value): value is string => Boolean(value));
 
         if (uploadedPaths.length > 0) {
-          const patchRes = await fetch("/api/boards", {
+          const patchRes = await fetch(withBridgeQuery("/api/boards", bridgeId), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1749,7 +1752,7 @@ export function WorkspaceKanban({
     const queuedRequest = mutationQueueRef.current
       .catch(() => null)
       .then(async () => {
-        const res = await fetch("/api/boards", {
+        const res = await fetch(withBridgeQuery("/api/boards", bridgeId), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -1804,7 +1807,7 @@ export function WorkspaceKanban({
     setProjectSyncSaving(true);
     setProjectSyncError(null);
     try {
-      const res = await fetch("/api/github/projects", {
+      const res = await fetch(withBridgeQuery("/api/github/projects", bridgeId), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1845,7 +1848,7 @@ export function WorkspaceKanban({
     setProjectSyncSaving(true);
     setProjectSyncError(null);
     try {
-      const res = await fetch("/api/github/projects/sync", {
+      const res = await fetch(withBridgeQuery("/api/github/projects/sync", bridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId, direction }),
@@ -1942,7 +1945,7 @@ export function WorkspaceKanban({
     setCommentBusy(true);
     setCommentError(null);
     try {
-      const res = await fetch("/api/boards/comments", {
+      const res = await fetch(withBridgeQuery("/api/boards/comments", bridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

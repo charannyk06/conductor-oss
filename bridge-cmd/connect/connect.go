@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,10 +17,13 @@ import (
 
 	"github.com/charannyk06/conductor-oss/bridge/daemon"
 	"github.com/charannyk06/conductor-oss/bridge/device"
+	"github.com/charannyk06/conductor-oss/bridge/relayurl"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
 
 const defaultDashboardURL = "https://conductross.com"
+
+var errInvalidSavedPairing = errors.New("saved device pairing is invalid")
 
 type Options struct {
 	RelayURL      string
@@ -56,6 +60,15 @@ type claimPollResponse struct {
 	DeviceID     string `json:"device_id"`
 	DeviceName   string `json:"device_name"`
 	Error        string `json:"error"`
+}
+
+type deviceAuthResponse struct {
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	Hostname   string `json:"hostname"`
+	OS         string `json:"os"`
+	Arch       string `json:"arch"`
+	Error      string `json:"error"`
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -95,25 +108,46 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	if refreshToken, err := store.Load(); err == nil && strings.TrimSpace(refreshToken) != "" {
-		deviceID, deviceErr := deviceStore.Load()
-		openTarget := dashboardURL
-		if deviceErr == nil && strings.TrimSpace(deviceID) != "" {
-			if withDevice, err := appendBridgeQuery(dashboardURL, deviceID); err == nil {
-				openTarget = withDevice
-			}
-		}
+	relayStore, err := relayurl.NewStore("")
+	if err != nil {
+		return err
+	}
+	if err := relayStore.Save(opts.RelayURL); err != nil {
+		return err
+	}
 
-		fmt.Fprintln(stdout, "Device already paired. Reconnecting bridge daemon.")
-		announceBrowser(openTarget, opts.OpenBrowser, stdout, stderr)
-		if opts.StartupDaemon {
-			return daemon.Run(ctx, daemon.Options{
-				RelayURL: opts.RelayURL,
-				Store:    store,
-				Stderr:   stderr,
-			})
+	if refreshToken, err := store.Load(); err == nil && strings.TrimSpace(refreshToken) != "" {
+		resolvedDevice, resolveErr := resolveSavedDevice(ctx, opts.RelayURL, refreshToken)
+		switch {
+		case resolveErr == nil:
+			if strings.TrimSpace(resolvedDevice.DeviceID) != "" {
+				if err := deviceStore.Save(resolvedDevice.DeviceID); err != nil {
+					return err
+				}
+			}
+
+			openTarget := dashboardURL
+			if strings.TrimSpace(resolvedDevice.DeviceID) != "" {
+				if withDevice, err := appendBridgeQuery(dashboardURL, resolvedDevice.DeviceID); err == nil {
+					openTarget = withDevice
+				}
+			}
+
+			fmt.Fprintln(stdout, "Device already paired. Reconnecting bridge daemon.")
+			announceBrowser(openTarget, opts.OpenBrowser, stdout, stderr)
+			if opts.StartupDaemon {
+				return daemon.Run(ctx, daemon.Options{
+					RelayURL: opts.RelayURL,
+					Store:    store,
+					Stderr:   stderr,
+				})
+			}
+			return nil
+		case errors.Is(resolveErr, errInvalidSavedPairing):
+			fmt.Fprintln(stderr, "Saved bridge pairing is invalid or expired. Re-pairing this machine.")
+		default:
+			return resolveErr
 		}
-		return nil
 	}
 
 	deviceID, err := deviceStore.Ensure()
@@ -159,6 +193,53 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	return nil
+}
+
+func resolveSavedDevice(ctx context.Context, relayURL string, refreshToken string) (deviceAuthResponse, error) {
+	endpoint, err := resolveRelayEndpoint(relayURL, "/api/devices/auth")
+	if err != nil {
+		return deviceAuthResponse{}, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return deviceAuthResponse{}, fmt.Errorf("build device auth request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(refreshToken))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return deviceAuthResponse{}, fmt.Errorf("resolve saved device pairing: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return deviceAuthResponse{}, fmt.Errorf("read device auth response: %w", err)
+	}
+
+	var payload deviceAuthResponse
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return deviceAuthResponse{}, fmt.Errorf("decode device auth response: %w (%s)", err, strings.TrimSpace(string(body)))
+		}
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return deviceAuthResponse{}, errInvalidSavedPairing
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := strings.TrimSpace(payload.Error)
+		if message == "" {
+			message = fmt.Sprintf("device auth request failed with status %d", resp.StatusCode)
+		}
+		return deviceAuthResponse{}, fmt.Errorf(message)
+	}
+	if strings.TrimSpace(payload.DeviceID) == "" {
+		return deviceAuthResponse{}, errInvalidSavedPairing
+	}
+
+	return payload, nil
 }
 
 func createClaim(ctx context.Context, relayURL string, deviceID string) (claimCreateResponse, error) {

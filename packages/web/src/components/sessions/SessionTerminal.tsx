@@ -10,8 +10,7 @@ import {
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { BridgeSessionTerminal } from "@/components/bridge/BridgeSessionTerminal";
-import { hasBridgeSettings } from "@/lib/bridge";
+import { RemoteSessionTerminal } from "@/components/sessions/RemoteSessionTerminal";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
@@ -490,6 +489,7 @@ function sessionTerminalPropsEqual(
 ): boolean {
   return (
     previous.sessionId === next.sessionId
+    && previous.bridgeId === next.bridgeId
     && previous.sessionState === next.sessionState
     && previous.runtimeMode === next.runtimeMode
     && previous.immersiveMobileMode === next.immersiveMobileMode
@@ -498,29 +498,8 @@ function sessionTerminalPropsEqual(
 }
 
 function SessionTerminalContainer(props: SessionTerminalProps) {
-  const [bridgeMode, setBridgeMode] = useState(false);
-
-  useEffect(() => {
-    const syncBridgeMode = () => {
-      setBridgeMode(hasBridgeSettings());
-    };
-
-    syncBridgeMode();
-    window.addEventListener("storage", syncBridgeMode);
-    return () => {
-      window.removeEventListener("storage", syncBridgeMode);
-    };
-  }, []);
-
-  if (bridgeMode) {
-    return (
-      <BridgeSessionTerminal
-        sessionId={props.sessionId}
-        sessionState={props.sessionState}
-        pendingInsert={props.pendingInsert}
-        immersiveMobileMode={props.immersiveMobileMode}
-      />
-    );
+  if (props.bridgeId?.trim()) {
+    return <RemoteSessionTerminal {...props} />;
   }
 
   return <SessionTerminalView {...props} />;

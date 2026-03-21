@@ -17,8 +17,8 @@ use tokio_stream::{self as stream, StreamExt};
 use crate::routes::boards::update_board_task_attempt_ref;
 use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
-    build_normalized_chat_feed, trim_lines_tail, AppState,
-    SessionRecord, SessionStatus, SpawnRequest,
+    build_normalized_chat_feed, trim_lines_tail, AppState, SessionRecord, SessionStatus,
+    SpawnRequest,
 };
 use uuid::Uuid;
 
@@ -73,7 +73,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions", get(list_sessions).post(spawn_session))
         .route("/api/bridges", get(list_bridges).post(register_bridge))
         .route("/api/bridges/{bridge_id}/heartbeat", post(heartbeat_bridge))
-        .route("/api/bridges/{bridge_id}/disconnect", post(disconnect_bridge))
+        .route(
+            "/api/bridges/{bridge_id}/disconnect",
+            post(disconnect_bridge),
+        )
         .route("/api/sessions/spawn", post(spawn_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/conversation", get(get_conversation))
@@ -366,7 +369,10 @@ async fn heartbeat_bridge(
         .await
     {
         Some(bridge) => ok(json!({ "bridge": bridge })),
-        None => error(StatusCode::NOT_FOUND, format!("Bridge {bridge_id} not found")),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("Bridge {bridge_id} not found"),
+        ),
     }
 }
 
@@ -376,7 +382,10 @@ async fn disconnect_bridge(
 ) -> ApiResponse {
     match state.disconnect_bridge(&bridge_id).await {
         Some(bridge) => ok(json!({ "bridge": bridge })),
-        None => error(StatusCode::NOT_FOUND, format!("Bridge {bridge_id} not found")),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("Bridge {bridge_id} not found"),
+        ),
     }
 }
 

@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { resolveDashboardPageRedirect } from "@/lib/auth";
+import { getDashboardAccess, requiresPairedDeviceScope, resolveDashboardPageRedirect } from "@/lib/auth";
 import DashboardClient from "@/features/dashboard/DashboardClient";
 
 export const dynamic = "force-dynamic";
@@ -32,5 +32,7 @@ export default async function Page({ searchParams }: PageProps) {
     redirect(redirectPath);
   }
 
-  return <DashboardClient />;
+  const access = await getDashboardAccess();
+
+  return <DashboardClient requiresPairedDeviceScope={requiresPairedDeviceScope(access)} />;
 }

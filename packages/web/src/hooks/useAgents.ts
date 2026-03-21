@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 
 export interface Agent {
@@ -31,15 +33,52 @@ type AgentsStoreSnapshot = {
   loading: boolean;
 };
 
+interface UseAgentsOptions {
+  enabled?: boolean;
+}
+
+type AgentsStoreState = {
+  agents: Agent[];
+  loading: boolean;
+  lastFetchedAt: number;
+  inFlight: Promise<void> | null;
+  retryTimeout: number | null;
+};
+
 const AGENTS_STALE_AFTER_MS = 30_000;
 const AGENTS_RETRY_DELAY_MS = 10_000;
+const LOCAL_SCOPE_KEY = "local";
 
-const listeners = new Set<() => void>();
-let storeAgents: Agent[] = [];
-let storeLoading = true;
-let storeLastFetchedAt = 0;
-let storeInFlight: Promise<void> | null = null;
-let storeRetryTimeout: number | null = null;
+const listenersByScope = new Map<string, Set<() => void>>();
+const storesByScope = new Map<string, AgentsStoreState>();
+
+function resolveScopeKey(bridgeId?: string | null): string {
+  return normalizeBridgeId(bridgeId) ?? LOCAL_SCOPE_KEY;
+}
+
+function getStore(scopeKey: string): AgentsStoreState {
+  let store = storesByScope.get(scopeKey);
+  if (!store) {
+    store = {
+      agents: [],
+      loading: true,
+      lastFetchedAt: 0,
+      inFlight: null,
+      retryTimeout: null,
+    };
+    storesByScope.set(scopeKey, store);
+  }
+  return store;
+}
+
+function getListeners(scopeKey: string): Set<() => void> {
+  let listeners = listenersByScope.get(scopeKey);
+  if (!listeners) {
+    listeners = new Set();
+    listenersByScope.set(scopeKey, listeners);
+  }
+  return listeners;
+}
 
 function normalizeAgentsPayload(payload: unknown): Agent[] {
   if (Array.isArray(payload)) return payload as Agent[];
@@ -56,93 +95,105 @@ function normalizeAgentsPayload(payload: unknown): Agent[] {
   return [];
 }
 
-function emitChange() {
-  for (const listener of listeners) {
+function emitChange(scopeKey: string) {
+  for (const listener of getListeners(scopeKey)) {
     listener();
   }
 }
 
-function currentSnapshot(): AgentsStoreSnapshot {
+function currentSnapshot(scopeKey: string): AgentsStoreSnapshot {
+  const store = getStore(scopeKey);
   return {
-    agents: storeAgents,
-    loading: storeLoading,
+    agents: store.agents,
+    loading: store.loading,
   };
 }
 
-function isStoreFresh() {
-  return storeAgents.length > 0 && Date.now() - storeLastFetchedAt < AGENTS_STALE_AFTER_MS;
+function isStoreFresh(scopeKey: string) {
+  const store = getStore(scopeKey);
+  return store.agents.length > 0 && Date.now() - store.lastFetchedAt < AGENTS_STALE_AFTER_MS;
 }
 
-function scheduleRetry() {
-  if (storeRetryTimeout !== null) return;
-  storeRetryTimeout = window.setTimeout(() => {
-    storeRetryTimeout = null;
-    void refreshAgents(true);
+function scheduleRetry(scopeKey: string, bridgeId?: string | null) {
+  const store = getStore(scopeKey);
+  if (store.retryTimeout !== null) return;
+  store.retryTimeout = window.setTimeout(() => {
+    const currentStore = getStore(scopeKey);
+    currentStore.retryTimeout = null;
+    void refreshAgents(scopeKey, bridgeId, true);
   }, AGENTS_RETRY_DELAY_MS);
 }
 
-async function refreshAgents(force = false): Promise<void> {
-  if (!force && isStoreFresh()) {
-    if (storeLoading) {
-      storeLoading = false;
-      emitChange();
+async function refreshAgents(scopeKey: string, bridgeId?: string | null, force = false): Promise<void> {
+  const store = getStore(scopeKey);
+  if (!force && isStoreFresh(scopeKey)) {
+    if (store.loading) {
+      store.loading = false;
+      emitChange(scopeKey);
     }
     return;
   }
 
-  if (storeInFlight) {
-    return storeInFlight;
+  if (store.inFlight) {
+    return store.inFlight;
   }
 
-  storeLoading = true;
-  emitChange();
+  store.loading = true;
+  emitChange(scopeKey);
 
-  storeInFlight = (async () => {
+  store.inFlight = (async () => {
     try {
-      const res = await fetch("/api/agents", { cache: "no-store" });
+      const res = await fetch(withBridgeQuery("/api/agents", bridgeId), { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch agents: ${res.status}`);
       const data = (await res.json()) as unknown;
       const nextAgents = normalizeAgentsPayload(data);
       if (nextAgents.length > 0) {
-        storeAgents = nextAgents;
-        storeLastFetchedAt = Date.now();
-        if (storeRetryTimeout !== null) {
-          window.clearTimeout(storeRetryTimeout);
-          storeRetryTimeout = null;
+        store.agents = nextAgents;
+        store.lastFetchedAt = Date.now();
+        if (store.retryTimeout !== null) {
+          window.clearTimeout(store.retryTimeout);
+          store.retryTimeout = null;
         }
       } else {
-        scheduleRetry();
+        scheduleRetry(scopeKey, bridgeId);
       }
     } catch {
-      scheduleRetry();
+      scheduleRetry(scopeKey, bridgeId);
     } finally {
-      storeLoading = false;
-      storeInFlight = null;
-      emitChange();
+      store.loading = false;
+      store.inFlight = null;
+      emitChange(scopeKey);
     }
   })();
 
-  return storeInFlight;
+  return store.inFlight;
 }
 
-export function useAgents(): UseAgentsReturn {
-  const [snapshot, setSnapshot] = useState<AgentsStoreSnapshot>({ agents: [], loading: true });
+export function useAgents(bridgeId?: string | null, options?: UseAgentsOptions): UseAgentsReturn {
+  const enabled = options?.enabled ?? true;
+  const scopeKey = resolveScopeKey(bridgeId);
+  const [snapshot, setSnapshot] = useState<AgentsStoreSnapshot>({ agents: [], loading: enabled });
 
   useEffect(() => {
-    const applySnapshot = () => setSnapshot(currentSnapshot());
-    listeners.add(applySnapshot);
+    if (!enabled) {
+      setSnapshot({ agents: [], loading: false });
+      return undefined;
+    }
+
+    const applySnapshot = () => setSnapshot(currentSnapshot(scopeKey));
+    getListeners(scopeKey).add(applySnapshot);
     applySnapshot();
-    void refreshAgents();
+    void refreshAgents(scopeKey, bridgeId);
 
     const handleWindowFocus = () => {
-      if (!isStoreFresh()) {
-        void refreshAgents(true);
+      if (!isStoreFresh(scopeKey)) {
+        void refreshAgents(scopeKey, bridgeId, true);
       }
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible" && !isStoreFresh()) {
-        void refreshAgents(true);
+      if (document.visibilityState === "visible" && !isStoreFresh(scopeKey)) {
+        void refreshAgents(scopeKey, bridgeId, true);
       }
     };
 
@@ -150,11 +201,11 @@ export function useAgents(): UseAgentsReturn {
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      listeners.delete(applySnapshot);
+      getListeners(scopeKey).delete(applySnapshot);
       window.removeEventListener("focus", handleWindowFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, []);
+  }, [bridgeId, enabled, scopeKey]);
 
-  return snapshot;
+  return enabled ? snapshot : { agents: [], loading: false };
 }

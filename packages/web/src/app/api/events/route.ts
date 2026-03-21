@@ -1,4 +1,4 @@
-import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import { getDashboardAccess, guardApiAccess, requiresPairedDeviceScope } from "@/lib/auth";
 import { requireRustBackendUrl } from "@/lib/backendUrl";
 import { forwardedAccessAuthenticated } from "@/lib/guardedRustProxy";
 import { hasRustBackend } from "@/lib/rustBackendProxy";
@@ -17,6 +17,17 @@ export async function GET(request: Request): Promise<Response> {
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
+  const access = await getDashboardAccess(request);
+  if (requiresPairedDeviceScope(access)) {
+    return NextResponse.json(
+      {
+        error: "Paired device required",
+        reason: "Hosted dashboard live events are only available for connected laptops.",
+      },
+      { status: 412 },
+    );
+  }
+
   if (!hasRustBackend()) {
     return NextResponse.json(
       { error: "Rust backend URL is not configured" },
@@ -30,7 +41,6 @@ export async function GET(request: Request): Promise<Response> {
   const incomingUrl = new URL(request.url);
   target.search = incomingUrl.search;
 
-  const access = await getDashboardAccess(request);
   const headers = new Headers({
     "Accept": "text/event-stream",
     "Cache-Control": "no-cache",

@@ -1,5 +1,7 @@
 "use client";
 
+import { withBridgeQuery } from "@/lib/bridgeQuery";
+
 type UploadAttachmentsResponse = {
   files?: unknown;
   error?: string;
@@ -102,11 +104,13 @@ export async function uploadProjectAttachments({
   files,
   projectId,
   taskRef,
+  bridgeId,
   preferAbsolute = true,
 }: {
   files: File[];
   projectId: string;
   taskRef?: string | null;
+  bridgeId?: string | null;
   preferAbsolute?: boolean;
 }): Promise<string[]> {
   if (!files.length) {
@@ -130,7 +134,7 @@ export async function uploadProjectAttachments({
     formData.append("files", file);
   }
 
-  const response = await fetch("/api/attachments", {
+  const response = await fetch(withBridgeQuery("/api/attachments", bridgeId), {
     method: "POST",
     body: formData,
   });

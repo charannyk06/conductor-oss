@@ -5,6 +5,7 @@ import { useSharedSession } from "@/lib/sessionState";
 
 interface UseSessionOptions {
   enabled?: boolean;
+  bridgeId?: string | null;
 }
 
 export function useSession(

@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 
 export interface UserPreferencesResponse {
   onboardingAcknowledged: boolean;
@@ -56,20 +57,34 @@ interface UsePreferencesReturn {
   refresh: () => Promise<void>;
 }
 
-export function usePreferences(): UsePreferencesReturn {
+interface UsePreferencesOptions {
+  enabled?: boolean;
+}
+
+export function usePreferences(
+  bridgeId?: string | null,
+  options?: UsePreferencesOptions,
+): UsePreferencesReturn {
+  const enabled = options?.enabled ?? true;
   const [preferences, setPreferences] = useState<UserPreferencesResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
-  const fetchedRef = useRef(false);
 
   const fetchPreferences = useCallback(async () => {
+    if (!enabled) {
+      setPreferences(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
     try {
-      const res = await fetch("/api/preferences");
+      const res = await fetch(withBridgeQuery("/api/preferences", bridgeId));
       const data = (await res.json().catch(() => null)) as
-        | { preferences?: unknown; error?: string }
+        | { preferences?: unknown; error?: string; reason?: string }
         | null;
       if (!res.ok) {
-        throw new Error(data?.error ?? `Failed to load preferences: ${res.status}`);
+        throw new Error(data?.error ?? data?.reason ?? `Failed to load preferences: ${res.status}`);
       }
       setPreferences(normalizePreferences(data?.preferences));
       setError(null);
@@ -79,13 +94,17 @@ export function usePreferences(): UsePreferencesReturn {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [bridgeId, enabled]);
 
   useEffect(() => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
+    if (!enabled) return;
     void fetchPreferences();
-  }, [fetchPreferences]);
+  }, [enabled, fetchPreferences]);
 
-  return { preferences, loading, error, refresh: fetchPreferences };
+  return {
+    preferences: enabled ? preferences : null,
+    loading: enabled ? loading : false,
+    error: enabled ? error : null,
+    refresh: fetchPreferences,
+  };
 }

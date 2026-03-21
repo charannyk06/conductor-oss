@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/charannyk06/conductor-oss/bridge/device"
+	"github.com/charannyk06/conductor-oss/bridge/relayurl"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
 
@@ -53,6 +54,14 @@ func Run(ctx context.Context, opts Options) error {
 
 	if strings.TrimSpace(opts.RelayURL) == "" {
 		return errors.New("relay URL is required")
+	}
+
+	relayStore, err := relayurl.NewStore("")
+	if err != nil {
+		return err
+	}
+	if err := relayStore.Save(opts.RelayURL); err != nil {
+		return err
 	}
 
 	store := opts.Store

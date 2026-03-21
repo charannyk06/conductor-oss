@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
 use base64::Engine;
-use conductor_types::{
-    BrowserToBridgeMessage, BridgeToBrowserMessage, FileEntry, FileEntryKind,
-};
+use conductor_types::{BridgeToBrowserMessage, BrowserToBridgeMessage, FileEntry, FileEntryKind};
 use futures_util::{SinkExt, StreamExt};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -17,7 +16,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use reqwest::StatusCode;
 use url::Url;
 use uuid::Uuid;
 
@@ -48,11 +46,18 @@ enum ConnectionOutcome {
 }
 
 pub fn token_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".conductor").join(BRIDGE_TOKEN_FILENAME))
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".conductor")
+            .join(BRIDGE_TOKEN_FILENAME)
+    })
 }
 
 fn state_path() -> Option<PathBuf> {
-    token_path().and_then(|path| path.parent().map(|parent| parent.join(BRIDGE_STATE_FILENAME)))
+    token_path().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join(BRIDGE_STATE_FILENAME))
+    })
 }
 
 pub fn save_token(token: &str) -> Result<()> {
@@ -170,8 +175,11 @@ fn resolve_backend_url(explicit: Option<&str>) -> Result<Url> {
     if let Ok(value) = std::env::var("CONDUCTOR_BACKEND_PORT") {
         let port = value.trim();
         if !port.is_empty() {
-            let parsed = port.parse::<u16>().context("invalid CONDUCTOR_BACKEND_PORT")?;
-            return Url::parse(&format!("http://127.0.0.1:{parsed}")).context("invalid backend URL");
+            let parsed = port
+                .parse::<u16>()
+                .context("invalid CONDUCTOR_BACKEND_PORT")?;
+            return Url::parse(&format!("http://127.0.0.1:{parsed}"))
+                .context("invalid backend URL");
         }
     }
 
@@ -211,11 +219,15 @@ async fn proxy_request(
     path: &str,
     body: Option<Value>,
 ) -> Result<BackendProxyResponse> {
-    let method = method.parse::<reqwest::Method>().context("invalid HTTP method")?;
+    let method = method
+        .parse::<reqwest::Method>()
+        .context("invalid HTTP method")?;
     let url = if path.starts_with("http://") || path.starts_with("https://") {
         Url::parse(path).context("invalid proxied URL")?
     } else {
-        backend.join(path).context("failed to resolve backend URL")?
+        backend
+            .join(path)
+            .context("failed to resolve backend URL")?
     };
 
     let mut request = client.request(method, url);
@@ -236,9 +248,8 @@ async fn proxy_request(
     let body = if bytes.is_empty() {
         Value::Null
     } else if content_type.contains("application/json") {
-        serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-            Value::String(String::from_utf8_lossy(&bytes).to_string())
-        })
+        serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).to_string()))
     } else if content_type.starts_with("text/")
         || content_type.contains("html")
         || content_type.contains("javascript")
@@ -477,7 +488,8 @@ async fn run_bridge_connection_once(
                                             .await;
                                         }
                                     }
-                                    BrowserToBridgeMessage::TerminalResize { .. } => {}
+                                    BrowserToBridgeMessage::TerminalResize { .. }
+                                    | BrowserToBridgeMessage::TerminalProxyStart { .. } => {}
                                 }
                             }
                             Err(err) => {
@@ -545,7 +557,14 @@ pub async fn connect(relay: String, token: Option<String>) -> Result<()> {
             return Ok(());
         }
 
-        match run_bridge_connection_once(relay_url.as_ref(), &token, reqwest::Client::new(), backend.clone()).await {
+        match run_bridge_connection_once(
+            relay_url.as_ref(),
+            &token,
+            reqwest::Client::new(),
+            backend.clone(),
+        )
+        .await
+        {
             Ok(ConnectionOutcome::Exit) => {
                 clear_state()?;
                 return Ok(());
@@ -592,15 +611,16 @@ pub fn status() -> Result<String> {
                 .unwrap_or("none");
             return Ok(format!(
                 "connected\nrelay: {}\nactive session: {session}\nlast updated: {}",
-                state.relay_url,
-                state.updated_at_unix
+                state.relay_url, state.updated_at_unix
             ));
         }
 
         return Ok(format!(
             "disconnected\nrelay: {}\nreason: {}",
             state.relay_url,
-            state.last_error.unwrap_or_else(|| "not connected".to_string())
+            state
+                .last_error
+                .unwrap_or_else(|| "not connected".to_string())
         ));
     }
 
@@ -653,7 +673,11 @@ pub fn browse_path(path: &str) -> Vec<FileEntry> {
     let mut entries = Vec::new();
     if let Ok(read_dir) = fs::read_dir(&directory) {
         for entry in read_dir.flatten() {
-            let kind = if entry.file_type().map(|file_type| file_type.is_dir()).unwrap_or(false) {
+            let kind = if entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+            {
                 FileEntryKind::Dir
             } else {
                 FileEntryKind::File

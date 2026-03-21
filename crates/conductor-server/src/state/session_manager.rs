@@ -135,17 +135,18 @@ impl AppState {
         let now = Utc::now();
         let status = {
             let mut registry = self.bridge_registry.write().await;
-            let record = registry
-                .entry(bridge_id.clone())
-                .or_insert_with(|| BridgeConnectionRecord {
-                    bridge_id: bridge_id.clone(),
-                    hostname: normalize_bridge_text(hostname.clone(), "unknown"),
-                    os: normalize_bridge_text(os.clone(), "unknown"),
-                    capabilities: normalize_bridge_capabilities(capabilities.clone()),
-                    connected: true,
-                    connected_at: now,
-                    last_seen_at: now,
-                });
+            let record =
+                registry
+                    .entry(bridge_id.clone())
+                    .or_insert_with(|| BridgeConnectionRecord {
+                        bridge_id: bridge_id.clone(),
+                        hostname: normalize_bridge_text(hostname.clone(), "unknown"),
+                        os: normalize_bridge_text(os.clone(), "unknown"),
+                        capabilities: normalize_bridge_capabilities(capabilities.clone()),
+                        connected: true,
+                        connected_at: now,
+                        last_seen_at: now,
+                    });
             record.hostname = normalize_bridge_text(hostname, "unknown");
             record.os = normalize_bridge_text(os, "unknown");
             record.capabilities = normalize_bridge_capabilities(capabilities);
@@ -191,7 +192,10 @@ impl AppState {
         Some(status)
     }
 
-    pub(crate) async fn disconnect_bridge(&self, bridge_id: &str) -> Option<BridgeConnectionStatus> {
+    pub(crate) async fn disconnect_bridge(
+        &self,
+        bridge_id: &str,
+    ) -> Option<BridgeConnectionStatus> {
         let status = {
             let mut registry = self.bridge_registry.write().await;
             let record = registry.get_mut(bridge_id)?;
@@ -821,6 +825,9 @@ impl AppState {
         } else {
             None
         };
+        let existing_bridge_id = existing_record
+            .as_ref()
+            .and_then(|record| record.bridge_id.clone());
         let branch = request.branch.clone().or_else(|| {
             Some(format!(
                 "session/{}",
@@ -1003,6 +1010,7 @@ impl AppState {
             request.prompt.clone(),
             Some(pid),
         );
+        record.bridge_id = request.bridge_id.clone().or(existing_bridge_id);
         let started_at = Utc::now().to_rfc3339();
         self.emit_terminal_text(
             &session_id,
@@ -2197,6 +2205,7 @@ mod tests {
             .spawn_session_now(
                 SpawnRequest {
                     project_id: "demo".to_string(),
+                    bridge_id: None,
                     prompt: "Investigate".to_string(),
                     issue_id: None,
                     agent: Some("claude-code".to_string()),
@@ -2271,6 +2280,7 @@ mod tests {
             .spawn_session_now(
                 SpawnRequest {
                     project_id: "demo".to_string(),
+                    bridge_id: None,
                     prompt: "Investigate".to_string(),
                     issue_id: None,
                     agent: Some("codex".to_string()),
@@ -2381,6 +2391,7 @@ mod tests {
             .spawn_session_now(
                 SpawnRequest {
                     project_id: "demo".to_string(),
+                    bridge_id: None,
                     prompt: "Investigate".to_string(),
                     issue_id: None,
                     agent: Some("codex".to_string()),
@@ -2447,6 +2458,7 @@ mod tests {
             .spawn_session_now(
                 SpawnRequest {
                     project_id: "demo".to_string(),
+                    bridge_id: None,
                     prompt: "Investigate".to_string(),
                     issue_id: None,
                     agent: None,
@@ -2504,6 +2516,7 @@ mod tests {
         let session = state
             .spawn_session(SpawnRequest {
                 project_id: "demo".to_string(),
+                bridge_id: None,
                 prompt: "Queued run".to_string(),
                 issue_id: None,
                 agent: None,
@@ -2594,6 +2607,7 @@ mod tests {
         let session = state
             .spawn_session(SpawnRequest {
                 project_id: "demo".to_string(),
+                bridge_id: None,
                 prompt: "Queued run".to_string(),
                 issue_id: None,
                 agent: None,
@@ -2662,6 +2676,7 @@ mod tests {
             .spawn_session_now(
                 SpawnRequest {
                     project_id: "demo".to_string(),
+                    bridge_id: None,
                     prompt: "Investigate".to_string(),
                     issue_id: None,
                     agent: None,

@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +26,8 @@ const (
 	maxReconnectBackoff      = 30 * time.Second
 	ttydPortRangeStart       = 7681
 	ttydPortRangeEnd         = 8699
+	bridgeProxyMetaKey       = "$bridgeProxy"
+	bridgeRequestMetaKey     = "$bridgeRequest"
 )
 
 type Options struct {
@@ -48,6 +52,10 @@ type bridgeEnvelope struct {
 	Path   string      `json:"path,omitempty"`
 	Status int         `json:"status,omitempty"`
 	Body   interface{} `json:"body,omitempty"`
+
+	// terminal_proxy_start
+	TerminalID string `json:"terminal_id,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
 
 	// file_browse / file_tree
 	Entries []any `json:"entries,omitempty"`
@@ -173,7 +181,6 @@ func findTtyd() (string, error) {
 	return "", fmt.Errorf("ttyd not found in PATH or common locations; install: brew install ttyd")
 }
 
-
 func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	// 1. Find ttyd and pick a port.
 	ttydPath, err := findTtyd()
@@ -189,7 +196,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	cmd := exec.Command(ttydPath, []string{
 		"-p", fmt.Sprintf("%d", port),
 		"-i", "127.0.0.1",
-		"-W",          // accept any origin (relay->bridge->browser)
+		"-W", // accept any origin (relay->bridge->browser)
 		"--wdir", os.TempDir(),
 		"bash",
 	}...)
@@ -280,6 +287,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 
 	// 6. Bidirectional bridge loop.
 	errCh := make(chan error, 2)
+	var activeTerminals sync.Map
 
 	// relay → ttyd
 	go func() {
@@ -335,6 +343,29 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 					Path:    env.Path,
 					Entries: entries,
 				})
+
+			case "terminal_proxy_start":
+				terminalID := strings.TrimSpace(env.TerminalID)
+				sessionID := strings.TrimSpace(env.SessionID)
+				if terminalID == "" || sessionID == "" {
+					continue
+				}
+				if _, exists := activeTerminals.LoadOrStore(terminalID, struct{}{}); exists {
+					continue
+				}
+
+				go func(terminalID string, sessionID string) {
+					defer activeTerminals.Delete(terminalID)
+					if err := proxyTerminalSession(
+						ctx,
+						opts.relayURL,
+						opts.refreshToken,
+						terminalID,
+						sessionID,
+					); err != nil && ctx.Err() == nil {
+						fmt.Fprintf(opts.stderr, "terminal proxy %s ended: %v\n", terminalID, err)
+					}
+				}(terminalID, sessionID)
 
 			case "bridge_status", "pong":
 				// No-op.
@@ -434,9 +465,193 @@ func websocketEndpoint(relayURL, scope, refreshToken string) (string, error) {
 	return base.String(), nil
 }
 
+func terminalBridgeEndpoint(relayURL, terminalID, refreshToken string) (string, error) {
+	base, err := url.Parse(strings.TrimSpace(relayURL))
+	if err != nil {
+		return "", fmt.Errorf("parse relay URL: %w", err)
+	}
+	switch base.Scheme {
+	case "ws", "wss":
+	case "http":
+		base.Scheme = "ws"
+	case "https":
+		base.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("unsupported relay URL scheme %q", base.Scheme)
+	}
+	base.Path = "/terminal/" + url.PathEscape(strings.TrimSpace(terminalID)) + "/bridge"
+	q := base.Query()
+	q.Set("token", refreshToken)
+	base.RawQuery = q.Encode()
+	base.Fragment = ""
+	return base.String(), nil
+}
+
+func resolveSessionTerminalWSURL(sessionID string) (string, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return "", fmt.Errorf("session id is required")
+	}
+
+	endpoint := fmt.Sprintf(
+		"http://127.0.0.1:4749/api/sessions/%s/terminal/token",
+		url.PathEscape(strings.TrimSpace(sessionID)),
+	)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("build terminal token request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request terminal token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read terminal token response: %w", err)
+	}
+
+	var payload struct {
+		TtydWSURL string `json:"ttydWsUrl"`
+		Error     string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode terminal token response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := strings.TrimSpace(payload.Error)
+		if message == "" {
+			message = fmt.Sprintf("terminal token request failed with status %d", resp.StatusCode)
+		}
+		return "", fmt.Errorf(message)
+	}
+
+	base, _ := url.Parse("http://127.0.0.1:4749")
+	resolved, err := base.Parse(strings.TrimSpace(payload.TtydWSURL))
+	if err != nil {
+		return "", fmt.Errorf("parse ttyd websocket url: %w", err)
+	}
+
+	switch resolved.Scheme {
+	case "http":
+		resolved.Scheme = "ws"
+	case "https":
+		resolved.Scheme = "wss"
+	case "ws", "wss":
+	default:
+		return "", fmt.Errorf("unsupported ttyd websocket scheme %q", resolved.Scheme)
+	}
+
+	return resolved.String(), nil
+}
+
+func proxyTerminalSession(
+	ctx context.Context,
+	relayURL string,
+	refreshToken string,
+	terminalID string,
+	sessionID string,
+) error {
+	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID, refreshToken)
+	if err != nil {
+		return err
+	}
+	backendEndpoint, err := resolveSessionTerminalWSURL(sessionID)
+	if err != nil {
+		return err
+	}
+
+	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, nil)
+	if err != nil {
+		return fmt.Errorf("connect relay terminal socket: %w", err)
+	}
+	defer relayConn.Close()
+
+	backendConn, _, err := websocket.DefaultDialer.DialContext(ctx, backendEndpoint, nil)
+	if err != nil {
+		return fmt.Errorf("connect backend terminal socket: %w", err)
+	}
+	defer backendConn.Close()
+
+	errCh := make(chan error, 2)
+
+	forward := func(srcName string, src *websocket.Conn, dstName string, dst *websocket.Conn) {
+		go func() {
+			for {
+				msgType, data, err := src.ReadMessage()
+				if err != nil {
+					errCh <- fmt.Errorf("%s read: %w", srcName, err)
+					return
+				}
+				switch msgType {
+				case websocket.TextMessage, websocket.BinaryMessage:
+					if err := dst.WriteMessage(msgType, data); err != nil {
+						errCh <- fmt.Errorf("%s write: %w", dstName, err)
+						return
+					}
+				case websocket.CloseMessage:
+					_ = dst.WriteMessage(websocket.CloseMessage, data)
+					errCh <- io.EOF
+					return
+				}
+			}
+		}()
+	}
+
+	forward("relay terminal", relayConn, "backend terminal", backendConn)
+	forward("backend terminal", backendConn, "relay terminal", relayConn)
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		if err == io.EOF {
+			return nil
+		}
+		return err
+	}
+}
+
 type apiResponse struct {
 	Status int
 	Body   interface{}
+}
+
+func decodeProxyRequestBody(body interface{}) ([]byte, string, bool, error) {
+	payload, ok := body.(map[string]interface{})
+	if !ok {
+		return nil, "", false, nil
+	}
+
+	metaRaw, ok := payload[bridgeRequestMetaKey]
+	if !ok {
+		return nil, "", false, nil
+	}
+
+	meta, ok := metaRaw.(map[string]interface{})
+	if !ok {
+		return nil, "", true, fmt.Errorf("invalid bridge request metadata")
+	}
+
+	kind, _ := meta["kind"].(string)
+	if kind != "bytes" {
+		return nil, "", true, fmt.Errorf("unsupported bridge request kind %q", kind)
+	}
+
+	encoded, _ := meta["base64"].(string)
+	if strings.TrimSpace(encoded) == "" {
+		return nil, "", true, fmt.Errorf("missing bridge request payload")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, "", true, fmt.Errorf("decode bridge request payload: %w", err)
+	}
+
+	contentType, _ := meta["contentType"].(string)
+	return decoded, strings.TrimSpace(contentType), true, nil
 }
 
 func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
@@ -445,24 +660,80 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 		path = "/"
 	}
 	backendURL := "http://127.0.0.1:4749" + path
-	var bodyBytes []byte
+	var requestBody io.Reader
+	contentType := "application/json"
 	if body != nil {
-		bodyBytes, _ = json.Marshal(body)
+		if rawBody, rawContentType, ok, err := decodeProxyRequestBody(body); ok {
+			if err != nil {
+				return apiResponse{Status: 0, Body: nil}, err
+			}
+			requestBody = bytes.NewReader(rawBody)
+			if rawContentType != "" {
+				contentType = rawContentType
+			} else {
+				contentType = "application/octet-stream"
+			}
+		} else {
+			bodyBytes, _ := json.Marshal(body)
+			requestBody = bytes.NewReader(bodyBytes)
+		}
 	}
-	req, err := http.NewRequest(method, backendURL, strings.NewReader(string(bodyBytes)))
+	req, err := http.NewRequest(method, backendURL, requestBody)
 	if err != nil {
 		return apiResponse{Status: 0, Body: nil}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", contentType)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return apiResponse{Status: 502, Body: nil}, err
 	}
 	defer resp.Body.Close()
-	var respBody interface{}
-	json.NewDecoder(resp.Body).Decode(&respBody)
-	return apiResponse{Status: resp.StatusCode, Body: respBody}, nil
+
+	responseBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return apiResponse{Status: resp.StatusCode, Body: map[string]any{
+			"error": err.Error(),
+		}}, nil
+	}
+
+	responseContentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if len(responseBytes) == 0 {
+		return apiResponse{Status: resp.StatusCode, Body: map[string]any{}}, nil
+	}
+
+	if strings.Contains(strings.ToLower(responseContentType), "application/json") {
+		var respBody interface{}
+		if err := json.Unmarshal(responseBytes, &respBody); err == nil {
+			return apiResponse{Status: resp.StatusCode, Body: respBody}, nil
+		}
+	}
+
+	if strings.HasPrefix(strings.ToLower(responseContentType), "text/") {
+		return apiResponse{
+			Status: resp.StatusCode,
+			Body: map[string]any{
+				bridgeProxyMetaKey: map[string]any{
+					"kind":        "text",
+					"text":        string(responseBytes),
+					"contentType": responseContentType,
+				},
+			},
+		}, nil
+	}
+
+	return apiResponse{
+		Status: resp.StatusCode,
+		Body: map[string]any{
+			bridgeProxyMetaKey: map[string]any{
+				"kind":        "bytes",
+				"base64":      base64.StdEncoding.EncodeToString(responseBytes),
+				"contentType": responseContentType,
+			},
+		},
+	}, nil
 }
 
 type fileEntry struct {

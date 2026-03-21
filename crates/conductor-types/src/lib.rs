@@ -18,6 +18,10 @@ pub enum BrowserToBridgeMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         body: Option<Value>,
     },
+    TerminalProxyStart {
+        terminal_id: String,
+        session_id: String,
+    },
     FileBrowse {
         path: String,
     },

@@ -18,12 +18,14 @@ pub(crate) use detached::{
     RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
 };
 pub(crate) use helpers::sanitize_terminal_text;
+pub(crate) use helpers::session_to_dashboard_value_with_bridge;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
-pub(crate) use helpers::session_to_dashboard_value_with_bridge;
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
-pub(crate) use session_manager::{BridgeConnectionRecord, BridgeConnectionStatus, OutputConsumerConfig};
+pub(crate) use session_manager::{
+    BridgeConnectionRecord, BridgeConnectionStatus, OutputConsumerConfig,
+};
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
     SpawnRequest, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
