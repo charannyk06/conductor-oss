@@ -629,3 +629,46 @@ export function buildSignInPath(redirectTarget?: string | null): string {
   const params = new URLSearchParams({ redirect_url: nextPath });
   return `/sign-in?${params.toString()}`;
 }
+
+export function buildHostedSignInPath(redirectTarget?: string | null): string {
+  const nextPath = resolvePostSignInRedirectTarget(redirectTarget);
+  if (nextPath === DEFAULT_POST_SIGN_IN_REDIRECT) {
+    return "/sign-in/hosted";
+  }
+
+  const params = new URLSearchParams({ redirect_url: nextPath });
+  return `/sign-in/hosted?${params.toString()}`;
+}
+
+export function buildHostedSignInRedirectUrl(
+  signInUrl: string | null | undefined,
+  requestBaseUrl: string | null | undefined,
+  redirectTarget?: string | null,
+): string | null {
+  const normalizedSignInUrl = (signInUrl ?? "").trim();
+  const normalizedBaseUrl = (requestBaseUrl ?? "").trim();
+  if (!normalizedSignInUrl || !normalizedBaseUrl) {
+    return null;
+  }
+
+  try {
+    const destinationUrl = new URL(normalizedSignInUrl, normalizedBaseUrl);
+    const localSignInUrl = new URL("/sign-in", normalizedBaseUrl);
+
+    if (
+      destinationUrl.origin === localSignInUrl.origin
+      && destinationUrl.pathname === localSignInUrl.pathname
+    ) {
+      return null;
+    }
+
+    const absoluteReturnUrl = new URL(
+      resolvePostSignInRedirectTarget(redirectTarget),
+      normalizedBaseUrl,
+    );
+    destinationUrl.searchParams.set("redirect_url", absoluteReturnUrl.toString());
+    return destinationUrl.toString();
+  } catch {
+    return null;
+  }
+}

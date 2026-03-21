@@ -3,6 +3,8 @@ import test from "node:test";
 import { NextRequest } from "next/server";
 import { clearRemoteAccessRuntimeState } from "./remoteAccessRuntime";
 import {
+  buildHostedSignInPath,
+  buildHostedSignInRedirectUrl,
   buildSignInPath,
   getDashboardAccess,
   guardApiActionAccess,
@@ -135,4 +137,31 @@ test("buildSignInPath includes redirect_url only when needed", () => {
   assert.equal(buildSignInPath("/bridge/connect?claim=claim_123"), "/sign-in?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123");
   assert.equal(buildSignInPath("/sign-in"), "/sign-in");
   assert.equal(buildSignInPath(undefined), "/sign-in");
+});
+
+test("buildHostedSignInPath includes redirect_url only when needed", () => {
+  assert.equal(
+    buildHostedSignInPath("/bridge/connect?claim=claim_123"),
+    "/sign-in/hosted?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123",
+  );
+  assert.equal(buildHostedSignInPath("/sign-in"), "/sign-in/hosted");
+  assert.equal(buildHostedSignInPath(undefined), "/sign-in/hosted");
+});
+
+test("buildHostedSignInRedirectUrl targets the configured hosted Clerk page", () => {
+  assert.equal(
+    buildHostedSignInRedirectUrl(
+      "https://accounts.conductross.com/sign-in",
+      "https://preview.conductross.com",
+      "/bridge/connect?claim=claim_123",
+    ),
+    "https://accounts.conductross.com/sign-in?redirect_url=https%3A%2F%2Fpreview.conductross.com%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123",
+  );
+});
+
+test("buildHostedSignInRedirectUrl avoids redirect loops back to the local sign-in route", () => {
+  assert.equal(
+    buildHostedSignInRedirectUrl("/sign-in", "https://preview.conductross.com", "/"),
+    null,
+  );
 });

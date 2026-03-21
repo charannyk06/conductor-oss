@@ -10,6 +10,8 @@ export type ClerkConfiguration = {
   secretKeyAvailable: boolean;
   proxyUrl: string | null;
   clerkJSUrl: string | null;
+  signInUrl: string | null;
+  signUpUrl: string | null;
   allowedRedirectOrigins: string[];
   reason: ClerkConfigurationReason | null;
 };
@@ -33,6 +35,77 @@ function normalizeOrigin(value?: string | null): string | null {
     }
 
     return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeProxyUrl(value?: string | null): string | null {
+  const normalized = normalizeEnvValue(value);
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith("/")) {
+    const trimmed = normalized.replace(/\/+$/, "");
+    return trimmed || "/";
+  }
+
+  const candidate = normalized.includes("://") ? normalized : `https://${normalized}`;
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.origin}${pathname || ""}`;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRedirectUrl(value?: string | null): string | null {
+  const normalized = normalizeEnvValue(value);
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.startsWith("/")) {
+    const trimmed = normalized.replace(/\/+$/, "");
+    return trimmed || "/";
+  }
+
+  const candidate = normalized.includes("://") ? normalized : `https://${normalized}`;
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+
+    const pathname = parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.origin}${pathname || ""}`;
+  } catch {
+    return null;
+  }
+}
+
+function deriveAccountPortalUrl(pathname: "sign-in" | "sign-up"): string | null {
+  const frontendApiUrl = resolveClerkFrontendApiUrl();
+  if (!frontendApiUrl) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(frontendApiUrl);
+    if (!parsed.hostname.startsWith("clerk.")) {
+      return null;
+    }
+
+    const accountPortalHost = `accounts.${parsed.hostname.slice("clerk.".length)}`;
+    return `${parsed.protocol}//${accountPortalHost}/${pathname}`;
   } catch {
     return null;
   }
@@ -98,6 +171,27 @@ export function resolveClerkFrontendApiUrl(): string | null {
   return `https://${frontendApiHost}`;
 }
 
+function resolveConfiguredProxyUrl(): string | null {
+  return normalizeProxyUrl(
+    process.env.NEXT_PUBLIC_CLERK_PROXY_URL
+    ?? process.env.CLERK_PROXY_URL,
+  );
+}
+
+function resolveConfiguredSignInUrl(): string | null {
+  return normalizeRedirectUrl(
+    process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL
+    ?? process.env.CLERK_SIGN_IN_URL,
+  ) ?? deriveAccountPortalUrl("sign-in");
+}
+
+function resolveConfiguredSignUpUrl(): string | null {
+  return normalizeRedirectUrl(
+    process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL
+    ?? process.env.CLERK_SIGN_UP_URL,
+  ) ?? deriveAccountPortalUrl("sign-up");
+}
+
 export function isDevelopmentClerkKey(value?: string | null): boolean {
   const normalized = normalizeEnvValue(value);
   return normalized.startsWith("pk_test_") || normalized.startsWith("sk_test_");
@@ -136,6 +230,8 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
       secretKeyAvailable,
       proxyUrl: null,
       clerkJSUrl: null,
+      signInUrl: null,
+      signUpUrl: null,
       allowedRedirectOrigins,
       reason: "missing-publishable-key",
     };
@@ -148,15 +244,21 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
       secretKeyAvailable,
       proxyUrl: null,
       clerkJSUrl: null,
+      signInUrl: null,
+      signUpUrl: null,
       allowedRedirectOrigins,
       reason: "hosted-development-keys",
     };
   }
 
-  // Hosted preview/prod should proxy Clerk through our stable app origin.
-  // Direct access to the custom Clerk frontend host can reject preview/prod requests.
-  const shouldProxyFrontendApi = !isLoopbackHost(hostname) && Boolean(trimmedBaseUrl);
-  const proxyUrl = shouldProxyFrontendApi ? `${trimmedBaseUrl}/__clerk` : null;
+  const configuredProxyUrl = resolveConfiguredProxyUrl();
+  const signInUrl = isLoopbackHost(hostname) ? null : resolveConfiguredSignInUrl();
+  const signUpUrl = isLoopbackHost(hostname) ? null : resolveConfiguredSignUpUrl();
+  // Only enable proxy mode when it is explicitly configured for the current deployment.
+  // Some hosted environments share a Clerk instance that accepts the custom Frontend API
+  // domain directly but rejects per-host proxy handshakes.
+  const shouldProxyFrontendApi = !isLoopbackHost(hostname) && Boolean(configuredProxyUrl);
+  const proxyUrl = shouldProxyFrontendApi ? configuredProxyUrl : null;
   const clerkJSUrl = proxyUrl ? `${proxyUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js` : null;
 
   return {
@@ -165,6 +267,8 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
     secretKeyAvailable,
     proxyUrl,
     clerkJSUrl,
+    signInUrl,
+    signUpUrl,
     allowedRedirectOrigins,
     reason: null,
   };

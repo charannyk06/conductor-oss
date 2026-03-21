@@ -5,7 +5,13 @@ import { Check, HardDrive, ShieldCheck, Workflow } from "lucide-react";
 import { SignInExperience } from "./SignInExperience";
 import { Button } from "@/components/ui/Button";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
-import { getDashboardAccess, resolvePostSignInRedirectTarget } from "@/lib/auth";
+import {
+  buildHostedSignInPath,
+  buildHostedSignInRedirectUrl,
+  getDashboardAccess,
+  resolvePostSignInRedirectTarget,
+} from "@/lib/auth";
+import { isLoopbackHost } from "@/lib/accessControl";
 import { resolveClerkConfiguration, resolveRequestBaseUrl, resolveRequestHostname } from "@/lib/clerkConfig";
 
 const LOCAL_RUNTIME_POINTS = [
@@ -74,6 +80,13 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   const hostname = resolveRequestHostname(headerStore);
   const baseUrl = resolveRequestBaseUrl(headerStore);
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
+  const hostedSignInUrl = isLoopbackHost(hostname)
+    ? null
+    : buildHostedSignInRedirectUrl(clerkConfiguration.signInUrl, baseUrl, redirectTarget);
+
+  if (hostedSignInUrl) {
+    redirect(hostedSignInUrl);
+  }
 
   return (
     <PublicPageShell>
@@ -105,7 +118,20 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
 
           <div className="mt-6">
             {clerkConfiguration.enabled && clerkConfiguration.publishableKey ? (
-              <SignInExperience redirectTarget={redirectTarget} />
+              <>
+                <SignInExperience redirectTarget={redirectTarget} />
+                <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)]/60 p-3">
+                  <p className="text-xs leading-5 text-[var(--text-muted)]">
+                    If the embedded sign-in form does not appear in this browser, continue on the hosted Clerk
+                    sign-in page instead.
+                  </p>
+                  <div className="mt-3">
+                    <Button asChild variant="outline" size="lg">
+                      <Link href={buildHostedSignInPath(redirectTarget)}>Use hosted sign-in</Link>
+                    </Button>
+                  </div>
+                </div>
+              </>
             ) : clerkConfiguration.reason === "hosted-development-keys" ? (
               <SignInUnavailable hostedMisconfiguration />
             ) : (
