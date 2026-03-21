@@ -579,11 +579,7 @@ export async function resolveDashboardPageRedirect(
 
   const nextPath = sanitizeRedirectTarget(currentPath);
   if (access.provider === "clerk" && !access.authenticated) {
-    const params = new URLSearchParams();
-    if (nextPath !== "/") {
-      params.set("redirect_url", nextPath);
-    }
-    return params.size > 0 ? `/sign-in?${params.toString()}` : "/sign-in";
+    return buildSignInPath(nextPath);
   }
 
   const params = new URLSearchParams({ error: "unavailable" });
@@ -591,4 +587,31 @@ export async function resolveDashboardPageRedirect(
     params.set("next", nextPath);
   }
   return `/unlock?${params.toString()}`;
+}
+
+const DEFAULT_POST_SIGN_IN_REDIRECT = "/";
+
+export function resolvePostSignInRedirectTarget(candidate: string | null | undefined): string {
+  const nextPath = sanitizeRedirectTarget(candidate);
+
+  if (
+    nextPath === "/sign-in"
+    || nextPath === "/sign-in/"
+    || nextPath.startsWith("/sign-in?")
+    || nextPath.startsWith("/sign-in/")
+  ) {
+    return DEFAULT_POST_SIGN_IN_REDIRECT;
+  }
+
+  return nextPath;
+}
+
+export function buildSignInPath(redirectTarget?: string | null): string {
+  const nextPath = resolvePostSignInRedirectTarget(redirectTarget);
+  if (nextPath === DEFAULT_POST_SIGN_IN_REDIRECT) {
+    return "/sign-in";
+  }
+
+  const params = new URLSearchParams({ redirect_url: nextPath });
+  return `/sign-in?${params.toString()}`;
 }

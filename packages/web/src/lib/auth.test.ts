@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
 import { clearRemoteAccessRuntimeState } from "./remoteAccessRuntime";
-import { getDashboardAccess, guardApiActionAccess } from "./auth";
+import {
+  buildSignInPath,
+  getDashboardAccess,
+  guardApiActionAccess,
+  resolvePostSignInRedirectTarget,
+} from "./auth";
 
 const originalConfigPath = process.env.CO_CONFIG_PATH;
 const originalWorkspace = process.env.CONDUCTOR_WORKSPACE;
@@ -95,4 +100,23 @@ test("guardApiActionAccess still blocks mismatched origins", () => {
   const denied = guardApiActionAccess(request);
   assert.ok(denied);
   assert.equal(denied?.status, 403);
+});
+
+test("resolvePostSignInRedirectTarget preserves bridge claim redirects", () => {
+  assert.equal(
+    resolvePostSignInRedirectTarget("/bridge/connect?claim=claim_123"),
+    "/bridge/connect?claim=claim_123",
+  );
+});
+
+test("resolvePostSignInRedirectTarget avoids sending users back into sign-in", () => {
+  assert.equal(resolvePostSignInRedirectTarget("/sign-in"), "/");
+  assert.equal(resolvePostSignInRedirectTarget("/sign-in/sso-callback"), "/");
+  assert.equal(resolvePostSignInRedirectTarget("https://evil.example.com"), "/");
+});
+
+test("buildSignInPath includes redirect_url only when needed", () => {
+  assert.equal(buildSignInPath("/bridge/connect?claim=claim_123"), "/sign-in?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123");
+  assert.equal(buildSignInPath("/sign-in"), "/sign-in");
+  assert.equal(buildSignInPath(undefined), "/sign-in");
 });

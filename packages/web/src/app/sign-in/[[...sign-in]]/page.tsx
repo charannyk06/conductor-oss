@@ -1,9 +1,11 @@
 import { headers } from "next/headers";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { Check, HardDrive, ShieldCheck, Workflow } from "lucide-react";
 import { SignInExperience } from "./SignInExperience";
 import { Button } from "@/components/ui/Button";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
+import { getDashboardAccess, resolvePostSignInRedirectTarget } from "@/lib/auth";
 import { resolveClerkConfiguration, resolveRequestBaseUrl, resolveRequestHostname } from "@/lib/clerkConfig";
 
 const LOCAL_RUNTIME_POINTS = [
@@ -17,6 +19,17 @@ const OPERATOR_POINTS = [
   "Pick the paired machine you trust.",
   "Launch and review work without moving the runtime.",
 ] as const;
+
+type SignInPageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+};
+
+function firstQueryValue(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) {
+    return value[0]?.trim() || null;
+  }
+  return value?.trim() || null;
+}
 
 function SignInUnavailable({ hostedMisconfiguration = false }: { hostedMisconfiguration?: boolean }) {
   return (
@@ -48,7 +61,15 @@ function SignInUnavailable({ hostedMisconfiguration = false }: { hostedMisconfig
   );
 }
 
-export default async function SignInPage() {
+export default async function SignInPage({ searchParams }: SignInPageProps) {
+  const resolvedSearchParams = searchParams ? await searchParams : {};
+  const redirectTarget = resolvePostSignInRedirectTarget(firstQueryValue(resolvedSearchParams.redirect_url));
+  const access = await getDashboardAccess();
+
+  if (access.authenticated) {
+    redirect(redirectTarget);
+  }
+
   const headerStore = await headers();
   const hostname = resolveRequestHostname(headerStore);
   const baseUrl = resolveRequestBaseUrl(headerStore);
@@ -78,13 +99,13 @@ export default async function SignInPage() {
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">Sign in</p>
           <h2 className="mt-3 text-2xl font-semibold text-[var(--text-strong)]">Connect to your paired runtime</h2>
           <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
-            GitHub is the fastest path. Email stays available if you prefer. After sign-in, choose the paired
-            machine and continue inside the same local workflow.
+            GitHub uses a full-page Clerk redirect, then returns you straight to the dashboard or active bridge
+            claim flow without relying on an embedded widget.
           </p>
 
           <div className="mt-6">
             {clerkConfiguration.enabled && clerkConfiguration.publishableKey ? (
-              <SignInExperience />
+              <SignInExperience redirectTarget={redirectTarget} />
             ) : clerkConfiguration.reason === "hosted-development-keys" ? (
               <SignInUnavailable hostedMisconfiguration />
             ) : (

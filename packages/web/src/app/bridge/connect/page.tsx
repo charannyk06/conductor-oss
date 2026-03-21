@@ -2,7 +2,7 @@ import Link from "next/link";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { Button } from "@/components/ui/Button";
 import BridgeConnectClient from "@/features/bridge/BridgeConnectClient";
-import { getDashboardAccess } from "@/lib/auth";
+import { buildSignInPath, getDashboardAccess } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +41,7 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
             />
             <div className="mt-8">
               <Button asChild variant="primary" size="lg">
-                <Link href={`/sign-in?redirect_url=${encodeURIComponent(redirectTarget)}`}>Sign in with GitHub</Link>
+                <Link href={buildSignInPath(redirectTarget)}>Sign in with GitHub</Link>
               </Button>
             </div>
           </PublicPanel>
