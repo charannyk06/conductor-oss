@@ -1,13 +1,9 @@
-import { guardAndProxy } from "@/lib/guardedRustProxy";
+import { guardedSessionProxyParamRoute } from "@/lib/proxyRoutes";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(
-  request: Request,
-  context: { params: Promise<{ id: string }> },
-): Promise<Response> {
-  const { id } = await context.params;
-  const pathname = `/api/sessions/${encodeURIComponent(id)}/terminal/token`;
-  return guardAndProxy(request, pathname, { role: "operator" });
-}
+export const GET = guardedSessionProxyParamRoute(
+  ({ id }) => `/api/sessions/${encodeURIComponent(id ?? "")}/terminal/token`,
+  { role: "operator" },
+);

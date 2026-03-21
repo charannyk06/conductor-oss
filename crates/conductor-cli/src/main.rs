@@ -1,3 +1,5 @@
+mod bridge;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use conductor_core::scaffold::{
@@ -17,28 +19,26 @@ use conductor_db::Database;
 #[derive(Parser)]
 #[command(name = "conductor", version, about = "AI agent orchestrator")]
 struct Cli {
-    /// Workspace directory.
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
-
-    /// Config file path.
     #[arg(long, short)]
     config: Option<PathBuf>,
-
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the Rust Conductor backend.
     Start {
         #[arg(long, short, default_value = "4747")]
         port: u16,
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
-    /// Initialize a new workspace.
+    Bridge {
+        #[command(subcommand)]
+        command: BridgeCommands,
+    },
     Init {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -69,21 +69,16 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Create the launcher home workspace scaffold without adding a project entry.
     BootstrapHome {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Start Conductor as an MCP server over stdio.
     McpServer,
-    /// List configured projects.
     Projects,
-    /// Show backend status.
     Status {
         #[arg(long, short, default_value = "4747")]
         port: u16,
     },
-    /// Spawn a task through the Rust backend.
     Spawn {
         #[arg(long, short)]
         project: String,
@@ -95,6 +90,18 @@ enum Commands {
         #[arg(long)]
         port: Option<u16>,
     },
+}
+
+#[derive(Subcommand)]
+enum BridgeCommands {
+    Connect {
+        #[arg(long)]
+        relay: String,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    Status,
+    Disconnect,
 }
 
 #[tokio::main]
@@ -113,13 +120,25 @@ async fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
-
     match cli.command {
+        Commands::Bridge { command } => match command {
+            BridgeCommands::Connect { relay, token } => {
+                if let Some(ref token) = token {
+                    bridge::save_token(token)?;
+                }
+                bridge::connect(relay, token).await?;
+            }
+            BridgeCommands::Status => {
+                println!("{}", bridge::status()?);
+            }
+            BridgeCommands::Disconnect => {
+                bridge::disconnect()?;
+            }
+        },
         Commands::Start { port, host } => {
             let config_path = cli
                 .config
                 .unwrap_or_else(|| cli.workspace.join("conductor.yaml"));
-
             let mut config = if config_path.exists() {
                 ConductorConfig::load(&config_path)?
             } else {
@@ -129,7 +148,6 @@ async fn main() -> Result<()> {
                 );
                 ConductorConfig::default_for_workspace(&cli.workspace)
             };
-
             config.workspace = cli.workspace.clone();
             config.config_path = Some(config_path.clone());
             config.server.host = host;
@@ -138,7 +156,6 @@ async fn main() -> Result<()> {
             if !config_path.exists() {
                 config.save(&config_path)?;
             }
-
             let db_path = cli.workspace.join(".conductor").join("conductor.db");
             let db = Database::connect(&db_path)
                 .await
@@ -186,30 +203,12 @@ async fn main() -> Result<()> {
             let board_exists = resolved.path.join("CONDUCTOR.md").exists();
             let config_exists = resolved.path.join("conductor.yaml").exists();
             let result = scaffold_workspace(&cwd, &options)?;
-
             if json {
-                let project = &result.project;
                 println!(
                     "{}",
-                    serde_json::to_string(&serde_json::json!({
-                        "created": result.created,
-                        "boardPath": result.board_path,
-                        "configPath": result.config_path,
-                        "project": {
-                            "projectId": &project.project_id,
-                            "displayName": &project.display_name,
-                            "repo": &project.repo,
-                            "path": &project.path,
-                            "agent": &project.agent,
-                            "agentModel": &project.agent_model,
-                            "agentReasoningEffort": &project.agent_reasoning_effort,
-                            "ide": &project.ide,
-                            "markdownEditor": &project.markdown_editor,
-                            "defaultBranch": &project.default_branch,
-                            "defaultWorkingDirectory": &project.default_working_directory,
-                            "dashboardUrl": &project.dashboard_url,
-                        }
-                    }))?
+                    serde_json::to_string(
+                        &serde_json::json!({"created": result.created, "boardPath": result.board_path, "configPath": result.config_path, "project": {"projectId": &result.project.project_id, "displayName": &result.project.display_name, "repo": &result.project.repo, "path": &result.project.path, "agent": &result.project.agent, "agentModel": &result.project.agent_model, "agentReasoningEffort": &result.project.agent_reasoning_effort, "ide": &result.project.ide, "markdownEditor": &result.project.markdown_editor, "defaultBranch": &result.project.default_branch, "defaultWorkingDirectory": &result.project.default_working_directory, "dashboardUrl": &result.project.dashboard_url}})
+                    )?
                 );
             } else {
                 if !board_exists || options.force {
@@ -217,31 +216,13 @@ async fn main() -> Result<()> {
                 } else {
                     println!("  CONDUCTOR.md already exists (use --force to overwrite)");
                 }
-
                 if !config_exists || options.force {
                     println!("✔  Created conductor.yaml");
                 } else {
                     println!("  conductor.yaml already exists (use --force to overwrite)");
                 }
-
                 if result.created > 0 {
-                    println!();
-                    println!("Detected project defaults:");
-                    println!("  project id: {}", result.project.project_id);
-                    println!("  repo: {}", result.project.repo);
-                    println!("  path: {}", result.project.path.display());
-                    println!("  default branch: {}", result.project.default_branch);
-                    println!("  agent: {}", result.project.agent);
-                    println!();
-                    println!("Next steps:");
-                    println!("  1. co start");
-                    println!("  2. Open dashboard");
-                    println!("  3. Open CONDUCTOR.md");
-                    println!();
-                    println!(
-                        "  Tip: Running `npx conductor-oss@latest init` from a repo root now auto-detects origin + branch."
-                    );
-                    println!();
+                    println!("\nDetected project defaults:\n  project id: {}\n  repo: {}\n  path: {}\n  default branch: {}\n  agent: {}\n\nNext steps:\n  1. co start\n  2. Open dashboard\n  3. Open CONDUCTOR.md\n\n  Tip: Running `npx conductor-oss@latest init` from a repo root now auto-detects origin + branch.\n", result.project.project_id, result.project.repo, result.project.path.display(), result.project.default_branch, result.project.agent);
                 }
             }
         }
@@ -255,13 +236,11 @@ async fn main() -> Result<()> {
             };
             fs::create_dir_all(&workspace)
                 .with_context(|| format!("failed to create {}", workspace.display()))?;
-
             let board_path = workspace.join("CONDUCTOR.md");
             if !board_path.exists() {
                 fs::write(&board_path, build_conductor_board("home", "Conductor Home"))
                     .with_context(|| format!("failed to write {}", board_path.display()))?;
             }
-
             let config_path = workspace.join("conductor.yaml");
             if !config_path.exists() {
                 let yaml = build_conductor_yaml(&ConductorYamlScaffoldConfig {
@@ -289,7 +268,6 @@ async fn main() -> Result<()> {
             };
             config.workspace = cli.workspace.clone();
             config.config_path = Some(config_path.clone());
-
             let db_path = cli.workspace.join(".conductor").join("conductor.db");
             let db = Database::connect(&db_path)
                 .await
@@ -309,7 +287,7 @@ async fn main() -> Result<()> {
                     "  {} ({}) - {}",
                     project.name.clone().unwrap_or_else(|| id.clone()),
                     id,
-                    project.path,
+                    project.path
                 );
             }
             println!("\n{} project(s)", config.projects.len());
@@ -339,23 +317,10 @@ async fn main() -> Result<()> {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()?;
-            let response = client
-                .post(format!(
-                    "http://127.0.0.1:{}/api/spawn",
-                    port.unwrap_or(4747)
-                ))
-                .json(&serde_json::json!({
-                    "projectId": project,
-                    "prompt": prompt,
-                    "agent": agent,
-                    "model": model,
-                }))
-                .send()
-                .await?;
+            let response = client.post(format!("http://127.0.0.1:{}/api/spawn", port.unwrap_or(4747))).json(&serde_json::json!({"projectId": project, "prompt": prompt, "agent": agent, "model": model})).send().await?;
             let payload: serde_json::Value = response.json().await?;
             println!("{}", serde_json::to_string_pretty(&payload)?);
         }
     }
-
     Ok(())
 }

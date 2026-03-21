@@ -17,8 +17,8 @@ use tokio_stream::{self as stream, StreamExt};
 use crate::routes::boards::update_board_task_attempt_ref;
 use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
-    build_normalized_chat_feed, session_to_dashboard_value, trim_lines_tail, AppState,
-    SessionRecord, SessionStatus, SpawnRequest,
+    build_normalized_chat_feed, trim_lines_tail, AppState, SessionRecord, SessionStatus,
+    SpawnRequest,
 };
 use uuid::Uuid;
 
@@ -70,7 +70,13 @@ pub fn router() -> Router<Arc<AppState>> {
 
     Router::new()
         .merge(spawn_route)
-        .route("/api/sessions", get(list_sessions))
+        .route("/api/sessions", get(list_sessions).post(spawn_session))
+        .route("/api/bridges", get(list_bridges).post(register_bridge))
+        .route("/api/bridges/{bridge_id}/heartbeat", post(heartbeat_bridge))
+        .route(
+            "/api/bridges/{bridge_id}/disconnect",
+            post(disconnect_bridge),
+        )
         .route("/api/sessions/spawn", post(spawn_session))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/conversation", get(get_conversation))
@@ -245,7 +251,7 @@ async fn list_sessions(
         "needsAttention": sessions
             .iter()
             .filter(|session| {
-                matches!(session["status"].as_str(), Some("needs_input" | "stuck" | "errored"))
+                matches!(session["status"].as_str(), Some("needs_input" | "stuck" | "errored" | "bridge_offline"))
                     || matches!(session["activity"].as_str(), Some("waiting_input" | "blocked"))
             })
             .count(),
@@ -265,6 +271,7 @@ async fn get_session(State(state): State<Arc<AppState>>, Path(id): Path<String>)
 #[serde(rename_all = "camelCase")]
 struct SpawnBody {
     project_id: String,
+    bridge_id: Option<String>,
     prompt: Option<String>,
     issue_id: Option<String>,
     agent: Option<String>,
@@ -285,6 +292,7 @@ async fn spawn_session(
     match state
         .spawn_session(SpawnRequest {
             project_id: body.project_id,
+            bridge_id: body.bridge_id,
             prompt,
             issue_id: body.issue_id,
             agent: body.agent,
@@ -306,8 +314,78 @@ async fn spawn_session(
         })
         .await
     {
-        Ok(session) => created(json!({ "session": session_to_dashboard_value(&session) })),
+        Ok(session) => {
+            let session_value = state.serialize_dashboard_session(&session).await;
+            created(json!({ "session": session_value }))
+        }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeRegistrationBody {
+    bridge_id: String,
+    hostname: String,
+    os: String,
+    capabilities: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeHeartbeatBody {
+    hostname: Option<String>,
+    os: Option<String>,
+    capabilities: Option<Vec<String>>,
+}
+
+async fn list_bridges(State(state): State<Arc<AppState>>) -> ApiResponse {
+    let bridges = state.list_bridges().await;
+    ok(json!({ "bridges": bridges }))
+}
+
+async fn register_bridge(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<BridgeRegistrationBody>,
+) -> ApiResponse {
+    let bridge = state
+        .register_bridge(
+            body.bridge_id,
+            body.hostname,
+            body.os,
+            body.capabilities.unwrap_or_default(),
+        )
+        .await;
+    created(json!({ "bridge": bridge }))
+}
+
+async fn heartbeat_bridge(
+    State(state): State<Arc<AppState>>,
+    Path(bridge_id): Path<String>,
+    Json(body): Json<BridgeHeartbeatBody>,
+) -> ApiResponse {
+    match state
+        .heartbeat_bridge(&bridge_id, body.hostname, body.os, body.capabilities)
+        .await
+    {
+        Some(bridge) => ok(json!({ "bridge": bridge })),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("Bridge {bridge_id} not found"),
+        ),
+    }
+}
+
+async fn disconnect_bridge(
+    State(state): State<Arc<AppState>>,
+    Path(bridge_id): Path<String>,
+) -> ApiResponse {
+    match state.disconnect_bridge(&bridge_id).await {
+        Some(bridge) => ok(json!({ "bridge": bridge })),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("Bridge {bridge_id} not found"),
+        ),
     }
 }
 
@@ -648,7 +726,10 @@ async fn restore_session(
     Path(id): Path<String>,
 ) -> ApiResponse {
     match state.restore_session(&id).await {
-        Ok(session) => ok(json!({ "session": session_to_dashboard_value(&session) })),
+        Ok(session) => {
+            let session_value = state.serialize_dashboard_session(&session).await;
+            ok(json!({ "session": session_value }))
+        }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -699,6 +780,7 @@ async fn retry_session(
     match state
         .spawn_session(SpawnRequest {
             project_id: source.project_id.clone(),
+            bridge_id: source.bridge_id.clone(),
             prompt: source.prompt.clone(),
             issue_id: source.issue_id.clone(),
             agent: body.agent.or_else(|| Some(source.agent.clone())),
@@ -735,7 +817,8 @@ async fn retry_session(
                 )
                 .await;
             }
-            ok(json!({ "session": session_to_dashboard_value(&session) }))
+            let session_value = state.serialize_dashboard_session(&session).await;
+            ok(json!({ "session": session_value }))
         }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
@@ -867,7 +950,7 @@ async fn apply_action(
         },
         "retry" | "restore" => match state.restore_session(&id).await {
             Ok(session) => ok(
-                json!({ "ok": true, "action": "restore", "session": session_to_dashboard_value(&session) }),
+                json!({ "ok": true, "action": "restore", "session": state.serialize_dashboard_session(&session).await }),
             ),
             Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
         },

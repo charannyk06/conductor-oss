@@ -1309,7 +1309,9 @@ mod tests {
         assert!(injected.contains("const terminalRoot = document.querySelector('.xterm');"));
         assert!(injected.contains(".xterm-viewport"));
         assert!(injected.contains(".xterm-scrollable-element"));
-        assert!(injected.contains("const resolveXtermCore = () => window.term?._core || window.term?.core || null;"));
+        assert!(injected.contains(
+            "const resolveXtermCore = () => window.term?._core || window.term?.core || null;"
+        ));
         assert!(injected.contains("coreMouseService.areMouseEventsActive"));
         assert!(injected.contains("mouseService.getMouseReportCoords"));
         assert!(injected.contains("viewport.getLinesScrolled(wheelLikeEvent)"));

@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronDown, ExternalLink, Loader2, Settings2 } from "lucide-react";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { usePreferences } from "@/hooks/usePreferences";
 
 const CODE_EDITOR_ICON_CLASS = "block h-5 w-5 shrink-0 object-contain";
@@ -54,10 +55,11 @@ function CodeEditorIcon({ editorId, label }: { editorId: string; label: string }
 
 interface SessionProjectOpenMenuProps {
   projectId: string | null;
+  bridgeId?: string | null;
 }
 
-export function SessionProjectOpenMenu({ projectId }: SessionProjectOpenMenuProps) {
-  const { preferences } = usePreferences();
+export function SessionProjectOpenMenu({ projectId, bridgeId }: SessionProjectOpenMenuProps) {
+  const { preferences } = usePreferences(bridgeId);
   const [openingEditorId, setOpeningEditorId] = useState<string | null>(null);
   const resolvedCurrentEditor = useMemo(
     () => resolveIdeOption(preferences?.ide ?? "vscode"),
@@ -68,7 +70,7 @@ export function SessionProjectOpenMenu({ projectId }: SessionProjectOpenMenuProp
     if (!projectId || openingEditorId) return;
     setOpeningEditorId(editorId);
     try {
-      const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/open`, {
+      const response = await fetch(withBridgeQuery(`/api/projects/${encodeURIComponent(projectId)}/open`, bridgeId), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

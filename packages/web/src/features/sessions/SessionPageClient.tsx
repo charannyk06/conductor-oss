@@ -5,6 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
+import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { WorkspaceSidebarPanel } from "@/components/layout/WorkspaceSidebarPanel";
 import { SessionDetail } from "@/components/sessions/SessionDetail";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
@@ -13,15 +14,31 @@ import { useNotificationAlerts } from "@/hooks/useNotificationAlerts";
 import { usePreferences } from "@/hooks/usePreferences";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
+import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 import type { DashboardSession } from "@/lib/types";
 
-export default function SessionPageClient() {
+export default function SessionPageClient({
+  requiresPairedDeviceScope = false,
+}: {
+  requiresPairedDeviceScope?: boolean;
+}) {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { projects } = useConfig();
-  const { session: currentSession } = useSession(params.id);
-  const { preferences, loading: preferencesLoading } = usePreferences();
+  const routeBridgeId = useMemo(
+    () => decodeBridgeSessionId(params.id)?.bridgeId ?? null,
+    [params.id],
+  );
+  const scopeReady = !requiresPairedDeviceScope || Boolean(routeBridgeId);
+  const { session: currentSession } = useSession(params.id, null, {
+    bridgeId: routeBridgeId,
+    enabled: scopeReady,
+  });
+  const effectiveBridgeId = currentSession?.bridgeId ?? routeBridgeId;
+  const { projects } = useConfig(effectiveBridgeId, { enabled: !requiresPairedDeviceScope || Boolean(effectiveBridgeId) });
+  const { preferences, loading: preferencesLoading } = usePreferences(effectiveBridgeId, {
+    enabled: !requiresPairedDeviceScope || Boolean(effectiveBridgeId),
+  });
   const {
     mobileSidebarOpen,
     desktopSidebarOpen,
@@ -29,7 +46,10 @@ export default function SessionPageClient() {
     closeSidebarOnMobile,
   } = useResponsiveSidebarStateWithOptions({ initialDesktopOpen: false });
   const sidebarVisible = mobileSidebarOpen || desktopSidebarOpen;
-  const { sessions, refresh } = useSessions(undefined, { enabled: sidebarVisible });
+  const { sessions, refresh } = useSessions(undefined, {
+    enabled: sidebarVisible && (!requiresPairedDeviceScope || Boolean(effectiveBridgeId)),
+    bridgeId: effectiveBridgeId,
+  });
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
@@ -57,6 +77,13 @@ export default function SessionPageClient() {
 
     return "Session";
   }, [currentSession, selectedProjectId]);
+
+  const dashboardRootHref = useMemo(() => {
+    if (!effectiveBridgeId) {
+      return "/";
+    }
+    return `/?bridge=${encodeURIComponent(effectiveBridgeId)}`;
+  }, [effectiveBridgeId]);
 
   useEffect(() => {
     if (currentSession?.projectId) {
@@ -141,7 +168,7 @@ export default function SessionPageClient() {
           selectedProjectId={selectedProjectId}
           onSelectProject={(projectId) => {
             if (projectId === null) {
-              router.push("/");
+              router.push(dashboardRootHref);
               return;
             }
             setSelectedProjectId(projectId);
@@ -161,7 +188,7 @@ export default function SessionPageClient() {
           }}
           onArchiveSession={handleArchiveSession}
           onCreateWorkspace={() => {
-            router.push("/");
+            router.push(dashboardRootHref);
           }}
         />
       ) : null}
@@ -169,6 +196,7 @@ export default function SessionPageClient() {
       {immersiveTerminalMode ? null : (
         <TopBar
           title={topBarTitle}
+          rightContent={<BridgeStatusPill />}
         />
       )}
       <div className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>

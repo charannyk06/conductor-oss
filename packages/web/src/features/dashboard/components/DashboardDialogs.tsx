@@ -44,6 +44,7 @@ import {
 import { normalizeAgentName } from "@/lib/agentUtils";
 import { getKnownAgent, KNOWN_AGENT_ORDER } from "@/lib/knownAgents";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { playNotificationSound } from "@/lib/notificationSounds";
 import { filterGitHubRepos, type GitHubRepo } from "../githubRepos";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
@@ -1001,6 +1002,7 @@ export function NewWorkspaceDialog({
   error,
   defaultAgent,
   agentOptions,
+  bridgeId,
 }: {
   open: boolean;
   onClose: () => void;
@@ -1009,6 +1011,7 @@ export function NewWorkspaceDialog({
   error: string | null;
   defaultAgent: string;
   agentOptions: string[];
+  bridgeId?: string | null;
 }) {
   const [mode, setMode] = useState<"git" | "local">("git");
   const [step, setStep] = useState<"source" | "details">("source");
@@ -1136,7 +1139,7 @@ export function NewWorkspaceDialog({
     setGithubReposError(null);
     try {
       const query = forceRefresh ? "?refresh=true" : "";
-      const res = await fetch(`/api/github/repos${query}`);
+      const res = await fetch(withBridgeQuery(`/api/github/repos${query}`, bridgeId));
       const data = (await res.json().catch(() => null)) as
         | { repos?: GitHubRepo[]; error?: string }
         | null;
@@ -1187,7 +1190,7 @@ export function NewWorkspaceDialog({
         params.set("path", effectivePath);
       }
 
-      const res = await fetch(`/api/workspaces/branches?${params.toString()}`);
+      const res = await fetch(withBridgeQuery(`/api/workspaces/branches?${params.toString()}`, bridgeId));
       const data = (await res.json().catch(() => null)) as
         | { branches?: string[]; defaultBranch?: string | null; error?: string }
         | null;
@@ -1883,6 +1886,7 @@ export function NewWorkspaceDialog({
 
       <FolderPickerDialog
         open={folderPickerOpen}
+        bridgeId={bridgeId}
         initialPath={folderPickerTarget === "clone" ? clonePath : localPath}
         title={folderPickerTarget === "local" ? "Select Local Repository" : "Select Clone Target Folder"}
         description={folderPickerTarget === "local"
@@ -1913,6 +1917,7 @@ export function NewWorkspaceDialog({
 
 function FolderPickerDialog({
   open,
+  bridgeId,
   initialPath,
   title,
   description,
@@ -1920,6 +1925,7 @@ function FolderPickerDialog({
   onSelect,
 }: {
   open: boolean;
+  bridgeId?: string | null;
   initialPath?: string;
   title: string;
   description: string;
@@ -1942,7 +1948,7 @@ function FolderPickerDialog({
     const query = targetPath ? `?path=${encodeURIComponent(targetPath)}` : "";
     setLoading(true);
     setError(null);
-    fetch(`/api/filesystem/directory${query}`)
+    fetch(withBridgeQuery(`/api/filesystem/directory${query}`, bridgeId))
       .then(async (res) => {
         const data = (await res.json().catch(() => null)) as
           | { currentPath?: string; entries?: DirectoryEntry[]; error?: string }
@@ -1975,7 +1981,7 @@ function FolderPickerDialog({
       const query = path && path.trim().length > 0
         ? `?path=${encodeURIComponent(path.trim())}`
         : "";
-      const res = await fetch(`/api/filesystem/directory${query}`);
+      const res = await fetch(withBridgeQuery(`/api/filesystem/directory${query}`, bridgeId));
       const data = (await res.json().catch(() => null)) as
         | { currentPath?: string; entries?: DirectoryEntry[]; error?: string }
         | null;
@@ -2012,7 +2018,7 @@ function FolderPickerDialog({
   const handleNativeBrowse = async () => {
     setBrowseLoading(true);
     try {
-      const res = await fetch("/api/filesystem/pick-directory", { method: "POST" });
+      const res = await fetch(withBridgeQuery("/api/filesystem/pick-directory", bridgeId), { method: "POST" });
       const data = (await res.json().catch(() => null)) as
         | { path?: string; cancelled?: boolean; error?: string }
         | null;
@@ -2214,6 +2220,7 @@ export function SettingsDialog({
   onOpenAgentSetup,
   onClose,
   onSave,
+  bridgeId,
 }: {
   open: boolean;
   mode: PreferencesDialogMode;
@@ -2229,6 +2236,7 @@ export function SettingsDialog({
   onOpenAgentSetup: (agent: string) => void;
   onClose: () => void;
   onSave: (next: PreferencesPayload, options?: { closeDialog?: boolean }) => Promise<boolean>;
+  bridgeId?: string | null;
 }) {
   const [activeTab, setActiveTab] = useState<SettingsTabId>("preferences");
   const [codingAgent, setCodingAgent] = useState(current.codingAgent);
@@ -2291,7 +2299,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     setRepositoriesLoading(true);
     setRepositoriesError(null);
     try {
-      const res = await fetch("/api/repositories");
+      const res = await fetch(withBridgeQuery("/api/repositories", bridgeId));
       const data = (await res.json().catch(() => null)) as
         | { repositories?: RepositorySettingsPayload[]; error?: string }
         | null;
@@ -2333,7 +2341,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     setRepositoryBranchesError(null);
     try {
       const params = new URLSearchParams({ path: trimmedPath });
-      const res = await fetch(`/api/workspaces/branches?${params.toString()}`);
+      const res = await fetch(withBridgeQuery(`/api/workspaces/branches?${params.toString()}`, bridgeId));
       const data = (await res.json().catch(() => null)) as
         | { branches?: string[]; defaultBranch?: string | null; error?: string }
         | null;
@@ -2374,7 +2382,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     setRepositoriesSaving(true);
     setRepositoriesError(null);
     try {
-      const res = await fetch("/api/repositories", {
+      const res = await fetch(withBridgeQuery("/api/repositories", bridgeId), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4187,6 +4195,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
 
       <FolderPickerDialog
         open={repositoryFolderPickerOpen}
+        bridgeId={bridgeId}
         initialPath={repositoryDraft?.path}
         title="Select Repository Path"
         description="Choose the local git repository folder."
@@ -4211,6 +4220,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
       />
       <FolderPickerDialog
         open={notesFolderPickerOpen}
+        bridgeId={bridgeId}
         initialPath={markdownEditorPath ?? ""}
         title="Select Notes Root"
         description="Choose the local Obsidian vault, Logseq graph, or markdown notes folder used for context attachments."

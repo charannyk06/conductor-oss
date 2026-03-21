@@ -335,6 +335,7 @@ where
 pub fn spawn_request(prompt: &str) -> conductor_server::state::SpawnRequest {
     conductor_server::state::SpawnRequest {
         project_id: "demo".to_string(),
+        bridge_id: None,
         prompt: prompt.to_string(),
         issue_id: None,
         agent: Some("codex".to_string()),

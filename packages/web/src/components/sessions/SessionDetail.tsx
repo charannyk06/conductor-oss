@@ -5,13 +5,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Globe,
+  Loader2,
   LayoutDashboard,
   PanelLeftOpen,
+  Share2,
   SquareTerminal,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { buildBridgeHttpUrl } from "@/lib/bridge";
 import { useSession } from "@/hooks/useSession";
 import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
@@ -117,6 +120,9 @@ export function SessionDetail({
   const terminalInsertNonceRef = useRef(0);
   const autoPreviewOpenedRef = useRef(false);
   const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [bridgeShareApiUrl, setBridgeShareApiUrl] = useState<string | null>(null);
   const activeTab = useMemo(
     () => resolveSessionTab(searchParams.get("tab")),
     [searchParams],
@@ -140,6 +146,70 @@ export function SessionDetail({
       ...request,
     });
   }, []);
+  useEffect(() => {
+    const syncBridgeShareUrl = () => {
+      setBridgeShareApiUrl(buildBridgeHttpUrl("/api/shares"));
+    };
+
+    syncBridgeShareUrl();
+    window.addEventListener("storage", syncBridgeShareUrl);
+    return () => {
+      window.removeEventListener("storage", syncBridgeShareUrl);
+    };
+  }, []);
+  const handleCreateShare = useCallback(async () => {
+    if (!bridgeShareApiUrl) {
+      setShareError("Bridge relay is not configured.");
+      return;
+    }
+
+    setShareBusy(true);
+    setShareError(null);
+
+    try {
+      const response = await fetch(bridgeShareApiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+
+      const payload = (await response.json().catch(() => null)) as {
+        shareId?: string;
+        error?: string;
+      } | null;
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Failed to create share link (${response.status})`);
+      }
+
+      const shareId = payload?.shareId?.trim();
+      if (!shareId) {
+        throw new Error("Relay did not return a share id.");
+      }
+
+      const sharePagePath = `/bridge/share/${encodeURIComponent(shareId)}`;
+      const absoluteShareUrl = typeof window !== "undefined"
+        ? new URL(sharePagePath, window.location.origin).toString()
+        : sharePagePath;
+
+      try {
+        await navigator.clipboard.writeText(absoluteShareUrl);
+      } catch {
+        // Clipboard access is best-effort.
+      }
+
+      const opened = window.open(sharePagePath, "_blank", "noopener,noreferrer");
+      if (!opened) {
+        window.location.assign(sharePagePath);
+      }
+    } catch (err) {
+      setShareError(err instanceof Error ? err.message : "Failed to create share link.");
+    } finally {
+      setShareBusy(false);
+    }
+  }, [bridgeShareApiUrl, sessionId]);
   useEffect(() => {
     autoPreviewOpenedRef.current = false;
     terminalInsertNonceRef.current = 0;
@@ -190,13 +260,22 @@ export function SessionDetail({
   }
 
   const status = typeof session.status === "string" ? session.status : "unknown";
+  const previewSupported = !session.bridgeId?.trim();
   const compactStatusLabel = getCompactSessionStatusLabel(status);
   const statusDotClass = getStatusDotClass(status);
   const statusAnimated = isStatusAnimated(status);
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
-  const previewTabActive = active && activeTab === "preview";
+  const previewTabActive = previewSupported && active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
+
+  useEffect(() => {
+    if (previewSupported || activeTab !== "preview") {
+      return;
+    }
+    handleTabChange("terminal");
+  }, [activeTab, handleTabChange, previewSupported]);
+
   const sessionTabs = (
     <TabsList className="flex w-full overflow-x-auto sm:w-fit sm:inline-flex">
       <TabsTrigger value="overview" className={tabTriggerClass}>
@@ -207,10 +286,12 @@ export function SessionDetail({
         <SquareTerminal className="h-3.5 w-3.5" />
         Terminal
       </TabsTrigger>
-      <TabsTrigger value="preview" className={tabTriggerClass}>
-        <Globe className="h-3.5 w-3.5" />
-        Preview
-      </TabsTrigger>
+      {previewSupported ? (
+        <TabsTrigger value="preview" className={tabTriggerClass}>
+          <Globe className="h-3.5 w-3.5" />
+          Preview
+        </TabsTrigger>
+      ) : null}
     </TabsList>
   );
 
@@ -234,8 +315,27 @@ export function SessionDetail({
                   className="h-8 w-8 shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
                   onClick={onOpenSidebar}
                   aria-label="Open workspace panel"
+                  >
+                    <PanelLeftOpen className="h-4 w-4" />
+                  </Button>
+              ) : null}
+              {bridgeShareApiUrl ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8 shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+                  onClick={() => {
+                    void handleCreateShare();
+                  }}
+                  disabled={shareBusy}
+                  aria-label="Create share link"
                 >
-                  <PanelLeftOpen className="h-4 w-4" />
+                  {shareBusy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Share2 className="h-4 w-4" />
+                  )}
                 </Button>
               ) : null}
               <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -243,7 +343,7 @@ export function SessionDetail({
                 <span className="text-[12px] font-medium text-[#efe8e1]">{compactStatusLabel}</span>
                 <span className="font-mono text-[10px] text-[#8e847d]">· {sessionId.slice(0, 7)}</span>
               </div>
-              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} /> : null}
+              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
             </div>
             {/* tab row */}
             <div className="px-1.5 pb-1.5">
@@ -255,14 +355,40 @@ export function SessionDetail({
             {sessionTabs}
             <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
               <div className="flex items-center gap-1.5">
+                {bridgeShareApiUrl ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 shrink-0 text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                    onClick={() => {
+                      void handleCreateShare();
+                    }}
+                    disabled={shareBusy}
+                    aria-label="Create share link"
+                    title="Create share link"
+                  >
+                    {shareBusy ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Share2 className="h-4 w-4" />
+                    )}
+                  </Button>
+                ) : null}
                 <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
                 <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
                 <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
               </div>
-              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} /> : null}
+              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
             </div>
           </div>
         )}
+
+        {shareError ? (
+          <div className="px-2 pt-1 text-[11px] text-[var(--status-error)]">
+            {shareError}
+          </div>
+        ) : null}
 
         <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           <TabsContent value="overview" className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
@@ -278,6 +404,7 @@ export function SessionDetail({
           >
             <SessionTerminal
               sessionId={sessionId}
+              bridgeId={session.bridgeId ?? null}
               sessionState={status}
               runtimeMode={session.metadata["runtimeMode"]?.trim() ?? null}
               pendingInsert={pendingTerminalInsert}
@@ -286,20 +413,22 @@ export function SessionDetail({
           </TabsContent>
 
 
-<TabsContent
-            value="preview"
-            className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-          >
-            {previewTabActive ? (
-              <SessionPreview
-                key={sessionId}
-                sessionId={sessionId}
-                active={previewTabActive}
-                onQueueTerminalInsert={queueTerminalInsert}
-                onConnectionChange={handlePreviewConnectionChange}
-              />
-            ) : null}
-          </TabsContent>
+          {previewSupported ? (
+            <TabsContent
+              value="preview"
+              className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+            >
+              {previewTabActive ? (
+                <SessionPreview
+                  key={sessionId}
+                  sessionId={sessionId}
+                  active={previewTabActive}
+                  onQueueTerminalInsert={queueTerminalInsert}
+                  onConnectionChange={handlePreviewConnectionChange}
+                />
+              ) : null}
+            </TabsContent>
+          ) : null}
         </div>
       </Tabs>
     </div>

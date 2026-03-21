@@ -228,6 +228,8 @@ pub struct SessionPrInfo {
 pub struct SessionRecord {
     pub id: String,
     pub project_id: String,
+    #[serde(default)]
+    pub bridge_id: Option<String>,
     pub status: SessionStatus,
     pub activity: Option<String>,
     pub branch: Option<String>,
@@ -286,6 +288,7 @@ impl SessionRecord {
             project_id,
             agent,
             prompt,
+            bridge_id: None,
             branch: None,
             issue_id: None,
             workspace_path: None,
@@ -301,6 +304,7 @@ pub struct SessionRecordBuilder {
     project_id: String,
     agent: String,
     prompt: String,
+    bridge_id: Option<String>,
     branch: Option<String>,
     issue_id: Option<String>,
     workspace_path: Option<String>,
@@ -310,6 +314,10 @@ pub struct SessionRecordBuilder {
 }
 
 impl SessionRecordBuilder {
+    pub fn bridge_id(mut self, value: Option<String>) -> Self {
+        self.bridge_id = value;
+        self
+    }
     pub fn branch(mut self, value: Option<String>) -> Self {
         self.branch = value;
         self
@@ -352,6 +360,7 @@ impl SessionRecordBuilder {
         SessionRecord {
             id: self.id,
             project_id: self.project_id,
+            bridge_id: self.bridge_id,
             status: SessionStatus::Working,
             activity: Some("active".to_string()),
             branch: self.branch,
@@ -377,6 +386,8 @@ impl SessionRecordBuilder {
 #[serde(rename_all = "camelCase")]
 pub struct SpawnRequest {
     pub project_id: String,
+    #[serde(default)]
+    pub bridge_id: Option<String>,
     pub prompt: String,
     pub issue_id: Option<String>,
     pub agent: Option<String>,

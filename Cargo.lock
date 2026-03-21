@@ -346,6 +346,7 @@ name = "conductor-cli"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "clap",
  "conductor-core",
@@ -353,14 +354,20 @@ dependencies = [
  "conductor-executors",
  "conductor-git",
  "conductor-server",
+ "conductor-types",
  "conductor-watcher",
+ "futures-util",
+ "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -427,6 +434,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "conductor-relay"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "conductor-types",
+ "futures-util",
+ "jsonwebtoken",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "conductor-server"
 version = "0.3.0"
 dependencies = [
@@ -465,6 +494,14 @@ dependencies = [
  "vt100",
  "which",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "conductor-types"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

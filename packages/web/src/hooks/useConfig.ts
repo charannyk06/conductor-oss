@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 
 export interface ConfigProject {
   id: string;
@@ -22,6 +23,10 @@ interface UseConfigReturn {
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
+}
+
+interface UseConfigOptions {
+  enabled?: boolean;
 }
 
 function normalizeProject(
@@ -85,17 +90,33 @@ function normalizeProjects(payload: unknown): ConfigProject[] {
   return [];
 }
 
-export function useConfig(): UseConfigReturn {
+export function useConfig(bridgeId?: string | null, options?: UseConfigOptions): UseConfigReturn {
+  const enabled = options?.enabled ?? true;
   const [projects, setProjects] = useState<ConfigProject[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
-  const fetchedRef = useRef(false);
 
   const fetchConfig = useCallback(async () => {
+    if (!enabled) {
+      setProjects([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
     try {
-      const res = await fetch("/api/config");
-      if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`);
-      const payload = (await res.json()) as unknown;
+      const res = await fetch(withBridgeQuery("/api/config", bridgeId));
+      const payload = (await res.json().catch(() => null)) as
+        | { error?: string; reason?: string }
+        | unknown;
+      if (!res.ok) {
+        const message = typeof payload === "object" && payload !== null
+          ? ((payload as { error?: string; reason?: string }).error
+            ?? (payload as { error?: string; reason?: string }).reason)
+          : null;
+        throw new Error(message ?? `Failed to fetch config: ${res.status}`);
+      }
       setProjects(normalizeProjects(payload));
       setError(null);
     } catch (err) {
@@ -104,13 +125,11 @@ export function useConfig(): UseConfigReturn {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [bridgeId, enabled]);
 
   useEffect(() => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
-    fetchConfig();
+    void fetchConfig();
   }, [fetchConfig]);
 
-  return { projects, loading, error, refresh: fetchConfig };
+  return { projects, loading: enabled ? loading : false, error: enabled ? error : null, refresh: fetchConfig };
 }

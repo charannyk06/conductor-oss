@@ -1,3 +1,4 @@
+@layer theme, base, clerk, components, utilities;
 @import "tailwindcss";
 
 @theme {
@@ -110,7 +111,11 @@ body {
 }
 
 .font-brand-header {
-  font-family: var(--font-tomorrow), sans-serif;
+  font-family: var(--font-brand-display), var(--font-tomorrow), sans-serif;
+}
+
+.font-brand-display {
+  font-family: var(--font-brand-display), var(--font-tomorrow), sans-serif;
 }
 
 a {
@@ -203,4 +208,9 @@ a:hover {
 html,
 body {
   overflow-x: hidden;
+}
+
+.conductor-auth-form .cl-formButtonPrimary {
+  color: var(--text-strong) !important;
+  font-weight: 700 !important;
 }

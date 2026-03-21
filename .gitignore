@@ -63,3 +63,5 @@ refactor.py
 rewrite.py
 research/
 .claude/
+.vercel
+.env*.local

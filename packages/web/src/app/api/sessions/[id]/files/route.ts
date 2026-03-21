@@ -1,8 +1,8 @@
-import { guardedProxyParamRoute } from "@/lib/proxyRoutes";
+import { guardedSessionProxyParamRoute } from "@/lib/proxyRoutes";
 
 export const dynamic = "force-dynamic";
 
-export const GET = guardedProxyParamRoute(
+export const GET = guardedSessionProxyParamRoute(
   ({ id }) => `/api/sessions/${encodeURIComponent(id ?? "")}/files`,
   { role: "viewer" },
 );

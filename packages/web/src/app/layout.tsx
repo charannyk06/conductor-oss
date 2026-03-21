@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from "next";
-import { JetBrains_Mono, Tomorrow } from "next/font/google";
+import { JetBrains_Mono, Orbitron, Tomorrow } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
+import { headers } from "next/headers";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { TooltipProvider } from "@/components/ui/Tooltip";
 import { resolveRustBackendUrl } from "@/lib/backendUrl";
+import { resolveClerkConfiguration, resolveRequestBaseUrl, resolveRequestHostname } from "@/lib/clerkConfig";
 import "./globals.css";
 
 const tomorrow = Tomorrow({
@@ -14,6 +16,13 @@ const tomorrow = Tomorrow({
   weight: ["700"],
 });
 
+const orbitron = Orbitron({
+  subsets: ["latin"],
+  variable: "--font-brand-display",
+  display: "swap",
+  weight: ["500", "700"],
+});
+
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-mono",
@@ -21,7 +30,7 @@ const jetbrainsMono = JetBrains_Mono({
   weight: ["400", "500"],
 });
 
-const rootClass = `${GeistSans.variable} ${tomorrow.variable} ${jetbrainsMono.variable}`;
+const rootClass = `${GeistSans.variable} ${tomorrow.variable} ${orbitron.variable} ${jetbrainsMono.variable}`;
 
 export const metadata: Metadata = {
   title: "Conductor",
@@ -57,15 +66,26 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
-  const publishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const headerStore = await headers();
+  const hostname = resolveRequestHostname(headerStore);
+  const baseUrl = resolveRequestBaseUrl(headerStore);
+  const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
 
-  if (!publishableKey) {
+  if (!clerkConfiguration.enabled || !clerkConfiguration.publishableKey) {
     return <Shell>{children}</Shell>;
   }
 
   return (
-    <ClerkProvider publishableKey={publishableKey}>
+    <ClerkProvider
+      publishableKey={clerkConfiguration.publishableKey}
+      proxyUrl={clerkConfiguration.proxyUrl ?? undefined}
+      clerkJSUrl={clerkConfiguration.clerkJSUrl ?? undefined}
+      allowedRedirectOrigins={clerkConfiguration.allowedRedirectOrigins.length > 0
+        ? clerkConfiguration.allowedRedirectOrigins
+        : undefined}
+      appearance={{ cssLayerName: "clerk" }}
+    >
       <Shell>{children}</Shell>
     </ClerkProvider>
   );

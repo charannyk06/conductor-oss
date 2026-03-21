@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { RemoteSessionTerminal } from "@/components/sessions/RemoteSessionTerminal";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
@@ -488,6 +489,7 @@ function sessionTerminalPropsEqual(
 ): boolean {
   return (
     previous.sessionId === next.sessionId
+    && previous.bridgeId === next.bridgeId
     && previous.sessionState === next.sessionState
     && previous.runtimeMode === next.runtimeMode
     && previous.immersiveMobileMode === next.immersiveMobileMode
@@ -495,4 +497,12 @@ function sessionTerminalPropsEqual(
   );
 }
 
-export const SessionTerminal = memo(SessionTerminalView, sessionTerminalPropsEqual);
+function SessionTerminalContainer(props: SessionTerminalProps) {
+  if (props.bridgeId?.trim()) {
+    return <RemoteSessionTerminal {...props} />;
+  }
+
+  return <SessionTerminalView {...props} />;
+}
+
+export const SessionTerminal = memo(SessionTerminalContainer, sessionTerminalPropsEqual);

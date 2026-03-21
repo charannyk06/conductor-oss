@@ -46,7 +46,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import type { DashboardSession } from "@/lib/types";
+import type { DashboardBridgeConnection, DashboardSession } from "@/lib/types";
 import { normalizeAgentName } from "@/lib/agentUtils";
 import {
   getKnownAgent,
@@ -61,8 +61,11 @@ import { useAgents } from "@/hooks/useAgents";
 import { useResponsiveSidebarStateWithOptions } from "@/hooks/useResponsiveSidebarState";
 import { AppShell } from "@/components/layout/AppShell";
 import { TopBar } from "@/components/layout/TopBar";
+import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
   getRuntimeCatalogDefaultModelForAccess,
@@ -270,6 +273,25 @@ type CreateSessionOptions = {
   useWorktree?: boolean;
   permissionMode?: CreatePermissionMode;
   issueId?: string;
+  bridgeId?: string;
+};
+
+type BridgeDevice = {
+  device_id: string;
+  device_name: string;
+  hostname: string;
+  os: string;
+  arch: string;
+  connected: boolean;
+  last_status: {
+    hostname: string;
+    os: string;
+    connected: boolean;
+  } | null;
+};
+
+type DevicesResponse = {
+  devices?: BridgeDevice[];
 };
 
 type LinkedBoardTask = {
@@ -1125,7 +1147,11 @@ function AgentModelSelector({
   );
 }
 
-export default function DashboardClient() {
+export default function DashboardClient({
+  requiresPairedDeviceScope = false,
+}: {
+  requiresPairedDeviceScope?: boolean;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -1141,12 +1167,26 @@ export default function DashboardClient() {
     () => resolveDashboardWorkspaceView(searchParams.get("view")),
     [searchParams],
   );
+  const bridgeQueryId = useMemo(
+    () => normalizeDashboardQueryValue(searchParams.get("bridge")),
+    [searchParams],
+  );
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
     return tab !== "overview" && tab !== "preview" && tab !== "diff";
   }, [searchParams]);
-  const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig();
-  const { agents } = useAgents();
+  const [selectedBridgeId, setSelectedBridgeId] = useState(bridgeQueryId ?? "");
+  const selectedBridgeIdValue = normalizeBridgeId(selectedBridgeId);
+  const selectedSessionBridgeId = useMemo(
+    () => decodeBridgeSessionId(selectedSessionId)?.bridgeId ?? null,
+    [selectedSessionId],
+  );
+  const effectiveBridgeId = selectedBridgeIdValue ?? selectedSessionBridgeId;
+  const scopeReady = !requiresPairedDeviceScope || Boolean(effectiveBridgeId);
+  const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig(effectiveBridgeId, {
+    enabled: scopeReady,
+  });
+  const { agents } = useAgents(effectiveBridgeId, { enabled: scopeReady });
   const {
     mobileSidebarOpen,
     desktopSidebarOpen,
@@ -1158,7 +1198,7 @@ export default function DashboardClient() {
   const needsSessionsList = !selectedSessionId || sidebarVisible;
   const { sessions, loading: sessionsLoading, error: sessionsError, refresh: refreshSessions } = useSessions(
     selectedProjectId,
-    { enabled: needsSessionsList },
+    { enabled: needsSessionsList && scopeReady, bridgeId: effectiveBridgeId },
   );
 
   const [prompt, setPrompt] = useState("");
@@ -1166,6 +1206,7 @@ export default function DashboardClient() {
   const [launchModelSelection, setLaunchModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [bridges, setBridges] = useState<DashboardBridgeConnection[]>([]);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [newWorkspaceError, setNewWorkspaceError] = useState<string | null>(null);
@@ -1200,6 +1241,76 @@ export default function DashboardClient() {
     };
   }, []);
 
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshBridges() {
+      try {
+        const response = await fetch("/api/bridge/devices", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Failed to fetch bridges: ${response.status}`);
+        }
+        const payload = (await response.json().catch(() => null)) as DevicesResponse | null;
+        if (!cancelled) {
+          setBridges((payload?.devices ?? []).map((device) => ({
+            bridgeId: device.device_id,
+            hostname: device.last_status?.hostname ?? device.hostname,
+            os: device.last_status?.os ?? `${device.os}/${device.arch}`,
+            capabilities: [],
+            connected: device.connected,
+            status: device.connected ? "connected" : "offline",
+            connectedAt: "",
+            lastSeenAt: "",
+          })));
+        }
+      } catch {
+        if (!cancelled) {
+          setBridges([]);
+        }
+      }
+    }
+
+    void refreshBridges();
+    const intervalId = window.setInterval(() => {
+      void refreshBridges();
+    }, 15_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    const connectedBridges = bridges.filter((bridge) => bridge.connected);
+    const selectedBridgeAvailable = selectedBridgeId
+      ? connectedBridges.some((bridge) => bridge.bridgeId === selectedBridgeId)
+      : false;
+
+    if (requiresPairedDeviceScope) {
+      if (connectedBridges.length === 0) {
+        if (selectedBridgeId) {
+          setSelectedBridgeId("");
+        }
+        return;
+      }
+
+      if (!selectedBridgeAvailable) {
+        setSelectedBridgeId(connectedBridges[0]?.bridgeId ?? "");
+      }
+      return;
+    }
+
+    if (selectedBridgeId && !selectedBridgeAvailable) {
+      setSelectedBridgeId("");
+    }
+  }, [bridges, requiresPairedDeviceScope, selectedBridgeId]);
+
+  useEffect(() => {
+    setSelectedBridgeId(bridgeQueryId ?? "");
+  }, [bridgeQueryId]);
+
   const immersiveMobileMode = Boolean(selectedSessionId) && terminalTabActive && compactTerminalChrome;
 
   const dashboardSessions = sessions as unknown as DashboardSession[];
@@ -1214,7 +1325,7 @@ export default function DashboardClient() {
   } = useSession(
     selectedSessionId,
     null,
-    { enabled: Boolean(selectedSessionId) },
+    { enabled: Boolean(selectedSessionId) && scopeReady, bridgeId: effectiveBridgeId },
   );
   const workspaceError = createError ?? configError ?? sessionsError ?? selectedSessionError ?? preferencesError;
   const sessionsByProjectId = useMemo(() => {
@@ -1236,6 +1347,7 @@ export default function DashboardClient() {
       sessionId?: string | null;
       workspaceView?: DashboardWorkspaceView | null;
       tab?: "overview" | "chat" | "diff" | "preview" | null;
+      bridgeId?: string | null;
     },
     mode: "push" | "replace" = "push",
   ) => {
@@ -1270,6 +1382,9 @@ export default function DashboardClient() {
         params.delete("tab");
       }
     }
+    if ("bridgeId" in updates) {
+      updateParam("bridge", updates.bridgeId);
+    }
 
     if (!params.has("project")) {
       params.delete("view");
@@ -1286,6 +1401,14 @@ export default function DashboardClient() {
     }
     router.push(nextUrl, { scroll: false });
   }, [pathname, router, searchParams]);
+
+  useEffect(() => {
+    const normalizedSelectedBridgeId = normalizeBridgeId(selectedBridgeId);
+    if ((bridgeQueryId ?? null) === normalizedSelectedBridgeId) {
+      return;
+    }
+    navigateDashboard({ bridgeId: normalizedSelectedBridgeId }, "replace");
+  }, [bridgeQueryId, navigateDashboard, selectedBridgeId]);
 
   useEffect(() => {
     if (configLoading || configError) return;
@@ -1377,6 +1500,27 @@ export default function DashboardClient() {
 
     return "All Projects";
   }, [selectedProject, selectedSession]);
+  const activeBridge = useMemo(
+    () => effectiveBridgeId
+      ? bridges.find((bridge) => bridge.bridgeId === effectiveBridgeId) ?? null
+      : null,
+    [bridges, effectiveBridgeId],
+  );
+  const scopeBadgeLabel = activeBridge
+    ? `Device · ${activeBridge.hostname}`
+    : requiresPairedDeviceScope
+      ? "Scope · Paired device required"
+      : "Scope · Local backend";
+  const scopeBadgeTitle = activeBridge
+    ? `Showing projects and sessions from ${activeBridge.hostname}.`
+    : requiresPairedDeviceScope
+      ? "Hosted dashboard access must target a connected laptop."
+      : "Showing projects and sessions from the local backend because no paired laptop is selected.";
+  const scopeBadgeClassName = activeBridge
+    ? "border-[rgba(24,197,143,0.35)] bg-[rgba(24,197,143,0.12)] text-[var(--vk-green)]"
+    : requiresPairedDeviceScope
+      ? "border-[rgba(255,143,122,0.24)] bg-[rgba(255,143,122,0.08)] text-[var(--vk-red)]"
+      : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-muted)]";
 
   const agentOptions = useMemo(() => {
     const safeAgents = Array.isArray(agents)
@@ -1499,14 +1643,23 @@ export default function DashboardClient() {
   useEffect(() => {
     let cancelled = false;
     async function loadPreferences() {
+      if (!scopeReady) {
+        if (!cancelled) {
+          setPreferences(normalizePreferences(null, DEFAULT_AGENT));
+          setPreferencesError(null);
+          setPreferencesLoading(false);
+        }
+        return;
+      }
+
       setPreferencesLoading(true);
       try {
-        const res = await fetch("/api/preferences");
+        const res = await fetch(withBridgeQuery("/api/preferences", effectiveBridgeId));
         const data = (await res.json().catch(() => null)) as
-          | { preferences?: unknown; error?: string }
+          | { preferences?: unknown; error?: string; reason?: string }
           | null;
         if (!res.ok) {
-          throw new Error(data?.error ?? `Failed to load preferences: ${res.status}`);
+          throw new Error(data?.error ?? data?.reason ?? `Failed to load preferences: ${res.status}`);
         }
         if (cancelled) return;
         const normalized = normalizePreferences(data?.preferences, DEFAULT_AGENT);
@@ -1527,7 +1680,7 @@ export default function DashboardClient() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [effectiveBridgeId, scopeReady]);
 
   useEffect(() => {
     if (!preferences) return;
@@ -1583,16 +1736,20 @@ export default function DashboardClient() {
     setPreferencesSaving(true);
     setPreferencesError(null);
     try {
-      const res = await fetch("/api/preferences", {
+      if (requiresPairedDeviceScope && !effectiveBridgeId) {
+        throw new Error("Pair or reconnect a laptop before saving preferences.");
+      }
+
+      const res = await fetch(withBridgeQuery("/api/preferences", effectiveBridgeId), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(next),
       });
       const data = (await res.json().catch(() => null)) as
-        | { preferences?: unknown; error?: string }
+        | { preferences?: unknown; error?: string; reason?: string }
         | null;
       if (!res.ok) {
-        throw new Error(data?.error ?? `Failed to save preferences: ${res.status}`);
+        throw new Error(data?.error ?? data?.reason ?? `Failed to save preferences: ${res.status}`);
       }
       const normalized = normalizePreferences(data?.preferences, next.codingAgent || DEFAULT_AGENT);
       setPreferences(normalized);
@@ -1610,10 +1767,15 @@ export default function DashboardClient() {
   }
 
   const openWorkspaceDialog = useCallback(() => {
+    if (requiresPairedDeviceScope && !effectiveBridgeId) {
+      setCreateError("Pair or reconnect a laptop before adding a workspace.");
+      return;
+    }
     setNewWorkspaceError(null);
+    setCreateError(null);
     setNewWorkspaceOpen(true);
     syncSidebarForViewport();
-  }, [syncSidebarForViewport]);
+  }, [effectiveBridgeId, requiresPairedDeviceScope, syncSidebarForViewport]);
 
   useEffect(() => {
     if (!pendingWorkspaceSetup || preferencesDialogOpen) return;
@@ -1625,6 +1787,12 @@ export default function DashboardClient() {
     const trimmedPrompt = prompt.trim();
     const resolvedModel = resolveModelSelectionValue(launchModelSelection);
     const resolvedReasoningEffort = resolveReasoningSelectionValue(launchModelSelection);
+    const targetBridgeId = options?.bridgeId ?? effectiveBridgeId ?? null;
+
+    if (requiresPairedDeviceScope && !targetBridgeId) {
+      setCreateError("Pair or reconnect a laptop before launching an agent session.");
+      return;
+    }
 
     const projectId = options?.projectId ?? selectedProjectId ?? projects[0]?.id;
     if (!projectId) {
@@ -1648,7 +1816,7 @@ export default function DashboardClient() {
     setCreateError(null);
 
     try {
-      const res = await fetch("/api/spawn", {
+      const res = await fetch(withBridgeQuery("/api/sessions", targetBridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1685,6 +1853,7 @@ export default function DashboardClient() {
           projectId,
           sessionId: data.session.id,
           tab: null,
+          bridgeId: targetBridgeId,
         },
         "push",
       );
@@ -1702,7 +1871,9 @@ export default function DashboardClient() {
     prompt,
     refreshSessions,
     selectedAgent,
+    effectiveBridgeId,
     selectedProjectId,
+    requiresPairedDeviceScope,
     syncSidebarForViewport,
   ]);
 
@@ -1737,11 +1908,16 @@ export default function DashboardClient() {
   }, [navigateDashboard, refreshSessions, selectedSessionId]);
 
   const handleCreateWorkspace = useCallback(async (payload: NewWorkspacePayload) => {
+    if (requiresPairedDeviceScope && !effectiveBridgeId) {
+      setNewWorkspaceError("Pair or reconnect a laptop before adding a workspace.");
+      return;
+    }
+
     setCreatingWorkspace(true);
     setNewWorkspaceError(null);
 
     try {
-      const res = await fetch("/api/workspaces", {
+      const res = await fetch(withBridgeQuery("/api/workspaces", effectiveBridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -1770,6 +1946,7 @@ export default function DashboardClient() {
           sessionId: null,
           workspaceView: "chat",
           tab: null,
+          bridgeId: effectiveBridgeId ?? null,
         },
         "push",
       );
@@ -1778,7 +1955,7 @@ export default function DashboardClient() {
     } finally {
       setCreatingWorkspace(false);
     }
-  }, [navigateDashboard, refreshConfig, syncSidebarForViewport]);
+  }, [effectiveBridgeId, navigateDashboard, refreshConfig, requiresPairedDeviceScope, syncSidebarForViewport]);
 
   const onboardingRequired = !preferencesLoading && !!preferences && !preferences.onboardingAcknowledged;
   const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || DEFAULT_AGENT);
@@ -1835,11 +2012,11 @@ export default function DashboardClient() {
 
   const handleUnlinkProject = useCallback(async (projectId: string) => {
     const encodedProjectId = encodeURIComponent(projectId);
-    let res = await fetch(`/api/repositories/${encodedProjectId}`, { method: "DELETE" });
+    let res = await fetch(withBridgeQuery(`/api/repositories/${encodedProjectId}`, effectiveBridgeId), { method: "DELETE" });
 
     // Fall back to the query-string endpoint for older servers that only expose DELETE /api/repositories?id=...
     if (res.status === 404 || res.status === 405) {
-      res = await fetch(`/api/repositories?id=${encodedProjectId}`, { method: "DELETE" });
+      res = await fetch(withBridgeQuery(`/api/repositories?id=${encodedProjectId}`, effectiveBridgeId), { method: "DELETE" });
     }
 
     const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -1847,7 +2024,7 @@ export default function DashboardClient() {
       throw new Error(data?.error ?? `Failed to unlink project (${res.status})`);
     }
     await refreshConfig();
-  }, [refreshConfig]);
+  }, [effectiveBridgeId, refreshConfig]);
 
   const sidebarContent = useMemo(() => {
     if (!sidebarVisible) {
@@ -1885,6 +2062,7 @@ export default function DashboardClient() {
       return (
         <WorkspaceKanban
           projectId={selectedProjectId}
+          bridgeId={effectiveBridgeId}
           defaultAgent={resolvedCodingAgent}
           agentOptions={agentOptions}
           projectSessions={selectedProjectSessions}
@@ -1905,6 +2083,10 @@ export default function DashboardClient() {
         runtimeModelCatalogs={runtimeModelCatalogs}
         agentOptions={agentOptions}
         projects={projects}
+        bridges={bridges}
+        selectedBridgeId={selectedBridgeId}
+        setSelectedBridgeId={setSelectedBridgeId}
+        requiresPairedDeviceScope={requiresPairedDeviceScope}
         selectedProjectId={selectedProjectId}
         onSelectProject={handleSelectProject}
         projectLabel={selectedProjectId ?? "All projects"}
@@ -1919,6 +2101,7 @@ export default function DashboardClient() {
   }, [
     agentOptions,
     agentStatesByName,
+    bridges,
     creating,
     handleCreateSession,
     launchModelSelection,
@@ -1929,7 +2112,9 @@ export default function DashboardClient() {
     prompt,
     resolvedCodingAgent,
     resolvedPreferences.modelAccess,
+    requiresPairedDeviceScope,
     runtimeModelCatalogs,
+    selectedBridgeId,
     selectedProjectId,
     setPrompt,
     workspaceError,
@@ -2060,6 +2245,17 @@ export default function DashboardClient() {
           <TopBar
             title={topBarTitle}
             onOpenPreferences={handleOpenPreferences}
+            rightContent={(
+              <>
+                <span
+                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[12px] font-medium ${scopeBadgeClassName}`}
+                  title={scopeBadgeTitle}
+                >
+                  {scopeBadgeLabel}
+                </span>
+                <BridgeStatusPill />
+              </>
+            )}
           />
         )}
 
@@ -2077,6 +2273,7 @@ export default function DashboardClient() {
           error={newWorkspaceError}
           defaultAgent={resolvedCodingAgent}
           agentOptions={agentOptions}
+          bridgeId={effectiveBridgeId}
         />
       ) : null}
 
@@ -2100,6 +2297,7 @@ export default function DashboardClient() {
           onOpenAgentSetup={openAgentSetup}
           onClose={handleClosePreferencesDialog}
           onSave={handleSavePreferences}
+          bridgeId={effectiveBridgeId}
         />
       ) : null}
     </>
@@ -2118,6 +2316,10 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   runtimeModelCatalogs,
   agentOptions,
   projects,
+  bridges,
+  selectedBridgeId,
+  setSelectedBridgeId,
+  requiresPairedDeviceScope,
   selectedProjectId,
   onSelectProject,
   projectLabel,
@@ -2139,6 +2341,10 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   agentOptions: string[];
   projects: ConfigProject[];
+  bridges: DashboardBridgeConnection[];
+  selectedBridgeId: string;
+  setSelectedBridgeId: (value: string) => void;
+  requiresPairedDeviceScope: boolean;
   selectedProjectId: string | null;
   onSelectProject: (projectId: string | null) => void;
   projectLabel: string;
@@ -2169,6 +2375,10 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   const selectedProject = useMemo(
     () => projectOptions.find((project) => project.id === effectiveProjectId) ?? null,
     [effectiveProjectId, projectOptions],
+  );
+  const availableBridges = useMemo(
+    () => bridges.filter((bridge) => bridge.connected),
+    [bridges],
   );
   const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [branchLoading, setBranchLoading] = useState(false);
@@ -2218,7 +2428,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     setBranchLoading(true);
     try {
       const params = new URLSearchParams({ path: selectedProject.path });
-      const res = await fetch(`/api/workspaces/branches?${params.toString()}`);
+      const res = await fetch(withBridgeQuery(`/api/workspaces/branches?${params.toString()}`, selectedBridgeId));
       const data = (await res.json().catch(() => null)) as
         | { branches?: string[]; defaultBranch?: string | null }
         | null;
@@ -2239,14 +2449,14 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     } finally {
       setBranchLoading(false);
     }
-  }, [selectedProject]);
+  }, [selectedBridgeId, selectedProject]);
 
   const loadTasks = useCallback(async () => {
     if (!effectiveProjectId) return;
 
     setTaskLoading(true);
     try {
-      const res = await fetch(`/api/boards?projectId=${encodeURIComponent(effectiveProjectId)}`);
+      const res = await fetch(withBridgeQuery(`/api/boards?projectId=${encodeURIComponent(effectiveProjectId)}`, selectedBridgeId));
       const payload = (await res.json().catch(() => null)) as LinkedBoardResponse | { error?: string } | null;
       if (!res.ok) {
         throw new Error((payload as { error?: string } | null)?.error ?? `Failed to load tasks: ${res.status}`);
@@ -2273,7 +2483,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     } finally {
       setTaskLoading(false);
     }
-  }, [effectiveProjectId]);
+  }, [effectiveProjectId, selectedBridgeId]);
 
   useEffect(() => {
     if (!branchMenuOpen || branchLoading || branchOptions.length > 0) {
@@ -2360,6 +2570,16 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
         <h1 className="pb-4 text-center text-[30px] font-medium leading-[34px] tracking-[-0.7px] text-[var(--vk-text-strong)] sm:text-[36px] sm:leading-[40px] sm:tracking-[-0.9px]">
           What would you like to work on?
         </h1>
+        {!selectedBridgeId ? (
+          <div className="mb-4 flex items-start gap-2 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+            <PlugZap className="mt-0.5 h-[14px] w-[14px] shrink-0" />
+            <span>
+              {requiresPairedDeviceScope
+                ? "Pair or reconnect a laptop to browse workspaces and launch coding agents from the web dashboard."
+                : "Showing projects and sessions from the local backend. Pair a laptop and select it here to browse that device instead."}
+            </span>
+          </div>
+        ) : null}
 
         <div className="mx-auto w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
           <div className="flex flex-wrap items-center gap-2 border-b border-[var(--vk-border)] px-2 pb-[9px] pt-2">
@@ -2659,6 +2879,31 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                     </DropdownMenu.Portal>
                   </DropdownMenu.Root>
 
+
+
+                  {availableBridges.length > 0 ? (
+                    <label className="inline-flex h-[29px] max-w-[260px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)]">
+                      <PlugZap className="h-[14px] w-[14px] text-[var(--vk-text-muted)]" />
+                      <select
+                        value={selectedBridgeId}
+                        onChange={(event) => setSelectedBridgeId(event.target.value)}
+                        className="min-w-0 flex-1 bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none"
+                      >
+                        {requiresPairedDeviceScope ? null : <option value="">Local backend</option>}
+                        {availableBridges.map((bridge) => (
+                          <option key={bridge.bridgeId} value={bridge.bridgeId}>
+                            {bridge.hostname} · {bridge.os}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <div className="inline-flex h-[29px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-muted)]">
+                      <PlugZap className="h-[14px] w-[14px]" />
+                      <span>{requiresPairedDeviceScope ? "No device connected" : "Local backend"}</span>
+                    </div>
+                  )}
+
                   <DropdownMenu.Root onOpenChange={setBranchMenuOpen}>
                     <DropdownMenu.Trigger asChild>
                       <button
@@ -2713,6 +2958,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         ? { baseBranch: selectedBranch || selectedProject?.defaultBranch || undefined }
                         : { branch: selectedBranch || selectedProject?.defaultBranch || undefined }),
                       issueId: issueId.trim() || undefined,
+                      bridgeId: selectedBridgeId || undefined,
                       useWorktree,
                       permissionMode,
                     })}

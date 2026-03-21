@@ -1,17 +1,52 @@
 import type { DashboardRole } from "@conductor-oss/core/types";
+import { NextResponse } from "next/server";
+import { getDashboardAccess, requiresPairedDeviceScope } from "@/lib/auth";
+import {
+  getBridgeIdFromRequest,
+  guardAndProxyToBridgeDevice,
+} from "@/lib/bridgeApiProxy";
+import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 import { guardAndProxy } from "@/lib/guardedRustProxy";
 import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
 
 type GuardOptions = {
   role?: DashboardRole;
   requireActionGuard?: boolean;
+  bridgeAware?: boolean;
+  responseMapper?: (payload: unknown, bridgeId: string) => unknown;
 };
 
 type RouteParams = Record<string, string | undefined>;
 type RouteContext = { params: Promise<RouteParams> };
 
+async function rejectHostedLocalFallback(request: Request): Promise<Response | null> {
+  const access = await getDashboardAccess(request);
+  if (!access.ok || !requiresPairedDeviceScope(access)) {
+    return null;
+  }
+
+  return NextResponse.json(
+    {
+      error: "Paired device required",
+      reason: "Hosted dashboard workspaces and sessions must target a connected laptop.",
+    },
+    { status: 412 },
+  );
+}
+
 export function guardedProxyRoute(pathname: string, options: GuardOptions = {}) {
   return async function proxyRoute(request: Request): Promise<Response> {
+    if (options.bridgeAware) {
+      const bridgeId = getBridgeIdFromRequest(request);
+      if (bridgeId) {
+        return guardAndProxyToBridgeDevice(request, bridgeId, pathname, options);
+      }
+
+      const rejected = await rejectHostedLocalFallback(request);
+      if (rejected) {
+        return rejected;
+      }
+    }
     return guardAndProxy(request, pathname, options);
   };
 }
@@ -25,6 +60,52 @@ export function guardedProxyParamRoute(
     context: RouteContext,
   ): Promise<Response> {
     const params = await context.params;
+    if (options.bridgeAware) {
+      const bridgeId = getBridgeIdFromRequest(request);
+      if (bridgeId) {
+        return guardAndProxyToBridgeDevice(request, bridgeId, buildPathname(params), options);
+      }
+
+      const rejected = await rejectHostedLocalFallback(request);
+      if (rejected) {
+        return rejected;
+      }
+    }
+    return guardAndProxy(request, buildPathname(params), options);
+  };
+}
+
+export function guardedSessionProxyParamRoute(
+  buildPathname: (params: RouteParams) => string,
+  options: GuardOptions = {},
+) {
+  return async function proxySessionParamRoute(
+    request: Request,
+    context: RouteContext,
+  ): Promise<Response> {
+    const params = await context.params;
+    const bridgeSession = decodeBridgeSessionId(params.id);
+    if (bridgeSession) {
+      return guardAndProxyToBridgeDevice(
+        request,
+        bridgeSession.bridgeId,
+        buildPathname({ ...params, id: bridgeSession.sessionId }),
+        options,
+      );
+    }
+
+    const rejected = await rejectHostedLocalFallback(request);
+    if (rejected) {
+      return rejected;
+    }
+
+    if (options.bridgeAware) {
+      const bridgeId = getBridgeIdFromRequest(request);
+      if (bridgeId) {
+        return guardAndProxyToBridgeDevice(request, bridgeId, buildPathname(params), options);
+      }
+    }
+
     return guardAndProxy(request, buildPathname(params), options);
   };
 }

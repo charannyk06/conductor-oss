@@ -6,6 +6,7 @@ use std::path::Path;
 use super::types::{
     SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT,
 };
+use super::BridgeConnectionStatus;
 use super::{DETACHED_PID_METADATA_KEY, RUNTIME_MODE_METADATA_KEY};
 
 const SPAWN_REQUEST_METADATA_KEY: &str = "spawnRequest";
@@ -21,6 +22,7 @@ const LEGACY_TMUX_RUNTIME_SUMMARY: &str = "Archived legacy tmux session after tm
 fn dashboard_metadata_allowlist() -> &'static [&'static str] {
     &[
         "agent",
+        "bridgeStatus",
         "agentCwd",
         "briefPath",
         "ciStatus",
@@ -96,9 +98,19 @@ pub(crate) fn dashboard_session_metadata(
 }
 
 pub fn session_to_dashboard_value(session: &SessionRecord) -> Value {
+    session_to_dashboard_value_with_bridge(session, None)
+}
+
+pub(crate) fn session_to_dashboard_value_with_bridge(
+    session: &SessionRecord,
+    bridge_connection: Option<&BridgeConnectionStatus>,
+) -> Value {
     json!({
         "id": session.id,
         "projectId": session.project_id,
+        "bridgeId": session.bridge_id,
+        "bridgeConnected": bridge_connection.map(|bridge| bridge.connected),
+        "bridgeConnection": bridge_connection,
         "status": session.status,
         "activity": session.activity,
         "branch": session.branch,
