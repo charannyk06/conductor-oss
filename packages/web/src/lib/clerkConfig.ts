@@ -2,7 +2,7 @@ import { isLoopbackHost } from "@/lib/accessControl";
 
 export type ClerkConfigurationReason =
   | "missing-publishable-key"
-  | "hosted-development-keys";
+  | "production-origin-mismatch";
 
 export type ClerkConfiguration = {
   enabled: boolean;
@@ -19,6 +19,10 @@ export type ClerkConfiguration = {
 
 function normalizeEnvValue(value?: string | null): string {
   return (value ?? "").trim();
+}
+
+function normalizeHostname(value?: string | null): string {
+  return normalizeEnvValue(value).toLowerCase().replace(/^\[|\]$/g, "");
 }
 
 function normalizeOrigin(value?: string | null): string | null {
@@ -153,6 +157,37 @@ export function resolveClerkFrontendApiUrl(): string | null {
   return `https://${frontendApiHost}`;
 }
 
+function resolveCompatibleHostSuffix(frontendApiUrl: string | null): string | null {
+  if (!frontendApiUrl) {
+    return null;
+  }
+
+  try {
+    const hostname = new URL(frontendApiUrl).hostname.toLowerCase();
+    const parts = hostname.split(".").filter(Boolean);
+    if (parts.length <= 2) {
+      return hostname;
+    }
+    return parts.slice(1).join(".");
+  } catch {
+    return null;
+  }
+}
+
+function requestHostMatchesFrontendApi(hostname: string | null | undefined, frontendApiUrl: string | null): boolean {
+  const normalizedHostname = normalizeHostname(hostname);
+  if (!normalizedHostname || isLoopbackHost(normalizedHostname)) {
+    return true;
+  }
+
+  const compatibleSuffix = resolveCompatibleHostSuffix(frontendApiUrl);
+  if (!compatibleSuffix) {
+    return true;
+  }
+
+  return normalizedHostname === compatibleSuffix || normalizedHostname.endsWith(`.${compatibleSuffix}`);
+}
+
 function resolveConfiguredProxyUrl(): string | null {
   return normalizeProxyUrl(
     process.env.NEXT_PUBLIC_CLERK_PROXY_URL
@@ -281,7 +316,13 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
     };
   }
 
-  if (!isLoopbackHost(hostname) && (isDevelopmentClerkKey(publishableKey) || isDevelopmentClerkKey(secretKey))) {
+  const configuredProxyUrl = resolveConfiguredProxyUrl();
+  const frontendApiUrl = resolveClerkFrontendApiUrl();
+  if (
+    !configuredProxyUrl
+    && !isDevelopmentClerkKey(publishableKey)
+    && !requestHostMatchesFrontendApi(hostname, frontendApiUrl)
+  ) {
     return {
       enabled: false,
       publishableKey,
@@ -292,11 +333,10 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
       signUpUrl: null,
       hostedSignInUrl: null,
       allowedRedirectOrigins,
-      reason: "hosted-development-keys",
+      reason: "production-origin-mismatch",
     };
   }
 
-  const configuredProxyUrl = resolveConfiguredProxyUrl();
   const configuredSignInUrl = resolveConfiguredSignInUrl();
   const configuredSignUpUrl = resolveConfiguredSignUpUrl();
   const configuredHostedSignInUrl = resolveConfiguredHostedSignInUrl();

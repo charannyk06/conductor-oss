@@ -83,7 +83,7 @@ test("resolveClerkConfiguration allows development keys on loopback hosts", () =
   assert.equal(configuration.hostedSignInUrl, null);
 });
 
-test("resolveClerkConfiguration rejects development keys on hosted domains", () => {
+test("resolveClerkConfiguration allows development keys on preview hosts", () => {
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_hosted";
   process.env.CLERK_SECRET_KEY = "sk_test_hosted";
 
@@ -92,8 +92,8 @@ test("resolveClerkConfiguration rejects development keys on hosted domains", () 
     "https://conductor-dashboard-seven.vercel.app",
   );
 
-  assert.equal(configuration.enabled, false);
-  assert.equal(configuration.reason, "hosted-development-keys");
+  assert.equal(configuration.enabled, true);
+  assert.equal(configuration.reason, null);
 });
 
 test("resolveClerkConfiguration requires a publishable key before rendering Clerk", () => {
@@ -106,7 +106,7 @@ test("resolveClerkConfiguration requires a publishable key before rendering Cler
   assert.equal(configuration.reason, "missing-publishable-key");
 });
 
-test("resolveClerkConfiguration allows live keys on hosted domains", () => {
+test("resolveClerkConfiguration rejects live keys on unrelated preview hosts without a proxy", () => {
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuY29uZHVjdHJvc3MuY29tJA";
   process.env.CLERK_SECRET_KEY = "sk_live_hosted";
   delete process.env.NEXT_PUBLIC_CLERK_PROXY_URL;
@@ -114,6 +114,20 @@ test("resolveClerkConfiguration allows live keys on hosted domains", () => {
   const configuration = resolveClerkConfiguration(
     "conductor-dashboard-seven.vercel.app",
     "https://conductor-dashboard-seven.vercel.app",
+  );
+
+  assert.equal(configuration.enabled, false);
+  assert.equal(configuration.reason, "production-origin-mismatch");
+});
+
+test("resolveClerkConfiguration allows live keys on compatible hosted domains", () => {
+  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuY29uZHVjdHJvc3MuY29tJA";
+  process.env.CLERK_SECRET_KEY = "sk_live_hosted";
+  delete process.env.NEXT_PUBLIC_CLERK_PROXY_URL;
+
+  const configuration = resolveClerkConfiguration(
+    "preview.conductross.com",
+    "https://preview.conductross.com",
   );
 
   assert.equal(configuration.enabled, true);
@@ -124,7 +138,7 @@ test("resolveClerkConfiguration allows live keys on hosted domains", () => {
   assert.equal(configuration.signInUrl, "/sign-in");
   assert.equal(configuration.signUpUrl, null);
   assert.equal(configuration.hostedSignInUrl, null);
-  assert.deepEqual(configuration.allowedRedirectOrigins, ["https://conductor-dashboard-seven.vercel.app"]);
+  assert.deepEqual(configuration.allowedRedirectOrigins, ["https://preview.conductross.com"]);
 });
 
 test("resolveClerkConfiguration keeps the hosted sign-in surface available without the server key", () => {
@@ -159,10 +173,15 @@ test("resolveClerkConfiguration prefers an explicit shared proxy path when confi
   process.env.CLERK_SECRET_KEY = "sk_live_hosted";
   process.env.NEXT_PUBLIC_CLERK_PROXY_URL = "/__clerk/";
 
-  const configuration = resolveClerkConfiguration("preview.conductross.com", "https://preview.conductross.com");
+  const configuration = resolveClerkConfiguration(
+    "conductor-dashboard-seven.vercel.app",
+    "https://conductor-dashboard-seven.vercel.app",
+  );
 
   assert.equal(configuration.proxyUrl, "/__clerk");
   assert.equal(configuration.clerkJSUrl, "/__clerk/npm/@clerk/clerk-js@5/dist/clerk.browser.js");
+  assert.equal(configuration.enabled, true);
+  assert.equal(configuration.reason, null);
 });
 
 test("resolveClerkConfiguration preserves the path on absolute proxy URLs", () => {

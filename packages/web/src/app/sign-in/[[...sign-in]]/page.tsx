@@ -3,14 +3,18 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Check, HardDrive, ShieldCheck, Workflow } from "lucide-react";
 import { SignInExperience } from "./SignInExperience";
-import { Button } from "@/components/ui/Button";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
+import { Button } from "@/components/ui/Button";
 import {
-  buildHostedSignInPath,
   getDashboardAccess,
   resolvePostSignInRedirectTarget,
 } from "@/lib/auth";
-import { resolveClerkConfiguration, resolveRequestBaseUrl, resolveRequestHostname } from "@/lib/clerkConfig";
+import {
+  type ClerkConfigurationReason,
+  resolveClerkConfiguration,
+  resolveRequestBaseUrl,
+  resolveRequestHostname,
+} from "@/lib/clerkConfig";
 
 const LOCAL_RUNTIME_POINTS = [
   "Repositories remain on the paired laptop.",
@@ -35,18 +39,18 @@ function firstQueryValue(value: string | string[] | undefined): string | null {
   return value?.trim() || null;
 }
 
-function SignInUnavailable({ hostedMisconfiguration = false }: { hostedMisconfiguration?: boolean }) {
+function SignInUnavailable({ reason = null }: { reason?: ClerkConfigurationReason | null }) {
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--status-error)]/30 bg-[color:color-mix(in_srgb,var(--status-error)_10%,transparent)] p-5 text-left">
       <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">Sign In Unavailable</p>
       <h2 className="mt-3 text-xl font-semibold text-[var(--text-strong)]">
-        {hostedMisconfiguration ? "Hosted authentication is misconfigured." : "Authentication is not configured."}
+        {reason === "production-origin-mismatch" ? "This preview deployment cannot use the production Clerk instance." : "Authentication is not configured."}
       </h2>
-      {hostedMisconfiguration ? (
+      {reason === "production-origin-mismatch" ? (
         <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
-          This deployment is using Clerk development keys. Development keys only work on local loopback
-          hosts. Add a production Clerk publishable key and secret key for this deployed domain, then
-          redeploy.
+          Clerk only allows production keys on <code className="rounded bg-[var(--bg-shell)] px-1.5 py-0.5 text-[13px] text-[var(--text-strong)]">conductross.com</code> and its
+          subdomains. Use the Clerk development instance for the Vercel preview environment, or move
+          previews onto a <code className="rounded bg-[var(--bg-shell)] px-1.5 py-0.5 text-[13px] text-[var(--text-strong)]">*.conductross.com</code> hostname, then redeploy.
         </p>
       ) : (
         <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
@@ -81,7 +85,6 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   }
 
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
-  const hostedSignInPath = clerkConfiguration.hostedSignInUrl ? buildHostedSignInPath(redirectTarget) : null;
 
   return (
     <PublicPageShell>
@@ -113,24 +116,9 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
 
           <div className="mt-6">
             {clerkConfiguration.enabled && clerkConfiguration.publishableKey ? (
-              <>
-                <SignInExperience redirectTarget={redirectTarget} />
-                <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--border-soft)] bg-[var(--bg-shell)]/60 p-3">
-                  <p className="text-xs leading-5 text-[var(--text-muted)]">
-                    If the embedded sign-in form does not appear in this browser, continue on the hosted Clerk
-                    sign-in page instead.
-                  </p>
-                  <div className="mt-3">
-                    <Button asChild variant="outline" size="lg">
-                      <Link href={hostedSignInPath ?? "/sign-in/hosted"}>Use hosted sign-in</Link>
-                    </Button>
-                  </div>
-                </div>
-              </>
-            ) : clerkConfiguration.reason === "hosted-development-keys" ? (
-              <SignInUnavailable hostedMisconfiguration />
+              <SignInExperience redirectTarget={redirectTarget} />
             ) : (
-              <SignInUnavailable />
+              <SignInUnavailable reason={clerkConfiguration.reason} />
             )}
           </div>
         </PublicPanel>
