@@ -371,11 +371,11 @@ async function resolveClerkAccess(
 ): Promise<DashboardAccess | null> {
   const clerkConfiguration = resolveClerkConfiguration(hostname);
   if (!clerkConfiguration.enabled) {
-    if (clerkConfiguration.reason === "hosted-development-keys") {
+    if (clerkConfiguration.reason === "production-origin-mismatch") {
       return {
         ok: false,
         authenticated: false,
-        reason: "Hosted Clerk auth is misconfigured. Replace Clerk development keys with production keys for this domain.",
+        reason: "Preview auth is misconfigured. Use Clerk development keys for this preview deployment or move it onto a conductross.com subdomain.",
         provider: "clerk",
       };
     }
