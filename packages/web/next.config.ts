@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const isVercelDeployment = process.env.VERCEL === "1" || process.env.VERCEL === "true";
+const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
@@ -38,7 +39,7 @@ const nextConfig: NextConfig = {
     "proxy-agent",
   ],
   // Silence "multiple lockfiles" warning — pin workspace root to the monorepo
-  outputFileTracingRoot: resolve(process.cwd(), "../../"),
+  outputFileTracingRoot: workspaceRoot,
   async headers() {
     return [
       {

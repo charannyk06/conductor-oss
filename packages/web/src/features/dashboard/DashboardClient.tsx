@@ -294,6 +294,8 @@ type DevicesResponse = {
   devices?: BridgeDevice[];
 };
 
+type BridgeInventoryStatus = "loading" | "ready" | "error";
+
 type LinkedBoardTask = {
   id: string;
   text: string;
@@ -1207,6 +1209,7 @@ export default function DashboardClient({
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [bridges, setBridges] = useState<DashboardBridgeConnection[]>([]);
+  const [bridgeInventoryStatus, setBridgeInventoryStatus] = useState<BridgeInventoryStatus>("loading");
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [newWorkspaceError, setNewWorkspaceError] = useState<string | null>(null);
@@ -1263,10 +1266,12 @@ export default function DashboardClient({
             connectedAt: "",
             lastSeenAt: "",
           })));
+          setBridgeInventoryStatus("ready");
         }
       } catch {
         if (!cancelled) {
           setBridges([]);
+          setBridgeInventoryStatus("error");
         }
       }
     }
@@ -1282,8 +1287,12 @@ export default function DashboardClient({
     };
   }, []);
 
+  const connectedBridges = useMemo(
+    () => bridges.filter((bridge) => bridge.connected),
+    [bridges],
+  );
+
   useEffect(() => {
-    const connectedBridges = bridges.filter((bridge) => bridge.connected);
     const selectedBridgeAvailable = selectedBridgeId
       ? connectedBridges.some((bridge) => bridge.bridgeId === selectedBridgeId)
       : false;
@@ -1305,7 +1314,17 @@ export default function DashboardClient({
     if (selectedBridgeId && !selectedBridgeAvailable) {
       setSelectedBridgeId("");
     }
-  }, [bridges, requiresPairedDeviceScope, selectedBridgeId]);
+  }, [connectedBridges, requiresPairedDeviceScope, selectedBridgeId]);
+
+  useEffect(() => {
+    if (!requiresPairedDeviceScope || effectiveBridgeId) {
+      return;
+    }
+    if (bridgeInventoryStatus !== "ready" || connectedBridges.length > 0) {
+      return;
+    }
+    router.replace("/bridge/connect");
+  }, [bridgeInventoryStatus, connectedBridges.length, effectiveBridgeId, requiresPairedDeviceScope, router]);
 
   useEffect(() => {
     setSelectedBridgeId(bridgeQueryId ?? "");
@@ -1645,7 +1664,7 @@ export default function DashboardClient({
     async function loadPreferences() {
       if (!scopeReady) {
         if (!cancelled) {
-          setPreferences(normalizePreferences(null, DEFAULT_AGENT));
+          setPreferences(null);
           setPreferencesError(null);
           setPreferencesLoading(false);
         }
@@ -1691,11 +1710,14 @@ export default function DashboardClient({
 
   useEffect(() => {
     if (preferencesLoading) return;
-    if (!preferences) return;
+    if (!preferences || (requiresPairedDeviceScope && !effectiveBridgeId)) {
+      setPreferencesDialogOpen(false);
+      return;
+    }
     if (!preferences.onboardingAcknowledged) {
       setPreferencesDialogOpen(true);
     }
-  }, [preferences, preferencesLoading]);
+  }, [effectiveBridgeId, preferences, preferencesLoading, requiresPairedDeviceScope]);
 
   useEffect(() => {
     if (agentOptions.length === 0) return;
@@ -1957,7 +1979,10 @@ export default function DashboardClient({
     }
   }, [effectiveBridgeId, navigateDashboard, refreshConfig, requiresPairedDeviceScope, syncSidebarForViewport]);
 
-  const onboardingRequired = !preferencesLoading && !!preferences && !preferences.onboardingAcknowledged;
+  const onboardingRequired = !preferencesLoading
+    && !!preferences
+    && (!requiresPairedDeviceScope || Boolean(effectiveBridgeId))
+    && !preferences.onboardingAcknowledged;
   const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || DEFAULT_AGENT);
   const resolvedCodingAgent = selectedAgent || resolvedPreferences.codingAgent || DEFAULT_AGENT;
   const notificationProjectId = selectedProjectId ?? selectedSessionRecord?.projectId ?? null;
@@ -1996,8 +2021,12 @@ export default function DashboardClient({
   }, [closeSidebarOnMobile, navigateDashboard, selectedProjectId, sessionsById]);
 
   const handleOpenPreferences = useCallback(() => {
+    if (requiresPairedDeviceScope && !effectiveBridgeId) {
+      router.push("/bridge/connect");
+      return;
+    }
     setPreferencesDialogOpen(true);
-  }, []);
+  }, [effectiveBridgeId, requiresPairedDeviceScope, router]);
 
   const handleCloseNewWorkspaceDialog = useCallback(() => {
     if (creatingWorkspace) return;

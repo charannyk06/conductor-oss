@@ -4,7 +4,9 @@ import { redirect } from "next/navigation";
 import {
   buildHostedSignInRedirectUrl,
   buildSignInPath,
+  getDefaultPostSignInRedirectTarget,
   getDashboardAccess,
+  requiresPairedDeviceScope,
   resolvePostSignInRedirectTarget,
 } from "@/lib/auth";
 import { isLoopbackHost } from "@/lib/accessControl";
@@ -30,11 +32,13 @@ export default async function HostedSignInPage({ searchParams }: HostedSignInPag
   const headerStore = await headers();
   const hostname = resolveRequestHostname(headerStore);
   const baseUrl = resolveRequestBaseUrl(headerStore);
+  const access = await getDashboardAccess();
+  const defaultRedirectTarget = getDefaultPostSignInRedirectTarget(requiresPairedDeviceScope(access));
   const redirectTarget = resolvePostSignInRedirectTarget(
     firstQueryValue(resolvedSearchParams.redirect_url),
     baseUrl,
+    defaultRedirectTarget,
   );
-  const access = await getDashboardAccess();
 
   if (access.ok && access.authenticated) {
     redirect(redirectTarget);
@@ -43,14 +47,19 @@ export default async function HostedSignInPage({ searchParams }: HostedSignInPag
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
   const hostedSignInUrl = isLoopbackHost(hostname)
     ? null
-    : buildHostedSignInRedirectUrl(clerkConfiguration.hostedSignInUrl, baseUrl, redirectTarget);
+    : buildHostedSignInRedirectUrl(
+      clerkConfiguration.hostedSignInUrl,
+      baseUrl,
+      redirectTarget,
+      defaultRedirectTarget,
+    );
 
   if (hostedSignInUrl) {
     redirect(hostedSignInUrl);
   }
 
   if (!clerkConfiguration.enabled || !clerkConfiguration.publishableKey || !clerkConfiguration.signInUrl) {
-    redirect(buildSignInPath(redirectTarget));
+    redirect(buildSignInPath(redirectTarget, defaultRedirectTarget));
   }
   const authState = await auth();
 
@@ -58,5 +67,5 @@ export default async function HostedSignInPage({ searchParams }: HostedSignInPag
     return authState.redirectToSignIn({ returnBackUrl: redirectTarget });
   }
 
-  redirect(buildSignInPath(redirectTarget));
+  redirect(buildSignInPath(redirectTarget, defaultRedirectTarget));
 }

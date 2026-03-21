@@ -6,7 +6,9 @@ import { SignInExperience } from "./SignInExperience";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { Button } from "@/components/ui/Button";
 import {
+  getDefaultPostSignInRedirectTarget,
   getDashboardAccess,
+  requiresPairedDeviceScope,
   resolvePostSignInRedirectTarget,
 } from "@/lib/auth";
 import {
@@ -74,11 +76,13 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   const headerStore = await headers();
   const hostname = resolveRequestHostname(headerStore);
   const baseUrl = resolveRequestBaseUrl(headerStore);
+  const access = await getDashboardAccess();
+  const defaultRedirectTarget = getDefaultPostSignInRedirectTarget(requiresPairedDeviceScope(access));
   const redirectTarget = resolvePostSignInRedirectTarget(
     firstQueryValue(resolvedSearchParams.redirect_url),
     baseUrl,
+    defaultRedirectTarget,
   );
-  const access = await getDashboardAccess();
 
   if (access.ok && access.authenticated) {
     redirect(redirectTarget);

@@ -1,11 +1,12 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { findConfigFile, loadConfig } from "@conductor-oss/core";
-import type { DashboardAccessConfig, DashboardRole, OrchestratorConfig } from "@conductor-oss/core/types";
+import { parse as parseYaml } from "yaml";
+import type { DashboardAccessConfig, DashboardRole } from "@conductor-oss/core/types";
 import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRoleForEmail, roleMeetsRequirement, isLoopbackHost } from "@/lib/accessControl";
 import {
+  getDefaultPostSignInRedirectTarget,
   buildHostedSignInPath,
   buildHostedSignInRedirectUrl,
   buildSignInPath,
@@ -56,11 +57,88 @@ const globalForDashboardConfig = globalThis as typeof globalThis & {
   _conductorDashboardConfigMtimeMs?: number | null;
 };
 
+const DASHBOARD_CONFIG_FILENAMES = ["conductor.yaml", "conductor.yml"] as const;
+
 function parseCsv(value?: string): string[] {
   return (value ?? "")
     .split(",")
     .map((v) => v.trim().toLowerCase())
     .filter(Boolean);
+}
+
+function toObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+function parseDashboardRole(value: unknown): DashboardRole | undefined {
+  return value === "viewer" || value === "operator" || value === "admin"
+    ? value
+    : undefined;
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const normalized = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeDashboardAccessConfig(value: unknown): DashboardAccessConfig | null {
+  const payload = toObject(value);
+  if (Object.keys(payload).length === 0) {
+    return null;
+  }
+
+  const trustedHeaders = toObject(payload["trustedHeaders"]);
+  const roles = toObject(payload["roles"]);
+
+  return {
+    requireAuth: payload["requireAuth"] === true ? true : undefined,
+    allowSignedShareLinks: payload["allowSignedShareLinks"] === true ? true : undefined,
+    defaultRole: parseDashboardRole(payload["defaultRole"]),
+    trustedHeaders: Object.keys(trustedHeaders).length > 0
+      ? {
+        enabled: trustedHeaders["enabled"] === true ? true : undefined,
+        provider: trustedHeaders["provider"] === "generic" || trustedHeaders["provider"] === "cloudflare-access"
+          ? trustedHeaders["provider"]
+          : undefined,
+        emailHeader: typeof trustedHeaders["emailHeader"] === "string" ? trustedHeaders["emailHeader"] : undefined,
+        jwtHeader: typeof trustedHeaders["jwtHeader"] === "string" ? trustedHeaders["jwtHeader"] : undefined,
+        teamDomain: typeof trustedHeaders["teamDomain"] === "string" ? trustedHeaders["teamDomain"] : undefined,
+        audience: typeof trustedHeaders["audience"] === "string" ? trustedHeaders["audience"] : undefined,
+      }
+      : undefined,
+    roles: Object.keys(roles).length > 0
+      ? {
+        viewers: parseStringArray(roles["viewers"]),
+        operators: parseStringArray(roles["operators"]),
+        admins: parseStringArray(roles["admins"]),
+        viewerDomains: parseStringArray(roles["viewerDomains"]),
+        operatorDomains: parseStringArray(roles["operatorDomains"]),
+        adminDomains: parseStringArray(roles["adminDomains"]),
+      }
+      : undefined,
+  };
+}
+
+function resolveConfigFileInDirectory(directory: string): string | null {
+  for (const filename of DASHBOARD_CONFIG_FILENAMES) {
+    const configPath = resolve(directory, filename);
+    if (existsSync(configPath)) {
+      return configPath;
+    }
+  }
+
+  return null;
 }
 
 type HostParts = {
@@ -173,20 +251,36 @@ function resolveDashboardConfigPath(): string | null {
       return existsSync(resolvedHint) ? resolvedHint : null;
     }
 
-    const workspaceConfigPath = findConfigFile(resolvedHint);
+    const workspaceConfigPath = resolveConfigFileInDirectory(resolvedHint);
     if (workspaceConfigPath) {
       return workspaceConfigPath;
     }
   }
 
-  return findConfigFile() ?? null;
+  const cwd = process.cwd();
+  const staticSearchRoots = [
+    cwd,
+    resolve(cwd, ".."),
+    resolve(cwd, "../.."),
+  ];
+
+  for (const searchRoot of staticSearchRoots) {
+    const configPath = resolveConfigFileInDirectory(searchRoot);
+    if (configPath) {
+      return configPath;
+    }
+  }
+
+  return null;
 }
 
 function readDashboardConfigSnapshot(configPath: string): DashboardConfigSnapshot {
-  const config = loadConfig(configPath) as OrchestratorConfig;
+  const raw = parseYaml(readFileSync(configPath, "utf8")) as { access?: unknown; dashboardUrl?: unknown } | null;
   return {
-    access: config.access ?? null,
-    dashboardUrl: config.dashboardUrl?.trim() || null,
+    access: normalizeDashboardAccessConfig(raw?.access),
+    dashboardUrl: typeof raw?.dashboardUrl === "string" && raw.dashboardUrl.trim().length > 0
+      ? raw.dashboardUrl.trim()
+      : null,
   };
 }
 
@@ -610,6 +704,7 @@ export async function resolveDashboardPageRedirect(
 }
 
 export {
+  getDefaultPostSignInRedirectTarget,
   buildHostedSignInPath,
   buildHostedSignInRedirectUrl,
   buildSignInPath,

@@ -10,7 +10,7 @@ function hasClerkServerKeys(): boolean {
 
 const clerkHandler = hasClerkServerKeys() ? clerkMiddleware() : null;
 
-export default function middleware(request: NextRequest, event: NextFetchEvent) {
+export function proxy(request: NextRequest, event: NextFetchEvent) {
   if (!clerkHandler) {
     return NextResponse.next();
   }
