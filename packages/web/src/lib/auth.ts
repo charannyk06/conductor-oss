@@ -5,7 +5,7 @@ import type { DashboardAccessConfig, DashboardRole, OrchestratorConfig } from "@
 import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { resolveRoleForEmail, roleMeetsRequirement, isLoopbackHost } from "@/lib/accessControl";
-import { resolveClerkConfiguration } from "@/lib/clerkConfig";
+import { resolveClerkConfiguration, resolveRequestHostname } from "@/lib/clerkConfig";
 import { verifyTrustedEdgeIdentity } from "@/lib/edgeAuth";
 import { readRemoteAccessRuntimeState } from "@/lib/remoteAccessRuntime";
 import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
@@ -250,14 +250,19 @@ async function currentHeaders(request?: Request): Promise<Headers> {
 
 async function currentHost(request?: Request): Promise<string> {
   if (request) {
+    const forwardedHost = resolveRequestHostname(request.headers);
+    if (forwardedHost) {
+      return forwardedHost;
+    }
+
     try {
-      return new URL(request.url).hostname;
+      return new URL(request.url).hostname.trim().toLowerCase();
     } catch {
-      return request.headers.get("host")?.split(":")[0]?.trim().toLowerCase() ?? "";
+      return "";
     }
   }
   const headerStore = await headers();
-  return headerStore.get("host")?.split(":")[0]?.trim().toLowerCase() ?? "";
+  return resolveRequestHostname(headerStore);
 }
 
 function resolveRoleForAuthenticatedEmail(
@@ -369,6 +374,15 @@ async function resolveClerkAccess(
       };
     }
     return null;
+  }
+
+  if (!clerkConfiguration.secretKeyAvailable) {
+    return {
+      ok: false,
+      authenticated: false,
+      reason: "Authentication service is unavailable. Check Clerk env vars and retry.",
+      provider: "clerk",
+    };
   }
 
   try {

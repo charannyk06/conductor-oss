@@ -81,6 +81,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       publishableKey={clerkConfiguration.publishableKey}
       proxyUrl={clerkConfiguration.proxyUrl ?? undefined}
       clerkJSUrl={clerkConfiguration.clerkJSUrl ?? undefined}
+      allowedRedirectOrigins={clerkConfiguration.allowedRedirectOrigins.length > 0
+        ? clerkConfiguration.allowedRedirectOrigins
+        : undefined}
       appearance={{ cssLayerName: "clerk" }}
     >
       <Shell>{children}</Shell>

@@ -46,15 +46,15 @@ function SignInUnavailable({ hostedMisconfiguration = false }: { hostedMisconfig
         </p>
       ) : (
         <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
-          Add both{" "}
+          Add{" "}
           <code className="rounded bg-[var(--bg-shell)] px-1.5 py-0.5 text-[13px] text-[var(--text-strong)]">
             NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
           </code>{" "}
-          and{" "}
+          to render the Clerk sign-in surface. Add{" "}
           <code className="rounded bg-[var(--bg-shell)] px-1.5 py-0.5 text-[13px] text-[var(--text-strong)]">
             CLERK_SECRET_KEY
           </code>{" "}
-          to enable the Clerk sign-in flow for this page.
+          for server-side session checks after sign-in.
         </p>
       )}
     </div>
@@ -66,7 +66,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   const redirectTarget = resolvePostSignInRedirectTarget(firstQueryValue(resolvedSearchParams.redirect_url));
   const access = await getDashboardAccess();
 
-  if (access.authenticated) {
+  if (access.ok && access.authenticated) {
     redirect(redirectTarget);
   }
 
@@ -99,13 +99,13 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">Sign in</p>
           <h2 className="mt-3 text-2xl font-semibold text-[var(--text-strong)]">Connect to your paired runtime</h2>
           <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
-            GitHub is the fastest path. Email stays available if you prefer. After sign-in, choose the paired
-            machine and continue inside the same local workflow.
+            GitHub is the fastest path. Email stays available if you prefer. After sign-in, Clerk returns you
+            to the dashboard or active bridge claim flow inside the same local workflow.
           </p>
 
           <div className="mt-6">
             {clerkConfiguration.enabled && clerkConfiguration.publishableKey ? (
-              <SignInExperience />
+              <SignInExperience redirectTarget={redirectTarget} />
             ) : clerkConfiguration.reason === "hosted-development-keys" ? (
               <SignInUnavailable hostedMisconfiguration />
             ) : (

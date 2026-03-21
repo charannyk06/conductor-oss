@@ -68,6 +68,22 @@ test("getDashboardAccess still denies non-local requests without remote identity
   assert.equal(access.reason, "Authentication is required for non-local dashboard access");
 });
 
+test("getDashboardAccess uses the forwarded host for hosted auth checks", async () => {
+  resetDashboardAuthEnv();
+  process.env.CONDUCTOR_REQUIRE_AUTH = "true";
+
+  const access = await getDashboardAccess(new Request("http://127.0.0.1:3000/api/access", {
+    headers: {
+      host: "127.0.0.1:3000",
+      "x-forwarded-host": "preview.conductross.com",
+      "x-forwarded-proto": "https",
+    },
+  }));
+
+  assert.equal(access.ok, false);
+  assert.equal(access.reason, "Authentication is required for non-local dashboard access");
+});
+
 test("guardApiActionAccess allows tunneled same-origin unlock requests via forwarded host", () => {
   const request = new NextRequest("http://127.0.0.1:3000/api/auth/session", {
     method: "POST",

@@ -2,6 +2,10 @@
 
 import { SignIn } from "@clerk/nextjs";
 
+type SignInExperienceProps = {
+  redirectTarget: string;
+};
+
 const SIGN_IN_APPEARANCE = {
   variables: {
     colorPrimary: "#d4d4d8",
@@ -46,10 +50,17 @@ const SIGN_IN_APPEARANCE = {
   },
 } as const;
 
-export function SignInExperience() {
+export function SignInExperience({ redirectTarget }: SignInExperienceProps) {
   return (
     <div className="conductor-auth-form">
-      <SignIn routing="path" path="/sign-in" appearance={SIGN_IN_APPEARANCE} />
+      <SignIn
+        routing="path"
+        path="/sign-in"
+        appearance={SIGN_IN_APPEARANCE}
+        oauthFlow="redirect"
+        fallbackRedirectUrl={redirectTarget}
+        signUpFallbackRedirectUrl={redirectTarget}
+      />
     </div>
   );
 }
