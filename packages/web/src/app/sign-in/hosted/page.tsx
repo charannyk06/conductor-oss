@@ -27,16 +27,19 @@ function firstQueryValue(value: string | string[] | undefined): string | null {
 
 export default async function HostedSignInPage({ searchParams }: HostedSignInPageProps) {
   const resolvedSearchParams = searchParams ? await searchParams : {};
-  const redirectTarget = resolvePostSignInRedirectTarget(firstQueryValue(resolvedSearchParams.redirect_url));
+  const headerStore = await headers();
+  const hostname = resolveRequestHostname(headerStore);
+  const baseUrl = resolveRequestBaseUrl(headerStore);
+  const redirectTarget = resolvePostSignInRedirectTarget(
+    firstQueryValue(resolvedSearchParams.redirect_url),
+    baseUrl,
+  );
   const access = await getDashboardAccess();
 
   if (access.ok && access.authenticated) {
     redirect(redirectTarget);
   }
 
-  const headerStore = await headers();
-  const hostname = resolveRequestHostname(headerStore);
-  const baseUrl = resolveRequestBaseUrl(headerStore);
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
   const hostedSignInUrl = isLoopbackHost(hostname)
     ? null

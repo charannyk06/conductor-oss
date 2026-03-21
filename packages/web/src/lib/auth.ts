@@ -605,8 +605,42 @@ export async function resolveDashboardPageRedirect(
 
 const DEFAULT_POST_SIGN_IN_REDIRECT = "/";
 
-export function resolvePostSignInRedirectTarget(candidate: string | null | undefined): string {
+function resolveRelativeRedirectTarget(
+  candidate: string | null | undefined,
+  requestBaseUrl?: string | null,
+): string {
+  if (!candidate) {
+    return DEFAULT_POST_SIGN_IN_REDIRECT;
+  }
+
   const nextPath = sanitizeRedirectTarget(candidate);
+  if (nextPath !== DEFAULT_POST_SIGN_IN_REDIRECT || candidate.trim() === DEFAULT_POST_SIGN_IN_REDIRECT) {
+    return nextPath;
+  }
+
+  const normalizedBaseUrl = (requestBaseUrl ?? "").trim();
+  if (!normalizedBaseUrl) {
+    return DEFAULT_POST_SIGN_IN_REDIRECT;
+  }
+
+  try {
+    const targetUrl = new URL(candidate, normalizedBaseUrl);
+    const baseUrl = new URL(normalizedBaseUrl);
+    if (targetUrl.origin !== baseUrl.origin) {
+      return DEFAULT_POST_SIGN_IN_REDIRECT;
+    }
+
+    return sanitizeRedirectTarget(`${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`);
+  } catch {
+    return DEFAULT_POST_SIGN_IN_REDIRECT;
+  }
+}
+
+export function resolvePostSignInRedirectTarget(
+  candidate: string | null | undefined,
+  requestBaseUrl?: string | null,
+): string {
+  const nextPath = resolveRelativeRedirectTarget(candidate, requestBaseUrl);
 
   if (
     nextPath === "/sign-in"

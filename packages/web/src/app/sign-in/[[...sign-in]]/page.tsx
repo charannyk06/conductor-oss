@@ -67,16 +67,19 @@ function SignInUnavailable({ hostedMisconfiguration = false }: { hostedMisconfig
 
 export default async function SignInPage({ searchParams }: SignInPageProps) {
   const resolvedSearchParams = searchParams ? await searchParams : {};
-  const redirectTarget = resolvePostSignInRedirectTarget(firstQueryValue(resolvedSearchParams.redirect_url));
+  const headerStore = await headers();
+  const hostname = resolveRequestHostname(headerStore);
+  const baseUrl = resolveRequestBaseUrl(headerStore);
+  const redirectTarget = resolvePostSignInRedirectTarget(
+    firstQueryValue(resolvedSearchParams.redirect_url),
+    baseUrl,
+  );
   const access = await getDashboardAccess();
 
   if (access.ok && access.authenticated) {
     redirect(redirectTarget);
   }
 
-  const headerStore = await headers();
-  const hostname = resolveRequestHostname(headerStore);
-  const baseUrl = resolveRequestBaseUrl(headerStore);
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
   const hostedSignInPath = clerkConfiguration.signInUrl ? buildHostedSignInPath(redirectTarget) : null;
 

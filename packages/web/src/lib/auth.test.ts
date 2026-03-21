@@ -133,6 +133,16 @@ test("resolvePostSignInRedirectTarget avoids sending users back into sign-in", (
   assert.equal(resolvePostSignInRedirectTarget("https://evil.example.com"), "/");
 });
 
+test("resolvePostSignInRedirectTarget accepts same-origin absolute callback targets", () => {
+  assert.equal(
+    resolvePostSignInRedirectTarget(
+      "https://preview.conductross.com/bridge/connect?claim=claim_123",
+      "https://preview.conductross.com",
+    ),
+    "/bridge/connect?claim=claim_123",
+  );
+});
+
 test("buildSignInPath includes redirect_url only when needed", () => {
   assert.equal(buildSignInPath("/bridge/connect?claim=claim_123"), "/sign-in?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123");
   assert.equal(buildSignInPath("/sign-in"), "/sign-in");
