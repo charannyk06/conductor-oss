@@ -1,4 +1,8 @@
-// This file mirrors the route type declarations generated in `.next/dev/types/routes.d.ts`.
+// This file mirrors the route type declarations generated in `.next/types/routes.d.ts`.
+
+declare module "next/dist/build/segment-config/app/app-segment-config.js" {
+  export type PrefetchForTypeCheckInternal = InstantConfigForTypeCheckInternal;
+}
 
 type AppRoutes = "/" | "/sessions/[id]" | "/sign-in/[[...sign-in]]" | "/unlock"
 type AppRouteHandlerRoutes =

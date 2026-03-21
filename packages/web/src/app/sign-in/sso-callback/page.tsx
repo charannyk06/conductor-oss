@@ -2,7 +2,7 @@
 
 import { AuthenticateWithRedirectCallback } from "@clerk/nextjs";
 import { useSearchParams } from "next/navigation";
-import { resolvePostSignInRedirectTarget } from "@/lib/auth";
+import { resolvePostSignInRedirectTarget } from "@/lib/authRedirect";
 
 export default function SsoCallbackPage() {
   const searchParams = useSearchParams();
