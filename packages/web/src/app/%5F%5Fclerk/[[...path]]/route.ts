@@ -6,7 +6,6 @@ export const runtime = "nodejs";
 const FORWARDED_REQUEST_HEADERS = [
   "accept",
   "accept-language",
-  "authorization",
   "content-type",
   "cookie",
   "user-agent",
