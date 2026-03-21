@@ -1,6 +1,8 @@
 import type { NextConfig } from "next";
 import { resolve } from "node:path";
 
+const isVercelDeployment = process.env.VERCEL === "1" || process.env.VERCEL === "true";
+
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
@@ -10,7 +12,10 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // Vercel's runtime loads the traced output directly. Forcing standalone there
+  // produces CommonJS launcher -> ESM app module mismatches under this package's
+  // `type: "module"` setting.
+  output: isVercelDeployment ? undefined : "standalone",
   reactStrictMode: false,
   experimental: {
     turbopackFileSystemCacheForBuild: true,
