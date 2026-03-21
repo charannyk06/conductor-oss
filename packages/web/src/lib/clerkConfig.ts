@@ -106,10 +106,10 @@ export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: st
     };
   }
 
-  // For hosted deployments with live keys, let Clerk talk to its own frontend API directly.
-  // Proxying Clerk through our app causes origin/auth mismatches on preview domains.
-  const shouldProxyFrontendApi = false;
-  const proxyUrl = shouldProxyFrontendApi && trimmedBaseUrl ? `${trimmedBaseUrl}/__clerk` : null;
+  // Hosted preview/prod should proxy Clerk through our stable app origin.
+  // This avoids preview-domain/client-host mismatches while keeping the Clerk UI intact.
+  const shouldProxyFrontendApi = !isLoopbackHost(hostname) && Boolean(trimmedBaseUrl);
+  const proxyUrl = shouldProxyFrontendApi ? `${trimmedBaseUrl}/__clerk` : null;
   const clerkJSUrl = proxyUrl ? `${proxyUrl}/npm/@clerk/clerk-js@5/dist/clerk.browser.js` : null;
 
   return {

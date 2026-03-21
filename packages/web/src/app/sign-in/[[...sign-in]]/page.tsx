@@ -99,13 +99,13 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">Sign in</p>
           <h2 className="mt-3 text-2xl font-semibold text-[var(--text-strong)]">Connect to your paired runtime</h2>
           <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
-            GitHub uses a full-page Clerk redirect, then returns you straight to the dashboard or active bridge
-            claim flow without relying on an embedded widget.
+            GitHub is the fastest path. Email stays available if you prefer. After sign-in, choose the paired
+            machine and continue inside the same local workflow.
           </p>
 
           <div className="mt-6">
             {clerkConfiguration.enabled && clerkConfiguration.publishableKey ? (
-              <SignInExperience redirectTarget={redirectTarget} />
+              <SignInExperience />
             ) : clerkConfiguration.reason === "hosted-development-keys" ? (
               <SignInUnavailable hostedMisconfiguration />
             ) : (
