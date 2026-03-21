@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   CheckCircle2,
@@ -14,9 +14,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { BridgeSessionTerminal } from "@/components/bridge/BridgeSessionTerminal";
+import { SessionTerminal } from "@/components/sessions/SessionTerminal";
 import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { Button } from "@/components/ui/Button";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 import type { DashboardSession } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@/lib/types";
 
@@ -45,6 +46,14 @@ type PairingCodeResponse = {
   error?: string;
 };
 
+type ClaimCompletionResponse = {
+  paired?: boolean;
+  already_paired?: boolean;
+  device_id?: string;
+  device_name?: string;
+  error?: string;
+};
+
 type SessionsResponse = DashboardSession[] | {
   sessions?: DashboardSession[];
   error?: string;
@@ -63,7 +72,11 @@ function pickBridgeTestSession(sessions: DashboardSession[]): DashboardSession |
     ?? null;
 }
 
-export default function BridgeConnectClient() {
+export default function BridgeConnectClient({
+  initialClaimToken = null,
+}: {
+  initialClaimToken?: string | null;
+}) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [expiresIn, setExpiresIn] = useState<number | null>(null);
@@ -76,13 +89,20 @@ export default function BridgeConnectClient() {
   const [testConnectionLoading, setTestConnectionLoading] = useState(false);
   const [testConnectionError, setTestConnectionError] = useState<string | null>(null);
   const [testSession, setTestSession] = useState<DashboardSession | null>(null);
+  const [claimStatus, setClaimStatus] = useState<"idle" | "pending" | "paired">(
+    initialClaimToken ? "pending" : "idle",
+  );
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const [claimedDevice, setClaimedDevice] = useState<{ deviceId: string; deviceName: string } | null>(null);
 
   const command = useMemo(() => (
-    pairingCode ? `conductor-bridge pair --code ${pairingCode}` : "conductor-bridge pair --code ABC123"
+    pairingCode
+      ? `conductor-bridge pair --code ${pairingCode}\nconductor-bridge daemon`
+      : "conductor-bridge pair --code ABC123\nconductor-bridge daemon"
   ), [pairingCode]);
   const connectedDevices = devices.filter((device) => device.connected);
 
-  async function refreshDevices(): Promise<void> {
+  const refreshDevices = useCallback(async (): Promise<void> => {
     setLoading(true);
     try {
       const response = await fetch("/api/bridge/devices", { cache: "no-store" });
@@ -98,7 +118,48 @@ export default function BridgeConnectClient() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  const completeClaim = useCallback(async (): Promise<void> => {
+    if (!initialClaimToken) {
+      return;
+    }
+
+    setClaimStatus("pending");
+    setClaimError(null);
+    try {
+      const response = await fetch("/api/bridge/devices/claims/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ claim_token: initialClaimToken }),
+      });
+      const payload = await response.json().catch(() => null) as ClaimCompletionResponse | null;
+      if (!response.ok || !payload?.paired || !payload.device_id || !payload.device_name) {
+        throw new Error(payload?.error ?? `Failed to pair this laptop (${response.status})`);
+      }
+
+      setClaimedDevice({
+        deviceId: payload.device_id,
+        deviceName: payload.device_name,
+      });
+      setClaimStatus("paired");
+      await refreshDevices();
+    } catch (err) {
+      setClaimStatus("idle");
+      setClaimError(err instanceof Error ? err.message : "Failed to complete the laptop claim.");
+    }
+  }, [initialClaimToken, refreshDevices]);
+
+  useEffect(() => {
+    void refreshDevices();
+  }, [refreshDevices]);
+
+  useEffect(() => {
+    if (!initialClaimToken) {
+      return;
+    }
+    void completeClaim();
+  }, [completeClaim, initialClaimToken]);
 
   async function handleGenerateCode(): Promise<void> {
     setCreatingCode(true);
@@ -159,7 +220,15 @@ export default function BridgeConnectClient() {
     setTestSession(null);
 
     try {
-      const response = await fetch("/api/sessions", { cache: "no-store" });
+      const activeDevice = connectedDevices[0];
+      if (!activeDevice) {
+        throw new Error("Connect a laptop first, then reopen the device terminal test.");
+      }
+
+      const response = await fetch(
+        withBridgeQuery("/api/sessions", activeDevice.device_id),
+        { cache: "no-store" },
+      );
       const payload = await response.json().catch(() => null) as SessionsResponse | null;
       if (!response.ok) {
         const responseError = payload && !Array.isArray(payload) ? payload.error : null;
@@ -192,7 +261,7 @@ export default function BridgeConnectClient() {
                 <div>
                   <h1 className="text-2xl font-semibold text-[var(--vk-text-strong)]">Connect a laptop</h1>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--vk-text-muted)]">
-                    Pair a terminal-only bridge once, keep the refresh token on the laptop, and manage every paired machine from this dashboard.
+                    Pair a laptop once, keep the bridge daemon running on it, and use it as a real execution target from the normal Conductor dashboard.
                   </p>
                 </div>
               </div>
@@ -242,17 +311,79 @@ export default function BridgeConnectClient() {
             </section>
           ) : null}
 
+          {initialClaimToken ? (
+            <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--vk-text-muted)]">
+                    Device-First Pairing
+                  </p>
+                  <h2 className="mt-2 text-xl font-semibold text-[var(--vk-text-strong)]">
+                    {claimStatus === "paired" ? "This laptop is paired" : "Finishing this laptop claim"}
+                  </h2>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--vk-text-muted)]">
+                    {claimStatus === "paired"
+                      ? "The command that opened this page can now finish the relay handshake on the same machine. Open the dashboard with this device selected once it reports online."
+                      : "Sign-in completed. Conductor is binding the currently-running machine to your dashboard account and handing the device token back to that local command."}
+                  </p>
+                </div>
+                {claimedDevice ? (
+                  <Button asChild variant="primary" size="lg">
+                    <Link href={`/?bridge=${encodeURIComponent(claimedDevice.deviceId)}`}>
+                      <Laptop className="h-4 w-4" />
+                      Open {claimedDevice.deviceName}
+                    </Link>
+                  </Button>
+                ) : null}
+              </div>
+
+              <div className="mt-5 rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-5 py-4 text-sm text-[var(--vk-text-muted)]">
+                {claimStatus === "pending" ? (
+                  <div className="flex items-center gap-3">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Waiting for the local command to receive its one-time device credentials.
+                  </div>
+                ) : claimStatus === "paired" && claimedDevice ? (
+                  <div className="flex items-start gap-3">
+                    <CheckCircle2 className="mt-0.5 h-4 w-4 text-[var(--vk-green)]" />
+                    <div>
+                      <div className="font-medium text-[var(--vk-text-strong)]">{claimedDevice.deviceName} is now paired.</div>
+                      <div className="mt-1">
+                        Leave the local `conductor-bridge connect` command running so the device comes online immediately.
+                      </div>
+                    </div>
+                  </div>
+                ) : claimError ? (
+                  <div className="space-y-3">
+                    <div className="text-[var(--vk-red)]">{claimError}</div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="md"
+                      onClick={() => {
+                        void completeClaim();
+                      }}
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                      Retry claim
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-lg font-semibold text-[var(--vk-text-strong)]">Pairing code</h2>
                   <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
-                    Generate a one-time code, run the command on the laptop, and the bridge will store its refresh token at{" "}
+                    Generate a one-time code, run the commands on the laptop, and the bridge will store its refresh token at{" "}
                     <code className="rounded bg-[var(--vk-bg-main)] px-1.5 py-0.5 text-[12px] text-[var(--vk-text-normal)]">
                       ~/.conductor/bridge-refresh-token
                     </code>
-                    .
+                    . Keep the daemon running so the laptop stays online in the dashboard.
                   </p>
                 </div>
                 <div className="flex items-center gap-2 rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-1.5 text-xs text-[var(--vk-text-muted)]">
@@ -447,8 +578,9 @@ export default function BridgeConnectClient() {
                 </div>
               ) : testSession ? (
                 <div className="min-h-[420px] flex-1 overflow-hidden rounded-[20px] border border-[var(--vk-border)] bg-[#060404]">
-                  <BridgeSessionTerminal
+                  <SessionTerminal
                     sessionId={testSession.id}
+                    bridgeId={testSession.bridgeId}
                     sessionState={testSession.status}
                     pendingInsert={null}
                   />

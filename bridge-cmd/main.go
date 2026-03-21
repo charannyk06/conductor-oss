@@ -10,7 +10,9 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/charannyk06/conductor-oss/bridge/connect"
 	"github.com/charannyk06/conductor-oss/bridge/daemon"
+	"github.com/charannyk06/conductor-oss/bridge/device"
 	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/charannyk06/conductor-oss/bridge/pair"
 	"github.com/charannyk06/conductor-oss/bridge/token"
@@ -41,6 +43,8 @@ func run(args []string) error {
 	defer stop()
 
 	switch args[0] {
+	case "connect":
+		return runConnect(ctx, args[1:])
 	case "pair":
 		return runPair(ctx, args[1:])
 	case "daemon":
@@ -57,11 +61,33 @@ func run(args []string) error {
 	}
 }
 
+func runConnect(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	relayURL := fs.String("relay-url", resolveRelayURL(), "Relay base URL")
+	dashboardURL := fs.String("dashboard-url", resolveDashboardURL(), "Hosted dashboard URL")
+	noBrowser := fs.Bool("no-browser", false, "Print the pairing URL instead of opening the browser")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	return connect.Run(ctx, connect.Options{
+		RelayURL:      strings.TrimSpace(*relayURL),
+		DashboardURL:  strings.TrimSpace(*dashboardURL),
+		Stdout:        os.Stdout,
+		Stderr:        os.Stderr,
+		OpenBrowser:   !*noBrowser,
+		StartupDaemon: true,
+	})
+}
+
 func runPair(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("pair", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	code := fs.String("code", "", "Pairing code shown in the dashboard")
+	deviceID := fs.String("device-id", "", "Override the stable device ID stored on this machine")
 	relayURL := fs.String("relay-url", resolveRelayURL(), "Relay base URL")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -69,6 +95,7 @@ func runPair(ctx context.Context, args []string) error {
 
 	return pair.Run(ctx, pair.Options{
 		Code:     strings.TrimSpace(*code),
+		DeviceID: strings.TrimSpace(*deviceID),
 		RelayURL: strings.TrimSpace(*relayURL),
 		Stdout:   os.Stdout,
 		Stderr:   os.Stderr,
@@ -111,10 +138,17 @@ func runStatus() error {
 	refreshToken, err := store.Load()
 	switch {
 	case err == nil:
-		fmt.Fprintf(os.Stdout, "paired\nrefresh token path: %s\nrefresh token length: %d\n", store.Path(), len(refreshToken))
+		deviceStore, deviceErr := device.NewStore("")
+		deviceLine := ""
+		if deviceErr == nil {
+			if deviceID, loadErr := deviceStore.Load(); loadErr == nil {
+				deviceLine = fmt.Sprintf("device id: %s\n", deviceID)
+			}
+		}
+		fmt.Fprintf(os.Stdout, "paired\n%srefresh token path: %s\nrefresh token length: %d\n", deviceLine, store.Path(), len(refreshToken))
 		return nil
 	case errors.Is(err, token.ErrTokenNotFound):
-		fmt.Fprintf(os.Stdout, "not paired\nrun 'conductor-bridge pair --code CODE' first\n")
+		fmt.Fprintf(os.Stdout, "not paired\nrun 'conductor-bridge connect' or 'conductor-bridge pair --code CODE' first\n")
 		return nil
 	default:
 		return err
@@ -131,12 +165,23 @@ func resolveRelayURL() string {
 	return defaultRelayURL
 }
 
+func resolveDashboardURL() string {
+	for _, key := range []string{"CONDUCTOR_DASHBOARD_URL", "CONDUCTOR_PUBLIC_DASHBOARD_URL"} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func usageError() error {
 	return fmt.Errorf("%s", usageText())
 }
 
 func usageText() string {
 	return `Usage:
+	conductor-bridge connect [--dashboard-url URL] [--relay-url URL]
   conductor-bridge pair --code CODE [--relay-url URL]
   conductor-bridge daemon [--relay-url URL]
   conductor-bridge status

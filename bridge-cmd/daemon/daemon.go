@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/charannyk06/conductor-oss/bridge/backend"
 	"github.com/charannyk06/conductor-oss/bridge/relay"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
@@ -39,11 +40,17 @@ func Run(ctx context.Context, opts Options) error {
 	refreshToken, err := store.Load()
 	if err != nil {
 		if errors.Is(err, token.ErrTokenNotFound) {
-			fmt.Fprintln(stderr, "Run 'conductor-bridge pair --code CODE' first")
+			fmt.Fprintln(stderr, "Run 'conductor-bridge connect' or 'conductor-bridge pair --code CODE' first")
 			return ErrNotPaired
 		}
 		return err
 	}
+
+	backendCleanup, err := backend.Ensure(ctx, backend.Options{Stderr: stderr})
+	if err != nil {
+		return err
+	}
+	defer backendCleanup()
 
 	pollInterval := opts.PollInterval
 	if pollInterval <= 0 {

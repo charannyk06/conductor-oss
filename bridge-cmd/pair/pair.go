@@ -13,17 +13,18 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/google/uuid"
-
+	"github.com/charannyk06/conductor-oss/bridge/device"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
 
 type Options struct {
-	Code     string
-	RelayURL string
-	Store     *token.Store
-	Stdout   io.Writer
-	Stderr   io.Writer
+	Code        string
+	DeviceID    string
+	RelayURL    string
+	DeviceStore *device.Store
+	Store       *token.Store
+	Stdout      io.Writer
+	Stderr      io.Writer
 }
 
 type pairRequest struct {
@@ -43,6 +44,8 @@ type pairResponse struct {
 }
 
 func Run(ctx context.Context, opts Options) error {
+	var err error
+
 	code := strings.TrimSpace(opts.Code)
 	if code == "" {
 		return errors.New("pairing code is required")
@@ -66,6 +69,22 @@ func Run(ctx context.Context, opts Options) error {
 		stdout = os.Stdout
 	}
 
+	deviceStore := opts.DeviceStore
+	if deviceStore == nil {
+		deviceStore, err = device.NewStore("")
+		if err != nil {
+			return err
+		}
+	}
+
+	deviceID := strings.TrimSpace(opts.DeviceID)
+	if deviceID == "" {
+		deviceID, err = deviceStore.Ensure()
+		if err != nil {
+			return err
+		}
+	}
+
 	hostname, err := os.Hostname()
 	if err != nil || strings.TrimSpace(hostname) == "" {
 		hostname = "unknown"
@@ -73,7 +92,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	requestBody, err := json.Marshal(pairRequest{
 		Code:     strings.ToUpper(code),
-		DeviceID: uuid.NewString(),
+		DeviceID: deviceID,
 		Hostname: hostname,
 		OS:       runtime.GOOS,
 		Arch:     runtime.GOARCH,
