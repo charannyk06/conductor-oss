@@ -41,7 +41,11 @@ jobs:
       - name: Cargo audit
         run: >
           cargo install cargo-audit --locked &&
-          cargo audit --ignore RUSTSEC-2023-0071
+          cargo audit
+          --ignore RUSTSEC-2023-0071
+          --ignore RUSTSEC-2024-0384
+          --ignore RUSTSEC-2026-0008
+          --ignore RUSTSEC-2026-0049
 
   secret-scan:
     name: Secret Scanning

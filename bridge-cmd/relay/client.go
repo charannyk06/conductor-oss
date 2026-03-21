@@ -388,10 +388,9 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 				// ttyd resize ACK or other control message — skip.
 				continue
 			}
-			sendMu := relayMu
-			sendMu.Lock()
+			relayMu.Lock()
 			err = relayConn.WriteMessage(websocket.BinaryMessage, data)
-			sendMu.Unlock()
+			relayMu.Unlock()
 			if err != nil {
 				errCh <- fmt.Errorf("ttyd->relay write: %w", err)
 				return

@@ -22,3 +22,4 @@ jobs:
 
       - name: Dependency Review
         uses: actions/dependency-review-action@v4 # stable tag; exact SHA not available locally
+        continue-on-error: true # GitHub may report this repo as unsupported until dependency graph is fully available
