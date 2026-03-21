@@ -117,13 +117,11 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
                     If the embedded sign-in form does not appear in this browser, continue on the hosted Clerk
                     sign-in page instead.
                   </p>
-                  {hostedSignInPath ? (
-                    <div className="mt-3">
-                      <Button asChild variant="outline" size="lg">
-                        <Link href={hostedSignInPath}>Use hosted sign-in</Link>
-                      </Button>
-                    </div>
-                  ) : null}
+                  <div className="mt-3">
+                    <Button asChild variant="outline" size="lg">
+                      <Link href={hostedSignInPath ?? "/sign-in/hosted"}>Use hosted sign-in</Link>
+                    </Button>
+                  </div>
                 </div>
               </>
             ) : clerkConfiguration.reason === "hosted-development-keys" ? (

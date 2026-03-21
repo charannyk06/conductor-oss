@@ -3,11 +3,11 @@ import { NextRequest } from "next/server";
 
 export const runtime = "nodejs";
 
-const FORWARDED_REQUEST_HEADERS = [
-  "accept-language",
-  "authorization",
-  "content-type",
-  "cookie",
+const STRIP_REQUEST_HEADERS = [
+  "connection",
+  "content-length",
+  "host",
+  "transfer-encoding",
 ] as const;
 
 function resolveProxyBaseUrl(request: NextRequest): string {
@@ -43,24 +43,24 @@ function rewriteRedirectLocation(location: string, proxyBaseUrl: string, fronten
   return location;
 }
 
-function buildUpstreamHeaders(request: NextRequest, secretKey: string): Headers {
-  const headers = new Headers();
-  for (const headerName of FORWARDED_REQUEST_HEADERS) {
-    const value = request.headers.get(headerName);
-    if (value) {
-      headers.set(headerName, value);
-    }
+function buildUpstreamHeaders(request: NextRequest, secretKey: string, proxyBaseUrl: string): Headers {
+  const headers = new Headers(request.headers);
+  for (const headerName of STRIP_REQUEST_HEADERS) {
+    headers.delete(headerName);
   }
 
+  headers.set("Clerk-Proxy-Url", proxyBaseUrl);
   headers.set("Clerk-Secret-Key", secretKey);
-  headers.set("User-Agent", "ConductorClerkProxy/1.0");
   if (!headers.has("Accept")) {
     headers.set("Accept", "*/*");
+  }
+  if (!headers.has("User-Agent")) {
+    headers.set("User-Agent", "ConductorClerkProxy/1.0");
   }
 
   const clientIp = resolveClientIp(request);
   if (clientIp) {
-    headers.set("X-Forwarded-For", clientIp);
+    headers.append("X-Forwarded-For", clientIp);
   }
 
   return headers;
@@ -89,7 +89,7 @@ async function proxyClerkRequest(
   }
 
   const upstreamUrl = buildUpstreamUrl(request, path);
-  const headers = buildUpstreamHeaders(request, secretKey);
+  const headers = buildUpstreamHeaders(request, secretKey, proxyBaseUrl);
 
   const init: RequestInit & { duplex?: "half" } = {
     method: request.method,
