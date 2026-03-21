@@ -15,8 +15,9 @@ concurrency:
 
 jobs:
   rust:
-    name: Rust (check, clippy, test)
+    name: Rust (fmt, check, clippy, test)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -24,7 +25,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
-          components: clippy
+          components: clippy,rustfmt
 
       - name: Cache Cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -38,6 +39,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Format
+        run: cargo fmt --check
+
       - name: Check
         run: cargo check --workspace
 
@@ -47,9 +51,34 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  go-bridge:
+    name: Go bridge (build, vet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: bridge-cmd
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: bridge-cmd/go.mod
+          cache-dependency-path: bridge-cmd/go.sum
+          check-latest: false
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
   frontend:
     name: Frontend (build, typecheck, test)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -57,11 +86,12 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # v2.1.3
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Build + typecheck are the preview-confidence gate and do not require Vercel secrets.
       # Build in dependency order: core → cli → web
       - name: Build core
         run: bun run --cwd packages/core build
@@ -84,8 +114,6 @@ jobs:
 
       - name: Test core
         run: bun run --cwd packages/core test
-        continue-on-error: true
 
       - name: Test CLI
         run: bun run --cwd packages/cli test
-        continue-on-error: true
