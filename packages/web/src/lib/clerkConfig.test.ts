@@ -9,6 +9,7 @@ const originalAllowedOrigins = process.env.CONDUCTOR_ALLOWED_ORIGINS;
 const originalProxyUrl = process.env.NEXT_PUBLIC_CLERK_PROXY_URL;
 const originalSignInUrl = process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL;
 const originalSignUpUrl = process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL;
+const originalHostedSignInUrl = process.env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL;
 
 function restoreClerkEnv(): void {
   if (originalPublishableKey === undefined) {
@@ -52,6 +53,12 @@ function restoreClerkEnv(): void {
   } else {
     process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL = originalSignUpUrl;
   }
+
+  if (originalHostedSignInUrl === undefined) {
+    delete process.env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL;
+  } else {
+    process.env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL = originalHostedSignInUrl;
+  }
 }
 
 test.afterEach(() => {
@@ -71,8 +78,9 @@ test("resolveClerkConfiguration allows development keys on loopback hosts", () =
   assert.equal(configuration.enabled, true);
   assert.equal(configuration.reason, null);
   assert.equal(configuration.proxyUrl, null);
-  assert.equal(configuration.signInUrl, null);
+  assert.equal(configuration.signInUrl, "/sign-in");
   assert.equal(configuration.signUpUrl, null);
+  assert.equal(configuration.hostedSignInUrl, null);
 });
 
 test("resolveClerkConfiguration rejects development keys on hosted domains", () => {
@@ -113,8 +121,9 @@ test("resolveClerkConfiguration allows live keys on hosted domains", () => {
   assert.equal(configuration.secretKeyAvailable, true);
   assert.equal(configuration.proxyUrl, null);
   assert.equal(configuration.clerkJSUrl, null);
-  assert.equal(configuration.signInUrl, null);
+  assert.equal(configuration.signInUrl, "/sign-in");
   assert.equal(configuration.signUpUrl, null);
+  assert.equal(configuration.hostedSignInUrl, null);
   assert.deepEqual(configuration.allowedRedirectOrigins, ["https://conductor-dashboard-seven.vercel.app"]);
 });
 
@@ -128,6 +137,7 @@ test("resolveClerkConfiguration keeps the hosted sign-in surface available witho
   assert.equal(configuration.enabled, true);
   assert.equal(configuration.reason, null);
   assert.equal(configuration.secretKeyAvailable, false);
+  assert.equal(configuration.signInUrl, "/sign-in");
 });
 
 test("resolveClerkConfiguration uses stable configured origins for redirect validation", () => {
@@ -172,13 +182,25 @@ test("resolveClerkConfiguration preserves the path on absolute proxy URLs", () =
 test("resolveClerkConfiguration exposes configured hosted sign-in and sign-up URLs", () => {
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuY29uZHVjdHJvc3MuY29tJA";
   process.env.CLERK_SECRET_KEY = "sk_live_hosted";
-  process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL = "https://accounts.conductross.com/sign-in/";
+  process.env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL = "https://accounts.conductross.com/sign-in/";
   process.env.NEXT_PUBLIC_CLERK_SIGN_UP_URL = "/sign-up/";
 
   const configuration = resolveClerkConfiguration("preview.conductross.com", "https://preview.conductross.com");
 
-  assert.equal(configuration.signInUrl, "https://accounts.conductross.com/sign-in");
+  assert.equal(configuration.signInUrl, "/sign-in");
   assert.equal(configuration.signUpUrl, "/sign-up");
+  assert.equal(configuration.hostedSignInUrl, "https://accounts.conductross.com/sign-in");
+});
+
+test("resolveClerkConfiguration treats external sign-in urls as hosted fallback urls", () => {
+  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuY29uZHVjdHJvc3MuY29tJA";
+  process.env.CLERK_SECRET_KEY = "sk_live_hosted";
+  process.env.NEXT_PUBLIC_CLERK_SIGN_IN_URL = "https://accounts.conductross.com/sign-in/";
+
+  const configuration = resolveClerkConfiguration("preview.conductross.com", "https://preview.conductross.com");
+
+  assert.equal(configuration.signInUrl, "/sign-in");
+  assert.equal(configuration.hostedSignInUrl, "https://accounts.conductross.com/sign-in");
 });
 
 test("resolveClerkFrontendApiUrl derives the instance host from the Clerk publishable key", () => {

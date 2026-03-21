@@ -43,7 +43,7 @@ export default async function HostedSignInPage({ searchParams }: HostedSignInPag
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
   const hostedSignInUrl = isLoopbackHost(hostname)
     ? null
-    : buildHostedSignInRedirectUrl(clerkConfiguration.signInUrl, baseUrl, redirectTarget);
+    : buildHostedSignInRedirectUrl(clerkConfiguration.hostedSignInUrl, baseUrl, redirectTarget);
 
   if (hostedSignInUrl) {
     redirect(hostedSignInUrl);

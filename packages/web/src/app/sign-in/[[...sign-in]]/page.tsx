@@ -81,7 +81,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
   }
 
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
-  const hostedSignInPath = clerkConfiguration.signInUrl ? buildHostedSignInPath(redirectTarget) : null;
+  const hostedSignInPath = clerkConfiguration.hostedSignInUrl ? buildHostedSignInPath(redirectTarget) : null;
 
   return (
     <PublicPageShell>
