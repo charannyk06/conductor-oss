@@ -46,10 +46,9 @@ export default async function HostedSignInPage({ searchParams }: HostedSignInPag
     redirect(hostedSignInUrl);
   }
 
-  if (!clerkConfiguration.enabled || !clerkConfiguration.publishableKey) {
+  if (!clerkConfiguration.enabled || !clerkConfiguration.publishableKey || !clerkConfiguration.signInUrl) {
     redirect(buildSignInPath(redirectTarget));
   }
-
   const authState = await auth();
 
   if ("redirectToSignIn" in authState && typeof authState.redirectToSignIn === "function") {

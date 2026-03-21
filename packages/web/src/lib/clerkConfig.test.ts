@@ -113,8 +113,8 @@ test("resolveClerkConfiguration allows live keys on hosted domains", () => {
   assert.equal(configuration.secretKeyAvailable, true);
   assert.equal(configuration.proxyUrl, null);
   assert.equal(configuration.clerkJSUrl, null);
-  assert.equal(configuration.signInUrl, "https://accounts.conductross.com/sign-in");
-  assert.equal(configuration.signUpUrl, "https://accounts.conductross.com/sign-up");
+  assert.equal(configuration.signInUrl, null);
+  assert.equal(configuration.signUpUrl, null);
   assert.deepEqual(configuration.allowedRedirectOrigins, ["https://conductor-dashboard-seven.vercel.app"]);
 });
 
