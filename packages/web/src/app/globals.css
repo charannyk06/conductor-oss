@@ -210,13 +210,6 @@ body {
   overflow-x: hidden;
 }
 
-.conductor-auth-form .cl-socialButtons,
-.conductor-auth-form .cl-dividerRow,
-.conductor-auth-form [class*="socialButtons"],
-.conductor-auth-form [class*="dividerRow"] {
-  display: none !important;
-}
-
 .conductor-auth-form .cl-formButtonPrimary {
   color: var(--text-strong) !important;
   font-weight: 700 !important;
