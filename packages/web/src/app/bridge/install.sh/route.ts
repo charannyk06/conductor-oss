@@ -199,7 +199,15 @@ ensure_conductor_cli() {
   fi
 
   echo "Installing conductor-oss CLI..."
-  npm install -g conductor-oss
+  if ! npm install -g conductor-oss; then
+    CONDUCTOR_CMD="$(resolve_conductor_command_path || true)"
+    if [ -n "$CONDUCTOR_CMD" ]; then
+      echo "Using existing Conductor CLI at $CONDUCTOR_CMD"
+    else
+      echo "Retrying conductor-oss install with --force to replace an existing co shim..."
+      npm install -g conductor-oss --force
+    fi
+  fi
 
   CONDUCTOR_CMD="$(resolve_conductor_command_path || true)"
   if [ -z "$CONDUCTOR_CMD" ]; then
