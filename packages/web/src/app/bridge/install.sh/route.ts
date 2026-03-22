@@ -38,6 +38,7 @@ INSTALL_BIN_DIR="\${CONDUCTOR_INSTALL_BIN:-$HOME/.local/bin}"
 SERVICE_BIN_DIR="$HOME/.conductor/bin"
 LOCAL_GO_ROOT="$HOME/.local/go"
 BRIDGE_BIN="$INSTALL_BIN_DIR/conductor-bridge"
+CONDUCTOR_WRAPPER_DIR="$HOME/.conductor/bin"
 CONNECT_AFTER_INSTALL=0
 CONNECT_DASHBOARD_URL=""
 CONNECT_RELAY_URL=""
@@ -155,6 +156,73 @@ build_bridge() {
   chmod +x "$INSTALL_BIN_DIR/conductor-bridge"
 }
 
+resolve_conductor_command_path() {
+  for candidate in \
+    "$CONDUCTOR_WRAPPER_DIR/conductor" \
+    "$CONDUCTOR_WRAPPER_DIR/co" \
+    "$HOME/.local/bin/conductor" \
+    "$HOME/.local/bin/co" \
+    "/opt/homebrew/bin/conductor" \
+    "/opt/homebrew/bin/co" \
+    "/usr/local/bin/conductor" \
+    "/usr/local/bin/co" \
+    "/usr/bin/conductor" \
+    "/usr/bin/co"
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  if command -v conductor >/dev/null 2>&1; then
+    command -v conductor
+    return 0
+  fi
+  if command -v co >/dev/null 2>&1; then
+    command -v co
+    return 0
+  fi
+
+  return 1
+}
+
+ensure_conductor_cli() {
+  if resolve_conductor_command_path >/dev/null 2>&1; then
+    return
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "Conductor CLI is not installed and npm is unavailable." >&2
+    echo "Install conductor-oss manually or set CONDUCTOR_BRIDGE_BACKEND_COMMAND before running the bridge." >&2
+    return
+  fi
+
+  echo "Installing conductor-oss CLI..."
+  npm install -g conductor-oss
+
+  CONDUCTOR_CMD="$(resolve_conductor_command_path || true)"
+  if [ -z "$CONDUCTOR_CMD" ]; then
+    NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
+    if [ -n "$NPM_PREFIX" ]; then
+      if [ -x "$NPM_PREFIX/bin/conductor" ]; then
+        CONDUCTOR_CMD="$NPM_PREFIX/bin/conductor"
+      elif [ -x "$NPM_PREFIX/bin/co" ]; then
+        CONDUCTOR_CMD="$NPM_PREFIX/bin/co"
+      fi
+    fi
+  fi
+
+  if [ -z "$CONDUCTOR_CMD" ]; then
+    echo "Installed conductor-oss but could not locate the CLI binary." >&2
+    return
+  fi
+
+  mkdir -p "$CONDUCTOR_WRAPPER_DIR"
+  ln -sf "$CONDUCTOR_CMD" "$CONDUCTOR_WRAPPER_DIR/conductor"
+  ln -sf "$CONDUCTOR_CMD" "$CONDUCTOR_WRAPPER_DIR/co"
+}
+
 install_bridge_service() {
   "$INSTALL_BIN_DIR/conductor-bridge" install
   if [ -x "$SERVICE_BIN_DIR/conductor-bridge" ]; then
@@ -188,6 +256,7 @@ parse_args "$@"
 configure_shell_path
 install_go_if_missing
 build_bridge
+ensure_conductor_cli
 install_bridge_service
 
 echo "Installed conductor-bridge to $INSTALL_BIN_DIR/conductor-bridge"

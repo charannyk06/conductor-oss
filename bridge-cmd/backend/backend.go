@@ -157,14 +157,14 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 		return launchPlan{}, err
 	}
 
-	if conductorPath, err := exec.LookPath("conductor"); err == nil {
+	if conductorPath := findConductorBinary("conductor"); conductorPath != "" {
 		return launchPlan{
 			cmd:  conductorPath,
 			args: []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
 		}, nil
 	}
 
-	if coPath, err := exec.LookPath("co"); err == nil {
+	if coPath := findConductorBinary("co"); coPath != "" {
 		return launchPlan{
 			cmd:  coPath,
 			args: []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
@@ -172,6 +172,43 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 	}
 
 	return launchPlan{}, errors.New("could not find `conductor` or `co`; set CONDUCTOR_BRIDGE_BACKEND_COMMAND to start the local backend")
+}
+
+func findConductorBinary(command string) string {
+	if resolved, err := exec.LookPath(command); err == nil {
+		return resolved
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	candidates := []string{
+		filepath.Join(homeDir, ".conductor", "bin", command),
+		filepath.Join(homeDir, ".local", "bin", command),
+		filepath.Join(homeDir, ".npm-global", "bin", command),
+		filepath.Join("/opt/homebrew/bin", command),
+		filepath.Join("/usr/local/bin", command),
+		filepath.Join("/usr/bin", command),
+	}
+
+	if runtime.GOOS == "windows" {
+		withExtensions := make([]string, 0, len(candidates)*2)
+		for _, candidate := range candidates {
+			withExtensions = append(withExtensions, candidate)
+			withExtensions = append(withExtensions, candidate+".exe")
+		}
+		candidates = withExtensions
+	}
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+
+	return ""
 }
 
 func backendPort(backendURL *url.URL) int {
