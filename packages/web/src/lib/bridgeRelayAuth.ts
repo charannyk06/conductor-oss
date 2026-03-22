@@ -5,6 +5,9 @@ import { requireBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 const DEFAULT_LOCAL_BRIDGE_USER_ID = "local-admin";
 const RELAY_JWT_ISSUER = "conductor-dashboard";
 const RELAY_JWT_AUDIENCE = "conductor-relay";
+const LEGACY_PROXY_AUTHORIZED_HEADER = "x-conductor-proxy-authorized";
+const LEGACY_PROXY_EMAIL_HEADER = "x-conductor-access-email";
+const LEGACY_PROXY_LOCAL_USER_HEADER = "x-bridge-user-id";
 
 export type BridgeRelayJwtScope = "dashboard-api" | "terminal-browser";
 
@@ -17,6 +20,26 @@ export function resolveBridgeRelayUserId(access: DashboardAccess): string | null
     return DEFAULT_LOCAL_BRIDGE_USER_ID;
   }
   return null;
+}
+
+export function appendLegacyBridgeRelayAuthHeaders(
+  headers: Headers,
+  access: DashboardAccess,
+  userId: string,
+): Headers {
+  const trimmedUserId = userId.trim();
+  if (!trimmedUserId) {
+    return headers;
+  }
+
+  headers.set(LEGACY_PROXY_AUTHORIZED_HEADER, "true");
+  if (access.provider === "local") {
+    headers.set(LEGACY_PROXY_LOCAL_USER_HEADER, trimmedUserId);
+    return headers;
+  }
+
+  headers.set(LEGACY_PROXY_EMAIL_HEADER, trimmedUserId);
+  return headers;
 }
 
 function requireBridgeRelaySecret(): string {
@@ -60,9 +83,10 @@ export async function buildBridgeRelayAuthHeaders(
     throw new Error("Unable to resolve the dashboard user for the bridge relay.");
   }
 
-  return new Headers({
+  const headers = new Headers({
     Authorization: `Bearer ${await signBridgeRelayJwt(userId, scope)}`,
   });
+  return appendLegacyBridgeRelayAuthHeaders(headers, access, userId);
 }
 
 export function buildBridgeRelayWebSocketUrl(pathname: string, jwt: string): string {
