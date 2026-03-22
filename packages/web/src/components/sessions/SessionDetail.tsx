@@ -221,7 +221,13 @@ export function SessionDetail({
   );
 
   return (
-    <div className={`flex h-full min-h-0 min-w-0 w-full flex-col overflow-y-auto overscroll-contain lg:overflow-hidden ${immersiveTerminalActive ? "bg-[#060404]" : ""}`}>
+    <div
+      className={`flex h-full min-h-0 min-w-0 w-full flex-col ${
+        immersiveTerminalActive
+          ? "overflow-hidden bg-[#060404]"
+          : "overflow-y-auto overscroll-contain lg:overflow-hidden"
+      }`}
+    >
       <Tabs
         key={sessionId}
         value={activeTab}

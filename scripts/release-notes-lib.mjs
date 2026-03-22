@@ -4,6 +4,11 @@ const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
 const HEADING_RE = /^(#{1,6})\s+(.+?)\s*$/;
 const CONVENTIONAL_PREFIX_RE = /^[a-z]+(?:\([^)]+\))?!?:\s*/i;
 const TITLE_PR_SUFFIX_RE = /\s+\(#\d+\)\s*$/;
+const PR_TITLE_AGENT_ATTRIBUTION_PATTERNS = [
+  /^\s*\[(?:codex|claude(?:\s*code)?|cursor|gemini|qwen(?:\s*code)?|copilot|amp|droid|opencode|ccr)\]\s*/i,
+  /^\s*(?:codex|claude(?:\s*code)?|cursor|gemini|qwen(?:\s*code)?|copilot|amp|droid|opencode|ccr)\s*[-:]\s*/i,
+  /\b(?:authored|generated|created)\s+by\s+(?:codex|claude(?:\s*code)?|cursor|gemini|qwen(?:\s*code)?|copilot|amp|droid|opencode|ccr)\b/i,
+];
 const MAX_FALLBACK_NOTE_LENGTH = 240;
 
 const CATEGORY_ORDER = [
@@ -252,6 +257,11 @@ export function sanitizePrTitle(title) {
   );
 }
 
+export function titleHasCodingAgentAttribution(title) {
+  const normalized = normalizeNewlines(title).trim();
+  return PR_TITLE_AGENT_ATTRIBUTION_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
 export function extractReleaseNotes(body) {
   const section = extractSection(body, [
     "User-Facing Release Notes",
@@ -436,6 +446,10 @@ export function validatePrDescription({ body, title }) {
   const errors = [];
   const releaseNotes = extractReleaseNotes(body);
   const checkedCategories = extractCheckedCategories(body);
+
+  if (titleHasCodingAgentAttribution(title)) {
+    errors.push("PR title must not include coding-agent attribution such as `[codex]` or `claude:`. Use a normal conventional-commit style title instead.");
+  }
 
   if (!releaseNotes.explicit) {
     errors.push("Add a `## User-Facing Release Notes` section to the PR description.");
