@@ -88,8 +88,12 @@ export function registerBridge(program: Command): void {
     .option("--install-url <url>", "Override installer URL. Intended for development only.")
     .action(async (opts: BridgeSetupOptions) => {
       const installUrl = opts.installUrl?.trim() || resolveDefaultInstallUrl(opts.dashboardUrl);
+      console.log(`Preparing Conductor Bridge setup for ${opts.dashboardUrl}`);
+      console.log(`Detected platform: ${process.platform}`);
+      console.log(`Downloading installer: ${installUrl}`);
       const { tempDir, filePath } = await downloadInstaller(installUrl);
       try {
+        console.log(`Running installer: ${process.platform === "win32" ? "PowerShell" : "sh"}`);
         const exitCode = runInstaller(filePath, opts);
         if (exitCode !== 0) {
           process.exitCode = exitCode;
