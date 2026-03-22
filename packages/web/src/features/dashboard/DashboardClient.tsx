@@ -2124,6 +2124,7 @@ export default function DashboardClient({
                 <SessionDetail
                   sessionId={sessionId}
                   initialSession={initialSession}
+                  bridgeId={effectiveBridgeId}
                   active={sessionActive}
                   immersiveMobileMode={sessionActive && immersiveMobileMode}
                   onOpenSidebar={toggleSidebar}

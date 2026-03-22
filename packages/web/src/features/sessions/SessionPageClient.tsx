@@ -203,6 +203,7 @@ export default function SessionPageClient({
           key={params.id}
           sessionId={params.id}
           initialSession={currentSession}
+          bridgeId={effectiveBridgeId}
           immersiveMobileMode={immersiveTerminalMode}
           onOpenSidebar={toggleSidebar}
         />

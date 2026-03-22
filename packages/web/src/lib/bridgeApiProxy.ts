@@ -102,7 +102,8 @@ export function hasBridgeRelay(): boolean {
 }
 
 export function getBridgeIdFromRequest(request: Request): string | null {
-  return normalizeBridgeId(new URL(request.url).searchParams.get("bridgeId"));
+  const searchParams = new URL(request.url).searchParams;
+  return normalizeBridgeId(searchParams.get("bridgeId") ?? searchParams.get("bridge"));
 }
 
 export async function proxyToBridgeDevice(

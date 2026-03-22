@@ -11,20 +11,28 @@ import {
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { RemoteSessionTerminal } from "@/components/sessions/RemoteSessionTerminal";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 
-async function sendTerminalKeys(sessionId: string, keys: string): Promise<void> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
+async function sendTerminalKeys(
+  sessionId: string,
+  keys: string,
+  bridgeId?: string | null,
+): Promise<void> {
+  const response = await fetch(
+    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/keys`, bridgeId),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ keys }),
     },
-    body: JSON.stringify({ keys }),
-  });
+  );
   if (!response.ok) {
     const data = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(data?.error ?? `Failed to queue terminal input (${response.status})`);
@@ -52,6 +60,7 @@ function terminalUrlChanged(current: string | null, next: string): boolean {
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
+    bridgeId,
     sessionState,
     runtimeMode,
     pendingInsert,
@@ -116,7 +125,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setResolvingConnection(true);
     setConnectionError(null);
 
-    void resolveTerminalConnection(sessionId, { signal: abortController.signal })
+    void resolveTerminalConnection(sessionId, {
+      signal: abortController.signal,
+      bridgeId,
+    })
       .then((connection) => {
         if (cancelled) return;
         retryAttemptRef.current = 0;
@@ -174,7 +186,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         window.clearTimeout(retryTimer);
       }
     };
-  }, [connectionRefreshTick, expectsLiveTerminal, sessionId]);
+  }, [bridgeId, connectionRefreshTick, expectsLiveTerminal, sessionId]);
 
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
@@ -188,7 +200,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
 
     let cancelled = false;
-    void sendTerminalKeys(sessionId, `${inlineText} `)
+    void sendTerminalKeys(sessionId, `${inlineText} `, bridgeId)
       .then(() => {
         if (!cancelled) {
           setQueuedInsertError(null);
@@ -205,7 +217,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     return () => {
       cancelled = true;
     };
-  }, [pendingInsert, sessionId]);
+  }, [bridgeId, pendingInsert, sessionId]);
 
   const handlePromptSend = useCallback(async () => {
     const message = promptMessage.trim();
@@ -214,13 +226,16 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setPromptSending(true);
     setPromptError(null);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const response = await fetch(
+        withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, bridgeId),
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "send", message }),
         },
-        body: JSON.stringify({ action: "send", message }),
-      });
+      );
       if (!response.ok) {
         const data = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(data?.error ?? `Failed to send message (${response.status})`);
@@ -232,7 +247,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     } finally {
       setPromptSending(false);
     }
-  }, [promptMessage, promptSending, sessionId]);
+  }, [bridgeId, promptMessage, promptSending, sessionId]);
 
   useEffect(() => {
     if (process.env.NODE_ENV !== "development") return;

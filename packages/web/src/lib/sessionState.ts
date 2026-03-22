@@ -311,10 +311,17 @@ function subscribeSessions(scopeKey: string, listener: Listener): () => void {
   };
 }
 
-async function refreshSessionRecord(id: string, scopeKey: string): Promise<DashboardSession | null> {
+async function refreshSessionRecord(
+  id: string,
+  scopeKey: string,
+  bridgeId?: string | null,
+): Promise<DashboardSession | null> {
   const store = getSessionsStore(scopeKey);
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { cache: "no-store" });
+    const response = await fetch(
+      withBridgeQuery(`/api/sessions/${encodeURIComponent(id)}`, bridgeId),
+      { cache: "no-store" },
+    );
     if (response.status === 404) {
       const nextSessions = new Map(store.sessionsById);
       nextSessions.delete(id);
@@ -469,7 +476,7 @@ export function useSharedSession(
       if (document.visibilityState !== "visible") {
         return;
       }
-      void refreshSessionRecord(normalizedId, scopeKey).catch(() => {
+      void refreshSessionRecord(normalizedId, scopeKey, inferredBridgeId).catch(() => {
         // Ignore transient remote refresh failures.
       });
     };
@@ -479,7 +486,7 @@ export function useSharedSession(
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [enabled, normalizedId, scopeKey]);
+  }, [enabled, inferredBridgeId, normalizedId, scopeKey]);
 
   useEffect(() => {
     if (!enabled || normalizedId === null) {
@@ -499,7 +506,7 @@ export function useSharedSession(
     let cancelled = false;
     setLoading(true);
     setSessionError(null);
-    void refreshSessionRecord(normalizedId, scopeKey)
+    void refreshSessionRecord(normalizedId, scopeKey, inferredBridgeId)
       .then((session) => {
         if (cancelled) {
           return;
@@ -523,7 +530,7 @@ export function useSharedSession(
     return () => {
       cancelled = true;
     };
-  }, [enabled, initialSession, normalizedId, scopeKey, store]);
+  }, [enabled, inferredBridgeId, initialSession, normalizedId, scopeKey, store]);
 
   const session = normalizedId
     ? (hydrated
