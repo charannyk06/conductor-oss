@@ -68,7 +68,7 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return Some(if *method == Method::GET {
             AccessRole::Viewer
         } else {
-            AccessRole::Admin
+            AccessRole::Operator
         });
     }
 
@@ -135,7 +135,7 @@ mod tests {
         );
         assert_eq!(
             required_access_role(&Method::POST, "/api/app-update"),
-            Some(AccessRole::Admin)
+            Some(AccessRole::Operator)
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/health/sessions"),

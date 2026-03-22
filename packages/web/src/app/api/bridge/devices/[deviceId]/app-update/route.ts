@@ -23,7 +23,7 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
     deviceId,
     "/api/app-update",
     {
-      role: "admin",
+      role: "operator",
       requireActionGuard: true,
     },
   );
