@@ -60,6 +60,15 @@ function bridgeUpdateMessage(
   return status.jobMessage ?? `Installing Conductor ${status.latestVersion ?? "latest"} on ${device.device_name}.`;
 }
 
+function normalizeBridgeUpdateError(message: string | null, status: number): string {
+  const normalized = message?.trim() ?? "";
+  if (normalized.includes("127.0.0.1:4749")) {
+    return "This laptop is still on an older bridge build. Run the setup command once to upgrade the bridge service, then retry Update Conductor.";
+  }
+
+  return normalized || `Failed to update Conductor on this laptop (${status})`;
+}
+
 export function normalizeAppUpdatePayload(payload: unknown): AppUpdateStatus | null {
   if (!payload || typeof payload !== "object") {
     return null;
@@ -120,11 +129,10 @@ export async function requestBridgeAppUpdate(
 
   const payload = await response.json().catch(() => null) as AppUpdateStatus | { error?: string } | null;
   if (!response.ok) {
-    throw new Error(
-      payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-        ? payload.error
-        : `Failed to update Conductor on this laptop (${response.status})`,
-    );
+    const errorMessage = payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+      ? payload.error
+      : null;
+    throw new Error(normalizeBridgeUpdateError(errorMessage, response.status));
   }
 
   const status = normalizeAppUpdatePayload(payload);

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ChevronDown, Download, Laptop, Loader2, RefreshCw } from "lucide-react";
+import { ChevronDown, Download, Laptop, Loader2, RefreshCw, Wrench } from "lucide-react";
 import {
   isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
@@ -12,7 +12,11 @@ import {
   type BridgeAutoUpdateState,
 } from "@/lib/bridgeAppUpdate";
 import { cn } from "@/lib/cn";
-import { requestBridgeServiceRestart } from "@/lib/bridgeDeviceControl";
+import {
+  requestBridgeRepair,
+  requestBridgeServiceRestart,
+} from "@/lib/bridgeDeviceControl";
+import { buildBridgeInstallScriptUrl } from "@/lib/bridgeOnboarding";
 
 type BridgeDevice = {
   device_id: string;
@@ -35,6 +39,7 @@ type DevicesResponse = {
 
 type BridgeServiceActionState = {
   deviceId: string | null;
+  kind: "repair" | "restart" | null;
   status: "idle" | "running" | "completed" | "failed";
   message: string | null;
 };
@@ -91,6 +96,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
   });
   const [serviceAction, setServiceAction] = useState<BridgeServiceActionState>({
     deviceId: null,
+    kind: null,
     status: "idle",
     message: null,
   });
@@ -201,6 +207,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
   const handleRestartService = useCallback(async (device: BridgeDevice) => {
     setServiceAction({
       deviceId: device.device_id,
+      kind: "restart",
       status: "running",
       message: `Restarting the bridge service on ${device.device_name}.`,
     });
@@ -209,6 +216,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       const message = await requestBridgeServiceRestart(device.device_id);
       setServiceAction({
         deviceId: device.device_id,
+        kind: "restart",
         status: "completed",
         message,
       });
@@ -218,8 +226,39 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     } catch (err) {
       setServiceAction({
         deviceId: device.device_id,
+        kind: "restart",
         status: "failed",
         message: err instanceof Error ? err.message : `Failed to restart ${device.device_name}.`,
+      });
+    }
+  }, [refreshDevices]);
+
+  const handleRepairBridge = useCallback(async (device: BridgeDevice) => {
+    setServiceAction({
+      deviceId: device.device_id,
+      kind: "repair",
+      status: "running",
+      message: `Reinstalling the bridge service on ${device.device_name}.`,
+    });
+
+    try {
+      const installScriptUrl = buildBridgeInstallScriptUrl(window.location.origin);
+      const message = await requestBridgeRepair(device.device_id, installScriptUrl);
+      setServiceAction({
+        deviceId: device.device_id,
+        kind: "repair",
+        status: "completed",
+        message,
+      });
+      window.setTimeout(() => {
+        void refreshDevices(false);
+      }, 2_000);
+    } catch (err) {
+      setServiceAction({
+        deviceId: device.device_id,
+        kind: "repair",
+        status: "failed",
+        message: err instanceof Error ? err.message : `Failed to repair ${device.device_name}.`,
       });
     }
   }, [refreshDevices]);
@@ -261,7 +300,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                   : "No live bridge connection"}
             </div>
             <div className="mt-2 text-[11px] leading-5 text-[var(--vk-text-faint)]">
-              If a laptop is online but misbehaving, use these controls to update Conductor or restart its bridge service.
+              If a laptop is online but misbehaving, repair the bridge, update Conductor, or restart the service here.
             </div>
             {error ? (
               <div className="mt-2 text-[12px] leading-5 text-[var(--vk-red)]">{error}</div>
@@ -287,6 +326,8 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                 const updateInFlight = isBridgeAutoUpdateInFlight(autoUpdate, device.device_id);
                 const serviceActionRunning = serviceAction.status === "running"
                   && serviceAction.deviceId === device.device_id;
+                const repairRunning = serviceActionRunning && serviceAction.kind === "repair";
+                const restartRunning = serviceActionRunning && serviceAction.kind === "restart";
 
                 return (
                   <div
@@ -335,6 +376,21 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                             <button
                               type="button"
                               className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--vk-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)]"
+                              disabled={serviceActionRunning || updateInFlight}
+                              onClick={() => {
+                                void handleRepairBridge(device);
+                              }}
+                            >
+                              {repairRunning ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Wrench className="h-3.5 w-3.5" />
+                              )}
+                              Repair bridge
+                            </button>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--vk-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)]"
                               disabled={updateInFlight || serviceActionRunning}
                               onClick={() => {
                                 void handleUpdateDevice(device);
@@ -355,7 +411,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                                 void handleRestartService(device);
                               }}
                             >
-                              {serviceActionRunning ? (
+                              {restartRunning ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                               ) : (
                                 <RefreshCw className="h-3.5 w-3.5" />
