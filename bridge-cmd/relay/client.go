@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charannyk06/conductor-oss/bridge/backend"
 	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/gorilla/websocket"
 )
@@ -154,6 +156,8 @@ type sessionOptions struct {
 	stderr            io.Writer
 	heartbeatInterval time.Duration
 }
+
+var backendEnsureMu sync.Mutex
 
 // findFreePort asks the OS for a free port in the ttyd range.
 func findFreePort() (int, error) {
@@ -820,19 +824,19 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 		return resp, nil
 	}
 
-	// Proxy to local conductor backend at localhost:4749.
 	if path == "" {
 		path = "/"
 	}
-	backendURL := "http://127.0.0.1:4749" + path
-	var requestBody io.Reader
+
+	// Proxy to local conductor backend at localhost:4749.
+	var requestBodyBytes []byte
 	contentType := "application/json"
 	if body != nil {
 		if rawBody, rawContentType, ok, err := decodeProxyRequestBody(body); ok {
 			if err != nil {
 				return apiResponse{Status: 0, Body: nil}, err
 			}
-			requestBody = bytes.NewReader(rawBody)
+			requestBodyBytes = rawBody
 			if rawContentType != "" {
 				contentType = rawContentType
 			} else {
@@ -840,20 +844,18 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 			}
 		} else {
 			bodyBytes, _ := json.Marshal(body)
-			requestBody = bytes.NewReader(bodyBytes)
+			requestBodyBytes = bodyBytes
 		}
 	}
-	req, err := http.NewRequest(method, backendURL, requestBody)
-	if err != nil {
-		return apiResponse{Status: 0, Body: nil}, err
+
+	resp, err := doBackendAPIRequest(method, path, requestBodyBytes, contentType)
+	if err != nil && shouldRetryAfterEnsuringBackend(err) {
+		if ensureErr := ensureLocalBackendForProxy(); ensureErr == nil {
+			resp, err = doBackendAPIRequest(method, path, requestBodyBytes, contentType)
+		}
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", contentType)
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
 	if err != nil {
-		return apiResponse{Status: 502, Body: nil}, err
+		return apiResponse{Status: http.StatusBadGateway, Body: nil}, err
 	}
 	defer resp.Body.Close()
 
@@ -902,7 +904,7 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 }
 
 func maybeHandleBridgeControlRequest(method, path string) (bool, apiResponse) {
-	if path != bridgeServiceRestartPath {
+	if normalizeProxyAPIPath(path) != bridgeServiceRestartPath {
 		return false, apiResponse{}
 	}
 
@@ -938,6 +940,64 @@ func maybeHandleBridgeControlRequest(method, path string) (bool, apiResponse) {
 			"message": "Bridge service restart requested. This laptop should reconnect shortly.",
 		},
 	}
+}
+
+func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentType string) (*http.Response, error) {
+	backendURL := "http://127.0.0.1:4749" + path
+	var requestBody io.Reader
+	if len(requestBodyBytes) > 0 {
+		requestBody = bytes.NewReader(requestBodyBytes)
+	}
+
+	req, err := http.NewRequest(method, backendURL, requestBody)
+	if err != nil {
+		return nil, err
+	}
+	if len(requestBodyBytes) > 0 {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	return client.Do(req)
+}
+
+func ensureLocalBackendForProxy() error {
+	backendEnsureMu.Lock()
+	defer backendEnsureMu.Unlock()
+
+	_, err := backend.Ensure(context.Background(), backend.Options{
+		Stderr:         os.Stderr,
+		StartupTimeout: 20 * time.Second,
+	})
+	return err
+}
+
+func shouldRetryAfterEnsuringBackend(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return shouldRetryAfterEnsuringBackend(urlErr.Err)
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "connection refused")
+}
+
+func normalizeProxyAPIPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+
+	parsed, err := url.ParseRequestURI(trimmed)
+	if err != nil || parsed.Path == "" {
+		return trimmed
+	}
+
+	return parsed.Path
 }
 
 type fileEntry struct {
