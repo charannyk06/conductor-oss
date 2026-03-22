@@ -187,6 +187,20 @@ export default function BridgeConnectClient({
   }, [completeClaim, initialClaimToken]);
 
   useEffect(() => {
+    if (!initialClaimToken && !(claimStatus === "paired" && connectedDevices.length === 0)) {
+      return;
+    }
+
+    const pollTimer = window.setInterval(() => {
+      void refreshDevices();
+    }, 4_000);
+
+    return () => {
+      window.clearInterval(pollTimer);
+    };
+  }, [claimStatus, connectedDevices.length, initialClaimToken, refreshDevices]);
+
+  useEffect(() => {
     if (initialClaimToken || pairingCode || creatingCode || !showAdvancedSetup) {
       return;
     }
@@ -372,8 +386,8 @@ export default function BridgeConnectClient({
                     <div>
                       <div className="font-medium text-[var(--vk-text-strong)]">{claimedDevice.deviceName} is now paired.</div>
                       <div className="mt-1">
-                        Keep the local setup command running until it hands control back to the
-                        bridge daemon and the device reports online.
+                        Conductor is restarting the background bridge service for this laptop now.
+                        This page will refresh automatically until the device reports online.
                       </div>
                     </div>
                   </div>
