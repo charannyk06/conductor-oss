@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono, Orbitron, Tomorrow } from "next/font/google";
 import { GeistSans } from "geist/font/sans";
 import { ClerkProvider } from "@clerk/nextjs";
+import { Analytics } from "@vercel/analytics/next";
 import { headers } from "next/headers";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { TooltipProvider } from "@/components/ui/Tooltip";
@@ -59,7 +60,10 @@ function Shell({ children }: { children: React.ReactNode }) {
       </head>
       <body className="bg-[var(--bg-canvas)] text-[var(--text-strong)] antialiased">
         <TooltipProvider>
-          <ThemeProvider>{children}</ThemeProvider>
+          <ThemeProvider>
+            {children}
+            <Analytics />
+          </ThemeProvider>
         </TooltipProvider>
       </body>
     </html>
