@@ -1411,7 +1411,9 @@ mod tests {
         assert!(injected.contains("const LONG_PRESS_THRESHOLD_MS = 300;"));
         assert!(injected.contains("touchStartAt = window.performance?.now?.() ?? Date.now();"));
         assert!(injected.contains("touchMoved = true;"));
-        assert!(injected.contains("const touchDuration = (window.performance?.now?.() ?? Date.now()) - touchStartAt;"));
+        assert!(injected.contains(
+            "const touchDuration = (window.performance?.now?.() ?? Date.now()) - touchStartAt;"
+        ));
         assert!(injected.contains("if (!touchMoved && touchDuration < LONG_PRESS_THRESHOLD_MS) {"));
         assert!(injected.contains("window.term?.focus?.();"));
         assert!(
