@@ -6,12 +6,12 @@ on:
     types: [opened, reopened, synchronize, edited]
 
 jobs:
-  validate-description:
-    name: Validate PR description
+  validate-metadata:
+    name: Validate PR metadata
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate PR description
+      - name: Validate PR title and description
         run: node scripts/validate-pr-description.mjs

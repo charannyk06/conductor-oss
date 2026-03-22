@@ -24,12 +24,15 @@ const result = validatePrDescription({
 });
 
 if (result.errors.length > 0) {
-  console.error("PR description validation failed:");
+  console.error("PR metadata validation failed:");
   for (const error of result.errors) {
     console.error(`- ${error}`);
   }
   console.error("");
-  console.error("Expected pattern:");
+  console.error("Expected PR title pattern:");
+  console.error("fix: concise summary of the change");
+  console.error("");
+  console.error("Expected PR description pattern:");
   console.error("## User-Facing Release Notes");
   console.error("- You can now...");
   console.error("");
