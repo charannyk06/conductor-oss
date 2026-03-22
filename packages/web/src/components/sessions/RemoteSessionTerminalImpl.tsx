@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
+import { AlertCircle, Loader2, RefreshCw, Send, X } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildBridgeRepairHref } from "@/lib/bridgeOnboarding";
+import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "@/components/sessions/terminal/terminalConstants";
 import {
   isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
@@ -106,13 +107,64 @@ async function fetchRelayTerminalUrl(
   return payload.wsUrl;
 }
 
+type RelayTerminalAvailability =
+  | { available: true }
+  | { available: false; reason: string | null };
+
+async function probeRelayTerminalAvailability(
+  sessionId: string,
+  bridgeId?: string | null,
+): Promise<RelayTerminalAvailability> {
+  const response = await fetch(
+    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, bridgeId),
+    {
+      cache: "no-store",
+    },
+  );
+  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  if (response.ok) {
+    return { available: true };
+  }
+  if (response.status === 404 || response.status === 409) {
+    return {
+      available: false,
+      reason: payload?.error ?? null,
+    };
+  }
+  throw new Error(payload?.error ?? `Failed to resolve relay terminal availability (${response.status})`);
+}
+
+async function sendFollowUpMessage(
+  sessionId: string,
+  message: string,
+  bridgeId?: string | null,
+): Promise<void> {
+  const response = await fetch(
+    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, bridgeId),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action: "send", message }),
+    },
+  );
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error ?? `Failed to send message (${response.status})`);
+  }
+}
+
 export function RemoteSessionTerminal({
   sessionId,
   bridgeId,
   sessionState,
+  runtimeMode,
   pendingInsert,
+  immersiveMobileMode = false,
 }: SessionTerminalProps) {
   const terminalHostRef = useRef<HTMLDivElement>(null);
+  const promptInputRef = useRef<HTMLInputElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
@@ -123,14 +175,28 @@ export function RemoteSessionTerminal({
   const retryAttemptRef = useRef(0);
   const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
   const followBottomRef = useRef(true);
+  const [hasOutput, setHasOutput] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [relayUnavailableReason, setRelayUnavailableReason] = useState<string | null>(null);
+  const [promptMessage, setPromptMessage] = useState("");
+  const [promptSending, setPromptSending] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
+  const [queuedInsertError, setQueuedInsertError] = useState<string | null>(null);
   const [connectionTick, setConnectionTick] = useState(0);
   const normalizedSessionStatus = useMemo(
     () => sessionState.trim().toLowerCase(),
     [sessionState],
   );
+  const normalizedRuntimeMode = runtimeMode?.trim().toLowerCase() ?? null;
   const sessionClosed = TERMINAL_CLOSED_STATUSES.has(normalizedSessionStatus);
+  const ttydBacked = normalizedRuntimeMode === "ttyd";
+  const expectsRelayTerminal = ttydBacked
+    ? !sessionClosed
+    : false;
+  const showPromptBar = !ttydBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
+  const showStoredOutput = !expectsRelayTerminal;
+  const outputFallbackActive = showStoredOutput || relayUnavailableReason !== null;
   const bridgeRecoveryHref = useMemo(
     () => (bridgeId ? buildBridgeRepairHref(bridgeId) : null),
     [bridgeId],
@@ -221,7 +287,7 @@ export function RemoteSessionTerminal({
     }
 
     geometryRef.current = { cols: next.cols, rows: next.rows };
-    if (sessionClosed) {
+    if (!expectsRelayTerminal) {
       return next;
     }
 
@@ -241,7 +307,7 @@ export function RemoteSessionTerminal({
     }
 
     return next;
-  }, [fitTerminal, sendHandshake, sessionClosed]);
+  }, [expectsRelayTerminal, fitTerminal, sendHandshake]);
 
   const scheduleHandshakeRefreshes = useCallback(() => {
     clearScheduledLayoutSyncs();
@@ -263,7 +329,7 @@ export function RemoteSessionTerminal({
   }, [clearScheduledLayoutSyncs, syncTerminalGeometry]);
 
   const scheduleReconnect = useCallback(() => {
-    if (sessionClosed) {
+    if (!expectsRelayTerminal) {
       return;
     }
     if (reconnectTimerRef.current !== null) {
@@ -274,7 +340,7 @@ export function RemoteSessionTerminal({
     reconnectTimerRef.current = window.setTimeout(() => {
       setConnectionTick((value) => value + 1);
     }, delay);
-  }, [sessionClosed]);
+  }, [expectsRelayTerminal]);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -289,8 +355,8 @@ export function RemoteSessionTerminal({
     const terminal = new Terminal({
       allowTransparency: true,
       convertEol: true,
-      cursorBlink: !sessionClosed,
-      disableStdin: sessionClosed,
+      cursorBlink: expectsRelayTerminal,
+      disableStdin: !expectsRelayTerminal,
       fontFamily: initialViewport.fontFamily,
       fontSize: initialViewport.fontSize,
       lineHeight: initialViewport.lineHeight,
@@ -313,7 +379,7 @@ export function RemoteSessionTerminal({
     syncFollowBottom();
     scrollHost?.addEventListener("scroll", syncFollowBottom, { passive: true });
     const dataSubscription = terminal.onData((data) => {
-      if (sessionClosed) {
+      if (!expectsRelayTerminal) {
         return;
       }
       try {
@@ -342,23 +408,29 @@ export function RemoteSessionTerminal({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [sendTerminalFrame, sessionClosed, syncTerminalGeometry]);
+  }, [expectsRelayTerminal, sendTerminalFrame, syncTerminalGeometry]);
 
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
     retryAttemptRef.current = 0;
     followBottomRef.current = true;
+    setHasOutput(false);
     setLoading(true);
     setError(null);
+    setRelayUnavailableReason(null);
+    setPromptMessage("");
+    setPromptSending(false);
+    setPromptError(null);
+    setQueuedInsertError(null);
     decoderRef.current = new TextDecoder();
     if (terminalRef.current) {
       resetTerminalOutput(terminalRef.current, "", true);
-      terminalRef.current.options.disableStdin = sessionClosed;
-      terminalRef.current.options.cursorBlink = !sessionClosed;
+      terminalRef.current.options.disableStdin = !expectsRelayTerminal;
+      terminalRef.current.options.cursorBlink = expectsRelayTerminal;
     }
     clearScheduledLayoutSyncs();
     closeSocket();
-  }, [clearScheduledLayoutSyncs, closeSocket, sessionClosed, sessionId]);
+  }, [clearScheduledLayoutSyncs, closeSocket, expectsRelayTerminal, sessionId]);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -367,15 +439,15 @@ export function RemoteSessionTerminal({
       return;
     }
 
-    terminal.options.disableStdin = sessionClosed || socketRef.current?.readyState !== WebSocket.OPEN;
-    terminal.options.cursorBlink = !sessionClosed && socketRef.current?.readyState === WebSocket.OPEN;
+    terminal.options.disableStdin = !expectsRelayTerminal || socketRef.current?.readyState !== WebSocket.OPEN;
+    terminal.options.cursorBlink = expectsRelayTerminal && socketRef.current?.readyState === WebSocket.OPEN;
 
     const applyGeometry = () => {
       syncTerminalGeometry("resize");
     };
 
     const refreshTerminalLayout = () => {
-      if (sessionClosed) {
+      if (!expectsRelayTerminal) {
         fitTerminal();
         return;
       }
@@ -418,10 +490,10 @@ export function RemoteSessionTerminal({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       fontSet?.removeEventListener?.("loadingdone", refreshTerminalLayout as EventListener);
     };
-  }, [fitTerminal, sessionClosed, syncTerminalGeometry]);
+  }, [expectsRelayTerminal, fitTerminal, syncTerminalGeometry]);
 
   useEffect(() => {
-    if (sessionClosed) {
+    if (outputFallbackActive) {
       let cancelled = false;
       setLoading(true);
       void fetchClosedTerminalOutput(sessionId, bridgeId)
@@ -432,6 +504,7 @@ export function RemoteSessionTerminal({
           if (terminalRef.current) {
             resetTerminalOutput(terminalRef.current, output, true);
           }
+          setHasOutput(output.length > 0);
           setError(null);
         })
         .catch((nextError) => {
@@ -452,83 +525,99 @@ export function RemoteSessionTerminal({
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setRelayUnavailableReason(null);
 
-    void fetchRelayTerminalUrl(sessionId, bridgeId)
-      .then((wsUrl) => {
+    void probeRelayTerminalAvailability(sessionId, bridgeId)
+      .then((availability) => {
         if (cancelled) {
           return;
         }
 
-        closeSocket();
-        const socket = new WebSocket(wsUrl);
-        socket.binaryType = "arraybuffer";
-        socketRef.current = socket;
+        if (!availability.available) {
+          setRelayUnavailableReason(
+            availability.reason ?? "This session no longer exposes a live ttyd terminal.",
+          );
+          return;
+        }
 
-        socket.onopen = () => {
-          retryAttemptRef.current = 0;
-          decoderRef.current = new TextDecoder();
-          if (terminalRef.current) {
-            resetTerminalOutput(terminalRef.current, "", followBottomRef.current);
-            terminalRef.current.options.disableStdin = false;
-            terminalRef.current.options.cursorBlink = true;
-          }
-          try {
-            syncTerminalGeometry("handshake", true);
-            scheduleHandshakeRefreshes();
-            setError(null);
-          } catch (nextError) {
-            setError(nextError instanceof Error ? nextError.message : "Failed to initialize terminal.");
-          } finally {
-            setLoading(false);
-          }
-        };
-
-        socket.onmessage = (event) => {
-          const terminal = terminalRef.current;
-          if (!terminal) {
+        return fetchRelayTerminalUrl(sessionId, bridgeId).then((wsUrl) => {
+          if (cancelled) {
             return;
           }
 
-          const frame = typeof event.data === "string"
-            ? new TextEncoder().encode(event.data)
-            : new Uint8Array(event.data as ArrayBuffer);
-          if (frame.length === 0) {
-            return;
-          }
+          closeSocket();
+          const socket = new WebSocket(wsUrl);
+          socket.binaryType = "arraybuffer";
+          socketRef.current = socket;
 
-          switch (frame[0]) {
-            case CMD_OUTPUT: {
-              const text = decoderRef.current.decode(frame.slice(1), { stream: true });
-              if (text.length > 0) {
-                terminal.write(text);
-                if (followBottomRef.current) {
-                  terminal.scrollToBottom();
-                }
-              }
-              break;
+          socket.onopen = () => {
+            retryAttemptRef.current = 0;
+            decoderRef.current = new TextDecoder();
+            setHasOutput(false);
+            if (terminalRef.current) {
+              resetTerminalOutput(terminalRef.current, "", followBottomRef.current);
+              terminalRef.current.options.disableStdin = false;
+              terminalRef.current.options.cursorBlink = true;
             }
-            default:
-              break;
-          }
-        };
+            try {
+              syncTerminalGeometry("handshake", true);
+              scheduleHandshakeRefreshes();
+              setError(null);
+            } catch (nextError) {
+              setError(nextError instanceof Error ? nextError.message : "Failed to initialize terminal.");
+            } finally {
+              setLoading(false);
+            }
+          };
 
-        socket.onerror = () => {
-          if (!cancelled) {
-            setError("Relay terminal connection failed.");
-          }
-        };
+          socket.onmessage = (event) => {
+            const terminal = terminalRef.current;
+            if (!terminal) {
+              return;
+            }
 
-        socket.onclose = () => {
-          socketRef.current = null;
-          if (terminalRef.current) {
-            terminalRef.current.options.disableStdin = true;
-            terminalRef.current.options.cursorBlink = false;
-          }
-          if (!cancelled) {
-            setError("Relay terminal disconnected.");
-            scheduleReconnect();
-          }
-        };
+            const frame = typeof event.data === "string"
+              ? new TextEncoder().encode(event.data)
+              : new Uint8Array(event.data as ArrayBuffer);
+            if (frame.length === 0) {
+              return;
+            }
+
+            switch (frame[0]) {
+              case CMD_OUTPUT: {
+                const text = decoderRef.current.decode(frame.slice(1), { stream: true });
+                if (text.length > 0) {
+                  terminal.write(text);
+                  if (followBottomRef.current) {
+                    terminal.scrollToBottom();
+                  }
+                  setHasOutput(true);
+                }
+                break;
+              }
+              default:
+                break;
+            }
+          };
+
+          socket.onerror = () => {
+            if (!cancelled) {
+              setError("Relay terminal connection failed.");
+            }
+          };
+
+          socket.onclose = () => {
+            socketRef.current = null;
+            if (terminalRef.current) {
+              terminalRef.current.options.disableStdin = true;
+              terminalRef.current.options.cursorBlink = false;
+            }
+            if (!cancelled) {
+              setError("Relay terminal disconnected.");
+              scheduleReconnect();
+            }
+          };
+        });
       })
       .catch((nextError) => {
         if (!cancelled) {
@@ -554,8 +643,8 @@ export function RemoteSessionTerminal({
     connectionTick,
     scheduleHandshakeRefreshes,
     scheduleReconnect,
-    sessionClosed,
     sessionId,
+    outputFallbackActive,
     syncTerminalGeometry,
   ]);
 
@@ -566,23 +655,61 @@ export function RemoteSessionTerminal({
 
     lastAppliedInsertNonceRef.current = pendingInsert.nonce;
     const inlineText = pendingInsert.inlineText.trim();
-    if (inlineText.length === 0 || sessionClosed) {
+    if (inlineText.length === 0 || !expectsRelayTerminal) {
       return;
     }
 
     try {
       sendTerminalFrame(encodeInputFrame(`${inlineText} `));
       setError(null);
+      setQueuedInsertError(null);
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : "Failed to queue terminal input.");
+      setQueuedInsertError(nextError instanceof Error ? nextError.message : "Failed to queue terminal input.");
     }
-  }, [pendingInsert, sendTerminalFrame, sessionClosed]);
+  }, [expectsRelayTerminal, pendingInsert, sendTerminalFrame]);
+
+  const handlePromptSend = useCallback(async () => {
+    const message = promptMessage.trim();
+    if (message.length === 0 || promptSending) {
+      return;
+    }
+
+    setPromptSending(true);
+    setPromptError(null);
+    try {
+      await sendFollowUpMessage(sessionId, message, bridgeId);
+      setPromptMessage("");
+      promptInputRef.current?.focus();
+    } catch (nextError) {
+      setPromptError(nextError instanceof Error ? nextError.message : "Failed to send message.");
+    } finally {
+      setPromptSending(false);
+    }
+  }, [bridgeId, promptMessage, promptSending, sessionId]);
 
   const handleRetry = useCallback(() => {
     retryAttemptRef.current = 0;
     setError(null);
+    setRelayUnavailableReason(null);
     setConnectionTick((value) => value + 1);
   }, []);
+
+  const emptyStateTitle = expectsRelayTerminal
+    ? "Connecting live terminal"
+    : showPromptBar
+      ? "Session is waiting for input"
+      : "Live terminal is not active";
+  const emptyStateDescription = relayUnavailableReason
+    ?? error
+    ?? (expectsRelayTerminal
+      ? "Reconnecting to the existing relay terminal."
+      : ttydBacked
+        ? "This ttyd terminal is no longer attached. It only closes after an explicit kill or archive."
+        : showPromptBar
+          ? "Send a follow-up below to relaunch the agent in a fresh ttyd terminal."
+          : LIVE_TERMINAL_STATUSES.has(normalizedSessionStatus)
+            ? "This session no longer exposes a relay terminal. Wait for it to relaunch or open the session overview."
+            : `Session status is \`${normalizedSessionStatus}\`. Relay terminals only run while a ttyd runtime is active.`);
 
   return (
     <div className="group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
@@ -608,15 +735,117 @@ export function RemoteSessionTerminal({
           ref={terminalHostRef}
           className="h-full min-h-0 w-full flex-1 overflow-hidden overscroll-contain rounded-[10px] bg-[#060404] px-2 py-2 text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch]"
         />
+        {!loading && !hasOutput ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#060404]/84 px-4">
+            <div className="max-w-lg rounded-[16px] border border-white/10 bg-[#141010]/92 p-5 text-[#efe8e1] shadow-[0_24px_48px_rgba(0,0,0,0.34)]">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 rounded-full border border-white/10 bg-[#201818] p-2 text-[#c9c0b7]">
+                  {error ? (
+                    <AlertCircle className="h-4 w-4" />
+                  ) : (
+                    <Loader2 className={`h-4 w-4 ${expectsRelayTerminal ? "animate-spin" : ""}`} />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[14px] font-medium">{emptyStateTitle}</div>
+                  <div className="mt-1 text-[12px] leading-5 text-[#a79c94]">{emptyStateDescription}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
         {loading ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#060404]/84">
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#141010]/92 px-3 py-2 text-[12px] text-[#c9c0b7] backdrop-blur-sm">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>{sessionClosed ? "Loading terminal output…" : "Connecting relay terminal…"}</span>
+              <span>{showStoredOutput ? "Loading terminal output…" : "Connecting relay terminal…"}</span>
             </div>
           </div>
         ) : null}
       </div>
+
+      {!showPromptBar && queuedInsertError ? (
+        <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] px-3 py-2 text-[11px] text-[#ffb39e] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
+          <div className="flex items-center gap-1.5">
+            <AlertCircle className="h-3 w-3 shrink-0" />
+            <span className="truncate">{queuedInsertError}</span>
+            <button
+              type="button"
+              className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+              onClick={() => setQueuedInsertError(null)}
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {showPromptBar ? (
+        <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
+          {queuedInsertError ? (
+            <div className="flex items-center gap-1.5 px-3 pt-1.5 text-[11px] text-[#ffb39e]">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{queuedInsertError}</span>
+              <button
+                type="button"
+                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+                onClick={() => setQueuedInsertError(null)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : null}
+          {promptError ? (
+            <div className="flex items-center gap-1.5 px-3 pt-1.5 text-[11px] text-[#ff8f7a]">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{promptError}</span>
+              <button
+                type="button"
+                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+                onClick={() => setPromptError(null)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : null}
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handlePromptSend();
+            }}
+            className="flex items-center gap-2 px-2 py-2 lg:px-3"
+          >
+            <input
+              ref={promptInputRef}
+              value={promptMessage}
+              onChange={(event) => setPromptMessage(event.target.value)}
+              placeholder="Send a follow-up message…"
+              disabled={promptSending}
+              className="h-8 min-w-0 flex-1 rounded-md border border-white/10 bg-[#0c0808] px-2.5 text-[12px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20 disabled:opacity-50"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            <Button
+              type="submit"
+              size="icon"
+              variant="ghost"
+              disabled={promptSending || promptMessage.trim().length === 0}
+              className="h-8 w-8 shrink-0 rounded-md border border-white/10 bg-[#0c0808] text-[#c9c0b7] hover:bg-[#201818] disabled:opacity-30"
+              aria-label="Send message"
+            >
+              {promptSending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Send className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          </form>
+        </div>
+      ) : null}
 
       {error ? (
         <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] px-3 py-2 text-[11px] text-[#ffb39e] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">

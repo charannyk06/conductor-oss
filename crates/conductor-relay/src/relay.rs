@@ -98,6 +98,7 @@ struct TerminalSessionRecord {
     owner_user_id: String,
     browser: Option<TerminalConnectionRecord>,
     bridge: Option<TerminalConnectionRecord>,
+    bridge_ready_waiters: Vec<oneshot::Sender<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +130,8 @@ struct ProxiedPreviewResponse {
     headers: BTreeMap<String, String>,
     body_base64: Option<String>,
 }
+
+const TERMINAL_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug)]
 struct RateBucket {
@@ -1319,6 +1322,7 @@ impl RelayState {
         session_id: &str,
     ) -> std::result::Result<String, (StatusCode, String)> {
         let terminal_id = Uuid::new_v4().to_string();
+        let (bridge_ready_tx, bridge_ready_rx) = oneshot::channel();
 
         let start_message = {
             let mut inner = self.inner.lock().await;
@@ -1351,6 +1355,7 @@ impl RelayState {
                     owner_user_id: user_id.to_string(),
                     browser: None,
                     bridge: None,
+                    bridge_ready_waiters: vec![bridge_ready_tx],
                 },
             );
 
@@ -1371,6 +1376,28 @@ impl RelayState {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Device disconnected before terminal could start.".to_string(),
             ));
+        }
+
+        match tokio::time::timeout(TERMINAL_SESSION_READY_TIMEOUT, bridge_ready_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                let mut inner = self.inner.lock().await;
+                inner.terminal_sessions.remove(&terminal_id);
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    "Device stopped attaching the relay terminal before it became ready."
+                        .to_string(),
+                ));
+            }
+            Err(_) => {
+                let mut inner = self.inner.lock().await;
+                inner.terminal_sessions.remove(&terminal_id);
+                return Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "Timed out waiting for the paired device relay terminal to become ready."
+                        .to_string(),
+                ));
+            }
         }
 
         Ok(terminal_id)
@@ -1426,7 +1453,12 @@ impl RelayState {
         let record = TerminalConnectionRecord { tx };
         match peer_kind {
             TerminalPeerKind::Browser => session.browser = Some(record),
-            TerminalPeerKind::Bridge => session.bridge = Some(record),
+            TerminalPeerKind::Bridge => {
+                session.bridge = Some(record);
+                for waiter in session.bridge_ready_waiters.drain(..) {
+                    let _ = waiter.send(());
+                }
+            }
         }
         Ok(())
     }
@@ -2658,6 +2690,8 @@ fn generate_claim_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::ws::Message;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn device_claim_pairs_and_polls_once() {
@@ -2704,6 +2738,72 @@ mod tests {
 
         let missing = state.poll_device_claim(&created.poll_token).await;
         assert!(matches!(missing, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[tokio::test]
+    async fn create_terminal_session_waits_for_bridge_connection() {
+        let state = RelayState::default();
+        let (bridge_tx, mut bridge_rx) = mpsc::unbounded_channel::<Message>();
+
+        {
+            let mut inner = state.inner.lock().await;
+            inner.devices.insert(
+                "device-123".to_string(),
+                DeviceRecord {
+                    device_id: "device-123".to_string(),
+                    owner_user_id: "user@example.com".to_string(),
+                    name: "Mac".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    refresh_token: "refresh-token".to_string(),
+                },
+            );
+            inner.channels.insert(
+                "device-123".to_string(),
+                BridgeChannel {
+                    bridge: Some(ConnectionRecord {
+                        id: 1,
+                        user_id: "user@example.com".to_string(),
+                        tx: bridge_tx,
+                    }),
+                    browsers: HashMap::new(),
+                    last_status: None,
+                },
+            );
+        }
+
+        let create_task = tokio::spawn({
+            let state = state.clone();
+            async move {
+                state
+                    .create_terminal_session("user@example.com", "device-123", "session-abc")
+                    .await
+            }
+        });
+
+        let start_message = bridge_rx.recv().await.expect("bridge start message");
+        let Message::Text(payload) = start_message else {
+            panic!("expected text start payload");
+        };
+        let envelope: BrowserToBridgeMessage =
+            serde_json::from_str(payload.as_str()).expect("decode start payload");
+        let terminal_id = match envelope {
+            BrowserToBridgeMessage::TerminalProxyStart { terminal_id, .. } => terminal_id,
+            other => panic!("unexpected bridge message: {other:?}"),
+        };
+
+        let (terminal_tx, _terminal_rx) = mpsc::unbounded_channel::<Message>();
+        state
+            .register_terminal_connection(&terminal_id, TerminalPeerKind::Bridge, terminal_tx)
+            .await
+            .expect("register bridge terminal connection");
+
+        let created_terminal_id = create_task
+            .await
+            .expect("create task should finish")
+            .expect("terminal should be created");
+        assert_eq!(created_terminal_id, terminal_id);
     }
 }
 
