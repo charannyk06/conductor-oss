@@ -66,6 +66,11 @@ import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTer
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
+import {
+  isPairedBridgeScopePending,
+  isPairedBridgeScopeReady,
+  resolveSelectedBridgeId,
+} from "@/lib/bridgeScope";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
   getRuntimeCatalogDefaultModelForAccess,
@@ -1046,8 +1051,36 @@ export default function DashboardClient({
     () => decodeBridgeSessionId(selectedSessionId)?.bridgeId ?? null,
     [selectedSessionId],
   );
+  const requestedBridgeId = bridgeQueryId ?? selectedSessionBridgeId;
   const effectiveBridgeId = selectedBridgeIdValue ?? selectedSessionBridgeId;
-  const scopeReady = !requiresPairedDeviceScope || Boolean(effectiveBridgeId);
+  const [bridges, setBridges] = useState<DashboardBridgeConnection[]>([]);
+  const [bridgeInventoryStatus, setBridgeInventoryStatus] = useState<BridgeInventoryStatus>("loading");
+  const connectedBridges = useMemo(
+    () => bridges.filter((bridge) => bridge.connected),
+    [bridges],
+  );
+  const connectedBridgeIds = useMemo(
+    () => connectedBridges.map((bridge) => bridge.bridgeId),
+    [connectedBridges],
+  );
+  const bridgeScopePending = useMemo(
+    () => isPairedBridgeScopePending({
+      requiresPairedDeviceScope,
+      effectiveBridgeId,
+      connectedBridgeIds,
+      bridgeInventoryStatus,
+    }),
+    [bridgeInventoryStatus, connectedBridgeIds, effectiveBridgeId, requiresPairedDeviceScope],
+  );
+  const scopeReady = useMemo(
+    () => isPairedBridgeScopeReady({
+      requiresPairedDeviceScope,
+      effectiveBridgeId,
+      connectedBridgeIds,
+      bridgeInventoryStatus,
+    }),
+    [bridgeInventoryStatus, connectedBridgeIds, effectiveBridgeId, requiresPairedDeviceScope],
+  );
   const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig(effectiveBridgeId, {
     enabled: scopeReady,
   });
@@ -1071,8 +1104,6 @@ export default function DashboardClient({
   const [launchModelSelection, setLaunchModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [bridges, setBridges] = useState<DashboardBridgeConnection[]>([]);
-  const [bridgeInventoryStatus, setBridgeInventoryStatus] = useState<BridgeInventoryStatus>("loading");
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [newWorkspaceError, setNewWorkspaceError] = useState<string | null>(null);
@@ -1110,6 +1141,7 @@ export default function DashboardClient({
 
   useEffect(() => {
     let cancelled = false;
+    const refreshIntervalMs = bridgeScopePending ? 4_000 : 15_000;
 
     async function refreshBridges() {
       try {
@@ -1142,42 +1174,25 @@ export default function DashboardClient({
     void refreshBridges();
     const intervalId = window.setInterval(() => {
       void refreshBridges();
-    }, 15_000);
+    }, refreshIntervalMs);
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, []);
-
-  const connectedBridges = useMemo(
-    () => bridges.filter((bridge) => bridge.connected),
-    [bridges],
-  );
+  }, [bridgeScopePending]);
 
   useEffect(() => {
-    const selectedBridgeAvailable = selectedBridgeId
-      ? connectedBridges.some((bridge) => bridge.bridgeId === selectedBridgeId)
-      : false;
-
-    if (requiresPairedDeviceScope) {
-      if (connectedBridges.length === 0) {
-        if (selectedBridgeId) {
-          setSelectedBridgeId("");
-        }
-        return;
-      }
-
-      if (!selectedBridgeAvailable) {
-        setSelectedBridgeId(connectedBridges[0]?.bridgeId ?? "");
-      }
-      return;
+    const nextSelectedBridgeId = resolveSelectedBridgeId({
+      requiresPairedDeviceScope,
+      requestedBridgeId,
+      selectedBridgeId,
+      connectedBridgeIds,
+    });
+    if (nextSelectedBridgeId !== selectedBridgeId) {
+      setSelectedBridgeId(nextSelectedBridgeId);
     }
-
-    if (selectedBridgeId && !selectedBridgeAvailable) {
-      setSelectedBridgeId("");
-    }
-  }, [connectedBridges, requiresPairedDeviceScope, selectedBridgeId]);
+  }, [connectedBridgeIds, requestedBridgeId, requiresPairedDeviceScope, selectedBridgeId]);
 
   useEffect(() => {
     if (!requiresPairedDeviceScope || effectiveBridgeId) {
@@ -1390,16 +1405,22 @@ export default function DashboardClient({
   );
   const scopeBadgeLabel = activeBridge
     ? `Device · ${activeBridge.hostname}`
+    : bridgeScopePending
+      ? "Device · Reconnecting"
     : requiresPairedDeviceScope
       ? "Scope · Paired device required"
       : "Scope · Local backend";
   const scopeBadgeTitle = activeBridge
     ? `Showing projects and sessions from ${activeBridge.hostname}.`
+    : bridgeScopePending
+      ? "Waiting for the selected laptop to reconnect before loading dashboard data."
     : requiresPairedDeviceScope
       ? "Hosted dashboard access must target a connected laptop."
       : "Showing projects and sessions from the local backend because no paired laptop is selected.";
   const scopeBadgeClassName = activeBridge
     ? "border-[rgba(24,197,143,0.35)] bg-[rgba(24,197,143,0.12)] text-[var(--vk-green)]"
+    : bridgeScopePending
+      ? "border-[rgba(255,180,92,0.28)] bg-[rgba(255,180,92,0.10)] text-[var(--vk-orange)]"
     : requiresPairedDeviceScope
       ? "border-[rgba(255,143,122,0.24)] bg-[rgba(255,143,122,0.08)] text-[var(--vk-red)]"
       : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-muted)]";
@@ -2067,6 +2088,24 @@ export default function DashboardClient({
   }, [navigateDashboard, selectedProject, workspaceMainPanel, workspaceView]);
 
   const workspaceContent = useMemo(() => {
+    if (bridgeScopePending) {
+      return (
+        <div className="flex h-full min-h-0 flex-1 items-center justify-center bg-[var(--vk-bg-main)] px-4">
+          <div className="w-full max-w-md rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-5 py-5 text-center shadow-[0_18px_50px_rgba(0,0,0,0.18)]">
+            <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-[rgba(255,180,92,0.28)] bg-[rgba(255,180,92,0.10)] text-[var(--vk-orange)]">
+              <Loader2 className="h-5 w-5 animate-spin" />
+            </div>
+            <h2 className="mt-4 text-[18px] font-medium text-[var(--vk-text-strong)]">
+              Reconnecting paired laptop
+            </h2>
+            <p className="mt-2 text-[14px] leading-6 text-[var(--vk-text-muted)]">
+              Waiting for the selected laptop to report online before loading its projects and sessions.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
     if (selectedSessionId) {
       return (
         <div className="relative min-h-0 h-full min-w-0 flex-1 overflow-hidden">
@@ -2124,6 +2163,7 @@ export default function DashboardClient({
     projects,
     selectedProjectId,
     sessionsById,
+    bridgeScopePending,
     toggleSidebar,
   ]);
 
@@ -2274,6 +2314,10 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   const availableBridges = useMemo(
     () => bridges.filter((bridge) => bridge.connected),
     [bridges],
+  );
+  const selectedBridgeOnline = useMemo(
+    () => !selectedBridgeId || availableBridges.some((bridge) => bridge.bridgeId === selectedBridgeId),
+    [availableBridges, selectedBridgeId],
   );
   const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [branchLoading, setBranchLoading] = useState(false);
@@ -2795,7 +2839,13 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                   ) : (
                     <div className="inline-flex h-[29px] items-center gap-[6px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-muted)]">
                       <PlugZap className="h-[14px] w-[14px]" />
-                      <span>{requiresPairedDeviceScope ? "No device connected" : "Local backend"}</span>
+                      <span>
+                        {selectedBridgeId && !selectedBridgeOnline
+                          ? "Waiting for selected device"
+                          : requiresPairedDeviceScope
+                            ? "No device connected"
+                            : "Local backend"}
+                      </span>
                     </div>
                   )}
 

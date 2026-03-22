@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ChevronDown, Download, Laptop, Loader2, RefreshCw, Wrench } from "lucide-react";
 import {
   isBridgeAutoUpdateInFlight,
@@ -50,6 +50,8 @@ type BridgeStatusPillProps = {
   title?: string;
 };
 
+const BRIDGE_CONNECT_PATH = "/bridge/connect";
+
 function StatusBadge({
   connected,
   className,
@@ -84,6 +86,8 @@ function StatusBadge({
 }
 
 function BridgeStatusDropdown({ className }: { className?: string }) {
+  const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
   const [devices, setDevices] = useState<BridgeDevice[]>([]);
   const [loading, setLoading] = useState(true);
@@ -159,6 +163,15 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       window.removeEventListener("storage", syncRecentPairing);
     };
   }, []);
+
+  useEffect(() => {
+    if (pathname === BRIDGE_CONNECT_PATH) {
+      return;
+    }
+
+    // Warm the pairing page so the dropdown can still navigate if the network drops after load.
+    void router.prefetch(BRIDGE_CONNECT_PATH);
+  }, [pathname, router]);
 
   const connectedDevices = devices.filter((device) => device.connected);
   const selectedBridgeId = searchParams.get("bridge")?.trim() || null;
@@ -436,7 +449,8 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
           <DropdownMenu.Separator className="my-2 h-px bg-[var(--vk-border)]" />
           <DropdownMenu.Item asChild>
             <Link
-              href="/bridge/connect"
+              href={BRIDGE_CONNECT_PATH}
+              prefetch
               className="flex items-center justify-between rounded-[12px] px-3 py-2 text-[13px] font-medium text-[var(--vk-text-normal)] outline-none transition-colors hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]"
             >
               <span>Open bridge connection</span>

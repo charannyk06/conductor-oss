@@ -23,14 +23,22 @@ function firstQueryValue(value: string | string[] | undefined): string | null {
 export default async function BridgeConnectPage({ searchParams }: BridgeConnectPageProps) {
   const resolvedSearchParams = searchParams ? await searchParams : {};
   const claimToken = firstQueryValue(resolvedSearchParams.claim);
+  const deviceId = firstQueryValue(resolvedSearchParams.device);
   const headerStore = await headers();
   const baseUrl = resolveRequestBaseUrl(headerStore) ?? "https://conductross.com";
   const access = await getDashboardAccess();
   const requiresSignIn = access.provider === "clerk" && !access.authenticated;
 
   if (requiresSignIn) {
-    const redirectTarget = claimToken
-      ? `/bridge/connect?claim=${encodeURIComponent(claimToken)}`
+    const redirectParams = new URLSearchParams();
+    if (claimToken) {
+      redirectParams.set("claim", claimToken);
+    }
+    if (deviceId) {
+      redirectParams.set("device", deviceId);
+    }
+    const redirectTarget = redirectParams.size > 0
+      ? `/bridge/connect?${redirectParams.toString()}`
       : "/bridge/connect";
 
     return (
@@ -74,6 +82,7 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
   return (
     <BridgeConnectClient
       initialClaimToken={claimToken}
+      initialSelectedDeviceId={deviceId}
       dashboardUrl={baseUrl}
       relayUrl={resolveBridgeRelayUrl()}
       installScriptUrl={new URL("/bridge/install.sh", baseUrl).toString()}
