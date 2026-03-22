@@ -25,6 +25,7 @@ import { registerRetry } from "./commands/retry.js";
 import { registerTask } from "./commands/task.js";
 import { registerFeedback } from "./commands/feedback.js";
 import { registerSetup } from "./commands/setup.js";
+import { registerBridge } from "./commands/bridge.js";
 
 const cliPackage = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8")
@@ -48,6 +49,7 @@ registerDashboard(program);
 registerStart(program);
 registerInit(program);
 registerSetup(program);
+registerBridge(program);
 registerMcpServer(program);
 registerDoctor(program);
 registerRetry(program);

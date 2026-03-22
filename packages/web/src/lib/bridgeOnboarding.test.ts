@@ -23,14 +23,14 @@ test("buildBridgeInstallCommand produces a copy-pasteable shell pipeline", () =>
   );
 });
 
-test("buildBridgeBootstrapConnectCommand installs and connects in one step", () => {
+test("buildBridgeBootstrapConnectCommand uses the cross-platform npx entrypoint", () => {
   assert.equal(
     buildBridgeBootstrapConnectCommand(
       "https://preview.conductross.com/bridge/install.sh",
       "https://preview.conductross.com",
       "https://relay.conductross.com",
     ),
-    "curl -fsSL https://preview.conductross.com/bridge/install.sh | sh -s -- --connect --dashboard-url https://preview.conductross.com --relay-url https://relay.conductross.com",
+    "npx conductor-oss@latest bridge setup --dashboard-url https://preview.conductross.com --relay-url https://relay.conductross.com",
   );
 });
 

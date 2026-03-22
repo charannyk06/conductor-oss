@@ -25,19 +25,15 @@ export function buildBridgeInstallCommand(installScriptUrl: string): string {
 }
 
 export function buildBridgeBootstrapConnectCommand(
-  installScriptUrl: string,
+  _installScriptUrl: string,
   dashboardUrl: string,
   relayUrl?: string | null,
 ): string {
   const parts = [
-    "curl",
-    "-fsSL",
-    installScriptUrl,
-    "|",
-    "sh",
-    "-s",
-    "--",
-    "--connect",
+    "npx",
+    "conductor-oss@latest",
+    "bridge",
+    "setup",
     "--dashboard-url",
     dashboardUrl,
   ];
@@ -46,7 +42,7 @@ export function buildBridgeBootstrapConnectCommand(
     parts.push("--relay-url", relayUrl.trim());
   }
 
-  return parts.map((part) => (part === "|" ? part : shellQuote(part))).join(" ");
+  return formatCommand(parts);
 }
 
 export function buildBridgeConnectCommand(
