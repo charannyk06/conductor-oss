@@ -313,6 +313,7 @@ export function createCliReleaseStage({
 
   copyDistDirectory(resolve(resolvedRootDir, "packages", "cli", "dist"), join(outputDir, "dist"));
   copyOptionalFile(resolve(resolvedRootDir, "README.md"), join(outputDir, "README.md"));
+  copyOptionalFile(resolve(resolvedRootDir, "packages", "cli", "README.md"), join(outputDir, "README.md"));
   copyOptionalFile(resolve(resolvedRootDir, "LICENSE"), join(outputDir, "LICENSE"));
 
   const webOutputDir = join(outputDir, "web");

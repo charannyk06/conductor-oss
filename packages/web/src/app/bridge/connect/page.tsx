@@ -1,8 +1,11 @@
+import { headers } from "next/headers";
 import Link from "next/link";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { Button } from "@/components/ui/Button";
 import BridgeConnectClient from "@/features/bridge/BridgeConnectClient";
 import { buildSignInPath, getDashboardAccess } from "@/lib/auth";
+import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
+import { resolveRequestBaseUrl } from "@/lib/clerkConfig";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +23,8 @@ function firstQueryValue(value: string | string[] | undefined): string | null {
 export default async function BridgeConnectPage({ searchParams }: BridgeConnectPageProps) {
   const resolvedSearchParams = searchParams ? await searchParams : {};
   const claimToken = firstQueryValue(resolvedSearchParams.claim);
+  const headerStore = await headers();
+  const baseUrl = resolveRequestBaseUrl(headerStore) ?? "https://conductross.com";
   const access = await getDashboardAccess();
   const requiresSignIn = access.provider === "clerk" && !access.authenticated;
 
@@ -37,7 +42,7 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
               title="Sign in to pair a laptop"
               description={claimToken
                 ? "This browser was opened by a local Conductor bridge command. Sign in so the currently-running machine can be paired to your account without a copy-paste code."
-                : "Pairing codes are scoped to your authenticated dashboard session. Sign in first, then generate the one-time code for the laptop you want to connect."}
+                : "Sign in first, then install and connect the bridge on the laptop you want to use. The one-time pairing code remains available afterward as a manual fallback."}
             />
             <div className="mt-8">
               <Button asChild variant="primary" size="lg">
@@ -66,5 +71,12 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
     );
   }
 
-  return <BridgeConnectClient initialClaimToken={claimToken} />;
+  return (
+    <BridgeConnectClient
+      initialClaimToken={claimToken}
+      dashboardUrl={baseUrl}
+      relayUrl={resolveBridgeRelayUrl()}
+      installScriptUrl={new URL("/bridge/install.sh", baseUrl).toString()}
+    />
+  );
 }
