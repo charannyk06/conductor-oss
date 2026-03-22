@@ -82,8 +82,15 @@ export function AppUpdateNotice() {
     return resolveBridgeIdFromLocation(window.location.href);
   }, [pathname, searchParams]);
 
+  const resolveCurrentBridgeId = useCallback(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return resolveBridgeIdFromLocation(window.location.href);
+  }, []);
+
   const buildAppUpdatePath = useCallback((force = false) => {
-    const basePath = withBridgeQuery("/api/app-update", activeBridgeId);
+    const basePath = withBridgeQuery("/api/app-update", resolveCurrentBridgeId());
     if (!force) {
       return basePath;
     }
@@ -91,12 +98,16 @@ export function AppUpdateNotice() {
     const url = new URL(basePath, "http://127.0.0.1");
     url.searchParams.set("force", "1");
     return `${url.pathname}${url.search}${url.hash}`;
-  }, [activeBridgeId]);
+  }, [resolveCurrentBridgeId]);
 
   const refreshUpdate = useCallback(async (force = false): Promise<AppUpdateStatus | null> => {
     try {
       const response = await fetch(buildAppUpdatePath(force), { cache: "no-store" });
       const payload = await response.json().catch(() => null) as AppUpdateStatus | { error?: string } | null;
+      if (response.status === 412) {
+        setLoadError(null);
+        return null;
+      }
       if (!response.ok) {
         throw new Error(typeof payload?.error === "string" ? payload.error : `Failed to load update status (${response.status})`);
       }
@@ -108,7 +119,7 @@ export function AppUpdateNotice() {
       setLoadError(error instanceof Error ? error.message : "Failed to load update status.");
       return null;
     }
-  }, [buildAppUpdatePath]);
+  }, [buildAppUpdatePath, resolveCurrentBridgeId]);
 
   useEffect(() => {
     try {
@@ -176,7 +187,7 @@ export function AppUpdateNotice() {
   async function handleUpdateNow() {
     setRequestingUpdate(true);
     try {
-      const response = await fetch(withBridgeQuery("/api/app-update", activeBridgeId), {
+      const response = await fetch(withBridgeQuery("/api/app-update", resolveCurrentBridgeId()), {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -237,7 +248,7 @@ export function AppUpdateNotice() {
 
   async function handleRestartNow() {
     try {
-      const response = await fetch(withBridgeQuery("/api/app-update", activeBridgeId), {
+      const response = await fetch(withBridgeQuery("/api/app-update", resolveCurrentBridgeId()), {
         method: "POST",
         headers: {
           "content-type": "application/json",

@@ -692,6 +692,12 @@ func proxyTerminalSession(
 	terminalID string,
 	sessionID string,
 ) error {
+	backendConn, err := connectBackendTerminal(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	defer backendConn.Close()
+
 	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID, refreshToken)
 	if err != nil {
 		return err
@@ -702,12 +708,6 @@ func proxyTerminalSession(
 		return fmt.Errorf("connect relay terminal socket: %w", err)
 	}
 	defer relayConn.Close()
-
-	backendConn, err := connectBackendTerminal(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-	defer backendConn.Close()
 
 	errCh := make(chan error, 2)
 
