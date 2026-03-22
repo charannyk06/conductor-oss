@@ -6,7 +6,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "next dev --webpack -p ${PORT:-3000}",
-    "build": "bun run --cwd ../core build && next build",
+    "build": "bun run --cwd ../core build && next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf .next"

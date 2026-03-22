@@ -12,6 +12,18 @@ const securityHeaders = [
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
 ];
 
+const developmentWebpackConfig: Pick<NextConfig, "webpack"> = {
+  webpack(config) {
+    config.watchOptions = {
+      ...config.watchOptions,
+      // Runtime sessions, restore snapshots, and detached worktrees live under .conductor.
+      // Ignoring them prevents dashboard Fast Refresh churn while terminals are active.
+      ignored: ["**/.conductor/**"],
+    };
+    return config;
+  },
+};
+
 const nextConfig: NextConfig = {
   // Vercel's runtime loads the traced output directly. Forcing standalone there
   // produces CommonJS launcher -> ESM app module mismatches under this package's
@@ -21,17 +33,7 @@ const nextConfig: NextConfig = {
   experimental: {
     turbopackFileSystemCacheForBuild: true,
   },
-  webpack(config, { dev }) {
-    if (dev) {
-      config.watchOptions = {
-        ...config.watchOptions,
-        // Runtime sessions, restore snapshots, and detached worktrees live under .conductor.
-        // Ignoring them prevents dashboard Fast Refresh churn while terminals are active.
-        ignored: ["**/.conductor/**"],
-      };
-    }
-    return config;
-  },
+  ...(process.env.NODE_ENV === "development" ? developmentWebpackConfig : {}),
   serverExternalPackages: [
     "@conductor-oss/core",
     "@puppeteer/browsers",
