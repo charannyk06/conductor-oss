@@ -15,13 +15,13 @@ Conductor OSS is a local-first AI agent orchestrator built with Rust + Next.js. 
 
 ## Code Style
 
-### Rust (primary codebase, 37K+ lines)
+### Rust (primary codebase)
 
 - Error handling: `thiserror` for library errors, `anyhow` for binaries
 - Async: tokio runtime, axum for HTTP
 - Database: sqlx with SQLite, migrations in `conductor-db`
 - State: `Arc<RwLock<T>>` or `DashMap` for concurrent access
-- Tests: inline `#[cfg(test)]` modules, 155+ tests across crates
+- Tests: inline `#[cfg(test)]` modules plus crate and workspace integration tests
 - No `unwrap()` in library code; use `?` or explicit error handling
 
 ### TypeScript (dashboard + CLI launcher)
@@ -48,8 +48,12 @@ crates/
   conductor-db/         # SQLite persistence
   conductor-executors/  # Agent adapters, process management
   conductor-git/        # Git operations
+  conductor-relay/      # Relay server for bridge and remote terminal flows
   conductor-watcher/    # File system watching
   conductor-cli/        # Rust CLI
+  conductor-types/      # Shared bridge/transport protocol types
+  notify-rust/          # Desktop notification support
+bridge-cmd/             # Companion bridge binary used by paired-device flows
 packages/
   cli/                  # npm CLI launcher
   core/                 # Shared TS types (being superseded by Rust)
@@ -79,7 +83,7 @@ packages/
 
 ## Architecture Constraints
 
-- **Local-first:** No cloud relay, no credential proxying, no hosted state
+- **Local-first:** The core workflow must run fully local; optional remote helpers must not become hosted source-of-truth state or credential proxies
 - **ttyd-first:** Runtime defaults to ttyd-backed PTY sessions; tmux is legacy compatibility-only
 - **SQLite-only:** No external database dependencies
 - **Agent-agnostic:** Conductor orchestrates; agents do their own auth and billing
