@@ -74,13 +74,17 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
 
     // Keep scroll containment active for ttyd terminals on every platform.
     // The touch-specific gesture translation below still only activates on
-    // coarse-pointer devices.
+    // touch-capable devices or compact viewports that use the mobile shell.
     document.documentElement.classList.add('conductor-ttyd-touch-shim-enabled');
 
+    const viewportWidth = typeof window.innerWidth === 'number'
+        ? window.innerWidth
+        : 0;
+    const compactViewport = viewportWidth > 0 && viewportWidth < 1024;
     const coarsePointer = typeof window.matchMedia === 'function'
         && window.matchMedia('(pointer: coarse)').matches;
     const maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints || 0;
-    if (!coarsePointer && maxTouchPoints <= 0) return;
+    if (!compactViewport && !coarsePointer && maxTouchPoints <= 0) return;
 
     const bindTouchScroll = () => {
     const terminalRoot = document.querySelector('.xterm');
@@ -1411,6 +1415,7 @@ mod tests {
 
         assert!(injected.contains(TTYD_MOBILE_TOUCH_SHIM_MARKER));
         assert!(injected.contains("window.__conductorTtydMobileTouchShimInstalled"));
+        assert!(injected.contains("const compactViewport = viewportWidth > 0 && viewportWidth < 1024;"));
         assert!(injected.contains("const terminalRoot = document.querySelector('.xterm');"));
         assert!(injected.contains(".xterm-viewport"));
         assert!(injected.contains(".xterm-scrollable-element"));
