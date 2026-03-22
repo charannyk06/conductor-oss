@@ -122,7 +122,7 @@ export function AppShell({
         </button>
       )}
 
-      <main className="relative flex min-w-0 w-full flex-1 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+      <main className="relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-y-auto bg-[var(--vk-bg-main)] lg:overflow-hidden">
         {!mobileSidebarOpen && !hideMobileSidebarToggle && (
           <button
             type="button"

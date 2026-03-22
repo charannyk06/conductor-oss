@@ -191,6 +191,9 @@ function attachMobileTouchScrollShim(terminal: Terminal, host: HTMLElement): (()
   let active = false;
   let lastX = 0;
   let lastY = 0;
+  let touchStartAt = 0;
+  let touchMoved = false;
+  const LONG_PRESS_THRESHOLD_MS = 300;
 
   const reset = () => {
     active = false;
@@ -206,7 +209,8 @@ function attachMobileTouchScrollShim(terminal: Terminal, host: HTMLElement): (()
     const touch = event.touches[0];
     lastX = touch.clientX;
     lastY = touch.clientY;
-    terminal.focus();
+    touchStartAt = window.performance?.now?.() ?? Date.now();
+    touchMoved = false;
     setTouchAction(isMouseProtocolActive());
     active = true;
   };
@@ -226,6 +230,7 @@ function attachMobileTouchScrollShim(terminal: Terminal, host: HTMLElement): (()
       return;
     }
 
+    touchMoved = true;
     // Let xterm handle normal mobile scrolling. Only intercept when mouse
     // reporting is active, which is the OpenCode case that blocks native scroll.
     if (!isMouseProtocolActive()) {
@@ -245,6 +250,10 @@ function attachMobileTouchScrollShim(terminal: Terminal, host: HTMLElement): (()
   };
 
   const handleTouchEnd = () => {
+    const touchDuration = (window.performance?.now?.() ?? Date.now()) - touchStartAt;
+    if (!touchMoved && touchDuration < LONG_PRESS_THRESHOLD_MS) {
+      terminal.focus();
+    }
     setTouchAction(isMouseProtocolActive());
     reset();
   };

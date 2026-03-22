@@ -146,7 +146,7 @@ export function WorkspaceOverview({
 
   if (showWelcomeState) {
     return (
-      <div className="flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
+      <div className="flex h-full min-h-0 w-full flex-col overflow-y-auto overscroll-contain bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))] lg:overflow-hidden">
         <div className="mx-auto flex h-full min-h-0 w-full max-w-[1200px] flex-1 flex-col px-3 py-3 sm:px-4 sm:py-4">
           <div className="mb-4 flex justify-end">
             <Button variant="outline" size="md" onClick={onCreateWorkspace}>
@@ -188,7 +188,7 @@ export function WorkspaceOverview({
   }
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))]">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-y-auto overscroll-contain bg-[linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0))] lg:overflow-hidden">
       <div className="flex h-full min-h-0 w-full flex-1 flex-col gap-4 px-3 py-3 sm:px-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div className="max-w-3xl">

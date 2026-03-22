@@ -672,7 +672,7 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
   ) : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain lg:overflow-hidden">
       {/* Mobile: if a file is selected, show preview full-width instead of tree */}
       {mobileFilePreview}
 
@@ -799,7 +799,7 @@ export function SessionOverview({ session, sessionId, active }: SessionOverviewP
   }, [queueDepth, queuePosition, recoveryState, session.status]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain lg:overflow-hidden">
       {/* Recovery / queue banner */}
       {recoveryBanner ? (
         <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/8 px-3 py-2">
