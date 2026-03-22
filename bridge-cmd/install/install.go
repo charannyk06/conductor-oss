@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -62,6 +63,8 @@ func Install(binaryPath string) error {
 		return installLaunchd(home, destPath)
 	case "linux":
 		return installSystemd(home, destPath)
+	case "windows":
+		return installWindowsStartup(home, destPath)
 	default:
 		fmt.Println("Auto-start not supported on this platform.")
 		fmt.Println("Add to your shell profile: conductor-bridge daemon")
@@ -87,6 +90,16 @@ func RestartServiceIfInstalled() error {
 		cmd := exec.Command("systemctl", "--user", "restart", serviceName)
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("restart systemd service: %w", err)
+		}
+		return nil
+	case "windows":
+		binaryPath := filepath.Join(home, ".conductor", "bin", "conductor-bridge.exe")
+		if _, err := os.Stat(binaryPath); err != nil {
+			binaryPath = filepath.Join(home, ".conductor", "bin", "conductor-bridge")
+		}
+		cmd := exec.Command("cmd", "/C", "start", "", "/B", binaryPath, "daemon")
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("restart windows bridge daemon: %w", err)
 		}
 		return nil
 	default:
@@ -115,6 +128,15 @@ func RestartServiceAvailable() error {
 		unitPath := filepath.Join(xdgConfig, "systemd", "user", serviceName+".service")
 		if _, err := os.Stat(unitPath); err != nil {
 			return fmt.Errorf("systemd service not installed: %w", err)
+		}
+		return nil
+	case "windows":
+		startupScript, err := resolveWindowsStartupScriptPath()
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(startupScript); err != nil {
+			return fmt.Errorf("windows startup script not installed: %w", err)
 		}
 		return nil
 	default:
@@ -188,6 +210,31 @@ func installLaunchdService(home, plistPath string) error {
 	if err := exec.Command("launchctl", "kickstart", "-k", serviceTarget).Run(); err != nil {
 		return fmt.Errorf("kickstart launchd service: %w", err)
 	}
+	return nil
+}
+
+func resolveWindowsStartupScriptPath() (string, error) {
+	appData := strings.TrimSpace(os.Getenv("APPDATA"))
+	if appData == "" {
+		return "", fmt.Errorf("APPDATA is not set")
+	}
+	return filepath.Join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "conductor-bridge.cmd"), nil
+}
+
+func installWindowsStartup(home, binaryPath string) error {
+	startupScript, err := resolveWindowsStartupScriptPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(startupScript), 0755); err != nil {
+		return fmt.Errorf("create Windows Startup dir: %w", err)
+	}
+	launcher := fmt.Sprintf("@echo off\r\nstart \"\" /B \"%s\" daemon\r\n", binaryPath)
+	if err := os.WriteFile(startupScript, []byte(launcher), 0644); err != nil {
+		return fmt.Errorf("write Windows startup launcher: %w", err)
+	}
+	fmt.Printf("Windows startup launcher installed at %s\n", startupScript)
+	fmt.Println("Conductor Bridge will start automatically when you sign in.")
 	return nil
 }
 

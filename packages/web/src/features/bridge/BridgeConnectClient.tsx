@@ -797,14 +797,14 @@ export default function BridgeConnectClient({
                 Connect this laptop
               </h2>
               <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
-                Most users only need one command. It installs the bridge, registers the background
-                service, opens the browser, and pairs the current laptop to this dashboard.
+                Most users only need one command. It runs through `npx`, chooses the right installer
+                for this OS, opens the browser, and pairs the current laptop to this dashboard.
               </p>
 
               <div className="mt-5">
                 <CommandBlock
                   title="Recommended command"
-                  description="Run this once on the laptop you want to use."
+                  description="Run this once on the laptop you want to use. Works on macOS, Linux, and Windows anywhere `npx` is available."
                   command={bootstrapConnectCommand}
                   footer={(
                     <Button
@@ -828,7 +828,7 @@ export default function BridgeConnectClient({
                     Step 1
                   </div>
                   <p className="mt-2 text-sm leading-6 text-[var(--vk-text-normal)]">
-                    Run the command in Terminal on the laptop you want to pair.
+                    Run the command in Terminal, PowerShell, or Command Prompt on the laptop you want to pair.
                   </p>
                 </li>
                 <li className="rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-4">
