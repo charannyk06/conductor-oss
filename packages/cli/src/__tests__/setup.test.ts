@@ -5,9 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   buildAgentCheck,
-  buildTunnelCheck,
   resolveAgentSetupConfig,
-  resolveTunnelSetupConfig,
 } from "../commands/setup.js";
 
 const BASE_SYSTEM_PATH = "/bin:/usr/bin:/usr/sbin:/sbin";
@@ -66,22 +64,5 @@ test("Codex setup metadata points at the current official npm package", () => {
     label: "Connect OpenAI Codex",
     cmd: "codex",
     args: ["login"],
-  });
-});
-
-test("Cloudflare tunnel setup metadata points at the free tunnel binary", () => {
-  const config = resolveTunnelSetupConfig("cloudflare");
-
-  assert.deepEqual(config.commands, ["cloudflared"]);
-  assert.equal(config.install?.label, "Install Cloudflare Tunnel");
-  assert.ok(config.install === undefined || config.install.args.includes("cloudflared"));
-});
-
-test("buildTunnelCheck recognizes cloudflared on PATH", () => {
-  withTemporaryPath(["cloudflared"], () => {
-    const check = buildTunnelCheck("cloudflare");
-
-    assert.equal(check.installed, true);
-    assert.equal(check.install, undefined);
   });
 });

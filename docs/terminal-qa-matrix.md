@@ -9,8 +9,8 @@ Fill this out during the final merge pass. The `Observed` column should capture 
 | Resize stability | desktop resize narrow to wide and back | ttyd resize frames only | resize feels immediate | no prompt corruption, no duplicate redraw noise | | Pending | |
 | iPhone Safari live use | phone viewport on local or private network | backend ttyd facade websocket | attach and restore feel immediate, reconnect under 2 s | keyboard opens on terminal, typing works, rotate stays stable | | Pending | |
 | Android Chrome live use | phone viewport on local or private network | backend ttyd facade websocket | attach and restore feel immediate, reconnect under 2 s | typing, paste, orientation, tail-follow behavior all work | | Pending | |
-| Private remote attach | approved private remote path such as Tailscale | token + backend ttyd facade websocket | connect under 250 ms, live snapshot under 500 ms | native typing works, refresh restores same session | | Pending | |
-| Remote failure path | approved private remote path with ttyd intentionally blocked | explicit reconnect failure, no alternate websocket transport | failure is explicit and recoverable | user sees reconnect failure, fresh token + ttyd recovers when path returns | | Pending | |
+| External attach | authenticated non-loopback dashboard path | token + backend ttyd facade websocket | connect under 250 ms, live snapshot under 500 ms | native typing works, refresh restores same session | | Pending | |
+| External failure path | authenticated non-loopback dashboard path with ttyd intentionally blocked | explicit reconnect failure, no alternate websocket transport | failure is explicit and recoverable | user sees reconnect failure, fresh token + ttyd recovers when path returns | | Pending | |
 
 ## Sign-Off
 

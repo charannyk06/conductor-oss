@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -17,6 +18,16 @@ pub enum BrowserToBridgeMessage {
         path: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         body: Option<Value>,
+    },
+    PreviewRequest {
+        id: String,
+        session_id: String,
+        method: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body_base64: Option<String>,
     },
     TerminalProxyStart {
         terminal_id: String,
@@ -38,6 +49,14 @@ pub enum BridgeToBrowserMessage {
         id: String,
         status: u16,
         body: Value,
+    },
+    PreviewResponse {
+        id: String,
+        status: u16,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        headers: BTreeMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body_base64: Option<String>,
     },
     FileTree {
         path: String,

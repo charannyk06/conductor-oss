@@ -382,31 +382,6 @@ type AccessSettingsPayload = {
   current: AccessIdentitySummary;
 };
 
-type RemoteAccessPayload = {
-  publicUrl: string | null;
-  connectUrl: string | null;
-  shareable: boolean;
-  status: "disabled" | "starting" | "ready" | "error";
-  provider: "tailscale" | null;
-  recommendedProvider: "tailscale" | null;
-  localUrl: string | null;
-  managed: boolean;
-  installed: boolean;
-  connected: boolean;
-  canAutoInstall: boolean;
-  autoInstallMethod: "brew" | null;
-  lastError: string | null;
-  startedAt: string | null;
-  updatedAt: string | null;
-  mode: "cloudflare-access" | "private-network" | "enterprise-only" | "generic-header" | "clerk" | "local-only" | "misconfigured" | "unsafe-public";
-  title: string;
-  description: string;
-  warnings: string[];
-  nextSteps: string[];
-};
-
-type RemoteAccessAction = "enable" | "rotate" | "disable";
-
 type RepositoryPathHealth = {
   exists: boolean;
   isGitRepository: boolean;
@@ -463,7 +438,6 @@ type AgentSetupState = {
 type PreferencesDialogMode = "onboarding" | "settings";
 type SettingsTabId =
   | "general"
-  | "remote_access"
   | "repositories"
   | "organization"
   | "projects"
@@ -480,7 +454,6 @@ type SettingsTab = {
 
 const SETTINGS_TABS: SettingsTab[] = [
   { id: "general", label: "General", icon: Settings2, implemented: true },
-  { id: "remote_access", label: "Remote Access", icon: SlidersHorizontal, implemented: true },
   { id: "repositories", label: "Repositories", icon: FolderGit2, implemented: true },
   { id: "organization", label: "Organization Settings", icon: Building2, implemented: true },
   { id: "projects", label: "Projects", icon: FolderKanban, implemented: false },
@@ -577,14 +550,6 @@ function normalizeMultilineList(value: unknown): string {
     .join("\n");
 }
 
-function normalizeStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSettingsPayload {
   const payload = toObject(value);
   const trustedHeaders = toObject(payload["trustedHeaders"]);
@@ -637,108 +602,6 @@ function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSetti
         : null,
     },
   };
-}
-
-function normalizeRemoteAccess(value: unknown): RemoteAccessPayload {
-  const payload = toObject(value);
-  const mode = payload["mode"];
-  const status = payload["status"];
-  const provider = payload["provider"];
-  const autoInstallMethod = payload["autoInstallMethod"];
-
-  return {
-    publicUrl: typeof payload["publicUrl"] === "string" && payload["publicUrl"].trim().length > 0
-      ? payload["publicUrl"].trim()
-      : null,
-    connectUrl: typeof payload["connectUrl"] === "string" && payload["connectUrl"].trim().length > 0
-      ? payload["connectUrl"].trim()
-      : null,
-    shareable: payload["shareable"] === true,
-    status:
-      status === "starting"
-      || status === "ready"
-      || status === "error"
-      || status === "disabled"
-        ? status
-        : "disabled",
-    provider: provider === "tailscale" ? provider : null,
-    recommendedProvider:
-      payload["recommendedProvider"] === "tailscale"
-        ? payload["recommendedProvider"]
-        : null,
-    localUrl: typeof payload["localUrl"] === "string" && payload["localUrl"].trim().length > 0
-      ? payload["localUrl"].trim()
-      : null,
-    managed: payload["managed"] === true,
-    installed: payload["installed"] === true,
-    connected: payload["connected"] === true,
-    canAutoInstall: payload["canAutoInstall"] === true,
-    autoInstallMethod: autoInstallMethod === "brew" ? "brew" : null,
-    lastError: typeof payload["lastError"] === "string" && payload["lastError"].trim().length > 0
-      ? payload["lastError"].trim()
-      : null,
-    startedAt: typeof payload["startedAt"] === "string" && payload["startedAt"].trim().length > 0
-      ? payload["startedAt"].trim()
-      : null,
-    updatedAt: typeof payload["updatedAt"] === "string" && payload["updatedAt"].trim().length > 0
-      ? payload["updatedAt"].trim()
-      : null,
-    mode:
-      mode === "cloudflare-access"
-      || mode === "private-network"
-      || mode === "enterprise-only"
-      || mode === "generic-header"
-      || mode === "clerk"
-      || mode === "local-only"
-      || mode === "misconfigured"
-      || mode === "unsafe-public"
-        ? mode
-        : "local-only",
-    title: typeof payload["title"] === "string" && payload["title"].trim().length > 0
-      ? payload["title"].trim()
-      : "Remote access",
-    description: typeof payload["description"] === "string" && payload["description"].trim().length > 0
-      ? payload["description"].trim()
-      : "",
-    warnings: normalizeStringArray(payload["warnings"]),
-    nextSteps: normalizeStringArray(payload["nextSteps"]),
-  };
-}
-
-function getRemoteAccessModeLabel(mode: RemoteAccessPayload["mode"]): string {
-  switch (mode) {
-    case "cloudflare-access":
-      return "Cloudflare Access";
-    case "private-network":
-      return "Private network";
-    case "enterprise-only":
-      return "Enterprise only";
-    case "generic-header":
-      return "Legacy mode blocked";
-    case "clerk":
-      return "Clerk";
-    case "misconfigured":
-      return "Auth required";
-    case "unsafe-public":
-      return "Blocked until protected";
-    case "local-only":
-    default:
-      return "Local only";
-  }
-}
-
-function getRemoteAccessStatusLabel(status: RemoteAccessPayload["status"]): string {
-  switch (status) {
-    case "starting":
-      return "Starting";
-    case "ready":
-      return "Ready";
-    case "error":
-      return "Error";
-    case "disabled":
-    default:
-      return "Disabled";
-  }
 }
 
 function emptyModelSelection(): ModelSelectionState {

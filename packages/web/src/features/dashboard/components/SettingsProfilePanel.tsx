@@ -20,8 +20,6 @@ function formatProviderLabel(provider: string | null): string {
       return "Cloudflare Access";
     case "trusted-header":
       return "Verified Header";
-    case "tailscale":
-      return "Tailscale";
     case "local":
       return "Local";
     default:

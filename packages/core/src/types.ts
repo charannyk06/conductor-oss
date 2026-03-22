@@ -1311,8 +1311,6 @@ export interface TrustedHeaderAccessConfig {
 export interface DashboardAccessConfig {
   /** Require authenticated identity even for local access. */
   requireAuth?: boolean;
-  /** Allow the built-in signed share-link fallback for remote control. This is not enterprise SSO. */
-  allowSignedShareLinks?: boolean;
   /** Default role granted to authenticated users when no explicit binding matches. */
   defaultRole?: DashboardRole;
   /** Trust identity headers injected by an upstream edge access layer such as Cloudflare Access. */

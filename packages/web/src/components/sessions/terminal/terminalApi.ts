@@ -168,9 +168,8 @@ export async function resolveTerminalConnection(
 
   // Resolve the ttyd iframe URL against the backend origin so the ttyd
   // JavaScript inside the iframe connects its WebSocket back to the same
-  // origin. This makes it work on mobile (Tailscale, ngrok) because the
-  // Rust backend WebSocket is directly accessible at the same host:port as
-  // the ttyd HTTP page, while Next.js cannot proxy WebSocket upgrades.
+  // origin. This keeps the HTTP page and WebSocket endpoint aligned even
+  // when the dashboard is reached through a forwarded or protected URL.
   const terminalUrl = resolveProvidedTtydHttpUrl(auth.ttydHttpUrl, auth.ttydWsUrl, origin);
   if (!terminalUrl) {
     return {

@@ -42,7 +42,7 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
         return None;
     }
 
-    if path == "/api/auth/session" || path == "/api/health" || path == "/api/github/webhook" {
+    if path == "/api/health" || path == "/api/github/webhook" {
         return None;
     }
 
@@ -197,86 +197,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn middleware_rejects_unauthenticated_views_when_builtin_remote_auth_is_enabled() {
-        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
-            std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
-        }
-
-        let state = build_state(DashboardAccessConfig {
-            allow_signed_share_links: true,
-            ..DashboardAccessConfig::default()
-        })
-        .await;
-        let app = Router::new()
-            .route(
-                "/api/events",
-                get(|| async { StatusCode::OK.into_response() }),
-            )
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                require_auth_when_remote,
-            ))
-            .with_state(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/events")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        unsafe {
-            std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
-            std::env::remove_var("CONDUCTOR_REMOTE_SESSION_SECRET");
-        }
-    }
-
-    #[tokio::test]
-    async fn middleware_allows_local_views_when_share_links_are_disabled_even_if_runtime_tokens_exist(
-    ) {
-        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
-        unsafe {
-            std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
-            std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
-        }
-
-        let state = build_state(DashboardAccessConfig::default()).await;
-
-        let app = Router::new()
-            .route(
-                "/api/events",
-                get(|| async { StatusCode::OK.into_response() }),
-            )
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                require_auth_when_remote,
-            ))
-            .with_state(state);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/events")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        unsafe {
-            std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
-            std::env::remove_var("CONDUCTOR_REMOTE_SESSION_SECRET");
-        }
     }
 
     #[tokio::test]

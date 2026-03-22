@@ -161,11 +161,10 @@ The npm launcher (`co`) is the primary user-facing CLI.
 
 A lower-level Rust CLI also exists for development and internal flows. That native binary is where the current `bridge` subcommands live.
 
-## Remote Access and Bridge
+## Access Control and Bridge
 
-Conductor is local-first, but the current codebase includes several remote and access-control paths:
+Conductor is local-first, but the current codebase includes several access-control and paired-device paths:
 
-- **Private remote access** via a Tailscale link managed from the dashboard
 - **Verified edge auth** via Cloudflare Access JWT validation and role bindings
 - **Optional Clerk integration** for hosted sign-in flows in the web app
 - **Bridge and relay components** for paired-device flows and relay-backed terminals
@@ -267,7 +266,7 @@ conductor-oss/
 - Output quality depends on the upstream agent CLI you install; Conductor orchestrates it, not its model behavior
 - GitHub-heavy flows work best with `gh` installed and authenticated
 - Preview tooling depends on a project exposing a local dev server or explicit preview URL
-- Public remote admin links were removed; use Tailscale or a verified identity layer instead
+- Public remote admin links were removed; use a verified identity layer instead
 - Legacy tmux and legacy direct sessions are compatibility data that should be archived rather than resumed
 
 ## Links

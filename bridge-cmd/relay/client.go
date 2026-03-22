@@ -28,6 +28,7 @@ const (
 	ttydPortRangeEnd         = 8699
 	bridgeProxyMetaKey       = "$bridgeProxy"
 	bridgeRequestMetaKey     = "$bridgeRequest"
+	maxPreviewResponseBytes  = 10 * 1024 * 1024
 )
 
 type Options struct {
@@ -47,11 +48,14 @@ type bridgeEnvelope struct {
 	Data string `json:"data,omitempty"`
 
 	// api_request / api_response
-	ID     string      `json:"id,omitempty"`
-	Method string      `json:"method,omitempty"`
-	Path   string      `json:"path,omitempty"`
-	Status int         `json:"status,omitempty"`
-	Body   interface{} `json:"body,omitempty"`
+	ID         string            `json:"id,omitempty"`
+	Method     string            `json:"method,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	URL        string            `json:"url,omitempty"`
+	Status     int               `json:"status,omitempty"`
+	Body       interface{}       `json:"body,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	BodyBase64 string            `json:"body_base64,omitempty"`
 
 	// terminal_proxy_start
 	TerminalID string `json:"terminal_id,omitempty"`
@@ -353,6 +357,26 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 					})
 				}
 
+			case "preview_request":
+				previewResp, previewErr := proxyPreview(env.ID, env.SessionID, env.Method, env.URL, env.Headers, env.BodyBase64)
+				if previewErr != nil {
+					_ = send(bridgeEnvelope{
+						Type:       "preview_response",
+						ID:         env.ID,
+						Status:     502,
+						Headers:    map[string]string{"content-type": "text/plain; charset=utf-8"},
+						BodyBase64: base64.StdEncoding.EncodeToString([]byte(previewErr.Error())),
+					})
+				} else {
+					_ = send(bridgeEnvelope{
+						Type:       "preview_response",
+						ID:         env.ID,
+						Status:     previewResp.Status,
+						Headers:    previewResp.Headers,
+						BodyBase64: previewResp.BodyBase64,
+					})
+				}
+
 			case "file_browse":
 				entries, _ := browseFiles(env.Path)
 				_ = send(bridgeEnvelope{
@@ -628,6 +652,68 @@ type apiResponse struct {
 	Body   interface{}
 }
 
+type previewResponse struct {
+	Status     int
+	Headers    map[string]string
+	BodyBase64 string
+}
+
+func isLoopbackHostname(hostname string) bool {
+	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(hostname)), "[]")
+	switch normalized {
+	case "127.0.0.1", "localhost", "::1", "0.0.0.0":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizePreviewURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, fmt.Errorf("parse preview url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("preview url scheme %q is not allowed", parsed.Scheme)
+	}
+	if !isLoopbackHostname(parsed.Hostname()) {
+		return nil, fmt.Errorf("preview host %q is not allowed", parsed.Hostname())
+	}
+	if parsed.Hostname() == "0.0.0.0" {
+		parsed.Host = strings.Replace(parsed.Host, "0.0.0.0", "127.0.0.1", 1)
+	}
+	return parsed, nil
+}
+
+func sanitizePreviewRequestHeaders(headers map[string]string) http.Header {
+	sanitized := http.Header{}
+	for name, value := range headers {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "", "host", "connection", "proxy-connection", "keep-alive", "transfer-encoding", "content-length", "accept-encoding":
+			continue
+		default:
+			sanitized.Set(name, value)
+		}
+	}
+	return sanitized
+}
+
+func sanitizePreviewResponseHeaders(headers http.Header) map[string]string {
+	sanitized := map[string]string{}
+	for name, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "connection", "proxy-connection", "keep-alive", "transfer-encoding", "content-length", "content-encoding":
+			continue
+		default:
+			sanitized[name] = values[len(values)-1]
+		}
+	}
+	return sanitized
+}
+
 func decodeProxyRequestBody(body interface{}) ([]byte, string, bool, error) {
 	payload, ok := body.(map[string]interface{})
 	if !ok {
@@ -661,6 +747,70 @@ func decodeProxyRequestBody(body interface{}) ([]byte, string, bool, error) {
 
 	contentType, _ := meta["contentType"].(string)
 	return decoded, strings.TrimSpace(contentType), true, nil
+}
+
+func proxyPreview(
+	id string,
+	sessionID string,
+	method string,
+	rawURL string,
+	headers map[string]string,
+	bodyBase64 string,
+) (previewResponse, error) {
+	if strings.TrimSpace(id) == "" {
+		return previewResponse{}, fmt.Errorf("preview request id is required")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return previewResponse{}, fmt.Errorf("preview session id is required")
+	}
+
+	targetURL, err := normalizePreviewURL(rawURL)
+	if err != nil {
+		return previewResponse{}, err
+	}
+
+	var requestBody io.Reader
+	if strings.TrimSpace(bodyBase64) != "" {
+		decoded, err := base64.StdEncoding.DecodeString(bodyBase64)
+		if err != nil {
+			return previewResponse{}, fmt.Errorf("decode preview body: %w", err)
+		}
+		requestBody = bytes.NewReader(decoded)
+	}
+
+	req, err := http.NewRequest(strings.TrimSpace(method), targetURL.String(), requestBody)
+	if err != nil {
+		return previewResponse{}, err
+	}
+	req.Header = sanitizePreviewRequestHeaders(headers)
+
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return previewResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	limitedBody := io.LimitReader(resp.Body, maxPreviewResponseBytes+1)
+	responseBytes, err := io.ReadAll(limitedBody)
+	if err != nil {
+		return previewResponse{}, fmt.Errorf("read preview response: %w", err)
+	}
+	if len(responseBytes) > maxPreviewResponseBytes {
+		return previewResponse{}, fmt.Errorf("preview response exceeded %d bytes", maxPreviewResponseBytes)
+	}
+
+	return previewResponse{
+		Status:     resp.StatusCode,
+		Headers:    sanitizePreviewResponseHeaders(resp.Header),
+		BodyBase64: base64.StdEncoding.EncodeToString(responseBytes),
+	}, nil
 }
 
 func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {

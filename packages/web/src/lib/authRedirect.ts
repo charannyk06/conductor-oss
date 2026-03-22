@@ -1,4 +1,4 @@
-import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
+import { sanitizeRedirectTarget } from "@/lib/redirectTarget";
 
 const DEFAULT_POST_SIGN_IN_REDIRECT = "/";
 const DEFAULT_PAIRED_DEVICE_POST_SIGN_IN_REDIRECT = "/bridge/connect";

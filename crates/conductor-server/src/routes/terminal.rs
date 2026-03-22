@@ -29,7 +29,7 @@ const DEFAULT_TERMINAL_SNAPSHOT_LINES: usize = 10_000;
 const MAX_TERMINAL_SNAPSHOT_LINES: usize = 12000;
 const MAX_TERMINAL_LOG_TAIL_BYTES: u64 = 8 * 1024 * 1024;
 const TERMINAL_SNAPSHOT_MAX_BYTES: usize = 2 * 1024 * 1024;
-const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
+const TERMINAL_TOKEN_SECRET_ENV: &str = "CONDUCTOR_TERMINAL_SESSION_SECRET";
 const TERMINAL_TOKEN_TTL_SECONDS: i64 = 60;
 const SERVER_TIMING_HEADER: &str = "server-timing";
 const TERMINAL_SNAPSHOT_SOURCE_HEADER: &str = "x-conductor-terminal-snapshot-source";
@@ -1387,7 +1387,6 @@ mod tests {
         let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
         unsafe {
             std::env::remove_var(TERMINAL_TOKEN_SECRET_ENV);
-            std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
         }
 
         let access = conductor_core::config::DashboardAccessConfig {

@@ -2,11 +2,11 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { isLoopbackHost } from "@/lib/accessControl";
-import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
+import { sanitizeRedirectTarget } from "@/lib/redirectTarget";
 
 function getErrorMessage(code: string | null | undefined): string | null {
-  if (code === "invalid") return "That access link or token is invalid.";
-  if (code === "unavailable") return "Public share-link remote access is no longer available for this session.";
+  if (code === "invalid") return "That access request is invalid.";
+  if (code === "unavailable") return "This access path is not available for this session.";
   return null;
 }
 
@@ -39,9 +39,9 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
       <div className="mx-auto w-full max-w-2xl">
         <PublicPanel className="p-6 sm:p-8">
           <PublicSection
-            eyebrow="Secure Remote Access"
-            title="Unlock Conductor"
-            description="Public share-link remote access has been removed. Use the private Tailscale link from Settings, or open the protected enterprise URL from Cloudflare Access or Clerk instead."
+            eyebrow="Dashboard Access"
+            title="Authentication Required"
+            description="Open Conductor from a local session, or use a protected dashboard URL backed by a verified identity provider such as Cloudflare Access or Clerk."
           />
 
           {errorMessage ? (

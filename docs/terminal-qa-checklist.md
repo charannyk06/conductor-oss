@@ -31,11 +31,11 @@ Use this checklist before merging terminal architecture changes. Record the obse
 - [ ] Confirm tab switch or short network interruption reconnects cleanly.
 - [ ] Verify `Jump to latest` appears only when the viewport is above the live tail.
 
-## Private Remote Browser
+## External Browser
 
-- [ ] Validate an approved private remote path such as Tailscale with the remote runtime in `ready` state.
-- [ ] Confirm the remote terminal stream stays on the authenticated ttyd facade WS (`/api/sessions/:id/terminal/ttyd/ws`) using a live token from `/api/sessions/:id/terminal/token`.
-- [ ] Refresh the remote tab and confirm reconnect restores the same session content and prompt.
+- [ ] Validate an authenticated non-loopback dashboard path behind the configured access layer.
+- [ ] Confirm the terminal stream stays on the authenticated ttyd facade WS (`/api/sessions/:id/terminal/ttyd/ws`) using a live token from `/api/sessions/:id/terminal/token`.
+- [ ] Refresh the external tab and confirm reconnect restores the same session content and prompt.
 - [ ] Confirm direct typing works after reconnect without requiring page navigation.
 - [ ] Trigger an intentional failure path and confirm terminal reconnect behavior is explicit (token refresh + ttyd reconnect) before any snapshot recovery path is used.
 
@@ -43,7 +43,7 @@ Use this checklist before merging terminal architecture changes. Record the obse
 
 - [ ] session id
 - [ ] device and browser
-- [ ] local vs remote access path
+- [ ] loopback vs external dashboard path
 - [ ] terminal token headers and payload (`required`, `expiresInSeconds`)
 - [ ] terminal snapshot headers (`Server-Timing`, source, live, restored, format)
 - [ ] terminal snapshot payload (`source`, `live`, `restored`, `sequence`)

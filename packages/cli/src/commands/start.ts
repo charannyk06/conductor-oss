@@ -7,8 +7,8 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
@@ -220,20 +220,6 @@ type LauncherSettings = {
   access: LauncherAccessConfig;
 };
 
-type RemoteAccessRuntimeState = {
-  status: "disabled" | "starting" | "ready" | "error";
-  provider: "tailscale" | null;
-  publicUrl: string | null;
-  localUrl: string | null;
-  accessToken: string | null;
-  sessionSecret: string | null;
-  tunnelPid: number | null;
-  logPath: string | null;
-  lastError: string | null;
-  startedAt: string | null;
-  updatedAt: string | null;
-};
-
 type RustLaunchConfig = {
   cmd: string;
   args: string[];
@@ -245,52 +231,6 @@ type RustLaunchResolution = {
   launch: RustLaunchConfig | null;
   reason?: string;
 };
-
-function getRemoteAccessRuntimeStatePath(workspacePath: string): string {
-  const workspaceKey = createHash("sha256")
-    .update(workspacePath.trim())
-    .digest("hex");
-  return join(homedir(), ".conductor", "runtime", "remote-access", `${workspaceKey}.json`);
-}
-
-function writeRemoteAccessRuntimeState(
-  workspacePath: string,
-  next: Partial<RemoteAccessRuntimeState> & Pick<RemoteAccessRuntimeState, "status">,
-): void {
-  const statePath = getRemoteAccessRuntimeStatePath(workspacePath);
-  mkdirSync(dirname(statePath), { recursive: true });
-  const current = (() => {
-    try {
-      return JSON.parse(readFileSync(statePath, "utf8")) as Partial<RemoteAccessRuntimeState>;
-    } catch {
-      return null;
-    }
-  })();
-  const pick = <Key extends keyof RemoteAccessRuntimeState>(key: Key): RemoteAccessRuntimeState[Key] => {
-    if (Object.prototype.hasOwnProperty.call(next, key)) {
-      return (next[key] ?? null) as RemoteAccessRuntimeState[Key];
-    }
-    return ((current?.[key] as RemoteAccessRuntimeState[Key] | undefined) ?? null) as RemoteAccessRuntimeState[Key];
-  };
-  const payload: RemoteAccessRuntimeState = {
-    status: next.status,
-    provider: pick("provider"),
-    publicUrl: pick("publicUrl"),
-    localUrl: pick("localUrl"),
-    accessToken: pick("accessToken"),
-    sessionSecret: pick("sessionSecret"),
-    tunnelPid: pick("tunnelPid"),
-    logPath: pick("logPath"),
-    lastError: pick("lastError"),
-    startedAt: pick("startedAt"),
-    updatedAt: new Date().toISOString(),
-  };
-  writeFileSync(statePath, JSON.stringify(payload, null, 2), "utf8");
-}
-
-function clearRemoteAccessRuntimeState(workspacePath: string): void {
-  rmSync(getRemoteAccessRuntimeStatePath(workspacePath), { force: true });
-}
 
 function asObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -857,7 +797,6 @@ export function registerStart(program: Command): void {
     .option("--no-dashboard", "Skip starting the web dashboard")
     .option("--no-watcher", "Deprecated. Rust backend startup no longer uses the JS watcher")
     .option("--open", "Open the dashboard in your default browser")
-    .option("--tunnel", "Deprecated. Public share-link remote access has been removed")
     .option("--host <host>", "Dashboard bind host. Defaults to 127.0.0.1 for local-only access")
     .option("-p, --port <port>", "Dashboard port override")
     .option("--no-backend", "Do not launch a separate local Rust backend")
@@ -867,7 +806,6 @@ export function registerStart(program: Command): void {
       dashboard?: boolean;
       watcher?: boolean;
       open?: boolean;
-      tunnel?: boolean;
       host?: string;
       port?: string;
       backend?: boolean;
@@ -886,19 +824,12 @@ export function registerStart(program: Command): void {
         const backendPort = resolveBackendPort(opts.backendPort, settings.backendPort);
         const explicitBackendUrl = process.env["CONDUCTOR_BACKEND_URL"]?.trim() || null;
         const bindHost = opts.host?.trim() || "127.0.0.1";
-        if (opts.tunnel) {
-          throw new Error(
-            "`--tunnel` was removed for security. Use Settings -> Remote Access to enable the private Tailscale link, or configure Cloudflare Access on a protected public URL.",
-          );
-        }
         const shutdownTasks: Array<() => void | Promise<void>> = [];
         let isShuttingDown = false;
         let launcherControl: LauncherControlServer | null = null;
 
         process.env["CONDUCTOR_WORKSPACE"] = workspacePath;
         process.env["CO_CONFIG_PATH"] = configPath;
-        clearRemoteAccessRuntimeState(workspacePath);
-        shutdownTasks.push(() => clearRemoteAccessRuntimeState(workspacePath));
 
         const terminalDaemon = await ensureTerminalDaemon(workspacePath, configPath);
         if (terminalDaemon) {
@@ -1198,21 +1129,6 @@ export function registerStart(program: Command): void {
             const dashboardUrl = isLoopbackHost(bindHost)
               ? `http://localhost:${dashboardPort}`
               : `http://${bindHost}:${dashboardPort}`;
-            writeRemoteAccessRuntimeState(
-              workspacePath,
-              {
-                status: isLoopbackHost(bindHost) ? "disabled" : "ready",
-                provider: null,
-                publicUrl: isLoopbackHost(bindHost) ? null : dashboardUrl,
-                localUrl: dashboardInternalUrl,
-                accessToken: null,
-                sessionSecret: null,
-                tunnelPid: null,
-                logPath: null,
-                lastError: null,
-                startedAt: new Date().toISOString(),
-              },
-            );
             dashSpinner.succeed(`Web dashboard starting on ${dashboardUrl}`);
 
             if (opts.open) {

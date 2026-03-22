@@ -88,6 +88,39 @@ test("discoverPreviewCandidateUrls prefers explicit dev server urls and ignores 
   }
 });
 
+test("discoverPreviewCandidateUrls keeps paired-device localhost urls for secure bridge preview", async () => {
+  const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
+  const previousFetch = global.fetch;
+
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+  global.fetch = (async () => {
+    return new Response(JSON.stringify({ output: "stdout localhost:3002" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const session = {
+      ...buildSession({
+        devServerUrl: "0.0.0.0:3000",
+      }),
+      id: "bridge:bridge-1:session-1",
+      bridgeId: "bridge-1",
+    } satisfies DashboardSession;
+
+    const urls = await discoverPreviewCandidateUrls(session);
+
+    assert.deepEqual(urls, [
+      "http://127.0.0.1:3000/",
+      "http://localhost:3002/",
+    ]);
+  } finally {
+    process.env.CONDUCTOR_BACKEND_URL = previousBackendUrl;
+    global.fetch = previousFetch;
+  }
+});
+
 test("loadPreviewSessionContext captures backend lookup failures without throwing", async () => {
   const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
 

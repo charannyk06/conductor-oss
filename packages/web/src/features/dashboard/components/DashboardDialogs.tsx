@@ -266,31 +266,6 @@ type AccessSettingsPayload = {
   current: AccessIdentitySummary;
 };
 
-type RemoteAccessPayload = {
-  publicUrl: string | null;
-  connectUrl: string | null;
-  shareable: boolean;
-  status: "disabled" | "starting" | "ready" | "error";
-  provider: "tailscale" | null;
-  recommendedProvider: "tailscale" | null;
-  localUrl: string | null;
-  managed: boolean;
-  installed: boolean;
-  connected: boolean;
-  canAutoInstall: boolean;
-  autoInstallMethod: "brew" | null;
-  lastError: string | null;
-  startedAt: string | null;
-  updatedAt: string | null;
-  mode: "cloudflare-access" | "private-network" | "enterprise-only" | "generic-header" | "clerk" | "local-only" | "misconfigured" | "unsafe-public";
-  title: string;
-  description: string;
-  warnings: string[];
-  nextSteps: string[];
-};
-
-type RemoteAccessAction = "enable" | "rotate" | "disable";
-
 type RepositoryPathHealth = {
   exists: boolean;
   isGitRepository: boolean;
@@ -348,7 +323,6 @@ type PreferencesDialogMode = "onboarding" | "settings";
 type SettingsTabId =
   | "profile"
   | "general"
-  | "remote_access"
   | "repositories"
   | "organization"
   | "projects"
@@ -366,7 +340,6 @@ type SettingsTab = {
 const SETTINGS_TABS: SettingsTab[] = [
   { id: "profile", label: "Profile", icon: CircleUser, implemented: true },
   { id: "general", label: "General", icon: Settings2, implemented: true },
-  { id: "remote_access", label: "Remote Access", icon: SlidersHorizontal, implemented: true },
   { id: "repositories", label: "Repositories", icon: FolderGit2, implemented: true },
   { id: "organization", label: "Organization Settings", icon: Building2, implemented: true },
   { id: "projects", label: "Projects", icon: FolderKanban, implemented: false },
@@ -455,14 +428,6 @@ function normalizeMultilineList(value: unknown): string {
     .join("\n");
 }
 
-function normalizeStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
 function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSettingsPayload {
   const payload = toObject(value);
   const trustedHeaders = toObject(payload["trustedHeaders"]);
@@ -515,108 +480,6 @@ function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSetti
         : null,
     },
   };
-}
-
-function normalizeRemoteAccess(value: unknown): RemoteAccessPayload {
-  const payload = toObject(value);
-  const mode = payload["mode"];
-  const status = payload["status"];
-  const provider = payload["provider"];
-  const autoInstallMethod = payload["autoInstallMethod"];
-
-  return {
-    publicUrl: typeof payload["publicUrl"] === "string" && payload["publicUrl"].trim().length > 0
-      ? payload["publicUrl"].trim()
-      : null,
-    connectUrl: typeof payload["connectUrl"] === "string" && payload["connectUrl"].trim().length > 0
-      ? payload["connectUrl"].trim()
-      : null,
-    shareable: payload["shareable"] === true,
-    status:
-      status === "starting"
-      || status === "ready"
-      || status === "error"
-      || status === "disabled"
-        ? status
-        : "disabled",
-    provider: provider === "tailscale" ? provider : null,
-    recommendedProvider:
-      payload["recommendedProvider"] === "tailscale"
-        ? payload["recommendedProvider"]
-        : null,
-    localUrl: typeof payload["localUrl"] === "string" && payload["localUrl"].trim().length > 0
-      ? payload["localUrl"].trim()
-      : null,
-    managed: payload["managed"] === true,
-    installed: payload["installed"] === true,
-    connected: payload["connected"] === true,
-    canAutoInstall: payload["canAutoInstall"] === true,
-    autoInstallMethod: autoInstallMethod === "brew" ? "brew" : null,
-    lastError: typeof payload["lastError"] === "string" && payload["lastError"].trim().length > 0
-      ? payload["lastError"].trim()
-      : null,
-    startedAt: typeof payload["startedAt"] === "string" && payload["startedAt"].trim().length > 0
-      ? payload["startedAt"].trim()
-      : null,
-    updatedAt: typeof payload["updatedAt"] === "string" && payload["updatedAt"].trim().length > 0
-      ? payload["updatedAt"].trim()
-      : null,
-    mode:
-      mode === "cloudflare-access"
-      || mode === "private-network"
-      || mode === "enterprise-only"
-      || mode === "generic-header"
-      || mode === "clerk"
-      || mode === "local-only"
-      || mode === "misconfigured"
-      || mode === "unsafe-public"
-        ? mode
-        : "local-only",
-    title: typeof payload["title"] === "string" && payload["title"].trim().length > 0
-      ? payload["title"].trim()
-      : "Remote access",
-    description: typeof payload["description"] === "string" && payload["description"].trim().length > 0
-      ? payload["description"].trim()
-      : "",
-    warnings: normalizeStringArray(payload["warnings"]),
-    nextSteps: normalizeStringArray(payload["nextSteps"]),
-  };
-}
-
-function getRemoteAccessModeLabel(mode: RemoteAccessPayload["mode"]): string {
-  switch (mode) {
-    case "cloudflare-access":
-      return "Cloudflare Access";
-    case "private-network":
-      return "Private network";
-    case "enterprise-only":
-      return "Enterprise only";
-    case "generic-header":
-      return "Legacy mode blocked";
-    case "clerk":
-      return "Clerk";
-    case "misconfigured":
-      return "Auth required";
-    case "unsafe-public":
-      return "Blocked until protected";
-    case "local-only":
-    default:
-      return "Local only";
-  }
-}
-
-function getRemoteAccessStatusLabel(status: RemoteAccessPayload["status"]): string {
-  switch (status) {
-    case "starting":
-      return "Starting";
-    case "ready":
-      return "Ready";
-    case "error":
-      return "Error";
-    case "disabled":
-    default:
-      return "Disabled";
-  }
 }
 
 function emptyModelSelection(): ModelSelectionState {
@@ -2269,12 +2132,8 @@ export function SettingsDialog({
   const [profile, setProfile] = useState<DashboardProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
-  const [remoteAccessSettings, setRemoteAccessSettings] = useState<RemoteAccessPayload>(() => normalizeRemoteAccess(null));
-  const [remoteAccessLoading, setRemoteAccessLoading] = useState(false);
-  const [remoteAccessMutating, setRemoteAccessMutating] = useState<RemoteAccessAction | null>(null);
-  const [remoteAccessError, setRemoteAccessError] = useState<string | null>(null);
 
-  const isBusy = creating || repositoriesSaving || accessSaving || remoteAccessMutating !== null;
+  const isBusy = creating || repositoriesSaving || accessSaving;
 
 function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySettingsPayload {
   return {
@@ -2533,80 +2392,12 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
       }
 
       setAccessSettings(normalizeAccessSettings(data?.access, data?.current));
-      if (activeTab === "remote_access") {
-        await loadRemoteAccess();
-      }
       return true;
     } catch (err) {
       setAccessError(err instanceof Error ? err.message : "Failed to save organization settings");
       return false;
     } finally {
       setAccessSaving(false);
-    }
-  }
-
-  async function loadRemoteAccess(): Promise<void> {
-    setRemoteAccessLoading(true);
-    setRemoteAccessError(null);
-    try {
-      const res = await fetch("/api/remote-access");
-      const data = (await res.json().catch(() => null)) as
-        | { error?: string; reason?: string }
-        | RemoteAccessPayload
-        | null;
-      if (!res.ok) {
-        const reason = data && typeof data === "object" && "reason" in data && typeof data.reason === "string"
-          ? data.reason
-          : null;
-        const errorMessage = data && typeof data === "object" && "error" in data && typeof data.error === "string"
-          ? data.error
-          : null;
-        throw new Error(reason ?? errorMessage ?? `Failed to load remote access (${res.status})`);
-      }
-
-      setRemoteAccessSettings(normalizeRemoteAccess(data));
-    } catch (err) {
-      setRemoteAccessSettings(normalizeRemoteAccess(null));
-      setRemoteAccessError(err instanceof Error ? err.message : "Failed to load remote access");
-    } finally {
-      setRemoteAccessLoading(false);
-    }
-  }
-
-  async function mutateRemoteAccess(action: RemoteAccessAction): Promise<void> {
-    setRemoteAccessMutating(action);
-    setRemoteAccessError(null);
-    try {
-      const res = await fetch("/api/remote-access", {
-        method: action === "disable" ? "DELETE" : "POST",
-        headers: action === "disable"
-          ? undefined
-          : {
-              "Content-Type": "application/json",
-            },
-        body: action === "disable"
-          ? undefined
-          : JSON.stringify({ action }),
-      });
-      const data = (await res.json().catch(() => null)) as
-        | { error?: string; reason?: string }
-        | RemoteAccessPayload
-        | null;
-      if (!res.ok) {
-        const reason = data && typeof data === "object" && "reason" in data && typeof data.reason === "string"
-          ? data.reason
-          : null;
-        const errorMessage = data && typeof data === "object" && "error" in data && typeof data.error === "string"
-          ? data.error
-          : null;
-        throw new Error(reason ?? errorMessage ?? `Failed to ${action} remote access (${res.status})`);
-      }
-
-      setRemoteAccessSettings(normalizeRemoteAccess(data));
-    } catch (err) {
-      setRemoteAccessError(err instanceof Error ? err.message : `Failed to ${action} remote access`);
-    } finally {
-      setRemoteAccessMutating(null);
     }
   }
 
@@ -2627,8 +2418,6 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     setAccessError(null);
     setProfile(null);
     setProfileError(null);
-    setRemoteAccessSettings(normalizeRemoteAccess(null));
-    setRemoteAccessError(null);
   }, [mode, open]);
 
   useEffect(() => {
@@ -2648,12 +2437,6 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   useEffect(() => {
     if (!open || mode === "onboarding" || activeTab !== "profile") return;
     void loadProfile();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, mode, open]);
-
-  useEffect(() => {
-    if (!open || mode === "onboarding" || activeTab !== "remote_access") return;
-    void loadRemoteAccess();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, mode, open]);
 
@@ -2700,35 +2483,16 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   const isPreferencesTab = activeTabItem.id === "preferences";
   const isProfileTab = activeTabItem.id === "profile";
   const isGeneralTab = activeTabItem.id === "general";
-  const isRemoteAccessTab = activeTabItem.id === "remote_access";
   const isAgentsTab = activeTabItem.id === "agents";
   const isPreferenceFormTab = isPreferencesTab || isGeneralTab || isAgentsTab;
-  const isPrimarySettingsTab = isPreferenceFormTab || isRemoteAccessTab;
   const isRepositoriesTab = activeTabItem.id === "repositories";
   const isOrganizationTab = activeTabItem.id === "organization";
   const onboardingStepIndex = visibleTabs.findIndex((tab) => tab.id === activeTabItem.id) + 1;
   const onboardingHasRepositoryStep = visibleTabs.some((tab) => tab.id === "repositories");
   const accessCanEdit = accessSettings.current.role === "admin";
-  const remoteAccessModeLabel = getRemoteAccessModeLabel(remoteAccessSettings.mode);
-  const remoteAccessStatusLabel = getRemoteAccessStatusLabel(remoteAccessSettings.status);
-  const remoteAccessMutationPending = remoteAccessMutating !== null;
-  const managedRemoteProvider = remoteAccessSettings.provider ?? remoteAccessSettings.recommendedProvider;
-  const usingPrivateNetworkFlow = managedRemoteProvider === "tailscale";
-  const showManagedTunnelControls = managedRemoteProvider !== null || remoteAccessSettings.managed;
   const settingsMenuClass = "z-50 min-w-[240px] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
   const settingsSubMenuClass = `${settingsMenuClass} min-w-[280px]`;
   const settingsMenuItemClass = "flex min-h-[40px] cursor-default items-center gap-2 rounded-[4px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
-  const remoteAccessEnableLabel = !remoteAccessSettings.installed && remoteAccessSettings.canAutoInstall
-    ? "Install + Enable"
-    : "Enable Private Link";
-  const remoteAccessCanEnable = !remoteAccessLoading
-    && !remoteAccessMutationPending
-    && usingPrivateNetworkFlow
-    && !(remoteAccessSettings.status === "ready" && remoteAccessSettings.managed);
-  const remoteAccessCanRotate = false;
-  const remoteAccessCanDisable = !remoteAccessLoading
-    && !remoteAccessMutationPending
-    && (remoteAccessSettings.status === "starting" || remoteAccessSettings.status === "ready" || remoteAccessSettings.status === "error");
 
   const orderedAgentOptions = useMemo(() => {
     const opts = new Set(agentOptions);
@@ -2933,7 +2697,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
             </header>
 
             <div className="min-h-0 flex-1 overflow-auto px-4 py-3 sm:px-6 sm:py-4">
-              {isPrimarySettingsTab ? (
+              {isPreferenceFormTab ? (
                 <div className="space-y-5">
                   {isOnboarding && (
                     <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.08)] px-4 py-3">
@@ -3207,212 +2971,6 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     </>
                   )}
 
-                  {isRemoteAccessTab && (
-                    <div className="space-y-4">
-                      <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.06)] px-4 py-3">
-                        <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Remote Access</h4>
-                        <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                          Use one complete URL to open this Conductor instance from your phone or any other machine.
-                          The URL below is only shown to admin sessions because it can grant real control of the dashboard.
-                        </p>
-                      </section>
-
-                    <section className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="space-y-1">
-                          <h5 className="text-[18px] leading-[20px] text-[var(--vk-text-strong)]">{remoteAccessSettings.title}</h5>
-                          <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                            {remoteAccessSettings.description}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => void loadRemoteAccess()}
-                          disabled={remoteAccessLoading}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-[var(--vk-border)] px-2 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          <RefreshCcw className={`h-3.5 w-3.5${remoteAccessLoading ? " animate-spin" : ""}`} />
-                          <span>Refresh</span>
-                        </button>
-                      </div>
-
-                      {remoteAccessLoading ? (
-                        <div className="flex items-center gap-2 rounded-[6px] border border-[var(--vk-border)] px-3 py-3 text-[13px] text-[var(--vk-text-muted)]">
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                          Loading remote access details...
-                        </div>
-                      ) : remoteAccessError ? (
-                        <div className="rounded-[6px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-3 py-3 text-[12px] leading-5 text-[var(--vk-red)]">
-                          {remoteAccessError}
-                        </div>
-                      ) : (
-                        <>
-                          <div className="grid gap-3 lg:grid-cols-3">
-                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-                                Remote Status
-                              </span>
-                              <p className="mt-2 text-[14px] text-[var(--vk-text-normal)]">{remoteAccessStatusLabel}</p>
-                            </div>
-                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-                                Security Mode
-                              </span>
-                              <p className="mt-2 text-[14px] text-[var(--vk-text-normal)]">{remoteAccessModeLabel}</p>
-                            </div>
-                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-                                Local Target
-                              </span>
-                              <p className="mt-2 break-all text-[14px] text-[var(--vk-text-normal)]">
-                                {remoteAccessSettings.localUrl ?? "Not resolved"}
-                              </p>
-                            </div>
-                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-                                Remote URL
-                              </span>
-                              <p className="mt-2 break-all text-[14px] text-[var(--vk-text-normal)]">
-                                {remoteAccessSettings.publicUrl ?? "Not resolved"}
-                              </p>
-                            </div>
-                          </div>
-
-                          {showManagedTunnelControls ? (
-                            <div className="space-y-3 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
-                              <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div className="space-y-1">
-                                  <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-                                    {usingPrivateNetworkFlow ? "Private Network Link" : "Managed Remote Access"}
-                                  </span>
-                                  <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
-                                    {usingPrivateNetworkFlow
-                                      ? "Start a private Tailscale link inside Conductor. Only authenticated devices on your tailnet can reach this URL."
-                                      : "Conductor no longer starts public share tunnels. Use a private Tailscale link here, or configure a protected Cloudflare Access URL separately."}
-                                  </p>
-                                </div>
-                                <div className="flex flex-wrap gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={() => void mutateRemoteAccess("enable")}
-                                    disabled={!remoteAccessCanEnable}
-                                    className="inline-flex h-8 items-center rounded-[4px] border border-[var(--vk-orange)] px-3 text-[12px] text-[var(--vk-orange)] hover:bg-[var(--vk-orange)]/10 disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    {remoteAccessMutating === "enable" ? "Enabling..." : remoteAccessEnableLabel}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => void mutateRemoteAccess("disable")}
-                                    disabled={!remoteAccessCanDisable}
-                                    className="inline-flex h-8 items-center rounded-[4px] border border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-                                  >
-                                    {remoteAccessMutating === "disable" ? "Disabling..." : "Disable"}
-                                  </button>
-                                </div>
-                              </div>
-
-                              <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                                {usingPrivateNetworkFlow
-                                  ? remoteAccessSettings.installed
-                                    ? "Tailscale is available on this machine. Conductor will publish a private HTTPS link inside your tailnet."
-                                    : remoteAccessSettings.canAutoInstall && remoteAccessSettings.autoInstallMethod === "brew"
-                                      ? "Tailscale is not installed yet. Conductor can install it automatically with Homebrew, but the machine still needs a Tailscale sign-in."
-                                      : "Tailscale is not installed on this machine yet. Install and sign in once to enable the private remote link."
-                                  : "Managed remote access now uses only a private Tailscale link. For an enterprise public URL, configure Cloudflare Access separately and point Conductor at that protected address."}
-                              </p>
-                            </div>
-                          ) : (
-                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-                                Enterprise Policy
-                              </span>
-                              <p className="mt-2 text-[13px] leading-5 text-[var(--vk-text-normal)]">
-                                {remoteAccessSettings.recommendedProvider === "tailscale"
-                                  ? "Conductor is set up for a private VPN-style link. Install and sign in to Tailscale, then enable the private link from this screen."
-                                  : "Conductor no longer publishes bearer-style unlock URLs. Configure verified Cloudflare Access and point `CONDUCTOR_PUBLIC_DASHBOARD_URL` at the protected external URL instead."}
-                              </p>
-                            </div>
-                          )}
-
-                          {remoteAccessSettings.lastError && (
-                            <div className="rounded-[6px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-4 py-3">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-red)]">
-                                {usingPrivateNetworkFlow ? "Private Link Error" : "Tunnel Error"}
-                              </span>
-                              <p className="mt-2 text-[12px] leading-5 text-[var(--vk-red)]">
-                                {remoteAccessSettings.lastError}
-                              </p>
-                            </div>
-                          )}
-
-                          {remoteAccessSettings.connectUrl ? (
-                            <div className="space-y-2 rounded-[6px] border border-[var(--vk-border)] px-4 py-4">
-                              <div className="flex flex-wrap items-start justify-between gap-2">
-                                <div className="space-y-1">
-                                  <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-                                    {remoteAccessSettings.mode === "private-network"
-                                      ? "Private Remote URL"
-                                      : "Protected Remote URL"}
-                                  </span>
-                                  <p className="text-[12px] text-[var(--vk-text-muted)]">
-                                    {remoteAccessSettings.mode === "private-network"
-                                      ? "Share this URL only with operators who are already authenticated to your private network."
-                                      : "Share this protected URL. Recipients still need to pass the enterprise identity check before they reach Conductor."}
-                                  </p>
-                                </div>
-                                <CopySnippetButton value={remoteAccessSettings.connectUrl} idleLabel="Copy URL" />
-                              </div>
-                              <code className="block break-all rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-3 text-[12px] leading-5 text-[var(--vk-text-normal)]">
-                                {remoteAccessSettings.connectUrl}
-                              </code>
-                            </div>
-                          ) : (
-                            <div className="rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
-                              <p className="text-[13px] text-[var(--vk-text-normal)]">
-                                {remoteAccessSettings.mode === "enterprise-only"
-                                  ? remoteAccessSettings.recommendedProvider === "tailscale"
-                                    ? remoteAccessSettings.connected
-                                      ? "A private VPN URL will appear here after you enable the private link."
-                                      : "A private VPN URL will appear here after Tailscale is installed and signed in."
-                                    : "A protected enterprise remote URL will appear here after verified Cloudflare Access is configured."
-                                  : "A protected remote URL is not available yet."}
-                              </p>
-                            </div>
-                          )}
-
-                          {remoteAccessSettings.warnings.length > 0 && (
-                            <div className="space-y-2 rounded-[6px] border border-[var(--vk-red)]/35 bg-[var(--vk-red)]/10 px-4 py-3">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-red)]">
-                                Security Warnings
-                              </span>
-                              <div className="space-y-1.5">
-                                {remoteAccessSettings.warnings.map((warning) => (
-                                  <p key={warning} className="text-[12px] leading-5 text-[var(--vk-red)]">
-                                    {warning}
-                                  </p>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {remoteAccessSettings.nextSteps.length > 0 && (
-                            <div className="space-y-2 rounded-[6px] border border-[var(--vk-border)] px-4 py-3">
-                              <span className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">Next Steps</span>
-                              <div className="space-y-1.5">
-                                {remoteAccessSettings.nextSteps.map((step) => (
-                                  <p key={step} className="text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                                    {step}
-                                  </p>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </section>
-
-                    </div>
-                  )}
                 </div>
               ) : isProfileTab ? (
                 <SettingsProfilePanel
@@ -3852,11 +3410,11 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
               ) : isOrganizationTab ? (
                 <div className="space-y-5">
                   <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.06)] px-4 py-3">
-                    <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Security-First Remote Access</h4>
+                    <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Access Control</h4>
                     <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                      The dashboard stays bound to localhost. For phone and team access, put a verified edge
-                      identity layer like Cloudflare Access in front of it, then map authenticated users into
-                      viewer, operator, or admin roles here.
+                      The dashboard stays bound to localhost by default. If you need access beyond the local machine,
+                      put a verified identity layer like Cloudflare Access or Clerk in front of it, then map
+                      authenticated users into viewer, operator, or admin roles here.
                     </p>
                   </section>
 
@@ -3928,8 +3486,8 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                         </label>
 
                         <p className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                          Public share-link remote control has been removed. Remote access now requires either the private
-                          Tailscale link or an identity-bound provider such as Cloudflare Access or Clerk.
+                          Unauthenticated public dashboard access is not supported. Use a verified identity provider
+                          such as Cloudflare Access or Clerk before exposing the dashboard beyond localhost.
                         </p>
 
                         <label className="block">
@@ -4057,9 +3615,9 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                         </div>
 
                         <p className="rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                          Enterprise remote access requires a Cloudflare Access application that injects a verified JWT
-                          and email header. Conductor will not publish a shareable admin URL when that verification layer
-                          is missing.
+                          Verified public dashboard access requires a Cloudflare Access application that injects a
+                          signed JWT and identity email header. Conductor will not trust a public request path when
+                          that verification layer is missing.
                         </p>
                       </section>
 
@@ -4102,7 +3660,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                 <section className="space-y-3">
                   <h4 className="text-[16px] font-medium text-[var(--vk-text-strong)]">{activeTabItem.label}</h4>
                   <p className="text-[14px] text-[var(--vk-text-muted)]">
-                    This section is queued for implementation. General, Agents, Remote Access, and repository settings are available now.
+                    This section is queued for implementation. General, Agents, and repository settings are available now.
                   </p>
                   <button
                     type="button"

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import puppeteer, {
@@ -15,6 +16,8 @@ import {
   ChromeReleaseChannel,
   computeSystemExecutablePath,
 } from "@puppeteer/browsers";
+import { requestBridgePreview } from "@/lib/bridgeApiProxy";
+import type { BridgePreviewConfig } from "@/lib/previewSession";
 import type {
   PreviewCommandRequest,
   PreviewDomNode,
@@ -202,6 +205,33 @@ function urlsShareOrigin(left: string, right: string): boolean {
   }
 }
 
+type BridgePreviewRuntimeConfig = BridgePreviewConfig & {
+  forwardedHeaders: Record<string, string>;
+};
+
+function sanitizeBridgePreviewRequestHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const sanitized: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.trim().toLowerCase();
+    if (!normalized) continue;
+    if (
+      normalized === "host"
+      || normalized === "connection"
+      || normalized === "proxy-connection"
+      || normalized === "keep-alive"
+      || normalized === "transfer-encoding"
+      || normalized === "content-length"
+      || normalized === "accept-encoding"
+    ) {
+      continue;
+    }
+    sanitized[normalized] = value;
+  }
+  return sanitized;
+}
+
 type PreviewState = {
   sessionId: string;
   page: Page | null;
@@ -213,6 +243,8 @@ type PreviewState = {
   frameIds: WeakMap<Frame, string>;
   requestStarts: WeakMap<HTTPRequest, number>;
   frameSequence: number;
+  bridgePreview: BridgePreviewRuntimeConfig | null;
+  requestInterceptionEnabled: boolean;
 };
 
 type ElementSnapshot = Omit<PreviewElementSelection, "frameId" | "frameName" | "frameUrl">;
@@ -271,6 +303,8 @@ class PreviewBrowserManager {
         frameIds: new WeakMap(),
         requestStarts: new WeakMap(),
         frameSequence: 0,
+        bridgePreview: null,
+        requestInterceptionEnabled: false,
       };
       this.states.set(sessionId, state);
     }
@@ -283,6 +317,87 @@ class PreviewBrowserManager {
     const next = `frame-${++state.frameSequence}`;
     state.frameIds.set(frame, next);
     return next;
+  }
+
+  async configureBridgePreview(
+    sessionId: string,
+    config: BridgePreviewConfig | null,
+    forwardedHeaders?: HeadersInit,
+  ): Promise<void> {
+    const state = this.getState(sessionId);
+    state.bridgePreview = config && forwardedHeaders
+      ? {
+          ...config,
+          forwardedHeaders: Object.fromEntries(new Headers(forwardedHeaders).entries()),
+        }
+      : null;
+
+    if (state.page && !state.page.isClosed()) {
+      await this.syncRequestInterception(state, state.page);
+    }
+  }
+
+  private async syncRequestInterception(state: PreviewState, page: Page): Promise<void> {
+    const shouldIntercept = Boolean(state.bridgePreview);
+    if (state.requestInterceptionEnabled === shouldIntercept) {
+      return;
+    }
+
+    await page.setRequestInterception(shouldIntercept);
+    state.requestInterceptionEnabled = shouldIntercept;
+  }
+
+  private async handleBridgePreviewRequest(
+    state: PreviewState,
+    request: HTTPRequest,
+  ): Promise<void> {
+    const bridgePreview = state.bridgePreview;
+    if (!bridgePreview) {
+      await request.continue();
+      return;
+    }
+
+    let parsed: URL;
+    try {
+      parsed = new URL(request.url());
+    } catch {
+      await request.abort("blockedbyclient");
+      return;
+    }
+
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      await request.abort("blockedbyclient");
+      return;
+    }
+
+    if (!bridgePreview.allowedOrigins.includes(parsed.origin)) {
+      await request.abort("blockedbyclient");
+      return;
+    }
+
+    const bodyBuffer = request.method() === "GET" || request.method() === "HEAD"
+      ? null
+      : await request.postDataBuffer().catch(() => null);
+
+    const previewResponse = await requestBridgePreview(
+      bridgePreview.bridgeId,
+      bridgePreview.forwardedHeaders,
+      {
+        sessionId: bridgePreview.sessionId,
+        method: request.method(),
+        url: parsed.toString(),
+        headers: sanitizeBridgePreviewRequestHeaders(request.headers()),
+        bodyBase64: bodyBuffer ? Buffer.from(bodyBuffer).toString("base64") : null,
+      },
+    );
+
+    await request.respond({
+      status: previewResponse.status,
+      headers: previewResponse.headers,
+      body: previewResponse.bodyBase64
+        ? Buffer.from(previewResponse.bodyBase64, "base64")
+        : Buffer.alloc(0),
+    });
   }
 
   private attachListeners(state: PreviewState, page: Page) {
@@ -302,6 +417,29 @@ class PreviewBrowserManager {
     });
     page.on("request", (request) => {
       state.requestStarts.set(request, Date.now());
+      if (!state.requestInterceptionEnabled) {
+        return;
+      }
+
+      void this.handleBridgePreviewRequest(state, request).catch(async (error) => {
+        state.lastError = error instanceof Error ? error.message : "Bridge preview request failed";
+        pushLog(state.networkLogs, {
+          id: buildLogId("preview-request"),
+          kind: "network",
+          level: "error",
+          message: state.lastError,
+          timestamp: new Date().toISOString(),
+          url: request.url(),
+          method: request.method(),
+          status: null,
+          resourceType: request.resourceType(),
+        });
+        try {
+          await request.abort("failed");
+        } catch {
+          // Ignore duplicate resolution failures.
+        }
+      });
     });
     page.on("response", (response) => {
       this.captureResponse(state, response);
@@ -367,6 +505,7 @@ class PreviewBrowserManager {
     const state = this.getState(sessionId);
 
     if (state.page && !state.page.isClosed()) {
+      await this.syncRequestInterception(state, state.page);
       return { state, page: state.page };
     }
 
@@ -375,6 +514,7 @@ class PreviewBrowserManager {
     page.setDefaultNavigationTimeout(30_000);
     page.setDefaultTimeout(15_000);
     this.attachListeners(state, page);
+    await this.syncRequestInterception(state, page);
     state.page = page;
     state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
     state.selectedElement = null;
@@ -565,6 +705,22 @@ class PreviewBrowserManager {
   async connect(sessionId: string, url: string): Promise<void> {
     const { state, page } = await this.ensurePage(sessionId);
     const candidates = buildNavigationCandidates(url);
+    if (state.bridgePreview) {
+      const candidateOrigins = new Set(
+        candidates.map((candidate) => {
+          try {
+            return new URL(candidate).origin;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      const allowed = state.bridgePreview.allowedOrigins.some((origin) => candidateOrigins.has(origin));
+      if (!allowed) {
+        throw new Error("Bridge preview only allows navigation to the session's reported local dev server origin.");
+      }
+    }
+
     let lastError: unknown = null;
 
     for (const candidate of candidates) {

@@ -9,7 +9,6 @@ type AppRouteHandlerRoutes =
   | "/api/access"
   | "/api/agents"
   | "/api/attachments"
-  | "/api/auth/session"
   | "/api/boards"
   | "/api/config"
   | "/api/context-files"
@@ -59,7 +58,6 @@ interface ParamMap {
   "/api/access": {}
   "/api/agents": {}
   "/api/attachments": {}
-  "/api/auth/session": {}
   "/api/boards": {}
   "/api/config": {}
   "/api/context-files": {}
