@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"time"
 )
 
 const serviceName = "com.conductor.bridge"
@@ -154,8 +155,14 @@ func installLaunchdService(home, plistPath string) error {
 	serviceTarget := domainTarget + "/" + serviceName
 
 	_ = exec.Command("launchctl", "bootout", serviceTarget).Run()
+
 	if err := exec.Command("launchctl", "bootstrap", domainTarget, plistPath).Run(); err != nil {
-		return fmt.Errorf("bootstrap launchd service: %w", err)
+		time.Sleep(300 * time.Millisecond)
+		if printErr := exec.Command("launchctl", "print", serviceTarget).Run(); printErr != nil {
+			if retryErr := exec.Command("launchctl", "bootstrap", domainTarget, plistPath).Run(); retryErr != nil {
+				return fmt.Errorf("bootstrap launchd service: %w", err)
+			}
+		}
 	}
 	if err := exec.Command("launchctl", "kickstart", "-k", serviceTarget).Run(); err != nil {
 		return fmt.Errorf("kickstart launchd service: %w", err)
