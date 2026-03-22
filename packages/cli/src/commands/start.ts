@@ -8,7 +8,7 @@
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
