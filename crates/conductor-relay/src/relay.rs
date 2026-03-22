@@ -2433,9 +2433,18 @@ mod tests {
 
     #[test]
     fn device_proxy_timeout_tracks_slow_filesystem_routes() {
-        assert_eq!(device_proxy_timeout_for_url("/api/filesystem/pick-directory"), DEVICE_PICKER_TIMEOUT);
-        assert_eq!(device_proxy_timeout_for_url("/api/filesystem/directory?path=C:/Users"), Duration::from_secs(90));
-        assert_eq!(device_proxy_timeout_for_url("/api/sessions"), DEVICE_PROXY_TIMEOUT);
+        assert_eq!(
+            device_proxy_timeout_for_url("/api/filesystem/pick-directory"),
+            DEVICE_PICKER_TIMEOUT
+        );
+        assert_eq!(
+            device_proxy_timeout_for_url("/api/filesystem/directory?path=C:/Users"),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            device_proxy_timeout_for_url("/api/sessions"),
+            DEVICE_PROXY_TIMEOUT
+        );
     }
 
     #[tokio::test]

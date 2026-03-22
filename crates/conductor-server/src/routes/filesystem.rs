@@ -120,7 +120,11 @@ fn resolve_user_home_dir() -> Option<PathBuf> {
         .or_else(|| {
             let drive = std::env::var_os("HOMEDRIVE")?;
             let path = std::env::var_os("HOMEPATH")?;
-            Some(PathBuf::from(format!("{}{}", drive.to_string_lossy(), path.to_string_lossy())))
+            Some(PathBuf::from(format!(
+                "{}{}",
+                drive.to_string_lossy(),
+                path.to_string_lossy()
+            )))
         })
 }
 
