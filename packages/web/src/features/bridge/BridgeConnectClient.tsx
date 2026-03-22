@@ -1027,7 +1027,7 @@ export default function BridgeConnectClient({
                       />
                     ) : null}
                     {selectedDevice.connected ? (
-                      <div className="flex flex-wrap gap-2">
+                      <div className="flex w-full flex-wrap gap-2">
                         <Button
                           type="button"
                           variant="outline"
@@ -1118,7 +1118,7 @@ export default function BridgeConnectClient({
                           isSelected ? "border-[var(--vk-orange)]" : "border-[var(--vk-border)]",
                         )}
                       >
-                        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                           <button
                             type="button"
                             className="min-w-0 flex-1 text-left"
@@ -1174,7 +1174,7 @@ export default function BridgeConnectClient({
                             ) : null}
                           </button>
 
-                          <div className="flex shrink-0 items-center gap-2">
+                          <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
                             {device.connected ? (
                               <>
                                 <Button asChild variant={isSelected ? "primary" : "outline"} size="md">
