@@ -8,6 +8,7 @@ import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import { useBridgeTunnel } from "@/hooks/useBridgeTunnel";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
+import { resolveSessionTerminalViewportOptions } from "@/components/sessions/sessionTerminalUtils";
 
 export interface BridgeSessionTerminalProps extends SessionTerminalProps {
   scope?: string;
@@ -82,10 +83,33 @@ export function BridgeSessionTerminal({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const bridgeInputRef = useRef({ connected, readOnly, sendTerminalInput });
   const lastAppliedInsertNonceRef = useRef(0);
+  const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
   const [hasOutput, setHasOutput] = useState(false);
   const [loadingOutput, setLoadingOutput] = useState(true);
   const [requestError, setRequestError] = useState<string | null>(null);
   const sessionLabel = sessionState.trim().replace(/[_-]+/g, " ");
+
+  const clearScheduledLayoutSyncs = () => {
+    for (const timer of scheduledLayoutSyncTimersRef.current) {
+      window.clearTimeout(timer);
+    }
+    scheduledLayoutSyncTimersRef.current = [];
+  };
+
+  const applyTerminalViewport = () => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    const viewport = resolveSessionTerminalViewportOptions(
+      terminalHostRef.current?.clientWidth
+      ?? (typeof window === "undefined" ? undefined : window.innerWidth),
+    );
+    terminal.options.fontFamily = viewport.fontFamily;
+    terminal.options.fontSize = viewport.fontSize;
+    terminal.options.lineHeight = viewport.lineHeight;
+  };
 
   const fitTerminal = () => {
     const terminal = terminalRef.current;
@@ -94,6 +118,7 @@ export function BridgeSessionTerminal({
       return null;
     }
 
+    applyTerminalViewport();
     const previousCols = terminal.cols;
     const previousRows = terminal.rows;
     fitAddon.fit();
@@ -110,6 +135,32 @@ export function BridgeSessionTerminal({
     };
   };
 
+  const syncTerminalGeometry = (force: boolean = false) => {
+    const next = fitTerminal();
+    if (next && connected && (force || next.changed)) {
+      sendTerminalResize(next.cols, next.rows);
+    }
+  };
+
+  const scheduleGeometryRefreshes = () => {
+    clearScheduledLayoutSyncs();
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      syncTerminalGeometry(true);
+    });
+    scheduledLayoutSyncTimersRef.current.push(
+      window.setTimeout(() => {
+        syncTerminalGeometry(true);
+      }, 120),
+      window.setTimeout(() => {
+        syncTerminalGeometry(true);
+      }, 360),
+    );
+  };
+
   useEffect(() => {
     bridgeInputRef.current = { connected, readOnly, sendTerminalInput };
     if (terminalRef.current) {
@@ -119,27 +170,23 @@ export function BridgeSessionTerminal({
   }, [connected, readOnly, sendTerminalInput]);
 
   useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.options.fontSize = immersiveMobileMode ? 12 : 13;
-      terminalRef.current.options.lineHeight = immersiveMobileMode ? 1.34 : 1.44;
-    }
-  }, [immersiveMobileMode]);
-
-  useEffect(() => {
     const host = terminalHostRef.current;
     if (!host) {
       return;
     }
 
     host.textContent = "";
+    const initialViewport = resolveSessionTerminalViewportOptions(
+      typeof window === "undefined" ? undefined : window.innerWidth,
+    );
     const terminal = new Terminal({
       allowTransparency: true,
       convertEol: true,
       cursorBlink: !readOnly,
       disableStdin: readOnly || !connected,
-      fontFamily: '"JetBrains Mono", "SFMono-Regular", ui-monospace, monospace',
-      fontSize: immersiveMobileMode ? 12 : 13,
-      lineHeight: immersiveMobileMode ? 1.34 : 1.44,
+      fontFamily: initialViewport.fontFamily,
+      fontSize: initialViewport.fontSize,
+      lineHeight: initialViewport.lineHeight,
       letterSpacing: 0.2,
       scrollback: 4_000,
       theme: TERMINAL_THEME,
@@ -165,7 +212,7 @@ export function BridgeSessionTerminal({
     host.addEventListener("click", focusTerminal);
     terminal.focus();
     window.requestAnimationFrame(() => {
-      fitTerminal();
+      syncTerminalGeometry(true);
     });
 
     return () => {
@@ -185,6 +232,7 @@ export function BridgeSessionTerminal({
     if (terminalRef.current) {
       resetTerminalOutput(terminalRef.current, "");
     }
+    clearScheduledLayoutSyncs();
   }, [sessionId]);
 
   useEffect(() => {
@@ -195,10 +243,11 @@ export function BridgeSessionTerminal({
     }
 
     const applyGeometry = () => {
-      const next = fitTerminal();
-      if (next && next.changed && connected) {
-        sendTerminalResize(next.cols, next.rows);
-      }
+      syncTerminalGeometry();
+    };
+
+    const refreshTerminalLayout = () => {
+      syncTerminalGeometry(true);
     };
 
     applyGeometry();
@@ -208,14 +257,47 @@ export function BridgeSessionTerminal({
       : new ResizeObserver(() => {
         applyGeometry();
       });
+    const visualViewport = typeof window === "undefined" ? null : window.visualViewport;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshTerminalLayout();
+      }
+    };
+    const fontSet = typeof document === "undefined" ? null : document.fonts;
+    let fontReadyCancelled = false;
 
     observer?.observe(host);
     window.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("scroll", applyGeometry);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    fontSet?.addEventListener?.("loadingdone", refreshTerminalLayout as EventListener);
+    void fontSet?.ready.then(() => {
+      if (!fontReadyCancelled) {
+        refreshTerminalLayout();
+      }
+    }).catch(() => {});
     return () => {
+      fontReadyCancelled = true;
       observer?.disconnect();
       window.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("scroll", applyGeometry);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      fontSet?.removeEventListener?.("loadingdone", refreshTerminalLayout as EventListener);
     };
-  }, [connected, immersiveMobileMode, sendTerminalResize]);
+  }, [connected, sendTerminalResize]);
+
+  useEffect(() => {
+    if (connected) {
+      scheduleGeometryRefreshes();
+      return () => {
+        clearScheduledLayoutSyncs();
+      };
+    }
+
+    clearScheduledLayoutSyncs();
+  }, [connected]);
 
   useEffect(() => {
     if (!terminalChunk) {
@@ -353,7 +435,7 @@ export function BridgeSessionTerminal({
         <div className="relative flex h-full flex-col overflow-hidden rounded-[10px] border border-white/10 bg-[#060404] text-[#efe8e1]">
           <div
             ref={terminalHostRef}
-            className="h-full min-h-0 flex-1 overflow-hidden px-2 py-2 text-left [&_.xterm]:h-full [&_.xterm]:px-1 [&_.xterm-viewport]:overflow-y-auto"
+            className="h-full min-h-0 flex-1 overflow-hidden px-2 py-2 text-left [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto"
           />
 
           {!hasOutput ? (

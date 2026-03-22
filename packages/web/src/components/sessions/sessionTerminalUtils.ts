@@ -23,6 +23,7 @@ export type TerminalModeState = {
 const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
 /** Must match the Tailwind `lg:` breakpoint (1024px) used in SessionTerminal / SessionDetail. */
 const COMPACT_TERMINAL_CHROME_MAX_WIDTH_PX = 1024;
+const DEFAULT_TERMINAL_VIEWPORT_WIDTH_PX = 1280;
 const ANSI_ESCAPE_PATTERN = /\u001b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][\s\S]*?(?:\u0007|\u001b\\))/g;
 
 export const TERMINAL_FONT_FAMILY = [
@@ -88,6 +89,16 @@ export function getSessionTerminalViewportOptions(width: number): SessionTermina
     fontSize: 14,
     lineHeight: 1.2,
   };
+}
+
+export function resolveSessionTerminalViewportOptions(
+  width: number | null | undefined,
+): SessionTerminalViewportOptions {
+  const normalizedWidth =
+    typeof width === "number" && Number.isFinite(width) && width > 0
+      ? width
+      : DEFAULT_TERMINAL_VIEWPORT_WIDTH_PX;
+  return getSessionTerminalViewportOptions(normalizedWidth);
 }
 
 export function detectMobileTerminalInputRail(
