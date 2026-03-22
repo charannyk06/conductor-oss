@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
 import {
+  buildBridgeRelayAuthHeaders,
   buildBridgeRelayWebSocketUrl,
   resolveBridgeRelayUserId,
   signBridgeRelayJwt,
 } from "@/lib/bridgeRelayAuth";
 import { requireBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
-import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -51,7 +51,7 @@ export async function POST(
     const relayResponse = await fetch(relayTarget, {
       method: "POST",
       headers: new Headers({
-        ...(Object.fromEntries((await buildForwardedAccessHeaders(request)).entries())),
+        ...(Object.fromEntries((await buildBridgeRelayAuthHeaders(request)).entries())),
         "Content-Type": "application/json",
       }),
       body: JSON.stringify({ session_id: bridgeSession.sessionId }),
@@ -71,7 +71,7 @@ export async function POST(
       );
     }
 
-    const jwt = await signBridgeRelayJwt(userId);
+    const jwt = await signBridgeRelayJwt(userId, "terminal-browser");
     return NextResponse.json({
       wsUrl: buildBridgeRelayWebSocketUrl(
         `/terminal/${encodeURIComponent(payload.terminal_id)}/browser`,

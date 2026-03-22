@@ -3,6 +3,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::env;
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command as StdCommand;
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
@@ -62,15 +66,15 @@ pub struct AppUpdateConfig {
 
 impl AppUpdateConfig {
     pub fn from_env() -> Self {
-        let package_name = env::var("CONDUCTOR_CLI_PACKAGE_NAME")
+        let mut package_name = env::var("CONDUCTOR_CLI_PACKAGE_NAME")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let current_version = env::var("CONDUCTOR_CLI_VERSION")
+        let mut current_version = env::var("CONDUCTOR_CLI_VERSION")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        let install_mode =
+        let mut install_mode =
             AppInstallMode::from_env(env::var("CONDUCTOR_CLI_INSTALL_MODE").ok().as_deref());
         let rerun_command = env::var("CONDUCTOR_CLI_RERUN_COMMAND")
             .ok()
@@ -80,6 +84,22 @@ impl AppUpdateConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+
+        if package_name.is_none()
+            || current_version.is_none()
+            || matches!(install_mode, AppInstallMode::Unknown)
+        {
+            let inferred = infer_cli_metadata();
+            if package_name.is_none() {
+                package_name = inferred.package_name;
+            }
+            if current_version.is_none() {
+                current_version = inferred.current_version;
+            }
+            if matches!(install_mode, AppInstallMode::Unknown) {
+                install_mode = inferred.install_mode;
+            }
+        }
         let launcher_control_token = env::var("CONDUCTOR_LAUNCHER_CONTROL_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
@@ -94,6 +114,252 @@ impl AppUpdateConfig {
             launcher_control_token,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CliPackageManifest {
+    name: Option<String>,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct InferredAppUpdateMetadata {
+    package_name: Option<String>,
+    current_version: Option<String>,
+    install_mode: AppInstallMode,
+}
+
+fn infer_cli_metadata() -> InferredAppUpdateMetadata {
+    let current_exe = env::current_exe().ok();
+    let mut package_name = None;
+    let mut current_version = None;
+    let mut install_mode = AppInstallMode::Unknown;
+
+    if let Some(current_exe) = current_exe.as_deref() {
+        let normalized_root = infer_package_root_candidates(current_exe);
+        for package_root in &normalized_root {
+            if package_name.is_none() || current_version.is_none() {
+                let manifest = infer_cli_package_manifest(package_root);
+                if manifest.name.is_some() && manifest.version.is_some() {
+                    package_name = package_name.or(manifest.name);
+                    current_version = current_version.or(manifest.version);
+                }
+            }
+
+            if matches!(install_mode, AppInstallMode::Unknown) {
+                install_mode = infer_cli_install_mode(current_exe, package_root);
+            }
+        }
+
+        if package_name.is_none() {
+            let fallback = infer_fallback_package_name(current_exe);
+            if !fallback.is_empty() {
+                package_name = Some(fallback);
+            }
+        }
+
+        if current_version.is_none() {
+            current_version = infer_cli_binary_version(current_exe);
+        }
+    }
+
+    InferredAppUpdateMetadata {
+        package_name,
+        current_version,
+        install_mode,
+    }
+}
+
+fn infer_package_root_candidates(current_exe: &Path) -> Vec<PathBuf> {
+    let executable = current_exe.to_path_buf();
+    let mut candidate = executable
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| executable.clone());
+    let mut candidates = Vec::new();
+    for _ in 0..16 {
+        candidates.push(candidate.clone());
+        let parent = candidate.parent();
+        match parent {
+            Some(next) => candidate = next.to_path_buf(),
+            None => break,
+        }
+    }
+
+    if let Some(bun_candidate) = infer_bun_candidate_package_root(current_exe) {
+        candidates.insert(0, bun_candidate);
+    }
+
+    candidates
+}
+
+fn infer_bun_candidate_package_root(current_exe: &Path) -> Option<PathBuf> {
+    let normalized_exe = normalize_fs_path(current_exe);
+    if !normalized_exe.contains("/.bun/") {
+        return None;
+    }
+
+    let bun_root = env::var_os("BUN_INSTALL").map(PathBuf::from).or_else(|| {
+        env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .map(|value| value.join(".bun"))
+    });
+
+    bun_root.and_then(|root| {
+        for package_name in ["conductor-oss", "conductor"] {
+            let package_root = root
+                .join("install")
+                .join("global")
+                .join("node_modules")
+                .join(package_name);
+            if package_root.exists() {
+                return Some(package_root);
+            }
+        }
+        None
+    })
+}
+
+fn infer_cli_package_manifest(candidate_root: &Path) -> CliPackageManifest {
+    let path = candidate_root.join("package.json");
+    let payload = match fs::read_to_string(path) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return CliPackageManifest {
+                name: None,
+                version: None,
+            }
+        }
+    };
+
+    serde_json::from_str::<CliPackageManifest>(&payload)
+        .ok()
+        .filter(|manifest| {
+            manifest
+                .name
+                .as_deref()
+                .is_some_and(is_conductor_package_name)
+                && manifest
+                    .version
+                    .as_deref()
+                    .is_some_and(|version| !version.trim().is_empty())
+        })
+        .unwrap_or(CliPackageManifest {
+            name: None,
+            version: None,
+        })
+}
+
+fn infer_fallback_package_name(current_exe: &Path) -> String {
+    match current_exe
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+    {
+        "conductor" | "co" => "conductor-oss".to_string(),
+        _ => "".to_string(),
+    }
+}
+
+fn infer_cli_binary_version(current_exe: &Path) -> Option<String> {
+    let output = StdCommand::new(current_exe)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined_output = format!("{stdout}\n{stderr}");
+    extract_version_string(&combined_output).or_else(|| extract_version_string(&stdout))
+}
+
+fn is_conductor_package_name(name: &str) -> bool {
+    let normalized = name.trim().to_lowercase();
+    matches!(normalized.as_str(), "conductor" | "conductor-oss")
+}
+
+fn extract_version_string(value: &str) -> Option<String> {
+    for token in value.split(|c: char| {
+        !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+' || c == 'v')
+    }) {
+        let normalized = token.trim_start_matches(&['v', 'V'][..]).trim();
+        if parse_version(normalized).is_some() {
+            return Some(normalized.to_string());
+        }
+    }
+    None
+}
+
+fn infer_cli_install_mode(current_exe: &Path, package_root: &Path) -> AppInstallMode {
+    if is_source_checkout_layout(package_root) {
+        return AppInstallMode::Source;
+    }
+
+    let normalized_root = normalize_fs_path(package_root);
+    let normalized_exe = normalize_fs_path(current_exe);
+    if normalized_root.contains("/_npx/")
+        || normalized_root.contains("/npm-cache/_npx/")
+        || normalized_root.contains("/pnpm/dlx/")
+        || normalized_root.contains("/bunx/")
+        || normalized_exe.contains("/_npx/")
+        || normalized_exe.contains("/npm-cache/_npx/")
+        || normalized_exe.contains("/pnpm/dlx/")
+        || normalized_exe.contains("/bunx/")
+    {
+        return AppInstallMode::Npx;
+    }
+
+    let bun_root = infer_bun_root();
+    if bun_root
+        .as_ref()
+        .map(|root| normalized_root.starts_with(&normalize_fs_path(root)))
+        .unwrap_or(false)
+    {
+        return AppInstallMode::GlobalBun;
+    }
+
+    if normalized_root.contains("/.conductor/npm/")
+        || normalized_root.contains("/lib/node_modules/")
+        || normalized_root.contains("/node_modules/")
+    {
+        return AppInstallMode::GlobalNpm;
+    }
+
+    if normalized_root.contains("/pnpm/") {
+        return AppInstallMode::GlobalPnpm;
+    }
+
+    AppInstallMode::Unknown
+}
+
+fn infer_bun_root() -> Option<PathBuf> {
+    env::var_os("BUN_INSTALL").map(PathBuf::from).or_else(|| {
+        env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .map(|value| value.join(".bun"))
+    })
+}
+
+fn is_source_checkout_layout(candidate: &Path) -> bool {
+    if !normalize_fs_path(candidate).ends_with("/packages/cli") {
+        return false;
+    }
+
+    let parent = candidate.parent().unwrap_or(candidate);
+    parent
+        .parent()
+        .map(|value| value.join("pnpm-lock.yaml"))
+        .map(|lockfile| lockfile.exists())
+        .unwrap_or(false)
+}
+
+fn normalize_fs_path(value: &Path) -> String {
+    value.to_string_lossy().replace('\\', "/")
 }
 
 #[derive(Debug, Clone, Serialize)]

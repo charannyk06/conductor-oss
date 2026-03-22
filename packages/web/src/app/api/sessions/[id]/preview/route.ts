@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
@@ -39,7 +40,11 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   }
 
   const manager = getPreviewBrowserManager();
-  await manager.configureBridgePreview(id, previewContext.bridgePreview, forwardedHeaders);
+  await manager.configureBridgePreview(
+    id,
+    previewContext.bridgePreview,
+    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+  );
   const status = withLookupError(
     await manager.getStatus(id, previewContext.candidateUrls),
     previewContext.error,
@@ -71,7 +76,11 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
   }
 
   const manager = getPreviewBrowserManager();
-  await manager.configureBridgePreview(id, previewContext.bridgePreview, forwardedHeaders);
+  await manager.configureBridgePreview(
+    id,
+    previewContext.bridgePreview,
+    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+  );
 
   try {
     await manager.runCommand(id, body);
