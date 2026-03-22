@@ -286,9 +286,12 @@ export function resolveRequestBaseUrl(headerStore: Headers): string | null {
   const requestHost = forwardedHost || headerStore.get("host")?.trim() || "";
   if (!requestHost) return null;
 
+  const requestHostname = requestHost.split(":")[0]?.trim().toLowerCase() ?? "";
   const forwardedProto = headerStore.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
   const protocol = forwardedProto === "http" || forwardedProto === "https"
     ? forwardedProto
+    : isLoopbackHost(requestHostname)
+    ? "http"
     : "https";
 
   return `${protocol}://${requestHost}`;

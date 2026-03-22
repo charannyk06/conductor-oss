@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveClerkConfiguration, resolveClerkFrontendApiUrl } from "./clerkConfig";
+import {
+  resolveClerkConfiguration,
+  resolveClerkFrontendApiUrl,
+  resolveRequestBaseUrl,
+} from "./clerkConfig";
 
 const originalPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 const originalSecretKey = process.env.CLERK_SECRET_KEY;
@@ -234,4 +238,22 @@ test("resolveClerkFrontendApiUrl prefers the explicit environment override", () 
   process.env.CLERK_FAPI_URL = "https://frontend-api.example.com/";
 
   assert.equal(resolveClerkFrontendApiUrl(), "https://frontend-api.example.com");
+});
+
+test("resolveRequestBaseUrl keeps loopback requests on http when no proxy protocol is present", () => {
+  const headers = new Headers({
+    host: "127.0.0.1:3000",
+  });
+
+  assert.equal(resolveRequestBaseUrl(headers), "http://127.0.0.1:3000");
+});
+
+test("resolveRequestBaseUrl respects forwarded https on hosted deployments", () => {
+  const headers = new Headers({
+    host: "127.0.0.1:3000",
+    "x-forwarded-host": "preview.conductross.com",
+    "x-forwarded-proto": "https",
+  });
+
+  assert.equal(resolveRequestBaseUrl(headers), "https://preview.conductross.com");
 });
