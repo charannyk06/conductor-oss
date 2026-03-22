@@ -1415,7 +1415,9 @@ mod tests {
 
         assert!(injected.contains(TTYD_MOBILE_TOUCH_SHIM_MARKER));
         assert!(injected.contains("window.__conductorTtydMobileTouchShimInstalled"));
-        assert!(injected.contains("const compactViewport = viewportWidth > 0 && viewportWidth < 1024;"));
+        assert!(
+            injected.contains("const compactViewport = viewportWidth > 0 && viewportWidth < 1024;")
+        );
         assert!(injected.contains("const terminalRoot = document.querySelector('.xterm');"));
         assert!(injected.contains(".xterm-viewport"));
         assert!(injected.contains(".xterm-scrollable-element"));
