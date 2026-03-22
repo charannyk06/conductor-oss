@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess } from "@/lib/auth";
+import { maybeProxyBridgeSessionRequest } from "@/lib/bridgeSessionProxy";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
@@ -10,10 +11,18 @@ export const dynamic = "force-dynamic";
 type RouteParams = { params: Promise<{ id: string }> };
 
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
+  const { id } = await context.params;
+  const proxied = await maybeProxyBridgeSessionRequest(
+    request,
+    id,
+    (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/preview/screenshot`,
+    { role: "viewer" },
+  );
+  if (proxied) return proxied;
+
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
-  const { id } = await context.params;
   const previewContext = await loadPreviewSessionContext(id, {
     headers: await buildForwardedAccessHeaders(request),
   });

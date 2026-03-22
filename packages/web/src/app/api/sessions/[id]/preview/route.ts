@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { maybeProxyBridgeSessionRequest } from "@/lib/bridgeSessionProxy";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
@@ -25,10 +26,18 @@ function withLookupError(
 }
 
 export async function GET(request: NextRequest, context: RouteParams): Promise<Response> {
+  const { id } = await context.params;
+  const proxied = await maybeProxyBridgeSessionRequest(
+    request,
+    id,
+    (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/preview`,
+    { role: "viewer" },
+  );
+  if (proxied) return proxied;
+
   const denied = await guardApiAccess(request, "viewer");
   if (denied) return denied;
 
-  const { id } = await context.params;
   const previewContext = await loadPreviewSessionContext(id, {
     headers: await buildForwardedAccessHeaders(request),
   });
@@ -45,12 +54,20 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
 }
 
 export async function POST(request: NextRequest, context: RouteParams): Promise<Response> {
+  const { id } = await context.params;
+  const proxied = await maybeProxyBridgeSessionRequest(
+    request,
+    id,
+    (sessionId) => `/api/sessions/${encodeURIComponent(sessionId)}/preview`,
+    { role: "operator", requireActionGuard: true },
+  );
+  if (proxied) return proxied;
+
   const denied = await guardApiAccess(request, "operator");
   if (denied) return denied;
   const deniedAction = guardApiActionAccess(request);
   if (deniedAction) return deniedAction;
 
-  const { id } = await context.params;
   const previewContext = await loadPreviewSessionContext(id, {
     headers: await buildForwardedAccessHeaders(request),
   });

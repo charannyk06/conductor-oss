@@ -260,21 +260,13 @@ export function SessionDetail({
   }
 
   const status = typeof session.status === "string" ? session.status : "unknown";
-  const previewSupported = !session.bridgeId?.trim();
   const compactStatusLabel = getCompactSessionStatusLabel(status);
   const statusDotClass = getStatusDotClass(status);
   const statusAnimated = isStatusAnimated(status);
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
-  const previewTabActive = previewSupported && active && activeTab === "preview";
+  const previewTabActive = active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
-
-  useEffect(() => {
-    if (previewSupported || activeTab !== "preview") {
-      return;
-    }
-    handleTabChange("terminal");
-  }, [activeTab, handleTabChange, previewSupported]);
 
   const sessionTabs = (
     <TabsList className="flex w-full overflow-x-auto sm:w-fit sm:inline-flex">
@@ -286,12 +278,10 @@ export function SessionDetail({
         <SquareTerminal className="h-3.5 w-3.5" />
         Terminal
       </TabsTrigger>
-      {previewSupported ? (
-        <TabsTrigger value="preview" className={tabTriggerClass}>
-          <Globe className="h-3.5 w-3.5" />
-          Preview
-        </TabsTrigger>
-      ) : null}
+      <TabsTrigger value="preview" className={tabTriggerClass}>
+        <Globe className="h-3.5 w-3.5" />
+        Preview
+      </TabsTrigger>
     </TabsList>
   );
 
@@ -411,24 +401,20 @@ export function SessionDetail({
               immersiveMobileMode={immersiveTerminalActive}
             />
           </TabsContent>
-
-
-          {previewSupported ? (
-            <TabsContent
-              value="preview"
-              className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-            >
-              {previewTabActive ? (
-                <SessionPreview
-                  key={sessionId}
-                  sessionId={sessionId}
-                  active={previewTabActive}
-                  onQueueTerminalInsert={queueTerminalInsert}
-                  onConnectionChange={handlePreviewConnectionChange}
-                />
-              ) : null}
-            </TabsContent>
-          ) : null}
+          <TabsContent
+            value="preview"
+            className="min-h-0 h-full min-w-0 w-full overflow-auto focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+          >
+            {previewTabActive ? (
+              <SessionPreview
+                key={sessionId}
+                sessionId={sessionId}
+                active={previewTabActive}
+                onQueueTerminalInsert={queueTerminalInsert}
+                onConnectionChange={handlePreviewConnectionChange}
+              />
+            ) : null}
+          </TabsContent>
         </div>
       </Tabs>
     </div>
