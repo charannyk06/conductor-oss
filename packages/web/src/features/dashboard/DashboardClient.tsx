@@ -1878,6 +1878,7 @@ export default function DashboardClient({
     enabled: !preferencesLoading,
     projectId: notificationProjectId,
     preferences: resolvedPreferences.notifications,
+    bridgeId: effectiveBridgeId,
   });
 
   const handleSelectProject = useCallback((projectId: string | null) => {
@@ -2123,6 +2124,7 @@ export default function DashboardClient({
                 <SessionDetail
                   sessionId={sessionId}
                   initialSession={initialSession}
+                  bridgeId={effectiveBridgeId}
                   active={sessionActive}
                   immersiveMobileMode={sessionActive && immersiveMobileMode}
                   onOpenSidebar={toggleSidebar}

@@ -6,6 +6,7 @@ import {
   resolveBridgeRelayUserId,
   signBridgeRelayJwt,
 } from "@/lib/bridgeRelayAuth";
+import { getBridgeIdFromRequest } from "@/lib/bridgeApiProxy";
 import { requireBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 
@@ -27,7 +28,9 @@ export async function POST(
 
   const { id } = await context.params;
   const bridgeSession = decodeBridgeSessionId(id);
-  if (!bridgeSession) {
+  const bridgeId = bridgeSession?.bridgeId ?? getBridgeIdFromRequest(request);
+  const sessionId = bridgeSession?.sessionId ?? id.trim();
+  if (!bridgeId || !sessionId) {
     return NextResponse.json(
       { error: "Relay terminals are only available for paired-device sessions." },
       { status: 400 },
@@ -45,7 +48,7 @@ export async function POST(
 
   try {
     const relayTarget = new URL(
-      `/api/devices/${encodeURIComponent(bridgeSession.bridgeId)}/terminals`,
+      `/api/devices/${encodeURIComponent(bridgeId)}/terminals`,
       requireBridgeRelayUrl(),
     );
     const relayResponse = await fetch(relayTarget, {
@@ -54,7 +57,7 @@ export async function POST(
         ...(Object.fromEntries((await buildBridgeRelayAuthHeaders(request)).entries())),
         "Content-Type": "application/json",
       }),
-      body: JSON.stringify({ session_id: bridgeSession.sessionId }),
+      body: JSON.stringify({ session_id: sessionId }),
       cache: "no-store",
       redirect: "manual",
     });

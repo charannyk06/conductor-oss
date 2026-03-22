@@ -65,6 +65,7 @@ export default function SessionPageClient({
     enabled: !preferencesLoading && notificationProjectId !== null,
     projectId: notificationProjectId,
     preferences: preferences?.notifications ?? null,
+    bridgeId: effectiveBridgeId,
   });
 
   const topBarTitle = useMemo(() => {
@@ -202,6 +203,7 @@ export default function SessionPageClient({
           key={params.id}
           sessionId={params.id}
           initialSession={currentSession}
+          bridgeId={effectiveBridgeId}
           immersiveMobileMode={immersiveTerminalMode}
           onOpenSidebar={toggleSidebar}
         />

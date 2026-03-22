@@ -94,16 +94,19 @@ export function guardedSessionProxyParamRoute(
       );
     }
 
+    const bridgeId = getBridgeIdFromRequest(request);
+    if (bridgeId) {
+      return guardAndProxyToBridgeDevice(
+        request,
+        bridgeId,
+        buildPathname(params),
+        options,
+      );
+    }
+
     const rejected = await rejectHostedLocalFallback(request);
     if (rejected) {
       return rejected;
-    }
-
-    if (options.bridgeAware) {
-      const bridgeId = getBridgeIdFromRequest(request);
-      if (bridgeId) {
-        return guardAndProxyToBridgeDevice(request, bridgeId, buildPathname(params), options);
-      }
     }
 
     return guardAndProxy(request, buildPathname(params), options);

@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import { Check, Copy, Download, Loader2, RefreshCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { subscribeToAppUpdateEvents } from "@/lib/liveEvents";
+import { resolveBridgeIdFromLocation, withBridgeQuery } from "@/lib/bridgeQuery";
 import { describeAutoUpdateSkip } from "@/lib/bridgeAppUpdate";
 import type { AppInstallMode, AppUpdateStatus } from "@/lib/types";
 import { cn } from "@/lib/cn";
@@ -64,6 +66,8 @@ function manualActionLabel(update: AppUpdateStatus): string {
 }
 
 export function AppUpdateNotice() {
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [update, setUpdate] = useState<AppUpdateStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
@@ -71,20 +75,51 @@ export function AppUpdateNotice() {
   const [requestingUpdate, setRequestingUpdate] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
 
-  const refreshUpdate = useCallback(async (force = false) => {
+  const activeBridgeId = useMemo(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return resolveBridgeIdFromLocation(window.location.href);
+  }, [pathname, searchParams]);
+
+  const resolveCurrentBridgeId = useCallback(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return resolveBridgeIdFromLocation(window.location.href);
+  }, []);
+
+  const buildAppUpdatePath = useCallback((force = false) => {
+    const basePath = withBridgeQuery("/api/app-update", resolveCurrentBridgeId());
+    if (!force) {
+      return basePath;
+    }
+
+    const url = new URL(basePath, "http://127.0.0.1");
+    url.searchParams.set("force", "1");
+    return `${url.pathname}${url.search}${url.hash}`;
+  }, [resolveCurrentBridgeId]);
+
+  const refreshUpdate = useCallback(async (force = false): Promise<AppUpdateStatus | null> => {
     try {
-      const query = force ? "?force=1" : "";
-      const response = await fetch(`/api/app-update${query}`, { cache: "no-store" });
+      const response = await fetch(buildAppUpdatePath(force), { cache: "no-store" });
       const payload = await response.json().catch(() => null) as AppUpdateStatus | { error?: string } | null;
+      if (response.status === 412) {
+        setLoadError(null);
+        return null;
+      }
       if (!response.ok) {
         throw new Error(typeof payload?.error === "string" ? payload.error : `Failed to load update status (${response.status})`);
       }
-      setUpdate(payload as AppUpdateStatus);
+      const next = payload as AppUpdateStatus;
+      setUpdate(next);
       setLoadError(null);
+      return next;
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Failed to load update status.");
+      return null;
     }
-  }, []);
+  }, [buildAppUpdatePath, resolveCurrentBridgeId]);
 
   useEffect(() => {
     try {
@@ -95,11 +130,13 @@ export function AppUpdateNotice() {
     }
 
     void refreshUpdate(true);
-    const unsubscribe = subscribeToAppUpdateEvents((next) => {
-      if (!next) return;
-      setUpdate(next);
-      setLoadError(null);
-    });
+    const unsubscribe = activeBridgeId
+      ? () => {}
+      : subscribeToAppUpdateEvents((next) => {
+        if (!next) return;
+        setUpdate(next);
+        setLoadError(null);
+      });
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -115,7 +152,7 @@ export function AppUpdateNotice() {
       window.removeEventListener("focus", handleVisibilityChange);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [refreshUpdate]);
+  }, [activeBridgeId, refreshUpdate]);
 
   const hiddenForVersion = update?.latestVersion && dismissedVersion === update.latestVersion;
   const restarting = Boolean(update?.restarting) || reconnecting;
@@ -150,7 +187,7 @@ export function AppUpdateNotice() {
   async function handleUpdateNow() {
     setRequestingUpdate(true);
     try {
-      const response = await fetch("/api/app-update", {
+      const response = await fetch(withBridgeQuery("/api/app-update", resolveCurrentBridgeId()), {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -171,6 +208,21 @@ export function AppUpdateNotice() {
 
   const waitForRestartToFinish = useCallback(async () => {
     const deadline = Date.now() + 60_000;
+    if (activeBridgeId) {
+      while (Date.now() < deadline) {
+        const next = await refreshUpdate(false);
+        if (!next?.restarting) {
+          setReconnecting(false);
+          return;
+        }
+        await new Promise((resolveDelay) => window.setTimeout(resolveDelay, 1000));
+      }
+
+      setReconnecting(false);
+      setLoadError("Restart started on the paired device, but it did not reconnect in time. Retry from the bridge controls.");
+      return;
+    }
+
     while (Date.now() < deadline) {
       try {
         const response = await fetch("/api/health", { cache: "no-store" });
@@ -186,7 +238,7 @@ export function AppUpdateNotice() {
 
     setReconnecting(false);
     setLoadError("Restart started, but the dashboard did not come back in time. Reload manually.");
-  }, []);
+  }, [activeBridgeId, refreshUpdate]);
 
   useEffect(() => {
     if (!update?.restarting || reconnecting) return;
@@ -196,7 +248,7 @@ export function AppUpdateNotice() {
 
   async function handleRestartNow() {
     try {
-      const response = await fetch("/api/app-update", {
+      const response = await fetch(withBridgeQuery("/api/app-update", resolveCurrentBridgeId()), {
         method: "POST",
         headers: {
           "content-type": "application/json",

@@ -7,6 +7,7 @@ import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 import {
   isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
@@ -68,10 +69,16 @@ function encodeInputFrame(data: string): Uint8Array {
   return frame;
 }
 
-async function fetchClosedTerminalOutput(sessionId: string): Promise<string> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/output?lines=500`, {
-    cache: "no-store",
-  });
+async function fetchClosedTerminalOutput(
+  sessionId: string,
+  bridgeId?: string | null,
+): Promise<string> {
+  const response = await fetch(
+    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/output?lines=500`, bridgeId),
+    {
+      cache: "no-store",
+    },
+  );
   const payload = (await response.json().catch(() => null)) as { output?: string; error?: string } | null;
   if (!response.ok) {
     throw new Error(payload?.error ?? `Failed to load terminal output (${response.status})`);
@@ -79,11 +86,17 @@ async function fetchClosedTerminalOutput(sessionId: string): Promise<string> {
   return typeof payload?.output === "string" ? payload.output : "";
 }
 
-async function fetchRelayTerminalUrl(sessionId: string): Promise<string> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/relay`, {
-    method: "POST",
-    cache: "no-store",
-  });
+async function fetchRelayTerminalUrl(
+  sessionId: string,
+  bridgeId?: string | null,
+): Promise<string> {
+  const response = await fetch(
+    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/relay`, bridgeId),
+    {
+      method: "POST",
+      cache: "no-store",
+    },
+  );
   const payload = (await response.json().catch(() => null)) as { wsUrl?: string; error?: string } | null;
   if (!response.ok || !payload?.wsUrl) {
     throw new Error(payload?.error ?? `Failed to attach relay terminal (${response.status})`);
@@ -93,6 +106,7 @@ async function fetchRelayTerminalUrl(sessionId: string): Promise<string> {
 
 export function RemoteSessionTerminal({
   sessionId,
+  bridgeId,
   sessionState,
   pendingInsert,
 }: SessionTerminalProps) {
@@ -404,7 +418,7 @@ export function RemoteSessionTerminal({
     if (sessionClosed) {
       let cancelled = false;
       setLoading(true);
-      void fetchClosedTerminalOutput(sessionId)
+      void fetchClosedTerminalOutput(sessionId, bridgeId)
         .then((output) => {
           if (cancelled) {
             return;
@@ -433,7 +447,7 @@ export function RemoteSessionTerminal({
     setLoading(true);
     setError(null);
 
-    void fetchRelayTerminalUrl(sessionId)
+    void fetchRelayTerminalUrl(sessionId, bridgeId)
       .then((wsUrl) => {
         if (cancelled) {
           return;
@@ -527,7 +541,17 @@ export function RemoteSessionTerminal({
       }
       closeSocket();
     };
-  }, [clearScheduledLayoutSyncs, closeSocket, connectionTick, scheduleHandshakeRefreshes, scheduleReconnect, sessionClosed, sessionId, syncTerminalGeometry]);
+  }, [
+    bridgeId,
+    clearScheduledLayoutSyncs,
+    closeSocket,
+    connectionTick,
+    scheduleHandshakeRefreshes,
+    scheduleReconnect,
+    sessionClosed,
+    sessionId,
+    syncTerminalGeometry,
+  ]);
 
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {

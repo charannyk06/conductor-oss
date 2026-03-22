@@ -1,6 +1,7 @@
 "use client";
 
 import { type MutableRefObject, useEffect, useRef } from "react";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 import {
   primeNotificationAudio,
   playNotificationSound,
@@ -33,6 +34,7 @@ interface UseNotificationAlertsOptions {
   enabled: boolean;
   projectId: string | null;
   preferences: NotificationPreferences | null;
+  bridgeId?: string | null;
 }
 
 const POLL_INTERVAL_MS = 10_000;
@@ -120,13 +122,14 @@ export function useNotificationAlerts({
   enabled,
   projectId,
   preferences,
+  bridgeId,
 }: UseNotificationAlertsOptions): void {
   const soundEnabledRef = useRef(preferences?.soundEnabled !== false);
   const soundFileRef = useRef<NotificationSoundId>(resolveNotificationSoundId(preferences?.soundFile));
   const seenNotificationKeysRef = useRef(new Set<string>());
   const latestTimestampRef = useRef<string | null>(null);
   const initializedRef = useRef(false);
-  const activeProjectIdRef = useRef<string | null>(null);
+  const activeScopeKeyRef = useRef<string | null>(null);
   const inFlightRef = useRef<Promise<void> | null>(null);
   const pollTimerRef = useRef<number | null>(null);
 
@@ -141,8 +144,10 @@ export function useNotificationAlerts({
     }
 
     const normalizedProjectId = projectId?.trim() || null;
-    if (activeProjectIdRef.current !== normalizedProjectId) {
-      activeProjectIdRef.current = normalizedProjectId;
+    const normalizedBridgeId = bridgeId?.trim() || null;
+    const scopeKey = `${normalizedBridgeId ?? "local"}::${normalizedProjectId ?? ""}`;
+    if (activeScopeKeyRef.current !== scopeKey) {
+      activeScopeKeyRef.current = scopeKey;
       seenNotificationKeysRef.current = new Set();
       latestTimestampRef.current = null;
       initializedRef.current = false;
@@ -172,9 +177,12 @@ export function useNotificationAlerts({
         }
 
         try {
-          const response = await fetch(`/api/notifications?${params.toString()}`, {
-            cache: "no-store",
-          });
+          const response = await fetch(
+            withBridgeQuery(`/api/notifications?${params.toString()}`, normalizedBridgeId),
+            {
+              cache: "no-store",
+            },
+          );
           if (!response.ok) {
             return;
           }
@@ -287,5 +295,5 @@ export function useNotificationAlerts({
       window.removeEventListener("touchstart", handleAudioPrime, true);
       window.removeEventListener("keydown", handleAudioPrime, true);
     };
-  }, [enabled, projectId]);
+  }, [bridgeId, enabled, projectId]);
 }

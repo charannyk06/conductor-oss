@@ -6,6 +6,7 @@
  */
 
 import type { TerminalConnectionInfo } from "./terminalTypes";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
 
 // ---------------------------------------------------------------------------
 // Direct backend URL resolution — no server round-trip
@@ -109,6 +110,7 @@ function resolveProvidedTtydHttpUrl(
 }
 
 type ResolveTerminalConnectionOptions = {
+  bridgeId?: string | null;
   signal?: AbortSignal;
 };
 
@@ -116,10 +118,13 @@ async function fetchTerminalToken(
   sessionId: string,
   options?: ResolveTerminalConnectionOptions,
 ): Promise<TerminalTokenResult> {
-  const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, {
-    cache: "no-store",
-    signal: options?.signal,
-  });
+  const res = await fetch(
+    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, options?.bridgeId),
+    {
+      cache: "no-store",
+      signal: options?.signal,
+    },
+  );
   const data = (await res.json().catch(() => null)) as
     | { required?: boolean; ttydHttpUrl?: string; ttydWsUrl?: string; error?: string }
     | null;

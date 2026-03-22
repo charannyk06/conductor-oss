@@ -1,6 +1,7 @@
 "use client";
 
 import type { AppUpdateStatus, SSESessionEvent, SSESnapshotSession } from "@/lib/types";
+import { resolveBridgeIdFromLocation, withBridgeQuery } from "@/lib/bridgeQuery";
 
 type SnapshotListener = (event: SSESessionEvent) => void;
 type AppUpdateListener = (update: AppUpdateStatus | null) => void;
@@ -73,14 +74,22 @@ function dispatchAppUpdate(update: AppUpdateStatus | null) {
   }
 }
 
+function currentBridgeId(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  return resolveBridgeIdFromLocation(window.location.href);
+}
+
 async function refreshSessions() {
   if (typeof fetch !== "function") {
     return;
   }
 
   const load = (async () => {
+    const bridgeId = currentBridgeId();
     try {
-      const response = await fetch("/api/sessions");
+      const response = await fetch(withBridgeQuery("/api/sessions", bridgeId));
       if (!response.ok) {
         return;
       }
@@ -93,7 +102,7 @@ async function refreshSessions() {
     }
 
     try {
-      const response = await fetch("/api/app-update");
+      const response = await fetch(withBridgeQuery("/api/app-update", bridgeId));
       if (!response.ok) {
         return;
       }
@@ -114,7 +123,13 @@ async function refreshSessions() {
 }
 
 function ensureEventSource() {
-  if (eventSource || typeof EventSource === "undefined" || !hasSubscribers() || !pageVisible()) {
+  if (
+    eventSource
+    || typeof EventSource === "undefined"
+    || !hasSubscribers()
+    || !pageVisible()
+    || currentBridgeId()
+  ) {
     return;
   }
 
@@ -196,6 +211,10 @@ function syncLifecycleState() {
     return;
   }
   attachLifecycleListeners();
+  if (currentBridgeId()) {
+    closeEventSource();
+    return;
+  }
   if (!pageVisible()) {
     closeEventSource();
     return;

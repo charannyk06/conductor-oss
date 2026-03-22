@@ -24,16 +24,17 @@ import (
 )
 
 const (
-	defaultScope             = "conductor-bridge-control"
-	defaultHeartbeatInterval = 30 * time.Second
-	maxReconnectBackoff      = 30 * time.Second
-	ttydPortRangeStart       = 7681
-	ttydPortRangeEnd         = 8699
-	bridgeProxyMetaKey       = "$bridgeProxy"
-	bridgeRequestMetaKey     = "$bridgeRequest"
-	bridgeInstallPath        = "/_bridge/install"
-	bridgeServiceRestartPath = "/_bridge/service/restart"
-	maxPreviewResponseBytes  = 10 * 1024 * 1024
+	defaultScope              = "conductor-bridge-control"
+	defaultHeartbeatInterval  = 30 * time.Second
+	maxReconnectBackoff       = 30 * time.Second
+	terminalAttachMaxAttempts = 5
+	ttydPortRangeStart        = 7681
+	ttydPortRangeEnd          = 8699
+	bridgeProxyMetaKey        = "$bridgeProxy"
+	bridgeRequestMetaKey      = "$bridgeRequest"
+	bridgeInstallPath         = "/_bridge/install"
+	bridgeServiceRestartPath  = "/_bridge/service/restart"
+	maxPreviewResponseBytes   = 10 * 1024 * 1024
 )
 
 type Options struct {
@@ -77,6 +78,31 @@ type bridgeEnvelope struct {
 	Hostname  string `json:"hostname,omitempty"`
 	OS        string `json:"os,omitempty"`
 	Connected bool   `json:"connected,omitempty"`
+}
+
+type terminalAttachError struct {
+	status int
+	err    error
+}
+
+func (e *terminalAttachError) Error() string {
+	if e == nil {
+		return "terminal attach failed"
+	}
+	if e.err != nil {
+		return e.err.Error()
+	}
+	if e.status > 0 {
+		return fmt.Sprintf("terminal attach failed with status %d", e.status)
+	}
+	return "terminal attach failed"
+}
+
+func (e *terminalAttachError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -527,7 +553,7 @@ func terminalBridgeEndpoint(relayURL, terminalID, refreshToken string) (string, 
 	return base.String(), nil
 }
 
-func resolveSessionTerminalWSURL(sessionID string) (string, error) {
+func fetchSessionTerminalWSURL(sessionID string) (string, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return "", fmt.Errorf("session id is required")
 	}
@@ -543,13 +569,13 @@ func resolveSessionTerminalWSURL(sessionID string) (string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request terminal token: %w", err)
+		return "", &terminalAttachError{err: fmt.Errorf("request terminal token: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read terminal token response: %w", err)
+		return "", &terminalAttachError{err: fmt.Errorf("read terminal token response: %w", err)}
 	}
 
 	var payload struct {
@@ -557,7 +583,7 @@ func resolveSessionTerminalWSURL(sessionID string) (string, error) {
 		Error     string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", fmt.Errorf("decode terminal token response: %w", err)
+		return "", &terminalAttachError{err: fmt.Errorf("decode terminal token response: %w", err)}
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -565,13 +591,16 @@ func resolveSessionTerminalWSURL(sessionID string) (string, error) {
 		if message == "" {
 			message = fmt.Sprintf("terminal token request failed with status %d", resp.StatusCode)
 		}
-		return "", fmt.Errorf(message)
+		return "", &terminalAttachError{
+			status: resp.StatusCode,
+			err:    errors.New(message),
+		}
 	}
 
 	base, _ := url.Parse("http://127.0.0.1:4749")
 	resolved, err := base.Parse(strings.TrimSpace(payload.TtydWSURL))
 	if err != nil {
-		return "", fmt.Errorf("parse ttyd websocket url: %w", err)
+		return "", &terminalAttachError{err: fmt.Errorf("parse ttyd websocket url: %w", err)}
 	}
 
 	switch resolved.Scheme {
@@ -581,10 +610,79 @@ func resolveSessionTerminalWSURL(sessionID string) (string, error) {
 		resolved.Scheme = "wss"
 	case "ws", "wss":
 	default:
-		return "", fmt.Errorf("unsupported ttyd websocket scheme %q", resolved.Scheme)
+		return "", &terminalAttachError{err: fmt.Errorf("unsupported ttyd websocket scheme %q", resolved.Scheme)}
 	}
 
 	return resolved.String(), nil
+}
+
+func shouldRetryTerminalAttach(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	var attachErr *terminalAttachError
+	if errors.As(err, &attachErr) {
+		if attachErr.status == 0 {
+			return true
+		}
+		switch attachErr.status {
+		case http.StatusConflict, http.StatusBadGateway, http.StatusGatewayTimeout, http.StatusServiceUnavailable:
+			return true
+		default:
+			return false
+		}
+	}
+
+	return false
+}
+
+func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.Conn, error) {
+	var lastErr error
+	backoff := 250 * time.Millisecond
+
+	for attempt := 0; attempt < terminalAttachMaxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		backendEndpoint, err := fetchSessionTerminalWSURL(sessionID)
+		if err == nil {
+			conn, _, dialErr := websocket.DefaultDialer.DialContext(ctx, backendEndpoint, nil)
+			if dialErr == nil {
+				return conn, nil
+			}
+			err = &terminalAttachError{err: fmt.Errorf("connect backend terminal socket: %w", dialErr)}
+		}
+
+		lastErr = err
+		if !shouldRetryTerminalAttach(err) || attempt == terminalAttachMaxAttempts-1 {
+			break
+		}
+
+		if ensureErr := ensureLocalBackendForProxy(); ensureErr != nil && lastErr == nil {
+			lastErr = ensureErr
+		}
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if backoff < 2*time.Second {
+			backoff *= 2
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("backend terminal connection failed")
+	}
+	return nil, lastErr
 }
 
 func proxyTerminalSession(
@@ -594,11 +692,13 @@ func proxyTerminalSession(
 	terminalID string,
 	sessionID string,
 ) error {
-	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID, refreshToken)
+	backendConn, err := connectBackendTerminal(ctx, sessionID)
 	if err != nil {
 		return err
 	}
-	backendEndpoint, err := resolveSessionTerminalWSURL(sessionID)
+	defer backendConn.Close()
+
+	relayEndpoint, err := terminalBridgeEndpoint(relayURL, terminalID, refreshToken)
 	if err != nil {
 		return err
 	}
@@ -608,12 +708,6 @@ func proxyTerminalSession(
 		return fmt.Errorf("connect relay terminal socket: %w", err)
 	}
 	defer relayConn.Close()
-
-	backendConn, _, err := websocket.DefaultDialer.DialContext(ctx, backendEndpoint, nil)
-	if err != nil {
-		return fmt.Errorf("connect backend terminal socket: %w", err)
-	}
-	defer backendConn.Close()
 
 	errCh := make(chan error, 2)
 

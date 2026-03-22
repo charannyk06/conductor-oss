@@ -46,6 +46,7 @@ const SessionPreview = dynamic(
 interface SessionDetailProps {
   sessionId: string;
   initialSession?: DashboardSession | null;
+  bridgeId?: string | null;
   immersiveMobileMode?: boolean;
   active?: boolean;
   onOpenSidebar?: () => void;
@@ -108,6 +109,7 @@ function isStatusAnimated(status: string): boolean {
 export function SessionDetail({
   sessionId,
   initialSession = null,
+  bridgeId = null,
   immersiveMobileMode = false,
   active = true,
   onOpenSidebar,
@@ -115,7 +117,10 @@ export function SessionDetail({
   const pathname = usePathname();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { session, loading, error } = useSession(sessionId, initialSession, { enabled: active });
+  const { session, loading, error } = useSession(sessionId, initialSession, {
+    enabled: active,
+    bridgeId,
+  });
   const terminalInsertNonceRef = useRef(0);
   const autoPreviewOpenedRef = useRef(false);
   const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
