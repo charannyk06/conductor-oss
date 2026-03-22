@@ -111,6 +111,40 @@ func TestInferCliPackageManifestSupportsBunGlobalInstallationLayout(t *testing.T
 	}
 }
 
+func TestInferCliPackageManifestSupportsStandardGlobalBinLayout(t *testing.T) {
+	tempDir := t.TempDir()
+	workspace := filepath.Join(tempDir, "usr", "local", "lib", "node_modules", "conductor-oss")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("create package workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "package.json"), []byte(`{"name":"conductor-oss","version":"4.5.6"}`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	conductorPath := filepath.Join(tempDir, "usr", "local", "bin", "conductor")
+	if err := os.MkdirAll(filepath.Dir(conductorPath), 0o755); err != nil {
+		t.Fatalf("create global bin dir: %v", err)
+	}
+	if err := os.WriteFile(conductorPath, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatalf("write global script path: %v", err)
+	}
+
+	gotName, gotVersion, gotRoot := inferCliPackageManifest(conductorPath)
+	if gotName != "conductor-oss" {
+		t.Fatalf("expected package name conductor-oss, got %q", gotName)
+	}
+	if gotVersion != "4.5.6" {
+		t.Fatalf("expected package version 4.5.6, got %q", gotVersion)
+	}
+	expectedRoot, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		expectedRoot = workspace
+	}
+	if gotRoot != expectedRoot {
+		t.Fatalf("expected package root %q, got %q", expectedRoot, gotRoot)
+	}
+}
+
 func TestInferCliUpdateEnvFallsBackToBunPackageMetadataWhenEnvMissing(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Setenv("CONDUCTOR_CLI_PACKAGE_NAME", "")
@@ -142,6 +176,41 @@ func TestInferCliUpdateEnvFallsBackToBunPackageMetadataWhenEnvMissing(t *testing
 		"CONDUCTOR_CLI_PACKAGE_NAME=conductor-oss",
 		"CONDUCTOR_CLI_VERSION=1.2.3",
 		"CONDUCTOR_CLI_INSTALL_MODE=global-bun",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected launch env to contain %q, got %v", want, gotEnv)
+		}
+	}
+}
+
+func TestInferCliUpdateEnvFallsBackToGlobalBinPackageMetadataWhenEnvMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("CONDUCTOR_CLI_PACKAGE_NAME", "")
+	t.Setenv("CONDUCTOR_CLI_VERSION", "")
+	t.Setenv("CONDUCTOR_CLI_INSTALL_MODE", "")
+
+	workspace := filepath.Join(tempDir, "usr", "local", "lib", "node_modules", "conductor-oss")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("create package workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "package.json"), []byte(`{"name":"conductor-oss","version":"5.6.7"}`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	conductorPath := filepath.Join(tempDir, "usr", "local", "bin", "conductor")
+	if err := os.MkdirAll(filepath.Dir(conductorPath), 0o755); err != nil {
+		t.Fatalf("create global bin dir: %v", err)
+	}
+	if err := os.WriteFile(conductorPath, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatalf("write global script path: %v", err)
+	}
+
+	gotEnv := inferCliUpdateEnv(conductorPath)
+	got := strings.Join(gotEnv, "\n")
+	for _, want := range []string{
+		"CONDUCTOR_CLI_PACKAGE_NAME=conductor-oss",
+		"CONDUCTOR_CLI_VERSION=5.6.7",
+		"CONDUCTOR_CLI_INSTALL_MODE=global-npm",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected launch env to contain %q, got %v", want, gotEnv)

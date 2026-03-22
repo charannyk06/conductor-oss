@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::env;
@@ -177,17 +178,45 @@ fn infer_package_root_candidates(current_exe: &Path) -> Vec<PathBuf> {
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| executable.clone());
     let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    let append_candidate = |candidate: PathBuf,
+                            candidates: &mut Vec<PathBuf>,
+                            seen: &mut HashSet<PathBuf>| {
+        if candidate.as_os_str().is_empty() {
+            return;
+        }
+        if seen.insert(candidate.clone()) {
+            candidates.push(candidate);
+        }
+    };
+
+    if let Some(bun_candidate) = infer_bun_candidate_package_root(current_exe) {
+        append_candidate(bun_candidate, &mut candidates, &mut seen);
+    }
+
     for _ in 0..16 {
-        candidates.push(candidate.clone());
+        append_candidate(candidate.clone(), &mut candidates, &mut seen);
+        if candidate.file_name().and_then(|value| value.to_str()) == Some("bin") {
+            let parent = candidate.parent().unwrap_or(&candidate);
+            for package_name in ["conductor", "conductor-oss"] {
+                append_candidate(
+                    parent.join("lib").join("node_modules").join(package_name),
+                    &mut candidates,
+                    &mut seen,
+                );
+                append_candidate(
+                    parent.join("node_modules").join(package_name),
+                    &mut candidates,
+                    &mut seen,
+                );
+            }
+        }
         let parent = candidate.parent();
         match parent {
             Some(next) => candidate = next.to_path_buf(),
             None => break,
         }
-    }
-
-    if let Some(bun_candidate) = infer_bun_candidate_package_root(current_exe) {
-        candidates.insert(0, bun_candidate);
     }
 
     candidates
@@ -267,9 +296,6 @@ fn infer_cli_binary_version(current_exe: &Path) -> Option<String> {
         .arg("--version")
         .output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

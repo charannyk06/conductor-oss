@@ -378,18 +378,36 @@ func inferCliPackageRootCandidates(binaryPath string) []string {
 	}
 	current := filepath.Dir(resolvedPath)
 	var candidates []string
+	seen := make(map[string]struct{})
+
+	appendCandidate := func(candidate string) {
+		if candidate == "" {
+			return
+		}
+		if _, exists := seen[candidate]; exists {
+			return
+		}
+		seen[candidate] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+
+	if bunCandidate := inferBunCandidatePackageRootFromBinary(resolvedPath); bunCandidate != "" {
+		appendCandidate(bunCandidate)
+	}
 
 	for i := 0; i < 16; i++ {
-		candidates = append(candidates, current)
+		appendCandidate(current)
+		if filepath.Base(current) == "bin" {
+			for _, packageName := range []string{"conductor", "conductor-oss"} {
+				appendCandidate(filepath.Join(filepath.Dir(current), "lib", "node_modules", packageName))
+				appendCandidate(filepath.Join(filepath.Dir(current), "node_modules", packageName))
+			}
+		}
 		parent := filepath.Dir(current)
 		if parent == current {
 			break
 		}
 		current = parent
-	}
-
-	if bunCandidate := inferBunCandidatePackageRootFromBinary(resolvedPath); bunCandidate != "" {
-		candidates = append([]string{bunCandidate}, candidates...)
 	}
 	return candidates
 }
@@ -446,10 +464,15 @@ func inferCliBinaryVersion(binaryPath string) string {
 	defer cancel()
 
 	command := exec.CommandContext(ctx, binaryPath, "--version")
-	output, err := command.CombinedOutput()
-	if err != nil || ctx.Err() != nil {
+	output, _ := command.CombinedOutput()
+	if ctx.Err() != nil {
 		return ""
 	}
+
+	if len(output) == 0 {
+		return ""
+	}
+
 	match := cliVersionPattern.FindString(string(output))
 	return strings.TrimPrefix(match, "v")
 }
