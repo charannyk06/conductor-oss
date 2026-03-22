@@ -375,9 +375,9 @@ class PreviewBrowserManager {
       return;
     }
 
-    const bodyBuffer = request.method() === "GET" || request.method() === "HEAD"
+    const postData = request.method() === "GET" || request.method() === "HEAD"
       ? null
-      : await request.postDataBuffer().catch(() => null);
+      : request.postData() ?? null;
 
     const previewResponse = await requestBridgePreview(
       bridgePreview.bridgeId,
@@ -387,7 +387,7 @@ class PreviewBrowserManager {
         method: request.method(),
         url: parsed.toString(),
         headers: sanitizeBridgePreviewRequestHeaders(request.headers()),
-        bodyBase64: bodyBuffer ? Buffer.from(bodyBuffer).toString("base64") : null,
+        bodyBase64: postData ? Buffer.from(postData).toString("base64") : null,
       },
     );
 

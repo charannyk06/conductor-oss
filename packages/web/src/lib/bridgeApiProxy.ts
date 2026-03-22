@@ -40,6 +40,12 @@ export type BridgePreviewResponse = {
   bodyBase64?: string | null;
 };
 
+type BridgePreviewResponsePayload = {
+  status?: unknown;
+  headers?: unknown;
+  body_base64?: unknown;
+};
+
 function isJsonResponse(response: Response): boolean {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   return contentType.includes("application/json");
@@ -184,13 +190,17 @@ export async function requestBridgePreview(
     );
   }
 
+  const previewBody = body && typeof body === "object"
+    ? body as BridgePreviewResponsePayload
+    : null;
+
   return {
-    status: typeof body?.status === "number" ? body.status : 502,
-    headers: body && typeof body === "object" && "headers" in body && body.headers && typeof body.headers === "object"
-      ? body.headers as Record<string, string>
+    status: typeof previewBody?.status === "number" ? previewBody.status : 502,
+    headers: previewBody?.headers && typeof previewBody.headers === "object"
+      ? previewBody.headers as Record<string, string>
       : {},
-    bodyBase64: body && typeof body === "object" && "body_base64" in body
-      ? (body.body_base64 as string | null | undefined)
+    bodyBase64: typeof previewBody?.body_base64 === "string" || previewBody?.body_base64 === null
+      ? previewBody.body_base64 as string | null
       : undefined,
   };
 }
