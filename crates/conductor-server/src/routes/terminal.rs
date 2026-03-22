@@ -125,6 +125,19 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
         }
     };
 
+    const scrollTerminalViewport = (deltaY) => {
+        const maxScrollTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+        const nextScrollTop = Math.max(0, Math.min(maxScrollTop, scrollHost.scrollTop + deltaY));
+        if (nextScrollTop === scrollHost.scrollTop) {
+            return false;
+        }
+
+        scrollHost.scrollTop = nextScrollTop;
+        followBottom = isScrollHostAtBottom();
+        lastStableScrollTop = scrollHost.scrollTop;
+        return true;
+    };
+
     const resolveXtermCore = () => window.term?._core || window.term?.core || null;
     const resolveCoreMouseService = () => {
         const core = resolveXtermCore();
@@ -266,9 +279,17 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
                 return;
             }
 
+            if (scrollTerminalViewport(deltaY)) {
+                if (event.cancelable) {
+                    event.preventDefault();
+                }
+                return;
+            }
+
             // xterm already handles touch scrolling when mouse reporting is off. Only
-            // intercept the gesture when the app has enabled mouse mode, which is
-            // the OpenCode case that blocks native touch scrolling on mobile.
+            // intercept the gesture when the viewport has no remaining scroll range
+            // and the app has enabled mouse mode, which is the OpenCode case that
+            // blocks native touch scrolling on mobile.
             if (!syncTouchActionMode()) {
                 return;
             }
@@ -276,6 +297,9 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
             if (event.cancelable) {
                 event.preventDefault();
             }
+
+            followBottom = false;
+            lastStableScrollTop = scrollHost.scrollTop;
 
             // OpenCode enables xterm mouse reporting, which disables xterm's built-in
             // touchmove scrolling. Translate the drag into xterm's internal wheel mouse
@@ -1399,7 +1423,9 @@ mod tests {
         assert!(injected.contains("coreMouseService.areMouseEventsActive"));
         assert!(injected.contains("const syncFollowBottom = () => {"));
         assert!(injected.contains("const stickToBottomIfNeeded = () => {"));
+        assert!(injected.contains("const scrollTerminalViewport = (deltaY) => {"));
         assert!(injected.contains("const syncTouchActionMode = (forceActive) => {"));
+        assert!(injected.contains("if (scrollTerminalViewport(deltaY)) {"));
         assert!(injected.contains("mouseService.getMouseReportCoords"));
         assert!(injected.contains("viewport.getLinesScrolled(wheelLikeEvent)"));
         assert!(injected.contains("button: 4,"));

@@ -55,7 +55,7 @@ export function sanitizeRemoteTerminalSnapshot(snapshot: string): string {
 
 export function isTerminalScrollHostAtBottom(
   scrollHost: TerminalScrollHostLike | null | undefined,
-  tolerance = 1,
+  tolerance = 0.5,
 ): boolean {
   if (!scrollHost) {
     return true;

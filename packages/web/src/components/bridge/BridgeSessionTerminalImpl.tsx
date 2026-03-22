@@ -663,7 +663,7 @@ export function BridgeSessionTerminal({
               .then((response) => {
                 const output = extractOutputText(response);
                 if (terminalRef.current) {
-                  resetTerminalOutput(terminalRef.current, output);
+                  resetTerminalOutput(terminalRef.current, output, followBottomRef.current);
                 }
                 setHasOutput(output.length > 0);
                 setLoadingOutput(false);
@@ -692,7 +692,7 @@ export function BridgeSessionTerminal({
         <div className="relative flex h-full flex-col overflow-hidden rounded-[10px] border border-white/10 bg-[#060404] text-[#efe8e1]">
           <div
             ref={terminalHostRef}
-            className="h-full min-h-0 flex-1 overflow-hidden px-2 py-2 text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
+            className="h-full min-h-0 flex-1 overflow-hidden overscroll-contain px-2 py-2 text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
           />
 
           {!hasOutput ? (
