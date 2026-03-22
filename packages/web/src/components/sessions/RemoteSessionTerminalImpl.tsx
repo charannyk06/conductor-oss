@@ -7,7 +7,10 @@ import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
-import { resolveSessionTerminalViewportOptions } from "@/components/sessions/sessionTerminalUtils";
+import {
+  isTerminalScrollHostAtBottom,
+  resolveSessionTerminalViewportOptions,
+} from "@/components/sessions/sessionTerminalUtils";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 const CMD_OUTPUT = "0".charCodeAt(0);
@@ -39,12 +42,14 @@ const TERMINAL_THEME = {
   brightWhite: "#fff8f2",
 } as const;
 
-function resetTerminalOutput(terminal: Terminal, value: string) {
+function resetTerminalOutput(terminal: Terminal, value: string, scrollToBottom = true) {
   terminal.reset();
   if (value.length > 0) {
     terminal.write(value);
   }
-  terminal.scrollToBottom();
+  if (scrollToBottom) {
+    terminal.scrollToBottom();
+  }
 }
 
 function encodeResizeFrame(cols: number, rows: number): Uint8Array {
@@ -101,6 +106,7 @@ export function RemoteSessionTerminal({
   const lastAppliedInsertNonceRef = useRef(0);
   const retryAttemptRef = useRef(0);
   const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
+  const followBottomRef = useRef(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connectionTick, setConnectionTick] = useState(0);
@@ -168,7 +174,9 @@ export function RemoteSessionTerminal({
     const previousCols = terminal.cols;
     const previousRows = terminal.rows;
     fitAddon.fit();
-    terminal.scrollToBottom();
+    if (followBottomRef.current) {
+      terminal.scrollToBottom();
+    }
 
     const next = { cols: terminal.cols, rows: terminal.rows };
     geometryRef.current = next;
@@ -276,6 +284,14 @@ export function RemoteSessionTerminal({
     terminal.loadAddon(fitAddon);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    const scrollHost =
+      host.querySelector<HTMLElement>(".xterm-viewport")
+      ?? host.querySelector<HTMLElement>(".xterm-scrollable-element");
+    const syncFollowBottom = () => {
+      followBottomRef.current = isTerminalScrollHostAtBottom(scrollHost);
+    };
+    syncFollowBottom();
+    scrollHost?.addEventListener("scroll", syncFollowBottom, { passive: true });
     const dataSubscription = terminal.onData((data) => {
       if (sessionClosed) {
         return;
@@ -300,6 +316,7 @@ export function RemoteSessionTerminal({
 
     return () => {
       host.removeEventListener("click", focusTerminal);
+      scrollHost?.removeEventListener("scroll", syncFollowBottom);
       dataSubscription.dispose();
       terminal.dispose();
       terminalRef.current = null;
@@ -310,11 +327,12 @@ export function RemoteSessionTerminal({
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
     retryAttemptRef.current = 0;
+    followBottomRef.current = true;
     setLoading(true);
     setError(null);
     decoderRef.current = new TextDecoder();
     if (terminalRef.current) {
-      resetTerminalOutput(terminalRef.current, "");
+      resetTerminalOutput(terminalRef.current, "", true);
       terminalRef.current.options.disableStdin = sessionClosed;
       terminalRef.current.options.cursorBlink = !sessionClosed;
     }
@@ -392,7 +410,7 @@ export function RemoteSessionTerminal({
             return;
           }
           if (terminalRef.current) {
-            resetTerminalOutput(terminalRef.current, output);
+            resetTerminalOutput(terminalRef.current, output, true);
           }
           setError(null);
         })
@@ -430,7 +448,7 @@ export function RemoteSessionTerminal({
           retryAttemptRef.current = 0;
           decoderRef.current = new TextDecoder();
           if (terminalRef.current) {
-            resetTerminalOutput(terminalRef.current, "");
+            resetTerminalOutput(terminalRef.current, "", followBottomRef.current);
             terminalRef.current.options.disableStdin = false;
             terminalRef.current.options.cursorBlink = true;
           }
@@ -463,7 +481,9 @@ export function RemoteSessionTerminal({
               const text = decoderRef.current.decode(frame.slice(1), { stream: true });
               if (text.length > 0) {
                 terminal.write(text);
-                terminal.scrollToBottom();
+                if (followBottomRef.current) {
+                  terminal.scrollToBottom();
+                }
               }
               break;
             }

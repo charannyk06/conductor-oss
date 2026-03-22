@@ -8,7 +8,10 @@ import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import { useBridgeTunnel } from "@/hooks/useBridgeTunnel";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
-import { resolveSessionTerminalViewportOptions } from "@/components/sessions/sessionTerminalUtils";
+import {
+  isTerminalScrollHostAtBottom,
+  resolveSessionTerminalViewportOptions,
+} from "@/components/sessions/sessionTerminalUtils";
 
 export interface BridgeSessionTerminalProps extends SessionTerminalProps {
   scope?: string;
@@ -28,12 +31,14 @@ function extractOutputText(response: unknown): string {
   return "";
 }
 
-function resetTerminalOutput(terminal: Terminal, value: string) {
+function resetTerminalOutput(terminal: Terminal, value: string, scrollToBottom = true) {
   terminal.reset();
   if (value.length > 0) {
     terminal.write(value);
   }
-  terminal.scrollToBottom();
+  if (scrollToBottom) {
+    terminal.scrollToBottom();
+  }
 }
 
 type WheelLikeEvent = {
@@ -310,6 +315,7 @@ export function BridgeSessionTerminal({
   const bridgeInputRef = useRef({ connected, readOnly, sendTerminalInput });
   const lastAppliedInsertNonceRef = useRef(0);
   const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
+  const followBottomRef = useRef(true);
   const [hasOutput, setHasOutput] = useState(false);
   const [loadingOutput, setLoadingOutput] = useState(true);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -348,7 +354,9 @@ export function BridgeSessionTerminal({
     const previousCols = terminal.cols;
     const previousRows = terminal.rows;
     fitAddon.fit();
-    terminal.scrollToBottom();
+    if (followBottomRef.current) {
+      terminal.scrollToBottom();
+    }
 
     const next = { cols: terminal.cols, rows: terminal.rows };
     if (next.cols < 2 || next.rows < 2) {
@@ -423,6 +431,14 @@ export function BridgeSessionTerminal({
     terminal.loadAddon(fitAddon);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    const scrollHost =
+      host.querySelector<HTMLElement>(".xterm-viewport")
+      ?? host.querySelector<HTMLElement>(".xterm-scrollable-element");
+    const syncFollowBottom = () => {
+      followBottomRef.current = isTerminalScrollHostAtBottom(scrollHost);
+    };
+    syncFollowBottom();
+    scrollHost?.addEventListener("scroll", syncFollowBottom, { passive: true });
     const cleanupMobileTouchScroll = attachMobileTouchScrollShim(terminal, host);
     const dataSubscription = terminal.onData((data) => {
       const bridgeInput = bridgeInputRef.current;
@@ -444,6 +460,7 @@ export function BridgeSessionTerminal({
 
     return () => {
       host.removeEventListener("click", focusTerminal);
+      scrollHost?.removeEventListener("scroll", syncFollowBottom);
       dataSubscription.dispose();
       cleanupMobileTouchScroll?.();
       terminal.dispose();
@@ -454,11 +471,12 @@ export function BridgeSessionTerminal({
 
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
+    followBottomRef.current = true;
     setHasOutput(false);
     setLoadingOutput(true);
     setRequestError(null);
     if (terminalRef.current) {
-      resetTerminalOutput(terminalRef.current, "");
+      resetTerminalOutput(terminalRef.current, "", true);
     }
     clearScheduledLayoutSyncs();
   }, [sessionId]);
@@ -539,13 +557,15 @@ export function BridgeSessionTerminal({
 
     if (terminalChunk.startsWith("\u000c")) {
       const nextOutput = terminalChunk.slice(1);
-      resetTerminalOutput(terminal, nextOutput);
+      resetTerminalOutput(terminal, nextOutput, followBottomRef.current);
       setHasOutput(nextOutput.length > 0);
       return;
     }
 
     terminal.write(terminalChunk);
-    terminal.scrollToBottom();
+    if (followBottomRef.current) {
+      terminal.scrollToBottom();
+    }
     setHasOutput((current) => current || terminalChunk.length > 0);
   }, [terminalChunk, terminalSequence]);
 
@@ -565,7 +585,7 @@ export function BridgeSessionTerminal({
         }
         const output = extractOutputText(response);
         if (terminalRef.current) {
-          resetTerminalOutput(terminalRef.current, output);
+          resetTerminalOutput(terminalRef.current, output, true);
         }
         setHasOutput(output.length > 0);
         setLoadingOutput(false);

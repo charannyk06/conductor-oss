@@ -5,6 +5,7 @@ import {
   detectCompactTerminalChrome,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
+  isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
   sanitizeRemoteTerminalSnapshot,
   TERMINAL_FONT_FAMILY,
@@ -89,4 +90,11 @@ test("calculateMobileTerminalViewportMetrics returns keyboard inset and visible 
     keyboardInset: 0,
     keyboardVisible: false,
   });
+});
+
+test("isTerminalScrollHostAtBottom treats the viewport as sticky only at the bottom", () => {
+  assert.equal(isTerminalScrollHostAtBottom(null), true);
+  assert.equal(isTerminalScrollHostAtBottom({ clientHeight: 400, scrollHeight: 1200, scrollTop: 800 }), true);
+  assert.equal(isTerminalScrollHostAtBottom({ clientHeight: 400, scrollHeight: 1200, scrollTop: 760 }), false);
+  assert.equal(isTerminalScrollHostAtBottom({ clientHeight: 400, scrollHeight: 1200, scrollTop: 799.5 }), true);
 });
