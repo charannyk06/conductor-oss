@@ -16,6 +16,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { BridgeLocalRepairNotice } from "@/components/bridge/BridgeLocalRepairNotice";
 import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { PublicPageShell } from "@/components/public/PublicPageShell";
 import { SessionTerminal } from "@/components/sessions/SessionTerminal";
@@ -27,6 +28,7 @@ import {
   type BridgeAutoUpdateState,
   writeRecentBridgePairing,
 } from "@/lib/bridgeAppUpdate";
+import { isLegacyBridgeBuildErrorMessage } from "@/lib/bridgeBuildCompatibility";
 import { cn } from "@/lib/cn";
 import {
   requestBridgeRepair,
@@ -269,6 +271,10 @@ export default function BridgeConnectClient({
     && serviceAction.deviceId === selectedDevice?.device_id;
   const selectedDeviceRepairRunning = selectedDeviceActionRunning && serviceAction.kind === "repair";
   const selectedDeviceRestartRunning = selectedDeviceActionRunning && serviceAction.kind === "restart";
+  const selectedDeviceNeedsLocalRepair = Boolean(selectedDevice) && (
+    (serviceAction.deviceId === selectedDevice?.device_id && isLegacyBridgeBuildErrorMessage(serviceAction.message))
+    || (pairingAutoUpdate.deviceId === selectedDevice?.device_id && isLegacyBridgeBuildErrorMessage(pairingAutoUpdate.message))
+  );
 
   useEffect(() => {
     setSelectedDeviceId((current) => {
@@ -1010,6 +1016,15 @@ export default function BridgeConnectClient({
                         {serviceAction.message}
                       </div>
                     ) : null}
+                    {selectedDeviceNeedsLocalRepair ? (
+                      <BridgeLocalRepairNotice
+                        deviceId={selectedDevice.device_id}
+                        deviceName={selectedDevice.device_name}
+                        dashboardUrl={dashboardUrl}
+                        installScriptUrl={installScriptUrl}
+                        relayUrl={relayUrl}
+                      />
+                    ) : null}
                     {selectedDevice.connected ? (
                       <div className="flex flex-wrap gap-2">
                         <Button
@@ -1172,6 +1187,7 @@ export default function BridgeConnectClient({
                                   size="md"
                                   disabled={serviceActionRunning || updateInFlight}
                                   onClick={() => {
+                                    setSelectedDeviceId(device.device_id);
                                     void handleRepairBridge(device);
                                   }}
                                 >
@@ -1188,6 +1204,7 @@ export default function BridgeConnectClient({
                                   size="md"
                                   disabled={updateInFlight || serviceActionRunning}
                                   onClick={() => {
+                                    setSelectedDeviceId(device.device_id);
                                     void handleUpdateBridgeDevice(device);
                                   }}
                                 >
@@ -1204,6 +1221,7 @@ export default function BridgeConnectClient({
                                   size="md"
                                   disabled={serviceActionRunning || updateInFlight}
                                   onClick={() => {
+                                    setSelectedDeviceId(device.device_id);
                                     void handleRestartBridgeService(device);
                                   }}
                                 >

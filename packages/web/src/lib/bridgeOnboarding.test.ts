@@ -6,6 +6,7 @@ import {
   buildBridgeInstallCommand,
   buildBridgeInstallScriptUrl,
   buildBridgeManualPairCommand,
+  buildBridgeRepairHref,
 } from "./bridgeOnboarding";
 
 test("buildBridgeInstallScriptUrl resolves against the current dashboard origin", () => {
@@ -47,5 +48,12 @@ test("buildBridgeManualPairCommand includes relay arguments for both steps", () 
   assert.equal(
     buildBridgeManualPairCommand("ABC123", "https://relay.conductross.com"),
     "conductor-bridge pair --code ABC123 --relay-url https://relay.conductross.com\nconductor-bridge daemon --relay-url https://relay.conductross.com",
+  );
+});
+
+test("buildBridgeRepairHref deep-links to the bridge setup flow for a device", () => {
+  assert.equal(
+    buildBridgeRepairHref("device 1"),
+    "/bridge/connect?device=device%201#bridge-setup",
   );
 });
