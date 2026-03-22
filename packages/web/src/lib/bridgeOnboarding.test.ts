@@ -30,7 +30,7 @@ test("buildBridgeBootstrapConnectCommand uses the cross-platform npx entrypoint"
       "https://preview.conductross.com",
       "https://relay.conductross.com",
     ),
-    "npx conductor-oss@latest bridge setup --dashboard-url https://preview.conductross.com --relay-url https://relay.conductross.com",
+    "npx --yes conductor-oss@latest bridge setup --dashboard-url https://preview.conductross.com --relay-url https://relay.conductross.com",
   );
 });
 

@@ -253,7 +253,6 @@ parse_args "$@"
 configure_shell_path
 install_go_if_missing
 build_bridge
-ensure_conductor_cli
 install_bridge_service
 
 echo "Installed conductor-bridge to $INSTALL_BIN_DIR/conductor-bridge"
@@ -262,6 +261,7 @@ if [ -n "$CONNECT_DASHBOARD_URL" ]; then
 else
   echo "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
 fi
+echo "Bridge setup does not need the full Conductor CLI first. You can install conductor-oss later if needed."
 run_connect_if_requested
 `;
 }

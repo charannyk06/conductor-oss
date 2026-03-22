@@ -22,6 +22,7 @@ function buildInstallScript(sourceArchiveUrl: string): string {
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 $GoVersion = "${GO_VERSION}"
 $SourceArchiveUrl = "${sourceArchiveUrl}"
@@ -41,12 +42,15 @@ function Resolve-GoArchiveUrl {
 }
 
 function Ensure-Go {
+  Write-Host "Checking for Go toolchain..."
   $existing = Get-Command go -ErrorAction SilentlyContinue
   if ($existing) {
+    Write-Host "Using existing Go at $($existing.Source)"
     return $existing.Source
   }
 
   $zipUrl = Resolve-GoArchiveUrl
+  Write-Host "Downloading Go $GoVersion for Windows..."
   $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
   try {
@@ -67,6 +71,7 @@ function Ensure-Go {
 }
 
 function Build-Bridge($goExe) {
+  Write-Host "Downloading Conductor Bridge source..."
   $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
   try {
@@ -83,6 +88,7 @@ function Build-Bridge($goExe) {
     }
 
     New-Item -ItemType Directory -Force -Path $InstallBinDir | Out-Null
+    Write-Host "Building conductor-bridge.exe..."
     $previousPath = $env:PATH
     try {
       $env:PATH = (Split-Path $goExe -Parent) + ";" + $previousPath
@@ -125,29 +131,6 @@ function Resolve-ConductorCommandPath {
   return $null
 }
 
-function Ensure-ConductorCli {
-  $existing = Resolve-ConductorCommandPath
-  if ($existing) {
-    return $existing
-  }
-
-  $npm = Get-Command npm -ErrorAction SilentlyContinue
-  if (-not $npm) {
-    Write-Warning "Conductor CLI is not installed and npm is unavailable."
-    Write-Warning "Install conductor-oss manually if the bridge daemon cannot locate Conductor."
-    return $null
-  }
-
-  Write-Host "Installing conductor-oss CLI..."
-  New-Item -ItemType Directory -Force -Path $ConductorNpmPrefix | Out-Null
-  & $npm.Source install -g --prefix $ConductorNpmPrefix conductor-oss
-  if ($LASTEXITCODE -ne 0) {
-    throw "npm install -g conductor-oss failed with exit code $LASTEXITCODE"
-  }
-
-  return (Resolve-ConductorCommandPath)
-}
-
 function Run-Connect {
   if (-not $Connect) {
     return
@@ -165,6 +148,7 @@ function Run-Connect {
   }
 
   Write-Host "Starting Conductor Bridge pairing for dashboard: $DashboardUrl"
+  Write-Host "If this machine is already paired, the relay will rotate the previous refresh token for this device."
   & $BridgeBin @args
   if ($LASTEXITCODE -ne 0) {
     throw "Bridge connect failed with exit code $LASTEXITCODE"
@@ -173,7 +157,7 @@ function Run-Connect {
 
 $goExe = Ensure-Go
 Build-Bridge $goExe
-Ensure-ConductorCli | Out-Null
+Write-Host "Installing bridge background service..."
 & $BridgeBin install
 if ($LASTEXITCODE -ne 0) {
   throw "Bridge install failed with exit code $LASTEXITCODE"
@@ -185,6 +169,7 @@ if ($DashboardUrl) {
 } else {
   Write-Host "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
 }
+Write-Host "Bridge setup does not need the full Conductor CLI first. You can install conductor-oss later if needed."
 Run-Connect
 `;
 }

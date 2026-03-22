@@ -31,6 +31,7 @@ export function buildBridgeBootstrapConnectCommand(
 ): string {
   const parts = [
     "npx",
+    "--yes",
     "conductor-oss@latest",
     "bridge",
     "setup",
