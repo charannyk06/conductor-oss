@@ -93,7 +93,13 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
     const terminalRoot = document.querySelector('.xterm');
     const scrollHost = document.querySelector('.xterm-viewport')
         || document.querySelector('.xterm-scrollable-element');
-    if (!terminalRoot || !scrollHost || terminalRoot.dataset.conductorTouchShimBound === 'true') {
+    if (!terminalRoot) {
+        return false;
+    }
+    if (terminalRoot.dataset.conductorTouchShimBound === 'true') {
+        return false;
+    }
+    if (!scrollHost) {
         return false;
     }
 
@@ -293,13 +299,10 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
                 return;
             }
 
-            // xterm already handles touch scrolling when mouse reporting is off. Only
-            // intercept the gesture when the viewport has no remaining scroll range
-            // and the app has enabled mouse mode, which is the OpenCode case that
-            // blocks native touch scrolling on mobile.
-            if (!syncTouchActionMode()) {
-                return;
-            }
+            // xterm already handles touch scrolling when mouse reporting is off.
+            // When mouse reporting is on (OpenCode), we need to translate touch to wheel.
+            // Either way, if viewport scrolling fails, fall back to direct scroll.
+            const mouseModeActive = syncTouchActionMode();
 
             if (event.cancelable) {
                 event.preventDefault();
@@ -311,11 +314,16 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
             // OpenCode enables xterm mouse reporting, which disables xterm's built-in
             // touchmove scrolling. Translate the drag into xterm's internal wheel mouse
             // reports so OpenCode receives real scroll input for its own panes.
-            if (!dispatchCoreMouseWheel(deltaY, touch.clientX, touch.clientY)) {
-                if (!dispatchTerminalWheel(deltaX, deltaY, touch.clientX, touch.clientY)) {
-                    const maxScrollTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
-                    scrollHost.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollHost.scrollTop + deltaY));
+            if (mouseModeActive) {
+                if (!dispatchCoreMouseWheel(deltaY, touch.clientX, touch.clientY)) {
+                    if (!dispatchTerminalWheel(deltaX, deltaY, touch.clientX, touch.clientY)) {
+                        const maxScrollTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+                        scrollHost.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollHost.scrollTop + deltaY));
+                    }
                 }
+            } else {
+                const maxScrollTop = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+                scrollHost.scrollTop = Math.max(0, Math.min(maxScrollTop, scrollHost.scrollTop + deltaY));
             }
         }, { passive: false });
 
@@ -1446,7 +1454,8 @@ mod tests {
         assert!(injected.contains("new WheelEvent('wheel'"));
         assert!(injected.contains("eventTarget.dispatchEvent(wheelEvent)"));
         assert!(injected.contains("terminalRoot.addEventListener('touchmove'"));
-        assert!(injected.contains("if (!syncTouchActionMode()) {"));
+        assert!(injected.contains("const mouseModeActive = syncTouchActionMode();"));
+        assert!(injected.contains("if (mouseModeActive) {"));
         assert!(injected.contains("const LONG_PRESS_THRESHOLD_MS = 300;"));
         assert!(injected.contains("touchStartAt = window.performance?.now?.() ?? Date.now();"));
         assert!(injected.contains("touchMoved = true;"));
