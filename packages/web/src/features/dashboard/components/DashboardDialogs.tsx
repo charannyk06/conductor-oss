@@ -24,11 +24,11 @@ import {
   Building2,
   Check,
   ChevronDown,
+  CircleUser,
   Copy,
   FolderGit2,
   FolderKanban,
   FolderOpen,
-  Hand,
   List,
   Loader2,
   PlugZap,
@@ -44,10 +44,12 @@ import {
 import { normalizeAgentName } from "@/lib/agentUtils";
 import { getKnownAgent, KNOWN_AGENT_ORDER } from "@/lib/knownAgents";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import type { DashboardProfile } from "@/lib/dashboardProfile";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { playNotificationSound } from "@/lib/notificationSounds";
 import { filterGitHubRepos, type GitHubRepo } from "../githubRepos";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
+import { SettingsProfilePanel } from "./SettingsProfilePanel";
 import {
   getRuntimeCatalogDefaultModelForAccess,
   getRuntimeCatalogDefaultReasoning,
@@ -344,6 +346,7 @@ type AgentSetupState = {
 
 type PreferencesDialogMode = "onboarding" | "settings";
 type SettingsTabId =
+  | "profile"
   | "general"
   | "remote_access"
   | "repositories"
@@ -361,6 +364,7 @@ type SettingsTab = {
 };
 
 const SETTINGS_TABS: SettingsTab[] = [
+  { id: "profile", label: "Profile", icon: CircleUser, implemented: true },
   { id: "general", label: "General", icon: Settings2, implemented: true },
   { id: "remote_access", label: "Remote Access", icon: SlidersHorizontal, implemented: true },
   { id: "repositories", label: "Repositories", icon: FolderGit2, implemented: true },
@@ -2262,6 +2266,9 @@ export function SettingsDialog({
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessSaving, setAccessSaving] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
+  const [profile, setProfile] = useState<DashboardProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [remoteAccessSettings, setRemoteAccessSettings] = useState<RemoteAccessPayload>(() => normalizeRemoteAccess(null));
   const [remoteAccessLoading, setRemoteAccessLoading] = useState(false);
   const [remoteAccessMutating, setRemoteAccessMutating] = useState<RemoteAccessAction | null>(null);
@@ -2462,6 +2469,32 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     }
   }
 
+  async function loadProfile(): Promise<void> {
+    setProfileLoading(true);
+    setProfileError(null);
+    try {
+      const res = await fetch("/api/auth/profile", { cache: "no-store" });
+      const data = (await res.json().catch(() => null)) as
+        | (DashboardProfile & { error?: string })
+        | { error?: string }
+        | null;
+      if (!res.ok) {
+        const errorMessage =
+          data && typeof data === "object" && "error" in data && typeof data.error === "string"
+            ? data.error
+            : `Failed to load profile (${res.status})`;
+        throw new Error(errorMessage);
+      }
+
+      setProfile(data as DashboardProfile);
+    } catch (err) {
+      setProfile(null);
+      setProfileError(err instanceof Error ? err.message : "Failed to load profile");
+    } finally {
+      setProfileLoading(false);
+    }
+  }
+
   async function handleSaveAccess(): Promise<boolean> {
     if (accessSaving) return false;
 
@@ -2592,6 +2625,8 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     setRepositoriesError(null);
     setRepositoryModelSelection(emptyModelSelection());
     setAccessError(null);
+    setProfile(null);
+    setProfileError(null);
     setRemoteAccessSettings(normalizeRemoteAccess(null));
     setRemoteAccessError(null);
   }, [mode, open]);
@@ -2609,6 +2644,12 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     void loadAccessSettings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, open]);
+
+  useEffect(() => {
+    if (!open || mode === "onboarding" || activeTab !== "profile") return;
+    void loadProfile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, mode, open]);
 
   useEffect(() => {
     if (!open || mode === "onboarding" || activeTab !== "remote_access") return;
@@ -2657,6 +2698,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   const activeTabItem = visibleTabs.find((tab) => tab.id === activeTab) ?? visibleTabs[0] ?? SETTINGS_TABS[0];
   const isOnboarding = mode === "onboarding";
   const isPreferencesTab = activeTabItem.id === "preferences";
+  const isProfileTab = activeTabItem.id === "profile";
   const isGeneralTab = activeTabItem.id === "general";
   const isRemoteAccessTab = activeTabItem.id === "remote_access";
   const isAgentsTab = activeTabItem.id === "agents";
@@ -2737,6 +2779,8 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     ? repositoriesError
     : isOrganizationTab
       ? accessError
+      : isProfileTab
+        ? profileError
       : error;
   const accessRoleFields: Array<{
     label: string;
@@ -3370,6 +3414,15 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     </div>
                   )}
                 </div>
+              ) : isProfileTab ? (
+                <SettingsProfilePanel
+                  profile={profile}
+                  loading={profileLoading}
+                  error={profileError}
+                  onRefresh={() => {
+                    void loadProfile();
+                  }}
+                />
               ) : isRepositoriesTab ? (
                 <div className="space-y-5">
                   <section className="space-y-1">
@@ -4087,6 +4140,12 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                   <p className="text-[11px] text-[var(--vk-text-muted)]">
                     Organization access settings are written into `conductor.yaml`. Use admin role bindings for full
                     control, operator bindings for day-to-day agent usage, and viewer bindings for read-only access.
+                  </p>
+                )}
+                {!dialogError && isProfileTab && (
+                  <p className="text-[11px] text-[var(--vk-text-muted)]">
+                    Profile details reflect the current dashboard identity. GitHub avatar and logout controls appear when
+                    this session is authenticated through Clerk.
                   </p>
                 )}
               </div>
