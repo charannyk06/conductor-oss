@@ -182,92 +182,109 @@ func findTtyd() (string, error) {
 }
 
 func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
-	// 1. Find ttyd and pick a port.
-	ttydPath, err := findTtyd()
-	if err != nil {
-		return false, fmt.Errorf("ttyd: %w", err)
-	}
-	port, err := findFreePort()
-	if err != nil {
-		return false, fmt.Errorf("allocate ttyd port: %w", err)
-	}
+	var cmd *exec.Cmd
+	var ttydConn *websocket.Conn
+	var ttydDone <-chan struct{}
 
-	// 2. Spawn ttyd as a child process.
-	cmd := exec.Command(ttydPath, []string{
-		"-p", fmt.Sprintf("%d", port),
-		"-i", "127.0.0.1",
-		"-W", // accept any origin (relay->bridge->browser)
-		"--wdir", os.TempDir(),
-		"bash",
-	}...)
-	cmd.Env = os.Environ()
-	ttydOut, err := cmd.StdoutPipe()
-	if err != nil {
-		return false, fmt.Errorf("ttyd stdout pipe: %w", err)
-	}
-	ttydErr, err := cmd.StderrPipe()
-	if err != nil {
-		return false, fmt.Errorf("ttyd stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return false, fmt.Errorf("start ttyd: %w", err)
-	}
-
-	// Give ttyd a moment to start.
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := ttydOut.Read(buf)
-			if n > 0 {
-				fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
-			}
-			if err != nil {
-				break
-			}
+	stopTtyd := func() {
+		if ttydConn != nil {
+			_ = ttydConn.Close()
 		}
-	}()
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := ttydErr.Read(buf)
-			if n > 0 {
-				fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
-			}
-			if err != nil {
-				break
-			}
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
 		}
-	}()
-
-	// Wait for ttyd to be ready.
-	time.Sleep(500 * time.Millisecond)
-	if cmd.Process == nil {
-		return false, fmt.Errorf("ttyd process not started")
 	}
 
-	// 3. Connect to relay.
+	// 1. ttyd is optional for the initial bridge connection. If it is missing,
+	// keep the device online and fall back to API + session-terminal proxy flows.
+	if ttydPath, err := findTtyd(); err == nil {
+		port, err := findFreePort()
+		if err != nil {
+			return false, fmt.Errorf("allocate ttyd port: %w", err)
+		}
+
+		cmd = exec.Command(ttydPath, []string{
+			"-p", fmt.Sprintf("%d", port),
+			"-i", "127.0.0.1",
+			"-W", // accept any origin (relay->bridge->browser)
+			"--wdir", os.TempDir(),
+			"bash",
+		}...)
+		cmd.Env = os.Environ()
+		ttydOut, err := cmd.StdoutPipe()
+		if err != nil {
+			return false, fmt.Errorf("ttyd stdout pipe: %w", err)
+		}
+		ttydErr, err := cmd.StderrPipe()
+		if err != nil {
+			return false, fmt.Errorf("ttyd stderr pipe: %w", err)
+		}
+		if err := cmd.Start(); err != nil {
+			return false, fmt.Errorf("start ttyd: %w", err)
+		}
+
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := ttydOut.Read(buf)
+				if n > 0 {
+					fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := ttydErr.Read(buf)
+				if n > 0 {
+					fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
+				}
+				if err != nil {
+					break
+				}
+			}
+		}()
+
+		time.Sleep(500 * time.Millisecond)
+		if cmd.Process == nil {
+			return false, fmt.Errorf("ttyd process not started")
+		}
+
+		ttydURL := fmt.Sprintf("ws://127.0.0.1:%d", port)
+		ttydConn, _, err = websocket.DefaultDialer.DialContext(ctx, ttydURL, nil)
+		if err != nil {
+			stopTtyd()
+			return false, fmt.Errorf("connect to ttyd at %s: %w", ttydURL, err)
+		}
+
+		done := make(chan struct{})
+		ttydDone = done
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
+	} else {
+		fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", err)
+	}
+
+	// 2. Connect to relay.
 	relayEndpoint, err := websocketEndpoint(opts.relayURL, opts.scope, opts.refreshToken)
 	if err != nil {
-		cmd.Process.Kill()
+		stopTtyd()
 		return false, fmt.Errorf("build relay endpoint: %w", err)
 	}
 	relayConn, _, err := websocket.DefaultDialer.DialContext(ctx, relayEndpoint, nil)
 	if err != nil {
-		cmd.Process.Kill()
+		stopTtyd()
 		return false, fmt.Errorf("dial relay: %w", err)
 	}
 	defer relayConn.Close()
+	defer stopTtyd()
 
-	// 4. Connect to ttyd WebSocket.
-	ttydURL := fmt.Sprintf("ws://127.0.0.1:%d", port)
-	ttydConn, _, err := websocket.DefaultDialer.DialContext(ctx, ttydURL, nil)
-	if err != nil {
-		cmd.Process.Kill()
-		return false, fmt.Errorf("connect to ttyd at %s: %w", ttydURL, err)
-	}
-	defer ttydConn.Close()
-
-	// 5. Tell relay we are connected and ready.
+	// 3. Tell relay we are connected and ready.
 	var relayMu sync.Mutex
 	send := func(env bridgeEnvelope) error {
 		data, _ := json.Marshal(env)
@@ -281,11 +298,11 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 		OS:        opts.osName,
 		Connected: true,
 	}); err != nil {
-		cmd.Process.Kill()
+		stopTtyd()
 		return false, fmt.Errorf("send bridge_status: %w", err)
 	}
 
-	// 6. Bidirectional bridge loop.
+	// 4. Bidirectional bridge loop.
 	errCh := make(chan error, 2)
 	var activeTerminals sync.Map
 
@@ -300,35 +317,39 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 
 			var env bridgeEnvelope
 			if err := json.Unmarshal(data, &env); err != nil {
-				// Not JSON — maybe binary fallback; try raw write to ttyd.
-				ttydConn.WriteMessage(websocket.BinaryMessage, data)
+				if ttydConn != nil {
+					_ = ttydConn.WriteMessage(websocket.BinaryMessage, data)
+				}
 				continue
 			}
 
 			switch env.Type {
 			case "terminal_input":
-				ttydConn.WriteMessage(websocket.BinaryMessage, []byte(env.Data))
+				if ttydConn != nil {
+					_ = ttydConn.WriteMessage(websocket.BinaryMessage, []byte(env.Data))
+				}
 
 			case "terminal_resize":
-				// ttyd resize: send as special JSON on the binary channel.
-				resize, _ := json.Marshal(map[string]int{"cols": env.Cols, "rows": env.Rows})
-				ttydConn.WriteMessage(websocket.TextMessage, resize)
+				if ttydConn != nil {
+					resize, _ := json.Marshal(map[string]int{"cols": env.Cols, "rows": env.Rows})
+					_ = ttydConn.WriteMessage(websocket.TextMessage, resize)
+				}
 
 			case "ping":
-				send(bridgeEnvelope{Type: "pong"})
+				_ = send(bridgeEnvelope{Type: "pong"})
 
 			case "api_request":
 				// Proxy to localhost:4749 (conductor backend).
 				apiResp, apiErr := proxyAPI(env.ID, env.Method, env.Path, env.Body)
 				if apiErr != nil {
-					send(bridgeEnvelope{
+					_ = send(bridgeEnvelope{
 						Type:   "api_response",
 						ID:     env.ID,
 						Status: 502,
 						Body:   map[string]string{"error": apiErr.Error()},
 					})
 				} else {
-					send(bridgeEnvelope{
+					_ = send(bridgeEnvelope{
 						Type:   "api_response",
 						ID:     env.ID,
 						Status: apiResp.Status,
@@ -338,7 +359,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 
 			case "file_browse":
 				entries, _ := browseFiles(env.Path)
-				send(bridgeEnvelope{
+				_ = send(bridgeEnvelope{
 					Type:    "file_tree",
 					Path:    env.Path,
 					Entries: entries,
@@ -377,49 +398,44 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	}()
 
 	// ttyd → relay
-	go func() {
-		for {
-			msgType, data, err := ttydConn.ReadMessage()
-			if err != nil {
-				errCh <- fmt.Errorf("ttyd read: %w", err)
-				return
+	if ttydConn != nil {
+		go func() {
+			for {
+				msgType, data, err := ttydConn.ReadMessage()
+				if err != nil {
+					errCh <- fmt.Errorf("ttyd read: %w", err)
+					return
+				}
+				if msgType == websocket.TextMessage {
+					// ttyd resize ACK or other control message — skip.
+					continue
+				}
+				relayMu.Lock()
+				err = relayConn.WriteMessage(websocket.BinaryMessage, data)
+				relayMu.Unlock()
+				if err != nil {
+					errCh <- fmt.Errorf("ttyd->relay write: %w", err)
+					return
+				}
 			}
-			if msgType == websocket.TextMessage {
-				// ttyd resize ACK or other control message — skip.
-				continue
-			}
-			relayMu.Lock()
-			err = relayConn.WriteMessage(websocket.BinaryMessage, data)
-			relayMu.Unlock()
-			if err != nil {
-				errCh <- fmt.Errorf("ttyd->relay write: %w", err)
-				return
-			}
-		}
-	}()
+		}()
+	}
 
 	// Heartbeat to relay.
 	heartbeat := time.NewTicker(opts.heartbeatInterval)
 	defer heartbeat.Stop()
 
-	// Monitor ttyd process liveness.
-	ttydDone := make(chan struct{})
-	go func() {
-		cmd.Wait()
-		close(ttydDone)
-	}()
-
 	// Keep-alive loop: heartbeat + monitor errors.
 	for {
 		select {
 		case <-ctx.Done():
-			cmd.Process.Kill()
+			stopTtyd()
 			return true, nil
 		case err := <-errCh:
-			cmd.Process.Kill()
+			stopTtyd()
 			return false, err
 		case <-ttydDone:
-			cmd.Process.Kill()
+			stopTtyd()
 			return false, fmt.Errorf("ttyd process exited unexpectedly")
 		case <-heartbeat.C:
 			if err := send(bridgeEnvelope{
@@ -428,14 +444,14 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 				OS:        opts.osName,
 				Connected: true,
 			}); err != nil {
-				cmd.Process.Kill()
+				stopTtyd()
 				return false, fmt.Errorf("send bridge_status: %w", err)
 			}
 			relayMu.Lock()
 			err := relayConn.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
 			relayMu.Unlock()
 			if err != nil {
-				cmd.Process.Kill()
+				stopTtyd()
 				return false, fmt.Errorf("relay ping: %w", err)
 			}
 		}
