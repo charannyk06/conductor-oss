@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/gorilla/websocket"
 )
 
@@ -28,6 +29,7 @@ const (
 	ttydPortRangeEnd         = 8699
 	bridgeProxyMetaKey       = "$bridgeProxy"
 	bridgeRequestMetaKey     = "$bridgeRequest"
+	bridgeServiceRestartPath = "/_bridge/service/restart"
 	maxPreviewResponseBytes  = 10 * 1024 * 1024
 )
 
@@ -814,6 +816,10 @@ func proxyPreview(
 }
 
 func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
+	if handled, resp := maybeHandleBridgeControlRequest(method, path); handled {
+		return resp, nil
+	}
+
 	// Proxy to local conductor backend at localhost:4749.
 	if path == "" {
 		path = "/"
@@ -893,6 +899,45 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 			},
 		},
 	}, nil
+}
+
+func maybeHandleBridgeControlRequest(method, path string) (bool, apiResponse) {
+	if path != bridgeServiceRestartPath {
+		return false, apiResponse{}
+	}
+
+	if strings.TrimSpace(method) != http.MethodPost {
+		return true, apiResponse{
+			Status: http.StatusMethodNotAllowed,
+			Body: map[string]any{
+				"error": "Bridge service restart only supports POST.",
+			},
+		}
+	}
+
+	if err := install.RestartServiceAvailable(); err != nil {
+		return true, apiResponse{
+			Status: http.StatusBadRequest,
+			Body: map[string]any{
+				"error": err.Error(),
+			},
+		}
+	}
+
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		if err := install.RestartServiceIfInstalled(); err != nil {
+			fmt.Fprintf(os.Stderr, "bridge service restart failed: %v\n", err)
+		}
+	}()
+
+	return true, apiResponse{
+		Status: http.StatusAccepted,
+		Body: map[string]any{
+			"ok":      true,
+			"message": "Bridge service restart requested. This laptop should reconnect shortly.",
+		},
+	}
 }
 
 type fileEntry struct {

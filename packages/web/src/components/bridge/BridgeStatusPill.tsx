@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { ChevronDown, Laptop } from "lucide-react";
+import { ChevronDown, Download, Laptop, Loader2, RefreshCw } from "lucide-react";
 import {
+  isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
   runBridgeAutoUpdate,
   type BridgeAutoUpdateState,
 } from "@/lib/bridgeAppUpdate";
 import { cn } from "@/lib/cn";
+import { requestBridgeServiceRestart } from "@/lib/bridgeDeviceControl";
 
 type BridgeDevice = {
   device_id: string;
@@ -29,6 +31,12 @@ type BridgeDevice = {
 type DevicesResponse = {
   devices?: BridgeDevice[];
   error?: string;
+};
+
+type BridgeServiceActionState = {
+  deviceId: string | null;
+  status: "idle" | "running" | "completed" | "failed";
+  message: string | null;
 };
 
 type BridgeStatusPillProps = {
@@ -81,40 +89,46 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     phase: "idle",
     message: null,
   });
+  const [serviceAction, setServiceAction] = useState<BridgeServiceActionState>({
+    deviceId: null,
+    status: "idle",
+    message: null,
+  });
   const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
+
+  const refreshDevices = useCallback(async (showSpinner: boolean) => {
+    if (showSpinner) {
+      setLoading(true);
+    }
+    try {
+      const response = await fetch("/api/bridge/devices", { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as DevicesResponse | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Failed to load bridge devices (${response.status})`);
+      }
+      setDevices(payload?.devices ?? []);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load bridge devices.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     let pollTimer: number | null = null;
 
-    const refresh = async (showSpinner: boolean) => {
-      if (showSpinner) {
-        setLoading(true);
+    const safeRefresh = async (showSpinner: boolean) => {
+      if (cancelled) {
+        return;
       }
-      try {
-        const response = await fetch("/api/bridge/devices", { cache: "no-store" });
-        const payload = await response.json().catch(() => null) as DevicesResponse | null;
-        if (!response.ok) {
-          throw new Error(payload?.error ?? `Failed to load bridge devices (${response.status})`);
-        }
-        if (!cancelled) {
-          setDevices(payload?.devices ?? []);
-          setError(null);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load bridge devices.");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+      await refreshDevices(showSpinner);
     };
 
-    void refresh(true);
+    void safeRefresh(true);
     pollTimer = window.setInterval(() => {
-      void refresh(false);
+      void safeRefresh(false);
     }, 15_000);
 
     return () => {
@@ -123,7 +137,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
         window.clearInterval(pollTimer);
       }
     };
-  }, []);
+  }, [refreshDevices]);
 
   useEffect(() => {
     const syncRecentPairing = () => {
@@ -184,6 +198,39 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     });
   }, [autoUpdate.message, recentPairingDevice]);
 
+  const handleRestartService = useCallback(async (device: BridgeDevice) => {
+    setServiceAction({
+      deviceId: device.device_id,
+      status: "running",
+      message: `Restarting the bridge service on ${device.device_name}.`,
+    });
+
+    try {
+      const message = await requestBridgeServiceRestart(device.device_id);
+      setServiceAction({
+        deviceId: device.device_id,
+        status: "completed",
+        message,
+      });
+      window.setTimeout(() => {
+        void refreshDevices(false);
+      }, 2_000);
+    } catch (err) {
+      setServiceAction({
+        deviceId: device.device_id,
+        status: "failed",
+        message: err instanceof Error ? err.message : `Failed to restart ${device.device_name}.`,
+      });
+    }
+  }, [refreshDevices]);
+
+  const handleUpdateDevice = useCallback(async (device: BridgeDevice) => {
+    await runBridgeAutoUpdate(device, setAutoUpdate);
+    window.setTimeout(() => {
+      void refreshDevices(false);
+    }, 2_000);
+  }, [refreshDevices]);
+
   return (
     <DropdownMenu.Root>
       <DropdownMenu.Trigger asChild>
@@ -213,6 +260,9 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                   ? "Loading device status"
                   : "No live bridge connection"}
             </div>
+            <div className="mt-2 text-[11px] leading-5 text-[var(--vk-text-faint)]">
+              If a laptop is online but misbehaving, use these controls to update Conductor or restart its bridge service.
+            </div>
             {error ? (
               <div className="mt-2 text-[12px] leading-5 text-[var(--vk-red)]">{error}</div>
             ) : null}
@@ -233,40 +283,93 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
 
           <div className="mt-2 max-h-[280px] overflow-y-auto">
             {devices.length > 0 ? (
-              devices.map((device) => (
-                <div
-                  key={device.device_id}
-                  className="rounded-[14px] px-3 py-2.5 transition-colors hover:bg-[var(--vk-bg-hover)]"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">
-                        {device.device_name}
-                      </div>
-                      <div className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
-                        {device.hostname} · {device.os}/{device.arch}
-                      </div>
-                      <div className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
-                        Relay: {device.last_status?.hostname ?? device.hostname}
-                      </div>
-                      {autoUpdate.message && autoUpdate.deviceId === device.device_id ? (
-                        <div className={cn(
-                          "mt-1 text-[11px] leading-5",
-                          autoUpdate.phase === "failed"
-                            ? "text-[var(--vk-red)]"
-                            : autoUpdate.phase === "skipped"
-                              ? "text-[var(--vk-text-muted)]"
-                              : "text-[var(--vk-text-faint)]",
-                        )}
-                        >
-                          {autoUpdate.message}
+              devices.map((device) => {
+                const updateInFlight = isBridgeAutoUpdateInFlight(autoUpdate, device.device_id);
+                const serviceActionRunning = serviceAction.status === "running"
+                  && serviceAction.deviceId === device.device_id;
+
+                return (
+                  <div
+                    key={device.device_id}
+                    className="rounded-[14px] px-3 py-2.5 transition-colors hover:bg-[var(--vk-bg-hover)]"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">
+                          {device.device_name}
                         </div>
-                      ) : null}
+                        <div className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                          {device.hostname} · {device.os}/{device.arch}
+                        </div>
+                        <div className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
+                          Relay: {device.last_status?.hostname ?? device.hostname}
+                        </div>
+                        {autoUpdate.message && autoUpdate.deviceId === device.device_id ? (
+                          <div className={cn(
+                            "mt-1 text-[11px] leading-5",
+                            autoUpdate.phase === "failed"
+                              ? "text-[var(--vk-red)]"
+                              : autoUpdate.phase === "skipped"
+                                ? "text-[var(--vk-text-muted)]"
+                                : "text-[var(--vk-text-faint)]",
+                          )}
+                          >
+                            {autoUpdate.message}
+                          </div>
+                        ) : null}
+                        {serviceAction.message && serviceAction.deviceId === device.device_id ? (
+                          <div className={cn(
+                            "mt-1 text-[11px] leading-5",
+                            serviceAction.status === "failed"
+                              ? "text-[var(--vk-red)]"
+                              : serviceAction.status === "completed"
+                                ? "text-[var(--vk-green)]"
+                                : "text-[var(--vk-text-faint)]",
+                          )}
+                          >
+                            {serviceAction.message}
+                          </div>
+                        ) : null}
+                        {device.connected ? (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--vk-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)]"
+                              disabled={updateInFlight || serviceActionRunning}
+                              onClick={() => {
+                                void handleUpdateDevice(device);
+                              }}
+                            >
+                              {updateInFlight ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Download className="h-3.5 w-3.5" />
+                              )}
+                              {updateInFlight ? "Updating..." : "Update Conductor"}
+                            </button>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[var(--vk-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)]"
+                              disabled={serviceActionRunning || updateInFlight}
+                              onClick={() => {
+                                void handleRestartService(device);
+                              }}
+                            >
+                              {serviceActionRunning ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="h-3.5 w-3.5" />
+                              )}
+                              Restart service
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      <BridgeStatusPill connected={device.connected} />
                     </div>
-                    <BridgeStatusPill connected={device.connected} />
                   </div>
-                </div>
-              ))
+                );
+              })
             ) : (
               <div className="rounded-[14px] border border-dashed border-[var(--vk-border)] px-3 py-4 text-[12px] text-[var(--vk-text-muted)]">
                 {loading ? "Loading paired devices..." : "Pair a laptop to see bridge status here."}

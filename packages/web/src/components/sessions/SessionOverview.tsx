@@ -407,15 +407,15 @@ function HighlightedCode({ code, lang }: { code: string; lang: string }) {
     const lines = code.split("\n");
     const gutterWidth = String(lines.length).length;
     return (
-      <div className="overflow-auto">
-        <table className="w-full border-collapse font-mono text-[11px] leading-5">
+      <div className="inline-block min-w-full align-top">
+        <table className="min-w-full border-collapse font-mono text-[11px] leading-5">
           <tbody>
             {lines.map((line, i) => (
               <tr key={i} className="hover:bg-white/3">
                 <td className="select-none whitespace-nowrap border-r border-white/6 px-2 text-right text-[var(--vk-text-muted)] opacity-40" style={{ minWidth: `${gutterWidth + 2}ch` }}>
                   {i + 1}
                 </td>
-                <td className="whitespace-pre-wrap break-all px-3 text-[var(--vk-text-normal)]">
+                <td className="whitespace-pre px-3 text-[var(--vk-text-normal)]">
                   {line || "\u00A0"}
                 </td>
               </tr>
@@ -428,7 +428,7 @@ function HighlightedCode({ code, lang }: { code: string; lang: string }) {
 
   return (
     <div
-      className="shiki-viewer overflow-auto [&_.shiki]:!bg-transparent [&_.shiki]:p-0 [&_code]:text-[11px] [&_code]:leading-5 [&_pre]:!bg-transparent [&_pre]:!p-0"
+      className="shiki-viewer inline-block min-w-full align-top [&_.shiki]:!bg-transparent [&_.shiki]:p-0 [&_code]:text-[11px] [&_code]:leading-5 [&_pre]:!bg-transparent [&_pre]:!p-0"
       // biome-ignore lint/security/noDangerouslySetInnerHtml: shiki output is trusted
       dangerouslySetInnerHTML={{ __html: html }}
     />
@@ -535,13 +535,13 @@ function FileContentViewer({ sessionId, filePath }: { sessionId: string; filePat
   const textContent = content ?? "";
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
       {truncated ? (
         <div className="shrink-0 border-b border-amber-500/20 bg-amber-500/8 px-3 py-1 text-[11px] text-amber-300">
           File truncated{fileSize > 0 ? ` (${formatBytes(fileSize)} total)` : ""}
         </div>
       ) : null}
-      <div className="min-h-0 flex-1 overflow-auto py-2">
+      <div className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain touch-pan-x touch-pan-y py-2">
         <HighlightedCode code={textContent} lang={lang} />
       </div>
     </div>
@@ -652,7 +652,7 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
 
   /* ── Mobile: show file preview full-screen with back button ── */
   const mobileFilePreview = selectedPath ? (
-    <div className="flex h-full flex-col lg:hidden">
+    <div className="flex h-full min-h-0 min-w-0 flex-col lg:hidden">
       <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-2 py-2">
         <button
           type="button"
@@ -665,7 +665,7 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
         <File className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
         <span className="truncate font-mono text-[11px] text-[var(--vk-text-strong)]">{selectedPath}</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         <FileContentViewer sessionId={sessionId} filePath={selectedPath} />
       </div>
     </div>
@@ -708,7 +708,7 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
       {/* Desktop: side-by-side tree + preview.  Mobile: tree only (preview shown above) */}
       <div className={`min-h-0 flex-1 lg:flex lg:flex-row ${selectedPath ? "hidden lg:flex" : "flex flex-col"}`}>
         {/* File tree */}
-        <div className="min-h-0 flex-1 overflow-y-auto py-1 lg:max-w-[320px] lg:border-r lg:border-white/8">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1 lg:max-w-[320px] lg:border-r lg:border-white/8">
           {filtered.length === 0 ? (
             <div className="px-3 py-6 text-center text-[12px] text-[var(--vk-text-muted)]">
               {search ? "No files match your search." : "No files in workspace."}
@@ -729,14 +729,14 @@ function FilesBrowser({ sessionId, active }: { sessionId: string; active: boolea
         </div>
 
         {/* Desktop file preview (hidden on mobile — mobile uses the full-screen overlay above) */}
-        <div className="hidden min-h-0 flex-1 lg:block">
+        <div className="hidden min-h-0 min-w-0 flex-1 lg:block">
           {selectedPath ? (
-            <div className="flex h-full flex-col">
+            <div className="flex h-full min-h-0 min-w-0 flex-col">
               <div className="flex shrink-0 items-center gap-2 border-b border-white/8 px-3 py-2">
                 <File className="h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)]" />
                 <span className="truncate font-mono text-[11px] text-[var(--vk-text-strong)]">{selectedPath}</span>
               </div>
-              <div className="min-h-0 flex-1 overflow-auto">
+              <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
                 <FileContentViewer sessionId={sessionId} filePath={selectedPath} />
               </div>
             </div>
@@ -869,7 +869,7 @@ export function SessionOverview({ session, sessionId, active }: SessionOverviewP
       </div>
 
       {/* Tab content */}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         {innerTab === "changes" ? (
           <SessionDiff key={sessionId} sessionId={sessionId} active={active} />
         ) : (

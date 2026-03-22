@@ -28,6 +28,14 @@ export type BridgeAutoUpdateDevice = {
   connected: boolean;
 };
 
+export function isBridgeAutoUpdateInFlight(
+  state: BridgeAutoUpdateState,
+  deviceId: string,
+): boolean {
+  return state.deviceId === deviceId
+    && (state.phase === "checking" || state.phase === "updating" || state.phase === "restarting");
+}
+
 type RecentBridgePairing = {
   deviceId: string;
   deviceName: string | null;

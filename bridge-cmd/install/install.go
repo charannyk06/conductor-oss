@@ -70,6 +70,31 @@ func Install(binaryPath string) error {
 }
 
 func RestartServiceIfInstalled() error {
+	if err := RestartServiceAvailable(); err != nil {
+		return err
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not find home directory: %w", err)
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
+		return installLaunchdService(home, plistPath)
+	case "linux":
+		cmd := exec.Command("systemctl", "--user", "restart", serviceName)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("restart systemd service: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("auto-restart not supported on %s", runtime.GOOS)
+	}
+}
+
+func RestartServiceAvailable() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("could not find home directory: %w", err)
@@ -81,7 +106,7 @@ func RestartServiceIfInstalled() error {
 		if _, err := os.Stat(plistPath); err != nil {
 			return fmt.Errorf("launchd service not installed: %w", err)
 		}
-		return installLaunchdService(home, plistPath)
+		return nil
 	case "linux":
 		xdgConfig := os.Getenv("XDG_CONFIG_HOME")
 		if xdgConfig == "" {
@@ -90,10 +115,6 @@ func RestartServiceIfInstalled() error {
 		unitPath := filepath.Join(xdgConfig, "systemd", "user", serviceName+".service")
 		if _, err := os.Stat(unitPath); err != nil {
 			return fmt.Errorf("systemd service not installed: %w", err)
-		}
-		cmd := exec.Command("systemctl", "--user", "restart", serviceName)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("restart systemd service: %w", err)
 		}
 		return nil
 	default:
