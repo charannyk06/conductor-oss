@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -172,50 +172,64 @@ fn infer_cli_metadata() -> InferredAppUpdateMetadata {
 }
 
 fn infer_package_root_candidates(current_exe: &Path) -> Vec<PathBuf> {
-    let executable = current_exe.to_path_buf();
-    let mut candidate = executable
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| executable.clone());
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
 
-    let append_candidate = |candidate: PathBuf,
-                            candidates: &mut Vec<PathBuf>,
-                            seen: &mut HashSet<PathBuf>| {
-        if candidate.as_os_str().is_empty() {
-            return;
-        }
-        if seen.insert(candidate.clone()) {
-            candidates.push(candidate);
-        }
-    };
-
-    if let Some(bun_candidate) = infer_bun_candidate_package_root(current_exe) {
-        append_candidate(bun_candidate, &mut candidates, &mut seen);
-    }
-
-    for _ in 0..16 {
-        append_candidate(candidate.clone(), &mut candidates, &mut seen);
-        if candidate.file_name().and_then(|value| value.to_str()) == Some("bin") {
-            let parent = candidate.parent().unwrap_or(&candidate);
-            for package_name in ["conductor", "conductor-oss"] {
-                append_candidate(
-                    parent.join("lib").join("node_modules").join(package_name),
-                    &mut candidates,
-                    &mut seen,
-                );
-                append_candidate(
-                    parent.join("node_modules").join(package_name),
-                    &mut candidates,
-                    &mut seen,
-                );
+    let append_candidate =
+        |candidate: PathBuf, candidates: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>| {
+            if candidate.as_os_str().is_empty() {
+                return;
             }
-        }
-        let parent = candidate.parent();
-        match parent {
-            Some(next) => candidate = next.to_path_buf(),
-            None => break,
+            if seen.insert(candidate.clone()) {
+                candidates.push(candidate);
+            }
+        };
+
+    let append_candidates_from_executable =
+        |executable: &Path, candidates: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>| {
+            if let Some(bun_candidate) = infer_bun_candidate_package_root(executable) {
+                append_candidate(bun_candidate, candidates, seen);
+            }
+
+            let mut candidate = executable
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| executable.to_path_buf());
+            for _ in 0..16 {
+                append_candidate(candidate.clone(), candidates, seen);
+                if candidate.file_name().and_then(|value| value.to_str()) == Some("bin") {
+                    let parent = candidate.parent().unwrap_or(&candidate);
+                    for package_name in ["conductor", "conductor-oss"] {
+                        append_candidate(
+                            parent.join("lib").join("node_modules").join(package_name),
+                            candidates,
+                            seen,
+                        );
+                        append_candidate(
+                            parent.join("node_modules").join(package_name),
+                            candidates,
+                            seen,
+                        );
+                    }
+                }
+                if candidate.file_name().and_then(|value| value.to_str()) == Some(".bin") {
+                    let parent = candidate.parent().unwrap_or(&candidate);
+                    for package_name in ["conductor", "conductor-oss"] {
+                        append_candidate(parent.join(package_name), candidates, seen);
+                    }
+                }
+                let parent = candidate.parent();
+                match parent {
+                    Some(next) => candidate = next.to_path_buf(),
+                    None => break,
+                }
+            }
+        };
+
+    append_candidates_from_executable(current_exe, &mut candidates, &mut seen);
+    if let Ok(canonical_exe) = current_exe.canonicalize() {
+        if canonical_exe != current_exe {
+            append_candidates_from_executable(&canonical_exe, &mut candidates, &mut seen);
         }
     }
 
@@ -553,11 +567,17 @@ fn trim_log_tail(value: &str) -> String {
 }
 
 fn parse_version(value: &str) -> Option<ParsedVersion> {
-    let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
-    let (base, prerelease) = match value.split_once('-') {
-        Some((base, prerelease)) => (base, prerelease),
-        None => (value, ""),
-    };
+    let mut base = value
+        .trim()
+        .trim_start_matches(|value| value == 'v' || value == 'V');
+    let mut prerelease = "";
+    if let Some((value_base, value_prerelease)) = base.split_once('-') {
+        base = value_base;
+        prerelease = value_prerelease;
+    }
+    let base = base.split('+').next().unwrap_or(base);
+    let prerelease = prerelease.split('+').next().unwrap_or(prerelease);
+
     let mut segments = base.split('.');
     let major = segments.next()?.parse::<u64>().ok()?;
     let minor = segments.next()?.parse::<u64>().ok()?;
@@ -922,6 +942,64 @@ mod tests {
             compare_versions("0.3.0", "0.3.0-beta.1"),
             Some(Ordering::Greater)
         );
+    }
+
+    #[test]
+    fn compare_versions_ignores_build_metadata_and_uppercase_prefix() {
+        assert_eq!(
+            compare_versions("V0.3.0+build.7", "0.3.0"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare_versions("0.3.0-beta.1+build.5", "0.3.0-beta.1"),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn infer_package_root_candidates_include_symlinked_dot_bin_package() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir =
+            env::temp_dir().join(format!("conductor-app-update-{}", uuid::Uuid::new_v4()));
+        let package_root = temp_dir
+            .join("project")
+            .join("node_modules")
+            .join("conductor-oss");
+        let binary_path = package_root.join("bin").join("conductor");
+        let shim_path = temp_dir
+            .join("project")
+            .join("node_modules")
+            .join(".bin")
+            .join("conductor");
+
+        fs::create_dir_all(binary_path.parent().unwrap()).expect("create package bin dir");
+        fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"conductor-oss","version":"7.8.9"}"#,
+        )
+        .expect("write manifest");
+        fs::write(&binary_path, "#!/usr/bin/env node\n").expect("write package binary");
+        fs::create_dir_all(shim_path.parent().unwrap()).expect("create shim dir");
+        symlink(
+            Path::new("..")
+                .join("conductor-oss")
+                .join("bin")
+                .join("conductor"),
+            &shim_path,
+        )
+        .expect("create symlinked shim");
+
+        let candidates = infer_package_root_candidates(&shim_path);
+        assert!(
+            candidates.contains(&package_root),
+            "expected candidates to include {:?}, got {:?}",
+            package_root,
+            candidates
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

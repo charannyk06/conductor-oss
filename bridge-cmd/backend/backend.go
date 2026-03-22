@@ -11,8 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -295,12 +295,7 @@ func inferCliUpdateEnv(binaryPath string) []string {
 	currentVersion := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_VERSION"))
 	installMode := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_INSTALL_MODE"))
 
-	resolvedPath, err := filepath.EvalSymlinks(binaryPath)
-	if err != nil {
-		resolvedPath = binaryPath
-	}
-
-	manifestName, manifestVersion, manifestPackageRoot := inferCliPackageManifest(resolvedPath)
+	manifestName, manifestVersion, manifestPackageRoot := inferCliPackageManifest(binaryPath)
 	if manifestName != "" && manifestVersion != "" {
 		packageName = manifestName
 		currentVersion = manifestVersion
@@ -348,11 +343,7 @@ func inferCliPackageManifest(binaryPath string) (string, string, string) {
 }
 
 func inferCliInstallModeFromBinary(binaryPath string) string {
-	resolvedPath, err := filepath.EvalSymlinks(strings.TrimSpace(binaryPath))
-	if err != nil {
-		resolvedPath = binaryPath
-	}
-	for _, packageRoot := range inferCliPackageRootCandidates(resolvedPath) {
+	for _, packageRoot := range inferCliPackageRootCandidates(binaryPath) {
 		installMode := inferCliInstallMode(packageRoot)
 		if installMode != "" && installMode != "unknown" {
 			return installMode
@@ -371,17 +362,12 @@ func isConductorPackageName(value string) bool {
 }
 
 func inferCliPackageRootCandidates(binaryPath string) []string {
-	resolvedPath := strings.ReplaceAll(strings.TrimSpace(binaryPath), "\\", "/")
-	resolvedPath, err := filepath.EvalSymlinks(resolvedPath)
-	if err != nil {
-		resolvedPath = binaryPath
-	}
-	current := filepath.Dir(resolvedPath)
 	var candidates []string
 	seen := make(map[string]struct{})
 
 	appendCandidate := func(candidate string) {
-		if candidate == "" {
+		candidate = filepath.Clean(candidate)
+		if candidate == "" || candidate == "." {
 			return
 		}
 		if _, exists := seen[candidate]; exists {
@@ -391,23 +377,42 @@ func inferCliPackageRootCandidates(binaryPath string) []string {
 		candidates = append(candidates, candidate)
 	}
 
-	if bunCandidate := inferBunCandidatePackageRootFromBinary(resolvedPath); bunCandidate != "" {
-		appendCandidate(bunCandidate)
+	appendCandidatesFromBinary := func(path string) {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "" || path == "." {
+			return
+		}
+
+		if bunCandidate := inferBunCandidatePackageRootFromBinary(path); bunCandidate != "" {
+			appendCandidate(bunCandidate)
+		}
+
+		current := filepath.Dir(path)
+		for i := 0; i < 16; i++ {
+			appendCandidate(current)
+			if filepath.Base(current) == "bin" {
+				for _, packageName := range []string{"conductor", "conductor-oss"} {
+					appendCandidate(filepath.Join(filepath.Dir(current), "lib", "node_modules", packageName))
+					appendCandidate(filepath.Join(filepath.Dir(current), "node_modules", packageName))
+				}
+			}
+			if filepath.Base(current) == ".bin" {
+				for _, packageName := range []string{"conductor", "conductor-oss"} {
+					appendCandidate(filepath.Join(filepath.Dir(current), packageName))
+				}
+			}
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+			current = parent
+		}
 	}
 
-	for i := 0; i < 16; i++ {
-		appendCandidate(current)
-		if filepath.Base(current) == "bin" {
-			for _, packageName := range []string{"conductor", "conductor-oss"} {
-				appendCandidate(filepath.Join(filepath.Dir(current), "lib", "node_modules", packageName))
-				appendCandidate(filepath.Join(filepath.Dir(current), "node_modules", packageName))
-			}
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
+	trimmedPath := strings.TrimSpace(binaryPath)
+	appendCandidatesFromBinary(trimmedPath)
+	if resolvedPath, err := filepath.EvalSymlinks(trimmedPath); err == nil {
+		appendCandidatesFromBinary(resolvedPath)
 	}
 	return candidates
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -136,12 +137,52 @@ func TestInferCliPackageManifestSupportsStandardGlobalBinLayout(t *testing.T) {
 	if gotVersion != "4.5.6" {
 		t.Fatalf("expected package version 4.5.6, got %q", gotVersion)
 	}
-	expectedRoot, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		expectedRoot = workspace
-	}
+	expectedRoot := filepath.Clean(workspace)
 	if gotRoot != expectedRoot {
 		t.Fatalf("expected package root %q, got %q", expectedRoot, gotRoot)
+	}
+}
+
+func TestInferCliUpdateEnvFallsBackToSymlinkedDotBinPackageMetadataWhenEnvMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinked .bin shims are covered by a unix-specific regression")
+	}
+
+	tempDir := t.TempDir()
+	t.Setenv("CONDUCTOR_CLI_PACKAGE_NAME", "")
+	t.Setenv("CONDUCTOR_CLI_VERSION", "")
+	t.Setenv("CONDUCTOR_CLI_INSTALL_MODE", "")
+
+	packageRoot := filepath.Join(tempDir, "project", "node_modules", "conductor-oss")
+	binaryPath := filepath.Join(packageRoot, "bin", "conductor")
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
+		t.Fatalf("create package bin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packageRoot, "package.json"), []byte(`{"name":"conductor-oss","version":"7.8.9"}`), 0o644); err != nil {
+		t.Fatalf("write package manifest: %v", err)
+	}
+	if err := os.WriteFile(binaryPath, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatalf("write package binary: %v", err)
+	}
+
+	shimPath := filepath.Join(tempDir, "project", "node_modules", ".bin", "conductor")
+	if err := os.MkdirAll(filepath.Dir(shimPath), 0o755); err != nil {
+		t.Fatalf("create shim dir: %v", err)
+	}
+	if err := os.Symlink(filepath.Join("..", "conductor-oss", "bin", "conductor"), shimPath); err != nil {
+		t.Fatalf("create symlinked shim: %v", err)
+	}
+
+	gotEnv := inferCliUpdateEnv(shimPath)
+	got := strings.Join(gotEnv, "\n")
+	for _, want := range []string{
+		"CONDUCTOR_CLI_PACKAGE_NAME=conductor-oss",
+		"CONDUCTOR_CLI_VERSION=7.8.9",
+		"CONDUCTOR_CLI_INSTALL_MODE=",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected launch env to contain %q, got %v", want, gotEnv)
+		}
 	}
 }
 
