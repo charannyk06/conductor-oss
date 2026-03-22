@@ -8,6 +8,7 @@ const originalBridgeRelayUrl = process.env.CONDUCTOR_BRIDGE_RELAY_URL;
 const originalConfigPath = process.env.CO_CONFIG_PATH;
 const originalWorkspace = process.env.CONDUCTOR_WORKSPACE;
 const originalRequireAuth = process.env.CONDUCTOR_REQUIRE_AUTH;
+const originalRelayJwtSecret = process.env.RELAY_JWT_SECRET;
 const originalFetch = global.fetch;
 
 function resetEnv(): void {
@@ -16,6 +17,7 @@ function resetEnv(): void {
   process.env.CO_CONFIG_PATH = "/tmp/conductor-preview-route-test-config-does-not-exist.yaml";
   process.env.CONDUCTOR_WORKSPACE = "";
   process.env.CONDUCTOR_REQUIRE_AUTH = "";
+  delete process.env.RELAY_JWT_SECRET;
 }
 
 test.afterEach(() => {
@@ -51,6 +53,12 @@ test.after(() => {
     delete process.env.CONDUCTOR_REQUIRE_AUTH;
   } else {
     process.env.CONDUCTOR_REQUIRE_AUTH = originalRequireAuth;
+  }
+
+  if (originalRelayJwtSecret === undefined) {
+    delete process.env.RELAY_JWT_SECRET;
+  } else {
+    process.env.RELAY_JWT_SECRET = originalRelayJwtSecret;
   }
 
   global.fetch = originalFetch;
@@ -151,6 +159,7 @@ test("GET forwards dashboard access headers to backend preview lookups", async (
 test("GET resolves bridge-backed preview session context via the paired device and preserves local bridge candidates", async () => {
   resetEnv();
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
+  process.env.RELAY_JWT_SECRET = "preview-route-test-secret";
   const seenPaths: string[] = [];
 
   global.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -162,6 +171,7 @@ test("GET resolves bridge-backed preview session context via the paired device a
     assert.equal(init?.method, "POST");
 
     const headers = new Headers(init?.headers);
+    assert.match(headers.get("authorization") ?? "", /^Bearer\s.+/);
     assert.match(headers.get("x-forwarded-host") ?? "", /^(?:127\.0\.0\.1|localhost):3000$/);
     assert.equal(headers.get("x-forwarded-proto"), "http");
 

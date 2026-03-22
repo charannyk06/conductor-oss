@@ -75,3 +75,76 @@ func TestResolveLaunchPlanCarriesCliUpdateMetadataForNodeScriptBinaries(t *testi
 		}
 	}
 }
+
+func TestInferCliPackageManifestSupportsBunGlobalInstallationLayout(t *testing.T) {
+	tempDir := t.TempDir()
+	workspace := filepath.Join(tempDir, ".bun", "install", "global", "node_modules", "conductor-oss")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("create bun package workspace: %v", err)
+	}
+
+	manifestPath := filepath.Join(workspace, "package.json")
+	if err := os.WriteFile(manifestPath, []byte(`{"name":"conductor-oss","version":"9.9.9"}`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("BUN_INSTALL", filepath.Join(tempDir, ".bun"))
+
+	conductorPath := filepath.Join(tempDir, ".bun", "bin", "conductor")
+	if err := os.MkdirAll(filepath.Dir(conductorPath), 0o755); err != nil {
+		t.Fatalf("create bun bin dir: %v", err)
+	}
+	if err := os.WriteFile(conductorPath, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatalf("write bun shim path: %v", err)
+	}
+
+	gotName, gotVersion, gotRoot := inferCliPackageManifest(conductorPath)
+	if gotName != "conductor-oss" {
+		t.Fatalf("expected package name conductor-oss, got %q", gotName)
+	}
+	if gotVersion != "9.9.9" {
+		t.Fatalf("expected package version 9.9.9, got %q", gotVersion)
+	}
+	if gotRoot != workspace {
+		t.Fatalf("expected package root %q, got %q", workspace, gotRoot)
+	}
+}
+
+func TestInferCliUpdateEnvFallsBackToBunPackageMetadataWhenEnvMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("CONDUCTOR_CLI_PACKAGE_NAME", "")
+	t.Setenv("CONDUCTOR_CLI_VERSION", "")
+	t.Setenv("CONDUCTOR_CLI_INSTALL_MODE", "")
+
+	workspace := filepath.Join(tempDir, ".bun", "install", "global", "node_modules", "conductor-oss")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("create bun package workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "package.json"), []byte(`{"name":"conductor-oss","version":"1.2.3"}`), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	t.Setenv("HOME", tempDir)
+	t.Setenv("BUN_INSTALL", filepath.Join(tempDir, ".bun"))
+
+	conductorPath := filepath.Join(tempDir, ".bun", "bin", "conductor")
+	if err := os.MkdirAll(filepath.Dir(conductorPath), 0o755); err != nil {
+		t.Fatalf("create bun bin dir: %v", err)
+	}
+	if err := os.WriteFile(conductorPath, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatalf("write bun shim path: %v", err)
+	}
+
+	gotEnv := inferCliUpdateEnv(conductorPath)
+	got := strings.Join(gotEnv, "\n")
+	for _, want := range []string{
+		"CONDUCTOR_CLI_PACKAGE_NAME=conductor-oss",
+		"CONDUCTOR_CLI_VERSION=1.2.3",
+		"CONDUCTOR_CLI_INSTALL_MODE=global-bun",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected launch env to contain %q, got %v", want, gotEnv)
+		}
+	}
+}

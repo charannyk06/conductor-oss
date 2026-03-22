@@ -1,16 +1,12 @@
 import { SignJWT } from "jose";
-import type { DashboardAccess } from "@/lib/auth";
+import { getDashboardAccess, type DashboardAccess } from "@/lib/auth";
 import { requireBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
 const DEFAULT_LOCAL_BRIDGE_USER_ID = "local-admin";
+const RELAY_JWT_ISSUER = "conductor-dashboard";
+const RELAY_JWT_AUDIENCE = "conductor-relay";
 
-function base64UrlEncode(value: string): string {
-  return Buffer.from(value)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
+export type BridgeRelayJwtScope = "dashboard-api" | "terminal-browser";
 
 export function resolveBridgeRelayUserId(access: DashboardAccess): string | null {
   const email = access.email?.trim().toLowerCase();
@@ -23,32 +19,50 @@ export function resolveBridgeRelayUserId(access: DashboardAccess): string | null
   return null;
 }
 
-export async function signBridgeRelayJwt(userId: string): Promise<string> {
+function requireBridgeRelaySecret(): string {
+  const secret = process.env.RELAY_JWT_SECRET?.trim();
+  if (!secret) {
+    throw new Error("RELAY_JWT_SECRET is required for bridge relay access");
+  }
+  return secret;
+}
+
+export async function signBridgeRelayJwt(
+  userId: string,
+  scope: BridgeRelayJwtScope,
+): Promise<string> {
   const trimmedUserId = userId.trim();
   if (!trimmedUserId) {
     throw new Error("Bridge relay user id is required");
   }
 
-  const secret = process.env.RELAY_JWT_SECRET?.trim();
-  const expirationSeconds = Math.floor(Date.now() / 1000) + 5 * 60;
-
-  if (secret) {
-    return await new SignJWT({
-      sub: trimmedUserId,
-      user_id: trimmedUserId,
-    })
-      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-      .setExpirationTime(expirationSeconds)
-      .sign(new TextEncoder().encode(secret));
-  }
-
-  const header = base64UrlEncode(JSON.stringify({ alg: "none", typ: "JWT" }));
-  const payload = base64UrlEncode(JSON.stringify({
+  const secret = requireBridgeRelaySecret();
+  return await new SignJWT({
     sub: trimmedUserId,
     user_id: trimmedUserId,
-    exp: expirationSeconds,
-  }));
-  return `${header}.${payload}.`;
+    scope,
+  })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuer(RELAY_JWT_ISSUER)
+    .setAudience(RELAY_JWT_AUDIENCE)
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(new TextEncoder().encode(secret));
+}
+
+export async function buildBridgeRelayAuthHeaders(
+  request: Request,
+  scope: BridgeRelayJwtScope = "dashboard-api",
+): Promise<Headers> {
+  const access = await getDashboardAccess(request);
+  const userId = resolveBridgeRelayUserId(access);
+  if (!userId) {
+    throw new Error("Unable to resolve the dashboard user for the bridge relay.");
+  }
+
+  return new Headers({
+    Authorization: `Bearer ${await signBridgeRelayJwt(userId, scope)}`,
+  });
 }
 
 export function buildBridgeRelayWebSocketUrl(pathname: string, jwt: string): string {

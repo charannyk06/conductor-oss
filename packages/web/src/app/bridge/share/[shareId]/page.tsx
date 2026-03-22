@@ -1,72 +1,107 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
-import { BridgeSessionTerminal } from "@/components/bridge/BridgeSessionTerminal";
-import type { TerminalInsertRequest } from "@/components/sessions/terminalInsert";
-import { buildBridgeHttpUrl, hasBridgeSettings } from "@/lib/bridge";
 
 type ShareRecord = {
   share_id: string;
-  session_scope: string;
-  browser_url?: string;
-  read_only?: boolean;
+  read_only: boolean;
+  created_at_secs: number;
 };
 
-type ShareListResponse = {
-  shares?: ShareRecord[];
+type ShareOutputResponse = {
+  output?: string;
+  error?: string;
 };
+
+function formatAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
+}
 
 export default function BridgeSharePage() {
   const params = useParams<{ shareId: string }>();
   const shareId = params.shareId;
-  const [sessionScope, setSessionScope] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const mountedRef = useRef(true);
+  const [share, setShare] = useState<ShareRecord | null>(null);
+  const [output, setOutput] = useState("");
+  const [loadingShare, setLoadingShare] = useState(true);
+  const [refreshingOutput, setRefreshingOutput] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+
+  const loadOutput = useCallback(async (background = false) => {
+    if (!background && mountedRef.current) {
+      setRefreshingOutput(true);
+    }
+
+    try {
+      const response = await fetch(
+        `/api/bridge/shares/${encodeURIComponent(shareId)}/output?lines=500`,
+        { cache: "no-store" },
+      );
+      const payload = (await response.json().catch(() => null)) as ShareOutputResponse | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Failed to load shared terminal output (${response.status})`);
+      }
+
+      if (!mountedRef.current) {
+        return;
+      }
+
+      setOutput(typeof payload?.output === "string" ? payload.output : "");
+      setError(null);
+      setLastUpdatedAt(new Date().toLocaleTimeString());
+    } catch (err) {
+      if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to load shared terminal output.");
+      }
+    } finally {
+      if (!background && mountedRef.current) {
+        setRefreshingOutput(false);
+      }
+    }
+  }, [shareId]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadShare() {
-      if (!hasBridgeSettings()) {
-        if (!cancelled) {
-          setError("Bridge settings are not configured in this browser.");
-          setLoading(false);
-        }
-        return;
-      }
-
-      const url = buildBridgeHttpUrl("/api/shares");
-      if (!url) {
-        if (!cancelled) {
-          setError("Bridge relay URL is invalid.");
-          setLoading(false);
-        }
-        return;
-      }
-
+      setLoadingShare(true);
       try {
-        const response = await fetch(url, { cache: "no-store" });
+        const response = await fetch(`/api/bridge/shares/${encodeURIComponent(shareId)}`, {
+          cache: "no-store",
+        });
+        const payload = (await response.json().catch(() => null)) as
+          | (ShareRecord & { error?: string })
+          | null;
         if (!response.ok) {
-          throw new Error(`Failed to load share links (${response.status})`);
+          throw new Error(payload?.error ?? `Failed to resolve share link (${response.status})`);
         }
 
-        const payload = (await response.json().catch(() => null)) as ShareListResponse | null;
-        const share = payload?.shares?.find((item) => item.share_id === shareId) ?? null;
-        if (!share) {
-          throw new Error("Share link not found.");
+        if (cancelled || !mountedRef.current) {
+          return;
         }
 
-        if (!cancelled) {
-          setSessionScope(share.session_scope);
-          setError(null);
-          setLoading(false);
-        }
+        setShare(payload);
+        setError(null);
+        await loadOutput();
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled && mountedRef.current) {
           setError(err instanceof Error ? err.message : "Failed to resolve share link.");
-          setLoading(false);
+        }
+      } finally {
+        if (!cancelled && mountedRef.current) {
+          setLoadingShare(false);
         }
       }
     }
@@ -75,9 +110,23 @@ export default function BridgeSharePage() {
     return () => {
       cancelled = true;
     };
-  }, [shareId]);
+  }, [loadOutput, shareId]);
 
-  if (loading) {
+  useEffect(() => {
+    if (!share) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadOutput(true);
+    }, 4000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [loadOutput, share]);
+
+  if (loadingShare) {
     return (
       <PublicPageShell className="flex items-center">
         <div className="mx-auto w-full max-w-xl">
@@ -87,7 +136,7 @@ export default function BridgeSharePage() {
     );
   }
 
-  if (error || !sessionScope) {
+  if (error && !share) {
     return (
       <PublicPageShell className="flex items-center">
         <div className="mx-auto w-full max-w-xl">
@@ -95,7 +144,7 @@ export default function BridgeSharePage() {
             <PublicSection
               eyebrow="Conductor Bridge"
               title="Shared terminal unavailable"
-              description={error ?? "The shared terminal could not be resolved from this browser."}
+              description={error}
             />
           </PublicPanel>
         </div>
@@ -103,23 +152,37 @@ export default function BridgeSharePage() {
     );
   }
 
-  const emptyInsert: TerminalInsertRequest | null = null;
-
   return (
     <main className="min-h-dvh bg-[var(--bg-canvas)] px-3 py-3 text-[var(--text-strong)] sm:px-6 sm:py-6">
       <div className="mx-auto flex min-h-[calc(100dvh-1.5rem)] w-full max-w-7xl flex-col overflow-hidden rounded-[var(--radius-lg)] border border-[var(--border-soft)] bg-[var(--bg-panel)]">
-        <div className="border-b border-[var(--border-soft)] px-4 py-3 text-[12px] text-[var(--text-muted)] sm:px-6">
-          Read-only shared terminal
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--border-soft)] px-4 py-3 text-[12px] text-[var(--text-muted)] sm:px-6">
+          <div>
+            Shared terminal
+            {share ? ` · ${share.read_only ? "read-only" : "editable"} · created ${formatAge(share.created_at_secs)}` : ""}
+          </div>
+          <div className="flex items-center gap-3">
+            {lastUpdatedAt ? <span>Updated {lastUpdatedAt}</span> : null}
+            <button
+              type="button"
+              onClick={() => {
+                void loadOutput();
+              }}
+              disabled={refreshingOutput}
+              className="rounded-md border border-[var(--border-soft)] px-2 py-1 text-[11px] text-[var(--text-strong)] hover:bg-[var(--bg-panel-elevated)] disabled:opacity-60"
+            >
+              {refreshingOutput ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
-        <div className="min-h-0 flex-1">
-          <BridgeSessionTerminal
-            sessionId={sessionScope}
-            sessionState="shared"
-            pendingInsert={emptyInsert}
-            immersiveMobileMode={false}
-            scope={`share-${shareId}`}
-            readOnly
-          />
+        {error ? (
+          <div className="border-b border-[var(--border-soft)] bg-[rgba(255,143,122,0.08)] px-4 py-2 text-[12px] text-[var(--status-error)] sm:px-6">
+            {error}
+          </div>
+        ) : null}
+        <div className="min-h-0 flex-1 overflow-auto bg-[#060404] p-4 sm:p-6">
+          <pre className="min-h-full whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-[#efe8e1]">
+            {output || "No terminal output is available yet."}
+          </pre>
         </div>
       </div>
     </main>

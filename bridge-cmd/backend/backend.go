@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -290,38 +291,167 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 }
 
 func inferCliUpdateEnv(binaryPath string) []string {
-	if !isNodeScriptBinary(binaryPath) {
-		return nil
-	}
+	packageName := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_PACKAGE_NAME"))
+	currentVersion := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_VERSION"))
+	installMode := strings.TrimSpace(os.Getenv("CONDUCTOR_CLI_INSTALL_MODE"))
 
 	resolvedPath, err := filepath.EvalSymlinks(binaryPath)
 	if err != nil {
 		resolvedPath = binaryPath
 	}
 
-	packageRoot := filepath.Dir(filepath.Dir(resolvedPath))
-	manifestBytes, err := os.ReadFile(filepath.Join(packageRoot, "package.json"))
-	if err != nil {
+	manifestName, manifestVersion, manifestPackageRoot := inferCliPackageManifest(resolvedPath)
+	if manifestName != "" && manifestVersion != "" {
+		packageName = manifestName
+		currentVersion = manifestVersion
+		installMode = inferCliInstallMode(manifestPackageRoot)
+	}
+
+	if packageName == "" {
+		packageName = inferFallbackPackageName(binaryPath)
+	}
+	if currentVersion == "" {
+		currentVersion = inferCliBinaryVersion(binaryPath)
+	}
+	if installMode == "" {
+		installMode = inferCliInstallModeFromBinary(binaryPath)
+	}
+	if packageName == "" || currentVersion == "" {
 		return nil
 	}
 
-	var manifest cliPackageManifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-		return nil
-	}
-
-	packageName := strings.TrimSpace(manifest.Name)
-	version := strings.TrimSpace(manifest.Version)
-	if packageName == "" || version == "" {
-		return nil
-	}
-
-	installMode := inferCliInstallMode(packageRoot)
 	return []string{
 		"CONDUCTOR_CLI_PACKAGE_NAME=" + packageName,
-		"CONDUCTOR_CLI_VERSION=" + version,
+		"CONDUCTOR_CLI_VERSION=" + currentVersion,
 		"CONDUCTOR_CLI_INSTALL_MODE=" + installMode,
 	}
+}
+
+func inferCliPackageManifest(binaryPath string) (string, string, string) {
+	for _, packageRoot := range inferCliPackageRootCandidates(binaryPath) {
+		manifestPath := filepath.Join(packageRoot, "package.json")
+		manifest, ok := readCliPackageManifest(manifestPath)
+		if !ok {
+			continue
+		}
+		packageName := strings.TrimSpace(manifest.Name)
+		if !isConductorPackageName(packageName) {
+			continue
+		}
+		currentVersion := strings.TrimSpace(manifest.Version)
+		if packageName == "" || currentVersion == "" {
+			continue
+		}
+		return packageName, currentVersion, packageRoot
+	}
+	return "", "", ""
+}
+
+func inferCliInstallModeFromBinary(binaryPath string) string {
+	resolvedPath, err := filepath.EvalSymlinks(strings.TrimSpace(binaryPath))
+	if err != nil {
+		resolvedPath = binaryPath
+	}
+	for _, packageRoot := range inferCliPackageRootCandidates(resolvedPath) {
+		installMode := inferCliInstallMode(packageRoot)
+		if installMode != "" && installMode != "unknown" {
+			return installMode
+		}
+	}
+	return "unknown"
+}
+
+func isConductorPackageName(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "conductor", "conductor-oss":
+		return true
+	default:
+		return false
+	}
+}
+
+func inferCliPackageRootCandidates(binaryPath string) []string {
+	resolvedPath := strings.ReplaceAll(strings.TrimSpace(binaryPath), "\\", "/")
+	resolvedPath, err := filepath.EvalSymlinks(resolvedPath)
+	if err != nil {
+		resolvedPath = binaryPath
+	}
+	current := filepath.Dir(resolvedPath)
+	var candidates []string
+
+	for i := 0; i < 16; i++ {
+		candidates = append(candidates, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	if bunCandidate := inferBunCandidatePackageRootFromBinary(resolvedPath); bunCandidate != "" {
+		candidates = append([]string{bunCandidate}, candidates...)
+	}
+	return candidates
+}
+
+func inferBunCandidatePackageRootFromBinary(resolvedPath string) string {
+	normalizedPath := strings.ReplaceAll(resolvedPath, "\\", "/")
+	if !strings.Contains(normalizedPath, "/.bun/") {
+		return ""
+	}
+
+	bunInstallRoot := strings.TrimSpace(os.Getenv("BUN_INSTALL"))
+	if bunInstallRoot == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		bunInstallRoot = filepath.Join(homeDir, ".bun")
+	}
+
+	for _, packageName := range []string{"conductor-oss", "conductor"} {
+		packageRoot := filepath.Join(bunInstallRoot, "install", "global", "node_modules", packageName)
+		if _, err := os.Stat(packageRoot); err == nil {
+			return packageRoot
+		}
+	}
+	return ""
+}
+
+func readCliPackageManifest(path string) (cliPackageManifest, bool) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return cliPackageManifest{}, false
+	}
+	var manifest cliPackageManifest
+	if err := json.Unmarshal(payload, &manifest); err != nil {
+		return cliPackageManifest{}, false
+	}
+	return manifest, true
+}
+
+func inferFallbackPackageName(binaryPath string) string {
+	switch strings.ToLower(filepath.Base(binaryPath)) {
+	case "conductor", "co":
+		return "conductor-oss"
+	default:
+		return ""
+	}
+}
+
+var cliVersionPattern = regexp.MustCompile(`(?:v|V)?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?`)
+
+func inferCliBinaryVersion(binaryPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	command := exec.CommandContext(ctx, binaryPath, "--version")
+	output, err := command.CombinedOutput()
+	if err != nil || ctx.Err() != nil {
+		return ""
+	}
+	match := cliVersionPattern.FindString(string(output))
+	return strings.TrimPrefix(match, "v")
 }
 
 func inferCliInstallMode(packageRoot string) string {

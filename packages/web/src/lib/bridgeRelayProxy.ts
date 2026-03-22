@@ -1,7 +1,7 @@
 import type { DashboardRole } from "@conductor-oss/core/types";
 import { NextRequest, NextResponse } from "next/server";
-import { getDashboardAccess, guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
+import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
 import { requireBridgeRelayUrl, resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
 const BLOCKED_REQUEST_HEADERS = new Set<string>([
@@ -40,14 +40,7 @@ export function hasBridgeRelay(): boolean {
 }
 
 async function buildBridgeRelayHeaders(request: Request): Promise<Headers> {
-  const access = await getDashboardAccess(request);
-  const headers = await buildForwardedAccessHeaders(request);
-
-  if (!access.email && access.provider === "local") {
-    headers.set("x-bridge-user-id", "local-admin");
-  }
-
-  return headers;
+  return await buildBridgeRelayAuthHeaders(request);
 }
 
 export async function proxyToBridgeRelay(

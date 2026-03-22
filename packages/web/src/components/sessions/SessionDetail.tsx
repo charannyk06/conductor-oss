@@ -14,7 +14,6 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { buildBridgeHttpUrl } from "@/lib/bridge";
 import { useSession } from "@/hooks/useSession";
 import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
@@ -122,7 +121,6 @@ export function SessionDetail({
   const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
-  const [bridgeShareApiUrl, setBridgeShareApiUrl] = useState<string | null>(null);
   const activeTab = useMemo(
     () => resolveSessionTab(searchParams.get("tab")),
     [searchParams],
@@ -146,20 +144,9 @@ export function SessionDetail({
       ...request,
     });
   }, []);
-  useEffect(() => {
-    const syncBridgeShareUrl = () => {
-      setBridgeShareApiUrl(buildBridgeHttpUrl("/api/shares"));
-    };
-
-    syncBridgeShareUrl();
-    window.addEventListener("storage", syncBridgeShareUrl);
-    return () => {
-      window.removeEventListener("storage", syncBridgeShareUrl);
-    };
-  }, []);
   const handleCreateShare = useCallback(async () => {
-    if (!bridgeShareApiUrl) {
-      setShareError("Bridge relay is not configured.");
+    if (!session?.bridgeId) {
+      setShareError("Share links are only available for paired-device sessions.");
       return;
     }
 
@@ -167,12 +154,12 @@ export function SessionDetail({
     setShareError(null);
 
     try {
-      const response = await fetch(bridgeShareApiUrl, {
+      const response = await fetch("/api/bridge/shares", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ session_id: sessionId }),
+        body: JSON.stringify({ device_id: session.bridgeId, session_id: sessionId }),
       });
 
       const payload = (await response.json().catch(() => null)) as {
@@ -209,7 +196,7 @@ export function SessionDetail({
     } finally {
       setShareBusy(false);
     }
-  }, [bridgeShareApiUrl, sessionId]);
+  }, [session?.bridgeId, sessionId]);
   useEffect(() => {
     autoPreviewOpenedRef.current = false;
     terminalInsertNonceRef.current = 0;
@@ -267,6 +254,7 @@ export function SessionDetail({
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
+  const canCreateShare = Boolean(session.bridgeId);
 
   const sessionTabs = (
     <TabsList className="flex w-full overflow-x-auto sm:w-fit sm:inline-flex">
@@ -309,7 +297,7 @@ export function SessionDetail({
                     <PanelLeftOpen className="h-4 w-4" />
                   </Button>
               ) : null}
-              {bridgeShareApiUrl ? (
+              {canCreateShare ? (
                 <Button
                   type="button"
                   variant="ghost"
@@ -345,7 +333,7 @@ export function SessionDetail({
             {sessionTabs}
             <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
               <div className="flex items-center gap-1.5">
-                {bridgeShareApiUrl ? (
+                {canCreateShare ? (
                   <Button
                     type="button"
                     variant="ghost"

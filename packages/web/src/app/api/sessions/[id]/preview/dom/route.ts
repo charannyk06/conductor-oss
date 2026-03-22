@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
@@ -26,7 +27,11 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   const frameId = request.nextUrl.searchParams.get("frameId");
   const interactiveOnly = request.nextUrl.searchParams.get("interactiveOnly") === "1";
   const manager = getPreviewBrowserManager();
-  await manager.configureBridgePreview(id, previewContext.bridgePreview, forwardedHeaders);
+  await manager.configureBridgePreview(
+    id,
+    previewContext.bridgePreview,
+    previewContext.bridgePreview ? await buildBridgeRelayAuthHeaders(request) : undefined,
+  );
 
   try {
     const payload = await manager.inspectDom(id, frameId, interactiveOnly);

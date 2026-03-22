@@ -33,10 +33,12 @@ type RelayShare = {
 
 type BridgesResponse = {
   bridges?: RelayBridge[];
+  error?: string;
 };
 
 type SharesResponse = {
   shares?: RelayShare[];
+  error?: string;
 };
 
 function formatAge(seconds: number): string {
@@ -65,30 +67,20 @@ export default function BridgeSettingsPage() {
     setToken(settings.token);
     setRelayUrl(settings.relayUrl);
 
-    if (!settings.relayUrl) {
-      setBridges([]);
-      setShares([]);
-      setLoading(false);
-      setError(null);
-      return;
-    }
-
-    const bridgesUrl = buildBridgeHttpUrl("/api/bridges");
-    const sharesUrl = buildBridgeHttpUrl("/api/shares");
-    if (!bridgesUrl || !sharesUrl) {
-      setLoading(false);
-      setError("Bridge relay URL is invalid.");
-      return;
-    }
-
     try {
       const [bridgesResponse, sharesResponse] = await Promise.all([
-        fetch(bridgesUrl, { cache: "no-store" }),
-        fetch(sharesUrl, { cache: "no-store" }),
+        fetch("/api/bridge/bridges", { cache: "no-store" }),
+        fetch("/api/bridge/shares", { cache: "no-store" }),
       ]);
 
       const bridgePayload = (await bridgesResponse.json().catch(() => null)) as BridgesResponse | null;
       const sharePayload = (await sharesResponse.json().catch(() => null)) as SharesResponse | null;
+      if (!bridgesResponse.ok) {
+        throw new Error(bridgePayload?.error ?? `Failed to load bridges (${bridgesResponse.status})`);
+      }
+      if (!sharesResponse.ok) {
+        throw new Error(sharePayload?.error ?? `Failed to load shares (${sharesResponse.status})`);
+      }
       setBridges(bridgePayload?.bridges ?? []);
       setShares(sharePayload?.shares ?? []);
       setError(null);
@@ -209,11 +201,11 @@ export default function BridgeSettingsPage() {
                         type="button"
                         disabled={busyId === bridge.bridge_id}
                         onClick={async () => {
-                          const bridgeDeleteUrl = buildBridgeHttpUrl(`/api/bridges/${encodeURIComponent(bridge.bridge_id)}`);
-                          if (!bridgeDeleteUrl) return;
                           setBusyId(bridge.bridge_id);
                           try {
-                            const response = await fetch(bridgeDeleteUrl, { method: "DELETE" });
+                            const response = await fetch(`/api/bridge/bridges/${encodeURIComponent(bridge.bridge_id)}`, {
+                              method: "DELETE",
+                            });
                             if (!response.ok) {
                               throw new Error(`Failed to revoke bridge (${response.status})`);
                             }
@@ -268,11 +260,11 @@ export default function BridgeSettingsPage() {
                       type="button"
                       disabled={busyId === share.share_id}
                       onClick={async () => {
-                        const deleteUrl = buildBridgeHttpUrl(`/api/shares/${encodeURIComponent(share.share_id)}`);
-                        if (!deleteUrl) return;
                         setBusyId(share.share_id);
                         try {
-                          const response = await fetch(deleteUrl, { method: "DELETE" });
+                          const response = await fetch(`/api/bridge/shares/${encodeURIComponent(share.share_id)}`, {
+                            method: "DELETE",
+                          });
                           if (!response.ok) {
                             throw new Error(`Failed to revoke share (${response.status})`);
                           }

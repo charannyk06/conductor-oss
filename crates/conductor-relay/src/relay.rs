@@ -56,7 +56,8 @@ struct ConnectionRecord {
 
 #[derive(Debug, Clone)]
 struct ShareRecord {
-    bridge_token: String,
+    owner_user_id: String,
+    device_id: String,
     session_scope: String,
     read_only: bool,
     created_at: Instant,
@@ -168,6 +169,7 @@ struct WsQuery {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ShareCreateRequest {
+    device_id: String,
     session_id: Option<String>,
     session_scope: Option<String>,
 }
@@ -179,6 +181,18 @@ struct ShareListItem {
     browser_url: String,
     read_only: bool,
     created_at_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SharePublicItem {
+    share_id: String,
+    read_only: bool,
+    created_at_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ShareOutputQuery {
+    lines: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -338,13 +352,14 @@ enum TerminalPeerKind {
 
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 const DEFAULT_JWT_SECRET_ENV: &str = "RELAY_JWT_SECRET";
+const RELAY_JWT_ISSUER: &str = "conductor-dashboard";
+const RELAY_JWT_AUDIENCE: &str = "conductor-relay";
+const RELAY_JWT_SCOPE_DASHBOARD_API: &str = "dashboard-api";
+const RELAY_JWT_SCOPE_TERMINAL_BROWSER: &str = "terminal-browser";
 const SHARE_PREFIX: &str = "share-";
 const PAIRING_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEVICE_ACCESS_TOKEN_TTL_SECS: u64 = 3600;
 const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(30);
-const PROXY_AUTHORIZED_HEADER: &str = "x-conductor-proxy-authorized";
-const PROXY_EMAIL_HEADER: &str = "x-conductor-access-email";
-const PROXY_LOCAL_USER_HEADER: &str = "x-bridge-user-id";
 const BRIDGE_PROXY_META_KEY: &str = "$bridgeProxy";
 
 pub async fn serve() -> Result<()> {
@@ -383,7 +398,11 @@ fn build_router(state: RelayState) -> Router {
         )
         .route("/api/devices/{device_id}", delete(delete_device))
         .route("/api/shares", get(list_shares).post(create_share))
-        .route("/api/shares/{share_id}", delete(delete_share))
+        .route(
+            "/api/shares/{share_id}",
+            get(get_share).delete(delete_share),
+        )
+        .route("/api/shares/{share_id}/output", get(get_share_output))
         .route("/bridge/{scope}", get(bridge_ws))
         .route("/browser/{scope}", get(browser_ws))
         .route("/terminal/{terminal_id}/browser", get(browser_terminal_ws))
@@ -421,19 +440,30 @@ async fn health(State(state): State<RelayState>) -> Json<RelayHealth> {
     })
 }
 
-async fn list_bridges(State(state): State<RelayState>) -> Json<Value> {
+async fn list_bridges(State(state): State<RelayState>, headers: HeaderMap) -> Response {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
+        )
+            .into_response();
+    };
+
     let inner = state.inner.lock().await;
     let mut bridges: HashMap<String, BridgeListItem> = HashMap::new();
 
-    for channel in inner.channels.values() {
+    for (bridge_key, channel) in &inner.channels {
         let Some(bridge) = channel.bridge.as_ref() else {
             continue;
         };
+        if bridge.user_id != user_id {
+            continue;
+        }
 
         let entry = bridges
-            .entry(bridge.user_id.clone())
+            .entry(bridge_key.clone())
             .or_insert_with(|| BridgeListItem {
-                bridge_id: bridge.user_id.clone(),
+                bridge_id: bridge_key.clone(),
                 browser_count: 0,
                 connected: true,
                 last_status: channel.last_status.clone(),
@@ -445,7 +475,11 @@ async fn list_bridges(State(state): State<RelayState>) -> Json<Value> {
         }
     }
 
-    Json(json!({ "bridges": bridges.into_values().collect::<Vec<_>>() }))
+    (
+        StatusCode::OK,
+        Json(json!({ "bridges": bridges.into_values().collect::<Vec<_>>() })),
+    )
+        .into_response()
 }
 
 async fn create_pairing_code(
@@ -453,10 +487,10 @@ async fn create_pairing_code(
     headers: HeaderMap,
     Json(body): Json<DeviceCodeCreateRequest>,
 ) -> Response {
-    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing proxied dashboard user." })),
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
         )
             .into_response();
     };
@@ -490,10 +524,10 @@ async fn complete_device_claim(
     headers: HeaderMap,
     Json(body): Json<DeviceClaimCompleteRequest>,
 ) -> Response {
-    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing proxied dashboard user." })),
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
         )
             .into_response();
     };
@@ -525,10 +559,10 @@ async fn pair_device(
 }
 
 async fn list_devices(State(state): State<RelayState>, headers: HeaderMap) -> Response {
-    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing proxied dashboard user." })),
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
         )
             .into_response();
     };
@@ -576,10 +610,10 @@ async fn proxy_device_api(
     headers: HeaderMap,
     Json(body): Json<DeviceProxyRequest>,
 ) -> Response {
-    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing proxied dashboard user." })),
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
         )
             .into_response();
     };
@@ -599,10 +633,10 @@ async fn proxy_device_preview(
     headers: HeaderMap,
     Json(body): Json<DevicePreviewRequest>,
 ) -> Response {
-    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing proxied dashboard user." })),
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
         )
             .into_response();
     };
@@ -630,10 +664,10 @@ async fn create_terminal_session(
     headers: HeaderMap,
     Json(body): Json<DeviceTerminalCreateRequest>,
 ) -> Response {
-    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing proxied dashboard user." })),
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
         )
             .into_response();
     };
@@ -656,10 +690,10 @@ async fn delete_device(
     Path(device_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing proxied dashboard user." })),
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
         )
             .into_response();
     };
@@ -769,9 +803,21 @@ async fn bridge_terminal_ws(
     }
 }
 
-async fn delete_bridge(State(state): State<RelayState>, Path(bridge_id): Path<String>) -> Response {
+async fn delete_bridge(
+    State(state): State<RelayState>,
+    Path(bridge_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
+        )
+            .into_response();
+    };
+
     let (bridge_closes, browser_closes, pending_requests, removed) =
-        state.disconnect_bridge(&bridge_id).await;
+        state.disconnect_bridge_for_user(&user_id, &bridge_id).await;
     close_senders(bridge_closes).await;
     close_senders(browser_closes).await;
     fail_pending_api_requests(
@@ -795,37 +841,42 @@ async fn delete_bridge(State(state): State<RelayState>, Path(bridge_id): Path<St
     }
 }
 
-async fn list_shares(State(state): State<RelayState>) -> Json<Value> {
+async fn list_shares(State(state): State<RelayState>, headers: HeaderMap) -> Response {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
+        )
+            .into_response();
+    };
+
     let inner = state.inner.lock().await;
     let shares: Vec<ShareListItem> = inner
         .shares
         .iter()
+        .filter(|(_, share)| share.owner_user_id == user_id)
         .map(|(share_id, share)| ShareListItem {
             share_id: share_id.clone(),
             session_scope: share.session_scope.clone(),
-            browser_url: format!("/browser/{}{}", SHARE_PREFIX, share_id),
+            browser_url: format!("/bridge/share/{share_id}"),
             read_only: share.read_only,
             created_at_secs: share.created_at.elapsed().as_secs(),
         })
         .collect();
-    Json(json!({ "shares": shares }))
+    (StatusCode::OK, Json(json!({ "shares": shares }))).into_response()
 }
 
 async fn create_share(
     State(state): State<RelayState>,
     headers: HeaderMap,
-    Query(query): Query<WsQuery>,
     Json(body): Json<ShareCreateRequest>,
 ) -> Response {
-    let bridge_token = match resolve_token(&headers, query.token.as_deref()) {
-        Some(token) => token,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "Missing bridge token." })),
-            )
-                .into_response();
-        }
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
+        )
+            .into_response();
     };
 
     let session_scope = match body
@@ -843,13 +894,41 @@ async fn create_share(
         }
     };
 
-    let share_id = Uuid::new_v4().to_string();
-    let browser_url = format!("/browser/{}{}", SHARE_PREFIX, share_id);
+    let device_id = body.device_id.trim();
+    if device_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing device id." })),
+        )
+            .into_response();
+    }
+
     let mut inner = state.inner.lock().await;
+    match inner.devices.get(device_id) {
+        Some(device) if device.owner_user_id == user_id => {}
+        Some(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "Device access denied." })),
+            )
+                .into_response();
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Device not found." })),
+            )
+                .into_response();
+        }
+    }
+
+    let share_id = Uuid::new_v4().to_string();
+    let browser_url = format!("/bridge/share/{share_id}");
     inner.shares.insert(
         share_id.clone(),
         ShareRecord {
-            bridge_token,
+            owner_user_id: user_id,
+            device_id: device_id.to_string(),
             session_scope: session_scope.clone(),
             read_only: true,
             created_at: Instant::now(),
@@ -868,8 +947,90 @@ async fn create_share(
         .into_response()
 }
 
-async fn delete_share(State(state): State<RelayState>, Path(share_id): Path<String>) -> Response {
+async fn get_share(State(state): State<RelayState>, Path(share_id): Path<String>) -> Response {
+    let inner = state.inner.lock().await;
+    let Some(share) = inner.shares.get(&share_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Share link not found." })),
+        )
+            .into_response();
+    };
+
+    (
+        StatusCode::OK,
+        Json(SharePublicItem {
+            share_id,
+            read_only: share.read_only,
+            created_at_secs: share.created_at.elapsed().as_secs(),
+        }),
+    )
+        .into_response()
+}
+
+async fn get_share_output(
+    State(state): State<RelayState>,
+    Path(share_id): Path<String>,
+    Query(query): Query<ShareOutputQuery>,
+) -> Response {
+    let Some(share) = state.get_share_record(&share_id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Share link not found." })),
+        )
+            .into_response();
+    };
+
+    let lines = query.lines.unwrap_or(500).clamp(1, 2000);
+    let output_path = format!("/api/sessions/{}/output?lines={lines}", share.session_scope);
+
+    match state
+        .forward_device_api_request(
+            &share.owner_user_id,
+            &share.device_id,
+            "GET",
+            &output_path,
+            None,
+        )
+        .await
+    {
+        Ok(response) => response_from_proxied_api(response.status, response.body),
+        Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
+    }
+}
+
+async fn delete_share(
+    State(state): State<RelayState>,
+    Path(share_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
+        )
+            .into_response();
+    };
+
     let mut inner = state.inner.lock().await;
+    match inner.shares.get(&share_id) {
+        Some(share) if share.owner_user_id == user_id => {}
+        Some(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "Share access denied." })),
+            )
+                .into_response();
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "Share link not found." })),
+            )
+                .into_response();
+        }
+    }
+
     if inner.shares.remove(&share_id).is_some() {
         (
             StatusCode::OK,
@@ -902,7 +1063,7 @@ async fn browser_ws(
     }
 
     let (bridge_key, read_only, user_id) =
-        match resolve_browser_connection(&state, &scope, &headers, query.token.as_deref()).await {
+        match resolve_browser_connection(&scope, &headers, query.token.as_deref()).await {
             Ok(value) => value,
             Err(response) => return response,
         };
@@ -978,22 +1139,17 @@ async fn bridge_ws(
 }
 
 async fn resolve_browser_connection(
-    state: &RelayState,
     scope: &str,
     headers: &HeaderMap,
     token: Option<&str>,
 ) -> Result<(String, bool, String), Response> {
     if let Some(share_id) = scope.strip_prefix(SHARE_PREFIX) {
-        let inner = state.inner.lock().await;
-        let Some(share) = inner.shares.get(share_id) else {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "Share link not found." })),
-            )
-                .into_response());
-        };
-        let user_id = resolve_user_id(None, Some(&share.bridge_token));
-        return Ok((share.bridge_token.clone(), share.read_only, user_id));
+        let _ = share_id;
+        return Err((
+            StatusCode::GONE,
+            Json(json!({ "error": "Shared terminal websocket access has been disabled." })),
+        )
+            .into_response());
     }
 
     let Some(bridge_token) = resolve_token(headers, token) else {
@@ -1716,8 +1872,9 @@ impl RelayState {
         bucket.allow(now)
     }
 
-    async fn disconnect_bridge(
+    async fn disconnect_bridge_for_user(
         &self,
+        user_id: &str,
         bridge_id: &str,
     ) -> (
         Vec<mpsc::UnboundedSender<Message>>,
@@ -1735,10 +1892,10 @@ impl RelayState {
             .channels
             .iter()
             .filter(|(key, channel)| {
-                channel
-                    .bridge
-                    .as_ref()
-                    .is_some_and(|record| record.user_id == bridge_id || key.as_str() == bridge_id)
+                channel.bridge.as_ref().is_some_and(|record| {
+                    record.user_id == user_id
+                        && (record.user_id == bridge_id || key.as_str() == bridge_id)
+                })
             })
             .map(|(key, _)| key.clone())
             .collect();
@@ -1767,6 +1924,11 @@ impl RelayState {
         }
 
         (bridge_txs, browser_txs, pending_api_requests, removed)
+    }
+
+    async fn get_share_record(&self, share_id: &str) -> Option<ShareRecord> {
+        let inner = self.inner.lock().await;
+        inner.shares.get(share_id).cloned()
     }
 
     async fn create_pairing_code(&self, user_id: String, _suggested_name: String) -> String {
@@ -2018,7 +2180,7 @@ impl RelayState {
         };
 
         let (bridge_closes, browser_closes, pending_requests, _) =
-            self.disconnect_bridge(device_id).await;
+            self.disconnect_bridge_for_user(user_id, device_id).await;
         close_senders(bridge_closes).await;
         close_senders(browser_closes).await;
         fail_pending_api_requests(
@@ -2390,28 +2552,13 @@ fn resolve_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<Strin
         .map(ToOwned::to_owned)
 }
 
-fn resolve_proxy_user_id(headers: &HeaderMap) -> Option<String> {
-    let authorized = headers
-        .get(PROXY_AUTHORIZED_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .map(|value| value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if !authorized {
-        return None;
-    }
-
-    headers
-        .get(PROXY_EMAIL_HEADER)
-        .or_else(|| headers.get(PROXY_LOCAL_USER_HEADER))
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+fn resolve_dashboard_api_user_id(headers: &HeaderMap) -> Option<String> {
+    let jwt = resolve_token(headers, None)?;
+    decode_relay_user_id(&jwt, RELAY_JWT_SCOPE_DASHBOARD_API).ok()
 }
 
 fn resolve_browser_ws_user_id(jwt: &str) -> Option<String> {
-    decode_github_user_id(jwt, env::var(DEFAULT_JWT_SECRET_ENV).ok().as_deref()).ok()
+    decode_relay_user_id(jwt, RELAY_JWT_SCOPE_TERMINAL_BROWSER).ok()
 }
 
 fn resolve_user_id(jwt: Option<&str>, fallback: Option<&str>) -> String {
@@ -2423,9 +2570,7 @@ fn resolve_user_id(jwt: Option<&str>, fallback: Option<&str>) -> String {
             Some(trimmed)
         }
     }) {
-        if let Ok(user_id) =
-            decode_github_user_id(jwt, env::var(DEFAULT_JWT_SECRET_ENV).ok().as_deref())
-        {
+        if let Ok(user_id) = decode_relay_user_id(jwt, RELAY_JWT_SCOPE_DASHBOARD_API) {
             return user_id;
         }
     }
@@ -2566,31 +2711,30 @@ mod tests {
 struct Claims {
     sub: Option<String>,
     user_id: Option<String>,
+    scope: Option<String>,
     exp: Option<usize>,
 }
 
-fn decode_github_user_id(jwt: &str, secret: Option<&str>) -> Result<String> {
-    if let Some(secret) = secret {
-        let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
-        let claims = jsonwebtoken::decode::<Claims>(
-            jwt,
-            &key,
-            &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256),
-        )?;
-        return claims
-            .claims
-            .user_id
-            .or(claims.claims.sub)
-            .context("missing github user id in jwt");
+fn decode_relay_user_id(jwt: &str, expected_scope: &str) -> Result<String> {
+    let secret = env::var(DEFAULT_JWT_SECRET_ENV).context("relay jwt secret is not configured")?;
+    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.set_issuer(&[RELAY_JWT_ISSUER]);
+    validation.set_audience(&[RELAY_JWT_AUDIENCE]);
+    let claims = jsonwebtoken::decode::<Claims>(jwt, &key, &validation)?;
+
+    let scope = claims
+        .claims
+        .scope
+        .as_deref()
+        .context("missing relay jwt scope")?;
+    if scope != expected_scope {
+        anyhow::bail!("relay jwt scope mismatch");
     }
 
-    let payload = jwt.split('.').nth(1).context("invalid jwt")?;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload.as_bytes())
-        .context("invalid jwt payload")?;
-    let claims: Claims = serde_json::from_slice(&decoded)?;
     claims
+        .claims
         .user_id
-        .or(claims.sub)
-        .context("missing github user id in jwt")
+        .or(claims.claims.sub)
+        .context("missing user id in relay jwt")
 }

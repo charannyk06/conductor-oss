@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Copy, Download, Loader2, RefreshCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { subscribeToAppUpdateEvents } from "@/lib/liveEvents";
+import { describeAutoUpdateSkip } from "@/lib/bridgeAppUpdate";
 import type { AppInstallMode, AppUpdateStatus } from "@/lib/types";
 import { cn } from "@/lib/cn";
 
@@ -21,6 +22,9 @@ function installModeHint(mode: AppInstallMode): string | null {
 }
 
 function noticeTitle(update: AppUpdateStatus): string {
+  if (!update.enabled && update.reason) {
+    return "Conductor update unavailable";
+  }
   if (update.restarting) return "Restarting Conductor";
   if (update.jobStatus === "running") return "Updating Conductor";
   if (update.jobStatus === "completed") return "Conductor updated";
@@ -29,6 +33,9 @@ function noticeTitle(update: AppUpdateStatus): string {
 }
 
 function noticeDescription(update: AppUpdateStatus): string {
+  if (!update.enabled && update.reason) {
+    return describeAutoUpdateSkip(update);
+  }
   if (update.restarting) {
     return "The launcher is restarting the runtime. This tab will reconnect automatically once it is ready.";
   }
@@ -113,8 +120,9 @@ export function AppUpdateNotice() {
   const hiddenForVersion = update?.latestVersion && dismissedVersion === update.latestVersion;
   const restarting = Boolean(update?.restarting) || reconnecting;
   const visible = useMemo(() => {
-    if (!update?.enabled) return false;
+    if (!update) return false;
     if (restarting || update.jobStatus !== "idle") return true;
+    if (!update.enabled && update.reason) return true;
     if (hiddenForVersion) return false;
     return update.updateAvailable;
   }, [hiddenForVersion, restarting, update]);
@@ -136,7 +144,7 @@ export function AppUpdateNotice() {
       setDismissedVersion(update.latestVersion);
       return;
     }
-    setUpdate((current) => (current ? { ...current, enabled: false } : current));
+    setUpdate((current) => (current ? { ...current, reason: null, enabled: true } : current));
   }
 
   async function handleUpdateNow() {

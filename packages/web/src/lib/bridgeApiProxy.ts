@@ -1,9 +1,9 @@
 import type { DashboardRole } from "@conductor-oss/core/types";
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
+import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
 import { requireBridgeRelayUrl, resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { normalizeBridgeId } from "@/lib/bridgeSessionIds";
-import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 
 const BLOCKED_RESPONSE_HEADERS = new Set([
   "connection",
@@ -114,7 +114,7 @@ export async function proxyToBridgeDevice(
   const relayUrl = requireBridgeRelayUrl();
   const incomingUrl = new URL(request.url);
   const target = new URL(`/api/devices/${encodeURIComponent(bridgeId)}/proxy`, relayUrl);
-  const headers = await buildForwardedAccessHeaders(request);
+  const headers = await buildBridgeRelayAuthHeaders(request);
   headers.set("Content-Type", "application/json");
   headers.set("x-forwarded-proto", incomingUrl.protocol.replace(":", ""));
   headers.set("x-forwarded-host", incomingUrl.host);
