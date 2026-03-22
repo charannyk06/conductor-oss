@@ -11,6 +11,20 @@ import (
 
 const serviceName = "com.conductor.bridge"
 
+func resolveLaunchdPath(home string) string {
+	return fmt.Sprintf(
+		"%s:%s:%s:%s:%s:%s:%s:%s",
+		filepath.Join(home, ".conductor", "bin"),
+		filepath.Join(home, ".conductor", "npm", "bin"),
+		filepath.Join(home, ".local", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin:/sbin",
+	)
+}
+
 func Install(binaryPath string) error {
 	if binaryPath == "" {
 		// Find our own binary
@@ -66,8 +80,7 @@ func RestartServiceIfInstalled() error {
 		if _, err := os.Stat(plistPath); err != nil {
 			return fmt.Errorf("launchd service not installed: %w", err)
 		}
-		installLaunchdService(home, plistPath)
-		return nil
+		return installLaunchdService(home, plistPath)
 	case "linux":
 		xdgConfig := os.Getenv("XDG_CONFIG_HOME")
 		if xdgConfig == "" {
@@ -105,6 +118,11 @@ func installLaunchd(home, binaryPath string) error {
         <string>%s</string>
         <string>daemon</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>%s</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -115,27 +133,34 @@ func installLaunchd(home, binaryPath string) error {
     <string>/tmp/conductor-bridge.err</string>
 </dict>
 </plist>
-`, serviceName, binaryPath)
+`, serviceName, binaryPath, resolveLaunchdPath(home))
 
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
 
-	installLaunchdService(home, plistPath)
+	if err := installLaunchdService(home, plistPath); err != nil {
+		return err
+	}
 
 	fmt.Printf("macOS service installed at %s\n", plistPath)
 	fmt.Println("Conductor Bridge will relaunch automatically on login.")
 	return nil
 }
 
-func installLaunchdService(home, plistPath string) {
+func installLaunchdService(home, plistPath string) error {
 	uid := strconv.Itoa(os.Getuid())
 	domainTarget := "gui/" + uid
 	serviceTarget := domainTarget + "/" + serviceName
 
 	_ = exec.Command("launchctl", "bootout", serviceTarget).Run()
-	_ = exec.Command("launchctl", "bootstrap", domainTarget, plistPath).Run()
-	_ = exec.Command("launchctl", "kickstart", "-k", serviceTarget).Run()
+	if err := exec.Command("launchctl", "bootstrap", domainTarget, plistPath).Run(); err != nil {
+		return fmt.Errorf("bootstrap launchd service: %w", err)
+	}
+	if err := exec.Command("launchctl", "kickstart", "-k", serviceTarget).Run(); err != nil {
+		return fmt.Errorf("kickstart launchd service: %w", err)
+	}
+	return nil
 }
 
 func installSystemd(home, binaryPath string) error {

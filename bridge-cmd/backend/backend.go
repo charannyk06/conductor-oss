@@ -34,6 +34,45 @@ type launchPlan struct {
 	args []string
 }
 
+func findNodeBinary() string {
+	if resolved, err := exec.LookPath("node"); err == nil {
+		return resolved
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	for _, candidate := range []string{
+		filepath.Join(homeDir, ".local", "bin", "node"),
+		filepath.Join(homeDir, ".nvm", "current", "bin", "node"),
+		filepath.Join("/opt/homebrew/bin", "node"),
+		filepath.Join("/usr/local/bin", "node"),
+		filepath.Join("/usr/bin", "node"),
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+func resolveBinaryLaunch(binaryPath string, args []string) launchPlan {
+	data, err := os.ReadFile(binaryPath)
+	if err == nil {
+		firstLine := strings.SplitN(string(data), "\n", 2)[0]
+		if strings.Contains(firstLine, "node") {
+			if nodePath := findNodeBinary(); nodePath != "" {
+				return launchPlan{cmd: nodePath, args: append([]string{binaryPath}, args...)}
+			}
+		}
+	}
+
+	return launchPlan{cmd: binaryPath, args: args}
+}
+
 func Ensure(ctx context.Context, opts Options) (func(), error) {
 	stderr := opts.Stderr
 	if stderr == nil {
@@ -158,17 +197,17 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 	}
 
 	if conductorPath := findConductorBinary("conductor"); conductorPath != "" {
-		return launchPlan{
-			cmd:  conductorPath,
-			args: []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
-		}, nil
+		return resolveBinaryLaunch(
+			conductorPath,
+			[]string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
+		), nil
 	}
 
 	if coPath := findConductorBinary("co"); coPath != "" {
-		return launchPlan{
-			cmd:  coPath,
-			args: []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
-		}, nil
+		return resolveBinaryLaunch(
+			coPath,
+			[]string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
+		), nil
 	}
 
 	return launchPlan{}, errors.New("could not find `conductor` or `co`; set CONDUCTOR_BRIDGE_BACKEND_COMMAND to start the local backend")
