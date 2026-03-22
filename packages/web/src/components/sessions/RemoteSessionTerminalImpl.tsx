@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
@@ -8,6 +9,7 @@ import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { buildBridgeRepairHref } from "@/lib/bridgeOnboarding";
 import {
   isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
@@ -129,6 +131,10 @@ export function RemoteSessionTerminal({
     [sessionState],
   );
   const sessionClosed = TERMINAL_CLOSED_STATUSES.has(normalizedSessionStatus);
+  const bridgeRecoveryHref = useMemo(
+    () => (bridgeId ? buildBridgeRepairHref(bridgeId) : null),
+    [bridgeId],
+  );
 
   const closeSocket = useCallback(() => {
     const socket = socketRef.current;
@@ -614,9 +620,19 @@ export function RemoteSessionTerminal({
 
       {error ? (
         <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] px-3 py-2 text-[11px] text-[#ffb39e] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
-          <div className="flex items-center gap-1.5">
-            <AlertCircle className="h-3 w-3 shrink-0" />
-            <span className="truncate">{error}</span>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{error}</span>
+            </div>
+            {bridgeRecoveryHref ? (
+              <Link
+                href={bridgeRecoveryHref}
+                className="shrink-0 text-[11px] font-medium text-[#ffd089] underline underline-offset-2 hover:text-[#fff8f2]"
+              >
+                Open bridge recovery
+              </Link>
+            ) : null}
           </div>
         </div>
       ) : null}

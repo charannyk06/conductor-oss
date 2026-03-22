@@ -1,4 +1,5 @@
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { isLegacyBridgeBuildErrorMessage, legacyBridgeBuildActionMessage } from "@/lib/bridgeBuildCompatibility";
 import type { AppUpdateStatus } from "@/lib/types";
 
 export const BRIDGE_APP_UPDATE_POLL_INTERVAL_MS = 1_500;
@@ -62,8 +63,8 @@ function bridgeUpdateMessage(
 
 function normalizeBridgeUpdateError(message: string | null, status: number): string {
   const normalized = message?.trim() ?? "";
-  if (normalized.includes("127.0.0.1:4749")) {
-    return "This laptop is still on an older bridge build. Run the setup command once to upgrade the bridge service, then retry Update Conductor.";
+  if (isLegacyBridgeBuildErrorMessage(normalized)) {
+    return legacyBridgeBuildActionMessage("update");
   }
 
   return normalized || `Failed to update Conductor on this laptop (${status})`;

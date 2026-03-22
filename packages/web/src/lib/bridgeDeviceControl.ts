@@ -1,3 +1,5 @@
+import { isLegacyBridgeBuildErrorMessage, legacyBridgeBuildActionMessage } from "@/lib/bridgeBuildCompatibility";
+
 type BridgeDeviceControlPayload = {
   ok?: boolean;
   message?: string;
@@ -10,10 +12,8 @@ function normalizeBridgeControlError(
   status: number,
 ): string {
   const normalized = message?.trim() ?? "";
-  if (normalized.includes("127.0.0.1:4749")) {
-    return action === "repair"
-      ? "This laptop is still on an older bridge build. Run the setup command once to upgrade the bridge service, then use Repair bridge."
-      : "This laptop is still on an older bridge build. Run the setup command once to upgrade the bridge service, then retry Restart service.";
+  if (isLegacyBridgeBuildErrorMessage(normalized)) {
+    return legacyBridgeBuildActionMessage(action === "repair" ? "repair" : "restart");
   }
 
   return normalized || `Failed to run ${action} on the bridge service (${status})`;

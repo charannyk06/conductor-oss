@@ -16,6 +16,10 @@ export function buildBridgeInstallScriptUrl(baseUrl: string): string {
   return new URL(DEFAULT_INSTALL_SCRIPT_PATH, baseUrl).toString();
 }
 
+export function buildBridgeRepairHref(deviceId: string): string {
+  return `/bridge/connect?device=${encodeURIComponent(deviceId)}#bridge-setup`;
+}
+
 export function buildBridgeInstallCommand(installScriptUrl: string): string {
   return `curl -fsSL ${shellQuote(installScriptUrl)} | sh`;
 }

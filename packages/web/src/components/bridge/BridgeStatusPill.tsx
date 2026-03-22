@@ -5,18 +5,21 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ChevronDown, Download, Laptop, Loader2, RefreshCw, Wrench } from "lucide-react";
+import { BridgeLocalRepairNotice } from "@/components/bridge/BridgeLocalRepairNotice";
 import {
   isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
   runBridgeAutoUpdate,
   type BridgeAutoUpdateState,
 } from "@/lib/bridgeAppUpdate";
+import { isLegacyBridgeBuildErrorMessage } from "@/lib/bridgeBuildCompatibility";
 import { cn } from "@/lib/cn";
 import {
   requestBridgeRepair,
   requestBridgeServiceRestart,
 } from "@/lib/bridgeDeviceControl";
 import { buildBridgeInstallScriptUrl } from "@/lib/bridgeOnboarding";
+import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
 type BridgeDevice = {
   device_id: string;
@@ -175,6 +178,8 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
 
   const connectedDevices = devices.filter((device) => device.connected);
   const selectedBridgeId = searchParams.get("bridge")?.trim() || null;
+  const dashboardUrl = typeof window === "undefined" ? "" : window.location.origin;
+  const relayUrl = resolveBridgeRelayUrl();
   const selectedBridgeDevice = selectedBridgeId
     ? devices.find((device) => device.device_id === selectedBridgeId) ?? null
     : null;
@@ -341,6 +346,13 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                   && serviceAction.deviceId === device.device_id;
                 const repairRunning = serviceActionRunning && serviceAction.kind === "repair";
                 const restartRunning = serviceActionRunning && serviceAction.kind === "restart";
+                const needsLocalRepair = (
+                  serviceAction.deviceId === device.device_id
+                  && isLegacyBridgeBuildErrorMessage(serviceAction.message)
+                ) || (
+                  autoUpdate.deviceId === device.device_id
+                  && isLegacyBridgeBuildErrorMessage(autoUpdate.message)
+                );
 
                 return (
                   <div
@@ -383,6 +395,15 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                           >
                             {serviceAction.message}
                           </div>
+                        ) : null}
+                        {needsLocalRepair && dashboardUrl ? (
+                          <BridgeLocalRepairNotice
+                            deviceId={device.device_id}
+                            deviceName={device.device_name}
+                            dashboardUrl={dashboardUrl}
+                            installScriptUrl={buildBridgeInstallScriptUrl(dashboardUrl)}
+                            relayUrl={relayUrl}
+                          />
                         ) : null}
                         {device.connected ? (
                           <div className="mt-2 flex flex-wrap gap-2">
