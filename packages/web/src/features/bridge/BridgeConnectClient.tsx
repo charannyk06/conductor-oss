@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   CheckCircle2,
@@ -18,6 +18,12 @@ import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { PublicPageShell } from "@/components/public/PublicPageShell";
 import { SessionTerminal } from "@/components/sessions/SessionTerminal";
 import { Button } from "@/components/ui/Button";
+import {
+  readRecentBridgePairing,
+  runBridgeAutoUpdate,
+  type BridgeAutoUpdateState,
+  writeRecentBridgePairing,
+} from "@/lib/bridgeAppUpdate";
 import { cn } from "@/lib/cn";
 import {
   buildBridgeBootstrapConnectCommand,
@@ -178,7 +184,14 @@ export default function BridgeConnectClient({
   const [showAdvancedSetup, setShowAdvancedSetup] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimedDevice, setClaimedDevice] = useState<{ deviceId: string; deviceName: string } | null>(null);
+  const [recentPairingDeviceId, setRecentPairingDeviceId] = useState<string | null>(null);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [pairingAutoUpdate, setPairingAutoUpdate] = useState<BridgeAutoUpdateState>({
+    deviceId: null,
+    phase: "idle",
+    message: null,
+  });
+  const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
 
   const bootstrapConnectCommand = useMemo(
     () => buildBridgeBootstrapConnectCommand(installScriptUrl, dashboardUrl, relayUrl),
@@ -203,20 +216,28 @@ export default function BridgeConnectClient({
       : null,
     [claimedDevice, devices],
   );
+  const recentPairingDeviceRecord = useMemo(
+    () => recentPairingDeviceId
+      ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
+      : null,
+    [devices, recentPairingDeviceId],
+  );
   const selectedDevice = useMemo(
     () => devices.find((device) => device.device_id === selectedDeviceId)
       ?? claimedDeviceRecord
+      ?? recentPairingDeviceRecord
       ?? connectedDevices[0]
       ?? devices[0]
       ?? null,
-    [claimedDeviceRecord, connectedDevices, devices, selectedDeviceId],
+    [claimedDeviceRecord, connectedDevices, devices, recentPairingDeviceRecord, selectedDeviceId],
   );
   const readyDevice = useMemo(
     () => (claimedDeviceRecord?.connected ? claimedDeviceRecord : null)
+      ?? (recentPairingDeviceRecord?.connected ? recentPairingDeviceRecord : null)
       ?? (selectedDevice?.connected ? selectedDevice : null)
       ?? connectedDevices[0]
       ?? null,
-    [claimedDeviceRecord, connectedDevices, selectedDevice],
+    [claimedDeviceRecord, connectedDevices, recentPairingDeviceRecord, selectedDevice],
   );
   const readyDashboardHref = readyDevice
     ? `/?bridge=${encodeURIComponent(readyDevice.device_id)}`
@@ -228,11 +249,27 @@ export default function BridgeConnectClient({
         return current;
       }
       return claimedDeviceRecord?.device_id
+        ?? recentPairingDeviceRecord?.device_id
         ?? connectedDevices[0]?.device_id
         ?? devices[0]?.device_id
         ?? null;
     });
-  }, [claimedDeviceRecord, connectedDevices, devices]);
+  }, [claimedDeviceRecord, connectedDevices, devices, recentPairingDeviceRecord]);
+
+  useEffect(() => {
+    const syncRecentPairing = () => {
+      setRecentPairingDeviceId(readRecentBridgePairing()?.deviceId ?? null);
+    };
+
+    syncRecentPairing();
+    window.addEventListener("focus", syncRecentPairing);
+    window.addEventListener("storage", syncRecentPairing);
+
+    return () => {
+      window.removeEventListener("focus", syncRecentPairing);
+      window.removeEventListener("storage", syncRecentPairing);
+    };
+  }, []);
 
   const refreshDevices = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -274,6 +311,11 @@ export default function BridgeConnectClient({
         deviceId: payload.device_id,
         deviceName: payload.device_name,
       });
+      writeRecentBridgePairing({
+        deviceId: payload.device_id,
+        deviceName: payload.device_name,
+      });
+      setRecentPairingDeviceId(payload.device_id);
       setClaimStatus("paired");
       await refreshDevices();
     } catch (err) {
@@ -294,7 +336,43 @@ export default function BridgeConnectClient({
   }, [completeClaim, initialClaimToken]);
 
   useEffect(() => {
-    if (!initialClaimToken && !(claimStatus === "paired" && connectedDevices.length === 0)) {
+    const autoUpdateDevice = (claimedDeviceRecord?.connected ? claimedDeviceRecord : null)
+      ?? (recentPairingDeviceRecord?.connected ? recentPairingDeviceRecord : null)
+      ?? (selectedDevice?.connected ? selectedDevice : null);
+
+    if (!autoUpdateDevice) {
+      return;
+    }
+
+    if (autoUpdatedDeviceIdsRef.current.has(autoUpdateDevice.device_id)) {
+      return;
+    }
+
+    autoUpdatedDeviceIdsRef.current.add(autoUpdateDevice.device_id);
+    void runBridgeAutoUpdate(autoUpdateDevice, setPairingAutoUpdate);
+  }, [claimStatus, claimedDeviceRecord, recentPairingDeviceRecord, selectedDevice]);
+
+  useEffect(() => {
+    if (!recentPairingDeviceRecord || recentPairingDeviceRecord.connected || pairingAutoUpdate.message) {
+      return;
+    }
+
+    setPairingAutoUpdate({
+      deviceId: recentPairingDeviceRecord.device_id,
+      phase: "checking",
+      message: `Waiting for ${recentPairingDeviceRecord.device_name} to come online so Conductor can finish checking its package version.`,
+    });
+  }, [pairingAutoUpdate.message, recentPairingDeviceRecord]);
+
+  useEffect(() => {
+    const waitingForRecentPairing = Boolean(recentPairingDeviceId)
+      && !recentPairingDeviceRecord?.connected;
+
+    if (
+      !initialClaimToken
+      && !(claimStatus === "paired" && connectedDevices.length === 0)
+      && !waitingForRecentPairing
+    ) {
       return;
     }
 
@@ -305,7 +383,14 @@ export default function BridgeConnectClient({
     return () => {
       window.clearInterval(pollTimer);
     };
-  }, [claimStatus, connectedDevices.length, initialClaimToken, refreshDevices]);
+  }, [
+    claimStatus,
+    connectedDevices.length,
+    initialClaimToken,
+    recentPairingDeviceId,
+    recentPairingDeviceRecord?.connected,
+    refreshDevices,
+  ]);
 
   useEffect(() => {
     if (initialClaimToken || pairingCode || creatingCode || !showAdvancedSetup) {
@@ -560,6 +645,19 @@ export default function BridgeConnectClient({
                           ? "This laptop is online and ready to use."
                           : "The bridge service is restarting for this laptop now. This page will refresh until it reports online."}
                       </div>
+                      {pairingAutoUpdate.message ? (
+                        <div className={cn(
+                          "mt-2 text-xs leading-5",
+                          pairingAutoUpdate.phase === "failed"
+                            ? "text-[var(--vk-red)]"
+                            : pairingAutoUpdate.phase === "skipped"
+                              ? "text-[var(--vk-text-muted)]"
+                              : "text-[var(--vk-text-faint)]",
+                        )}
+                        >
+                          {pairingAutoUpdate.message}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 ) : claimError ? (
@@ -783,6 +881,19 @@ export default function BridgeConnectClient({
                     <div className="text-sm text-[var(--vk-text-muted)]">
                       {formatDeviceDescriptor(selectedDevice)}
                     </div>
+                    {pairingAutoUpdate.message && pairingAutoUpdate.deviceId === selectedDevice.device_id ? (
+                      <div className={cn(
+                        "text-xs leading-5",
+                        pairingAutoUpdate.phase === "failed"
+                          ? "text-[var(--vk-red)]"
+                          : pairingAutoUpdate.phase === "skipped"
+                            ? "text-[var(--vk-text-muted)]"
+                            : "text-[var(--vk-text-faint)]",
+                      )}
+                      >
+                        {pairingAutoUpdate.message}
+                      </div>
+                    ) : null}
                     {selectedDevice.connected ? (
                       <div>
                         <Button asChild variant="primary" size="md">
@@ -847,6 +958,19 @@ export default function BridgeConnectClient({
                             <div className="mt-1 text-xs text-[var(--vk-text-muted)]">
                               Relay: {device.last_status?.hostname ?? device.hostname}
                             </div>
+                            {pairingAutoUpdate.message && pairingAutoUpdate.deviceId === device.device_id ? (
+                              <div className={cn(
+                                "mt-2 text-xs leading-5",
+                                pairingAutoUpdate.phase === "failed"
+                                  ? "text-[var(--vk-red)]"
+                                  : pairingAutoUpdate.phase === "skipped"
+                                    ? "text-[var(--vk-text-muted)]"
+                                    : "text-[var(--vk-text-faint)]",
+                              )}
+                              >
+                                {pairingAutoUpdate.message}
+                              </div>
+                            ) : null}
                           </button>
 
                           <div className="flex shrink-0 items-center gap-2">

@@ -1,9 +1,15 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { ChevronDown, Laptop } from "lucide-react";
+import {
+  readRecentBridgePairing,
+  runBridgeAutoUpdate,
+  type BridgeAutoUpdateState,
+} from "@/lib/bridgeAppUpdate";
 import { cn } from "@/lib/cn";
 
 type BridgeDevice = {
@@ -65,9 +71,17 @@ function StatusBadge({
 }
 
 function BridgeStatusDropdown({ className }: { className?: string }) {
+  const searchParams = useSearchParams();
   const [devices, setDevices] = useState<BridgeDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [recentPairingDeviceId, setRecentPairingDeviceId] = useState<string | null>(null);
+  const [autoUpdate, setAutoUpdate] = useState<BridgeAutoUpdateState>({
+    deviceId: null,
+    phase: "idle",
+    message: null,
+  });
+  const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -111,7 +125,29 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     };
   }, []);
 
+  useEffect(() => {
+    const syncRecentPairing = () => {
+      setRecentPairingDeviceId(readRecentBridgePairing()?.deviceId ?? null);
+    };
+
+    syncRecentPairing();
+    window.addEventListener("focus", syncRecentPairing);
+    window.addEventListener("storage", syncRecentPairing);
+
+    return () => {
+      window.removeEventListener("focus", syncRecentPairing);
+      window.removeEventListener("storage", syncRecentPairing);
+    };
+  }, []);
+
   const connectedDevices = devices.filter((device) => device.connected);
+  const selectedBridgeId = searchParams.get("bridge")?.trim() || null;
+  const selectedBridgeDevice = selectedBridgeId
+    ? devices.find((device) => device.device_id === selectedBridgeId) ?? null
+    : null;
+  const recentPairingDevice = recentPairingDeviceId
+    ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
+    : null;
   const connected = connectedDevices.length > 0;
   const title = error
     ?? (connected
@@ -119,6 +155,34 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       : devices.length > 0
         ? "No paired bridges are online"
         : "No paired bridges yet");
+
+  useEffect(() => {
+    const autoUpdateDevice = (recentPairingDevice?.connected ? recentPairingDevice : null)
+      ?? (selectedBridgeDevice?.connected ? selectedBridgeDevice : null);
+
+    if (!autoUpdateDevice) {
+      return;
+    }
+
+    if (autoUpdatedDeviceIdsRef.current.has(autoUpdateDevice.device_id)) {
+      return;
+    }
+
+    autoUpdatedDeviceIdsRef.current.add(autoUpdateDevice.device_id);
+    void runBridgeAutoUpdate(autoUpdateDevice, setAutoUpdate);
+  }, [recentPairingDevice, selectedBridgeDevice]);
+
+  useEffect(() => {
+    if (!recentPairingDevice || recentPairingDevice.connected || autoUpdate.message) {
+      return;
+    }
+
+    setAutoUpdate({
+      deviceId: recentPairingDevice.device_id,
+      phase: "checking",
+      message: `Waiting for ${recentPairingDevice.device_name} to reconnect so Conductor can finish its package update.`,
+    });
+  }, [autoUpdate.message, recentPairingDevice]);
 
   return (
     <DropdownMenu.Root>
@@ -152,6 +216,19 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
             {error ? (
               <div className="mt-2 text-[12px] leading-5 text-[var(--vk-red)]">{error}</div>
             ) : null}
+            {autoUpdate.message ? (
+              <div className={cn(
+                "mt-2 text-[12px] leading-5",
+                autoUpdate.phase === "failed"
+                  ? "text-[var(--vk-red)]"
+                  : autoUpdate.phase === "skipped"
+                    ? "text-[var(--vk-text-muted)]"
+                    : "text-[var(--vk-text-faint)]",
+              )}
+              >
+                {autoUpdate.message}
+              </div>
+            ) : null}
           </div>
 
           <div className="mt-2 max-h-[280px] overflow-y-auto">
@@ -172,6 +249,19 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                       <div className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
                         Relay: {device.last_status?.hostname ?? device.hostname}
                       </div>
+                      {autoUpdate.message && autoUpdate.deviceId === device.device_id ? (
+                        <div className={cn(
+                          "mt-1 text-[11px] leading-5",
+                          autoUpdate.phase === "failed"
+                            ? "text-[var(--vk-red)]"
+                            : autoUpdate.phase === "skipped"
+                              ? "text-[var(--vk-text-muted)]"
+                              : "text-[var(--vk-text-faint)]",
+                        )}
+                        >
+                          {autoUpdate.message}
+                        </div>
+                      ) : null}
                     </div>
                     <BridgeStatusPill connected={device.connected} />
                   </div>
