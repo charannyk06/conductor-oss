@@ -186,7 +186,7 @@ export default function BridgeConnectClient({
   const [claimedDevice, setClaimedDevice] = useState<{ deviceId: string; deviceName: string } | null>(null);
   const [recentPairingDeviceId, setRecentPairingDeviceId] = useState<string | null>(null);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
-  const [pairingAutoUpdate, setPairingAutoUpdate] = useState<PairingAutoUpdateState>({
+  const [pairingAutoUpdate, setPairingAutoUpdate] = useState<BridgeAutoUpdateState>({
     deviceId: null,
     phase: "idle",
     message: null,
