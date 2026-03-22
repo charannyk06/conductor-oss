@@ -7,11 +7,13 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  Download,
   Laptop,
   Loader2,
   RefreshCw,
   TerminalSquare,
   Trash2,
+  Wrench,
   X,
 } from "lucide-react";
 import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
@@ -19,12 +21,17 @@ import { PublicPageShell } from "@/components/public/PublicPageShell";
 import { SessionTerminal } from "@/components/sessions/SessionTerminal";
 import { Button } from "@/components/ui/Button";
 import {
+  isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
   runBridgeAutoUpdate,
   type BridgeAutoUpdateState,
   writeRecentBridgePairing,
 } from "@/lib/bridgeAppUpdate";
 import { cn } from "@/lib/cn";
+import {
+  requestBridgeRepair,
+  requestBridgeServiceRestart,
+} from "@/lib/bridgeDeviceControl";
 import {
   buildBridgeBootstrapConnectCommand,
   buildBridgeConnectCommand,
@@ -71,6 +78,13 @@ type ClaimCompletionResponse = {
 type SessionsResponse = DashboardSession[] | {
   sessions?: DashboardSession[];
   error?: string;
+};
+
+type BridgeServiceActionState = {
+  deviceId: string | null;
+  kind: "repair" | "restart" | null;
+  status: "idle" | "running" | "completed" | "failed";
+  message: string | null;
 };
 
 function normalizeSessionsPayload(payload: SessionsResponse | null): DashboardSession[] {
@@ -191,6 +205,12 @@ export default function BridgeConnectClient({
     phase: "idle",
     message: null,
   });
+  const [serviceAction, setServiceAction] = useState<BridgeServiceActionState>({
+    deviceId: null,
+    kind: null,
+    status: "idle",
+    message: null,
+  });
   const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
 
   const bootstrapConnectCommand = useMemo(
@@ -242,6 +262,11 @@ export default function BridgeConnectClient({
   const readyDashboardHref = readyDevice
     ? `/?bridge=${encodeURIComponent(readyDevice.device_id)}`
     : null;
+  const selectedDeviceActionRunning = Boolean(selectedDevice)
+    && serviceAction.status === "running"
+    && serviceAction.deviceId === selectedDevice?.device_id;
+  const selectedDeviceRepairRunning = selectedDeviceActionRunning && serviceAction.kind === "repair";
+  const selectedDeviceRestartRunning = selectedDeviceActionRunning && serviceAction.kind === "restart";
 
   useEffect(() => {
     setSelectedDeviceId((current) => {
@@ -452,6 +477,71 @@ export default function BridgeConnectClient({
     } finally {
       setBusyDeviceId(null);
     }
+  }
+
+  async function handleRestartBridgeService(device: Device): Promise<void> {
+    setServiceAction({
+      deviceId: device.device_id,
+      kind: "restart",
+      status: "running",
+      message: `Restarting the bridge service on ${device.device_name}.`,
+    });
+
+    try {
+      const message = await requestBridgeServiceRestart(device.device_id);
+      setServiceAction({
+        deviceId: device.device_id,
+        kind: "restart",
+        status: "completed",
+        message,
+      });
+      window.setTimeout(() => {
+        void refreshDevices();
+      }, 2_000);
+    } catch (err) {
+      setServiceAction({
+        deviceId: device.device_id,
+        kind: "restart",
+        status: "failed",
+        message: err instanceof Error ? err.message : `Failed to restart ${device.device_name}.`,
+      });
+    }
+  }
+
+  async function handleRepairBridge(device: Device): Promise<void> {
+    setServiceAction({
+      deviceId: device.device_id,
+      kind: "repair",
+      status: "running",
+      message: `Reinstalling the bridge service on ${device.device_name}.`,
+    });
+
+    try {
+      const message = await requestBridgeRepair(device.device_id, installScriptUrl);
+      setServiceAction({
+        deviceId: device.device_id,
+        kind: "repair",
+        status: "completed",
+        message,
+      });
+      window.setTimeout(() => {
+        void refreshDevices();
+      }, 2_000);
+    } catch (err) {
+      setServiceAction({
+        deviceId: device.device_id,
+        kind: "repair",
+        status: "failed",
+        message: err instanceof Error ? err.message : `Failed to repair ${device.device_name}.`,
+      });
+    }
+  }
+
+  async function handleUpdateBridgeDevice(device: Device): Promise<void> {
+    await runBridgeAutoUpdate(device, setPairingAutoUpdate);
+    window.setTimeout(() => {
+      void refreshDevices();
+    }, 2_000);
   }
 
   async function handleOpenTestConnection(): Promise<void> {
@@ -894,13 +984,77 @@ export default function BridgeConnectClient({
                         {pairingAutoUpdate.message}
                       </div>
                     ) : null}
+                    {serviceAction.message && serviceAction.deviceId === selectedDevice.device_id ? (
+                      <div className={cn(
+                        "text-xs leading-5",
+                        serviceAction.status === "failed"
+                          ? "text-[var(--vk-red)]"
+                          : serviceAction.status === "completed"
+                            ? "text-[var(--vk-green)]"
+                            : "text-[var(--vk-text-faint)]",
+                      )}
+                      >
+                        {serviceAction.message}
+                      </div>
+                    ) : null}
                     {selectedDevice.connected ? (
-                      <div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="md"
+                          disabled={selectedDeviceActionRunning
+                            || isBridgeAutoUpdateInFlight(pairingAutoUpdate, selectedDevice.device_id)}
+                          onClick={() => {
+                            void handleRepairBridge(selectedDevice);
+                          }}
+                        >
+                          {selectedDeviceRepairRunning ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Wrench className="h-4 w-4" />
+                          )}
+                          Repair bridge
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="md"
+                          disabled={isBridgeAutoUpdateInFlight(pairingAutoUpdate, selectedDevice.device_id)
+                            || selectedDeviceActionRunning}
+                          onClick={() => {
+                            void handleUpdateBridgeDevice(selectedDevice);
+                          }}
+                        >
+                          {isBridgeAutoUpdateInFlight(pairingAutoUpdate, selectedDevice.device_id) ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Download className="h-4 w-4" />
+                          )}
+                          {isBridgeAutoUpdateInFlight(pairingAutoUpdate, selectedDevice.device_id) ? "Updating..." : "Update Conductor"}
+                        </Button>
                         <Button asChild variant="primary" size="md">
                           <Link href={`/?bridge=${encodeURIComponent(selectedDevice.device_id)}`}>
                             <Laptop className="h-4 w-4" />
                             Continue with {selectedDevice.device_name}
                           </Link>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="md"
+                          disabled={selectedDeviceActionRunning
+                            || isBridgeAutoUpdateInFlight(pairingAutoUpdate, selectedDevice.device_id)}
+                          onClick={() => {
+                            void handleRestartBridgeService(selectedDevice);
+                          }}
+                        >
+                          {selectedDeviceRestartRunning ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-4 w-4" />
+                          )}
+                          Restart service
                         </Button>
                       </div>
                     ) : (
@@ -921,6 +1075,11 @@ export default function BridgeConnectClient({
                 ) : devices.length > 0 ? (
                   devices.map((device) => {
                     const isSelected = selectedDevice?.device_id === device.device_id;
+                    const updateInFlight = isBridgeAutoUpdateInFlight(pairingAutoUpdate, device.device_id);
+                    const serviceActionRunning = serviceAction.status === "running"
+                      && serviceAction.deviceId === device.device_id;
+                    const repairRunning = serviceActionRunning && serviceAction.kind === "repair";
+                    const restartRunning = serviceActionRunning && serviceAction.kind === "restart";
 
                     return (
                       <div
@@ -971,15 +1130,78 @@ export default function BridgeConnectClient({
                                 {pairingAutoUpdate.message}
                               </div>
                             ) : null}
+                            {serviceAction.message && serviceAction.deviceId === device.device_id ? (
+                              <div className={cn(
+                                "mt-2 text-xs leading-5",
+                                serviceAction.status === "failed"
+                                  ? "text-[var(--vk-red)]"
+                                  : serviceAction.status === "completed"
+                                    ? "text-[var(--vk-green)]"
+                                    : "text-[var(--vk-text-faint)]",
+                              )}
+                              >
+                                {serviceAction.message}
+                              </div>
+                            ) : null}
                           </button>
 
                           <div className="flex shrink-0 items-center gap-2">
                             {device.connected ? (
-                              <Button asChild variant={isSelected ? "primary" : "outline"} size="md">
-                                <Link href={`/?bridge=${encodeURIComponent(device.device_id)}`}>
-                                  {isSelected ? "Continue" : "Open"}
-                                </Link>
-                              </Button>
+                              <>
+                                <Button asChild variant={isSelected ? "primary" : "outline"} size="md">
+                                  <Link href={`/?bridge=${encodeURIComponent(device.device_id)}`}>
+                                    {isSelected ? "Continue" : "Open"}
+                                  </Link>
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="md"
+                                  disabled={serviceActionRunning || updateInFlight}
+                                  onClick={() => {
+                                    void handleRepairBridge(device);
+                                  }}
+                                >
+                                  {repairRunning ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Wrench className="h-4 w-4" />
+                                  )}
+                                  Repair
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="md"
+                                  disabled={updateInFlight || serviceActionRunning}
+                                  onClick={() => {
+                                    void handleUpdateBridgeDevice(device);
+                                  }}
+                                >
+                                  {updateInFlight ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <Download className="h-4 w-4" />
+                                  )}
+                                  {updateInFlight ? "Updating..." : "Update"}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="md"
+                                  disabled={serviceActionRunning || updateInFlight}
+                                  onClick={() => {
+                                    void handleRestartBridgeService(device);
+                                  }}
+                                >
+                                  {restartRunning ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <RefreshCw className="h-4 w-4" />
+                                  )}
+                                  Restart
+                                </Button>
+                              </>
                             ) : (
                               <span className="text-xs text-[var(--vk-text-muted)]">Offline</span>
                             )}

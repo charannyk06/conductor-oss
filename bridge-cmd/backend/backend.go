@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -32,6 +33,12 @@ type Options struct {
 type launchPlan struct {
 	cmd  string
 	args []string
+	env  []string
+}
+
+type cliPackageManifest struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
 func isNodeScriptBinary(binaryPath string) bool {
@@ -244,10 +251,12 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 	}
 
 	if conductorPath := findConductorBinary("conductor"); conductorPath != "" {
+		updateEnv := inferCliUpdateEnv(conductorPath)
 		if nativePath := resolveBundledNativeConductorBinary(conductorPath); nativePath != "" {
 			return launchPlan{
 				cmd:  nativePath,
 				args: []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
+				env:  updateEnv,
 			}, nil
 		}
 		if isNodeScriptBinary(conductorPath) {
@@ -270,6 +279,94 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 	}
 
 	return launchPlan{}, errors.New("could not find `conductor` or `co`; set CONDUCTOR_BRIDGE_BACKEND_COMMAND to start the local backend")
+}
+
+func inferCliUpdateEnv(binaryPath string) []string {
+	if !isNodeScriptBinary(binaryPath) {
+		return nil
+	}
+
+	resolvedPath, err := filepath.EvalSymlinks(binaryPath)
+	if err != nil {
+		resolvedPath = binaryPath
+	}
+
+	packageRoot := filepath.Dir(filepath.Dir(resolvedPath))
+	manifestBytes, err := os.ReadFile(filepath.Join(packageRoot, "package.json"))
+	if err != nil {
+		return nil
+	}
+
+	var manifest cliPackageManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return nil
+	}
+
+	packageName := strings.TrimSpace(manifest.Name)
+	version := strings.TrimSpace(manifest.Version)
+	if packageName == "" || version == "" {
+		return nil
+	}
+
+	installMode := inferCliInstallMode(packageRoot)
+	return []string{
+		"CONDUCTOR_CLI_PACKAGE_NAME=" + packageName,
+		"CONDUCTOR_CLI_VERSION=" + version,
+		"CONDUCTOR_CLI_INSTALL_MODE=" + installMode,
+	}
+}
+
+func inferCliInstallMode(packageRoot string) string {
+	normalizedRoot := normalizeFsPath(packageRoot)
+	parentWorkspaceLockfile := filepath.Join(packageRoot, "..", "..", "pnpm-lock.yaml")
+	if strings.HasSuffix(normalizedRoot, "/packages/cli") {
+		if _, err := os.Stat(parentWorkspaceLockfile); err == nil {
+			return "source"
+		}
+	}
+
+	if strings.Contains(normalizedRoot, "/_npx/") ||
+		strings.Contains(normalizedRoot, "/npm-cache/_npx/") ||
+		strings.Contains(normalizedRoot, "/pnpm/dlx/") ||
+		strings.Contains(normalizedRoot, "/bunx/") {
+		return "npx"
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		bunInstallRoot := strings.TrimSpace(os.Getenv("BUN_INSTALL"))
+		if bunInstallRoot == "" {
+			bunInstallRoot = filepath.Join(homeDir, ".bun")
+		}
+		bunGlobalRoot := filepath.Join(bunInstallRoot, "install", "global", "node_modules")
+		if isPathInside(packageRoot, bunGlobalRoot) {
+			return "global-bun"
+		}
+	}
+
+	if strings.Contains(normalizedRoot, "/.conductor/npm/") ||
+		strings.Contains(normalizedRoot, "/lib/node_modules/") ||
+		strings.Contains(normalizedRoot, "/node_modules/") {
+		return "global-npm"
+	}
+
+	if strings.Contains(normalizedRoot, "/pnpm/") {
+		return "global-pnpm"
+	}
+
+	return "unknown"
+}
+
+func normalizeFsPath(value string) string {
+	return strings.ReplaceAll(value, "\\", "/")
+}
+
+func isPathInside(candidate string, parent string) bool {
+	relativePath, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(candidate))
+	if err != nil {
+		return false
+	}
+	return relativePath == "." || (!strings.HasPrefix(relativePath, "..") && !filepath.IsAbs(relativePath))
 }
 
 func findConductorBinary(command string) string {

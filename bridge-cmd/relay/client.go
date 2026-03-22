@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charannyk06/conductor-oss/bridge/backend"
+	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/gorilla/websocket"
 )
 
@@ -28,6 +31,8 @@ const (
 	ttydPortRangeEnd         = 8699
 	bridgeProxyMetaKey       = "$bridgeProxy"
 	bridgeRequestMetaKey     = "$bridgeRequest"
+	bridgeInstallPath        = "/_bridge/install"
+	bridgeServiceRestartPath = "/_bridge/service/restart"
 	maxPreviewResponseBytes  = 10 * 1024 * 1024
 )
 
@@ -152,6 +157,8 @@ type sessionOptions struct {
 	stderr            io.Writer
 	heartbeatInterval time.Duration
 }
+
+var backendEnsureMu sync.Mutex
 
 // findFreePort asks the OS for a free port in the ttyd range.
 func findFreePort() (int, error) {
@@ -814,19 +821,23 @@ func proxyPreview(
 }
 
 func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
-	// Proxy to local conductor backend at localhost:4749.
+	if handled, resp := maybeHandleBridgeControlRequest(method, path, body); handled {
+		return resp, nil
+	}
+
 	if path == "" {
 		path = "/"
 	}
-	backendURL := "http://127.0.0.1:4749" + path
-	var requestBody io.Reader
+
+	// Proxy to local conductor backend at localhost:4749.
+	var requestBodyBytes []byte
 	contentType := "application/json"
 	if body != nil {
 		if rawBody, rawContentType, ok, err := decodeProxyRequestBody(body); ok {
 			if err != nil {
 				return apiResponse{Status: 0, Body: nil}, err
 			}
-			requestBody = bytes.NewReader(rawBody)
+			requestBodyBytes = rawBody
 			if rawContentType != "" {
 				contentType = rawContentType
 			} else {
@@ -834,20 +845,18 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 			}
 		} else {
 			bodyBytes, _ := json.Marshal(body)
-			requestBody = bytes.NewReader(bodyBytes)
+			requestBodyBytes = bodyBytes
 		}
 	}
-	req, err := http.NewRequest(method, backendURL, requestBody)
-	if err != nil {
-		return apiResponse{Status: 0, Body: nil}, err
+
+	resp, err := doBackendAPIRequest(method, path, requestBodyBytes, contentType)
+	if err != nil && shouldRetryAfterEnsuringBackend(err) {
+		if ensureErr := ensureLocalBackendForProxy(); ensureErr == nil {
+			resp, err = doBackendAPIRequest(method, path, requestBodyBytes, contentType)
+		}
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", contentType)
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
 	if err != nil {
-		return apiResponse{Status: 502, Body: nil}, err
+		return apiResponse{Status: http.StatusBadGateway, Body: nil}, err
 	}
 	defer resp.Body.Close()
 
@@ -893,6 +902,208 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 			},
 		},
 	}, nil
+}
+
+func maybeHandleBridgeControlRequest(method, path string, body interface{}) (bool, apiResponse) {
+	switch normalizeProxyAPIPath(path) {
+	case bridgeServiceRestartPath:
+		return handleBridgeServiceRestartRequest(method)
+	case bridgeInstallPath:
+		return handleBridgeInstallRequest(method, body)
+	default:
+		return false, apiResponse{}
+	}
+}
+
+func handleBridgeServiceRestartRequest(method string) (bool, apiResponse) {
+	if strings.TrimSpace(method) != http.MethodPost {
+		return true, apiResponse{
+			Status: http.StatusMethodNotAllowed,
+			Body: map[string]any{
+				"error": "Bridge service restart only supports POST.",
+			},
+		}
+	}
+
+	if err := install.RestartServiceAvailable(); err != nil {
+		return true, apiResponse{
+			Status: http.StatusBadRequest,
+			Body: map[string]any{
+				"error": err.Error(),
+			},
+		}
+	}
+
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		if err := install.RestartServiceIfInstalled(); err != nil {
+			fmt.Fprintf(os.Stderr, "bridge service restart failed: %v\n", err)
+		}
+	}()
+
+	return true, apiResponse{
+		Status: http.StatusAccepted,
+		Body: map[string]any{
+			"ok":      true,
+			"message": "Bridge service restart requested. This laptop should reconnect shortly.",
+		},
+	}
+}
+
+func handleBridgeInstallRequest(method string, body interface{}) (bool, apiResponse) {
+	if strings.TrimSpace(method) != http.MethodPost {
+		return true, apiResponse{
+			Status: http.StatusMethodNotAllowed,
+			Body: map[string]any{
+				"error": "Bridge install only supports POST.",
+			},
+		}
+	}
+
+	installScriptURL, err := decodeBridgeInstallScriptURL(body)
+	if err != nil {
+		return true, apiResponse{
+			Status: http.StatusBadRequest,
+			Body: map[string]any{
+				"error": err.Error(),
+			},
+		}
+	}
+
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		if err := runBridgeInstallScript(installScriptURL); err != nil {
+			fmt.Fprintf(os.Stderr, "bridge install failed: %v\n", err)
+		}
+	}()
+
+	return true, apiResponse{
+		Status: http.StatusAccepted,
+		Body: map[string]any{
+			"ok":      true,
+			"message": "Bridge reinstall requested. This laptop should reconnect shortly.",
+		},
+	}
+}
+
+func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentType string) (*http.Response, error) {
+	backendURL := "http://127.0.0.1:4749" + path
+	var requestBody io.Reader
+	if len(requestBodyBytes) > 0 {
+		requestBody = bytes.NewReader(requestBodyBytes)
+	}
+
+	req, err := http.NewRequest(method, backendURL, requestBody)
+	if err != nil {
+		return nil, err
+	}
+	if len(requestBodyBytes) > 0 {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	return client.Do(req)
+}
+
+func ensureLocalBackendForProxy() error {
+	backendEnsureMu.Lock()
+	defer backendEnsureMu.Unlock()
+
+	_, err := backend.Ensure(context.Background(), backend.Options{
+		Stderr:         os.Stderr,
+		StartupTimeout: 20 * time.Second,
+	})
+	return err
+}
+
+func decodeBridgeInstallScriptURL(body interface{}) (string, error) {
+	bodyMap, ok := body.(map[string]interface{})
+	if !ok || bodyMap == nil {
+		return "", fmt.Errorf("missing bridge install payload")
+	}
+
+	value, ok := bodyMap["installScriptUrl"]
+	if !ok {
+		return "", fmt.Errorf("missing installScriptUrl")
+	}
+
+	installScriptURL, ok := value.(string)
+	if !ok || strings.TrimSpace(installScriptURL) == "" {
+		return "", fmt.Errorf("invalid installScriptUrl")
+	}
+
+	parsed, err := url.Parse(strings.TrimSpace(installScriptURL))
+	if err != nil {
+		return "", fmt.Errorf("parse installScriptUrl: %w", err)
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return "", fmt.Errorf("unsupported installScriptUrl scheme %q", parsed.Scheme)
+	}
+
+	return parsed.String(), nil
+}
+
+func runBridgeInstallScript(installScriptURL string) error {
+	request, err := http.NewRequest(http.MethodGet, installScriptURL, nil)
+	if err != nil {
+		return fmt.Errorf("build install script request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("download install script: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("download install script failed with status %d", response.StatusCode)
+	}
+
+	scriptBytes, err := io.ReadAll(io.LimitReader(response.Body, 512*1024))
+	if err != nil {
+		return fmt.Errorf("read install script: %w", err)
+	}
+
+	command := exec.Command("sh", "-s", "--")
+	command.Stdin = bytes.NewReader(scriptBytes)
+	command.Stdout = os.Stderr
+	command.Stderr = os.Stderr
+	command.Env = os.Environ()
+
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("run install script: %w", err)
+	}
+
+	return nil
+}
+
+func shouldRetryAfterEnsuringBackend(err error) bool {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return shouldRetryAfterEnsuringBackend(urlErr.Err)
+	}
+
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "connection refused")
+}
+
+func normalizeProxyAPIPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+
+	parsed, err := url.ParseRequestURI(trimmed)
+	if err != nil || parsed.Path == "" {
+		return trimmed
+	}
+
+	return parsed.Path
 }
 
 type fileEntry struct {
