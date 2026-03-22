@@ -47,10 +47,23 @@ html.conductor-ttyd-touch-shim-enabled body {
     overscroll-behavior: contain;
 }
 
+html.conductor-ttyd-touch-shim-enabled .xterm-viewport,
+html.conductor-ttyd-touch-shim-enabled .xterm-scrollable-element {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
 html.conductor-ttyd-touch-shim-enabled .xterm,
 html.conductor-ttyd-touch-shim-enabled .xterm-viewport,
 html.conductor-ttyd-touch-shim-enabled .xterm-scrollable-element,
 html.conductor-ttyd-touch-shim-enabled .xterm-screen {
+    touch-action: pan-y;
+}
+
+html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm,
+html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-viewport,
+html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-scrollable-element,
+html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
     touch-action: none;
 }
 </style>
@@ -90,9 +103,29 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
             return core?.coreMouseService || core?._coreMouseService || null;
         };
 
-        const isMouseProtocolActive = () => {
+        const resolveMouseTrackingMode = () => {
+            const publicMode = window.term?.modes?.mouseTrackingMode;
+            if (typeof publicMode === 'string' && publicMode.length > 0) {
+                return publicMode.toLowerCase();
+            }
+
             const coreMouseService = resolveCoreMouseService();
-            return Boolean(coreMouseService && coreMouseService.areMouseEventsActive);
+            const activeProtocol = coreMouseService?.activeProtocol;
+            if (typeof activeProtocol === 'string' && activeProtocol.length > 0) {
+                return activeProtocol.toLowerCase();
+            }
+
+            return coreMouseService?.areMouseEventsActive ? 'unknown' : 'none';
+        };
+
+        const isMouseProtocolActive = () => {
+            return resolveMouseTrackingMode() !== 'none';
+        };
+
+        const syncTouchActionMode = (forceActive) => {
+            const active = typeof forceActive === 'boolean' ? forceActive : isMouseProtocolActive();
+            document.documentElement.classList.toggle('conductor-ttyd-wheel-mode', active);
+            return active;
         };
 
         const dispatchCoreMouseWheel = (deltaY, clientX, clientY) => {
@@ -175,6 +208,7 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
 
         terminalRoot.addEventListener('touchstart', (event) => {
             if (event.touches.length !== 1) {
+                syncTouchActionMode();
                 reset();
                 return;
             }
@@ -183,6 +217,7 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
             lastX = touch.clientX;
             lastY = touch.clientY;
             window.term?.focus?.();
+            syncTouchActionMode();
             active = true;
         }, { passive: true });
 
@@ -204,7 +239,7 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
             // xterm already handles touch scrolling when mouse reporting is off. Only
             // intercept the gesture when the app has enabled mouse mode, which is
             // the OpenCode case that blocks native touch scrolling on mobile.
-            if (!isMouseProtocolActive()) {
+            if (!syncTouchActionMode()) {
                 return;
             }
 
@@ -223,15 +258,24 @@ html.conductor-ttyd-touch-shim-enabled .xterm-screen {
             }
         }, { passive: false });
 
-        terminalRoot.addEventListener('touchend', reset, { passive: true });
-        terminalRoot.addEventListener('touchcancel', reset, { passive: true });
+        terminalRoot.addEventListener('touchend', () => {
+            syncTouchActionMode();
+            reset();
+        }, { passive: true });
+        terminalRoot.addEventListener('touchcancel', () => {
+            syncTouchActionMode();
+            reset();
+        }, { passive: true });
+        syncTouchActionMode();
         return true;
     };
 
     const observer = new MutationObserver(() => {
         bindTouchScroll();
+        syncTouchActionMode();
     });
     bindTouchScroll();
+    syncTouchActionMode();
     observer.observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
 })();
@@ -1309,10 +1353,14 @@ mod tests {
         assert!(injected.contains("const terminalRoot = document.querySelector('.xterm');"));
         assert!(injected.contains(".xterm-viewport"));
         assert!(injected.contains(".xterm-scrollable-element"));
+        assert!(injected.contains("touch-action: pan-y;"));
+        assert!(injected.contains("conductor-ttyd-wheel-mode"));
         assert!(injected.contains(
             "const resolveXtermCore = () => window.term?._core || window.term?.core || null;"
         ));
+        assert!(injected.contains("const publicMode = window.term?.modes?.mouseTrackingMode;"));
         assert!(injected.contains("coreMouseService.areMouseEventsActive"));
+        assert!(injected.contains("const syncTouchActionMode = (forceActive) => {"));
         assert!(injected.contains("mouseService.getMouseReportCoords"));
         assert!(injected.contains("viewport.getLinesScrolled(wheelLikeEvent)"));
         assert!(injected.contains("button: 4,"));
@@ -1320,7 +1368,7 @@ mod tests {
         assert!(injected.contains("new WheelEvent('wheel'"));
         assert!(injected.contains("eventTarget.dispatchEvent(wheelEvent)"));
         assert!(injected.contains("terminalRoot.addEventListener('touchmove'"));
-        assert!(injected.contains("if (!isMouseProtocolActive()) {"));
+        assert!(injected.contains("if (!syncTouchActionMode()) {"));
         assert!(injected.contains("window.term?.focus?.();"));
         assert!(
             injected.find(TTYD_MOBILE_TOUCH_SHIM_MARKER).unwrap()
