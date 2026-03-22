@@ -65,6 +65,7 @@ import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import {
   isPairedBridgeScopePending,
@@ -1151,7 +1152,7 @@ export default function DashboardClient({
         }
         const payload = (await response.json().catch(() => null)) as DevicesResponse | null;
         if (!cancelled) {
-          setBridges((payload?.devices ?? []).map((device) => ({
+          setBridges(normalizeBridgeDevices(payload?.devices).map((device) => ({
             bridgeId: device.device_id,
             hostname: device.last_status?.hostname ?? device.hostname,
             os: device.last_status?.os ?? `${device.os}/${device.arch}`,

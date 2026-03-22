@@ -41,6 +41,7 @@ import {
   buildBridgeManualPairCommand,
 } from "@/lib/bridgeOnboarding";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import type { DashboardSession } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@/lib/types";
 
@@ -318,7 +319,7 @@ export default function BridgeConnectClient({
       if (!response.ok) {
         throw new Error(payload?.error ?? `Failed to load devices (${response.status})`);
       }
-      setDevices(payload?.devices ?? []);
+      setDevices(normalizeBridgeDevices(payload?.devices));
       setError(null);
     } catch (err) {
       setDevices([]);

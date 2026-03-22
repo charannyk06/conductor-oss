@@ -20,6 +20,7 @@ import {
 } from "@/lib/bridgeDeviceControl";
 import { buildBridgeInstallScriptUrl } from "@/lib/bridgeOnboarding";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
+import { normalizeBridgeDevices } from "@/lib/bridgeDevices";
 
 type BridgeDevice = {
   device_id: string;
@@ -119,7 +120,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       if (!response.ok) {
         throw new Error(payload?.error ?? `Failed to load bridge devices (${response.status})`);
       }
-      setDevices(payload?.devices ?? []);
+      setDevices(normalizeBridgeDevices(payload?.devices));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load bridge devices.");
@@ -455,7 +456,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                           </div>
                         ) : null}
                       </div>
-                      <BridgeStatusPill connected={device.connected} />
+                      <StatusBadge connected={device.connected === true} />
                     </div>
                   </div>
                 );
