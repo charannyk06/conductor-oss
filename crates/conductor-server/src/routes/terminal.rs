@@ -44,6 +44,9 @@ const TTYD_MOBILE_TOUCH_SHIM: &str = r#"
 <style>
 html.conductor-ttyd-touch-shim-enabled,
 html.conductor-ttyd-touch-shim-enabled body {
+    height: 100%;
+    max-height: 100%;
+    overflow: hidden;
     overscroll-behavior: contain;
 }
 
@@ -1421,6 +1424,9 @@ mod tests {
         assert!(injected.contains("const terminalRoot = document.querySelector('.xterm');"));
         assert!(injected.contains(".xterm-viewport"));
         assert!(injected.contains(".xterm-scrollable-element"));
+        assert!(injected.contains("height: 100%;"));
+        assert!(injected.contains("max-height: 100%;"));
+        assert!(injected.contains("overflow: hidden;"));
         assert!(injected.contains("touch-action: pan-y;"));
         assert!(injected.contains("conductor-ttyd-wheel-mode"));
         assert!(injected.contains(
