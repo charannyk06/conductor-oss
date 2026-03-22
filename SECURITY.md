@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | ✅ Yes    |
+| Latest tagged release | ✅ Yes |
+| Older releases | ❌ No |
 
 Conductor OSS is under active development. Security patches are applied to the latest release only.
 
@@ -48,29 +49,31 @@ We follow responsible disclosure: we'll coordinate with you before publishing an
 
 Conductor is designed to be **local-first and low-attack-surface**:
 
-### No Database
-- All session state is stored as flat `key=value` files in `~/.conductor/`
-- No SQL, no ORMs — no SQL injection surface exists
+### SQLite-backed local state
+- Session and runtime metadata are stored locally in `.conductor/conductor.db`
+- Board and workspace intent still live in Markdown and YAML (`CONDUCTOR.md`, `conductor.yaml`)
+- Conductor does not require an external database service
 
-### No Cloud Dependency
-- Conductor runs entirely on your local machine
-- No data leaves your machine unless you configure GitHub SCM integration
-- No telemetry, no analytics, no external pings
+### Local-first by default
+- Core orchestration runs on your machine
+- No hosted control plane is required for normal local use
+- Networked features such as GitHub integration, webhooks, private remote access, or bridge/relay flows are opt-in
 
 ### Agent Isolation via Git Worktrees
 - Each agent session runs in a separate `git worktree`, isolated from your main branch
 - A compromised or runaway agent cannot directly corrupt your working tree
 - Sessions are namespaced by `session-id` — no cross-session bleed
 
-### No Secrets in State Files
-- `~/.conductor/` stores only session IDs, status flags, PR numbers, and timestamps
-- API keys are read from environment variables — never persisted to disk by Conductor
-- The example config (`conductor.example.yaml`) uses placeholder values only
+### Secrets and local tokens
+- Agent credentials are expected to stay with the upstream CLIs or environment variables; Conductor does not proxy agent billing or auth
+- Workspace state in `.conductor/` may include runtime metadata, detached terminal state, and optional bridge token/state files when bridge flows are enabled
+- The example config uses placeholder values only
 
 ### Optional Authentication (Dashboard)
-- The web dashboard is **open by default** — it binds to `localhost:4747`
-- Clerk authentication can be enabled by setting keys in `packages/web/.env.local`
-- Without Clerk, the dashboard is intended for local use only; it should **not** be exposed to the internet without authentication
+- The default launcher keeps the dashboard on loopback (`127.0.0.1:4747`)
+- Remote access is expected to use a private Tailscale link or a verified identity layer such as Cloudflare Access
+- Optional Clerk-backed sign-in flows also exist in the web app
+- Without an auth layer, the dashboard is intended for local use only and should not be exposed to the internet
 
 ### Webhook Signature Verification
 - GitHub webhook events are verified using **HMAC-SHA256** signatures
@@ -98,9 +101,9 @@ Conductor is designed to be **local-first and low-attack-surface**:
      secret: "${WEBHOOK_SECRET}"  # use an env var, never hardcode
    ```
 
-5. **Run the dashboard behind a reverse proxy in production** — if you expose the dashboard beyond localhost, put it behind nginx/Caddy with TLS and authentication
+5. **Do not publish the dashboard unauthenticated** — if you expose it beyond localhost, use Tailscale, Cloudflare Access, Clerk, or another verified auth boundary with TLS
 
-6. **Keep `~/.conductor/` private** — session metadata may contain repository paths and PR numbers. Treat it like any other local config directory
+6. **Keep `~/.conductor/` private** — it may contain repository paths, session metadata, and optional bridge tokens or runtime state. Treat it like any other local secrets-adjacent config directory
 
 7. **Rotate credentials after any suspected compromise** — revoke and re-issue GitHub tokens, API keys, and webhook secrets immediately if you suspect unauthorized access
 

@@ -80,4 +80,4 @@ When a run fails, capture:
 - terminal snapshot payload (`source`, `live`, `restored`, `format`, `sequence`)
 - ttyd websocket close code, open timing, and reconnect timing
 - browser console and network errors
-- whether `co attach <session-id>` still reaches the same live session
+- whether reopening the session terminal still reaches the same live runtime

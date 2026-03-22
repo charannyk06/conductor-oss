@@ -6,6 +6,7 @@ import {
   buildHostedSignInPath,
   buildHostedSignInRedirectUrl,
   buildSignInPath,
+  getDefaultPostSignInRedirectTarget,
   getDashboardAccess,
   guardApiActionAccess,
   resolvePostSignInRedirectTarget,
@@ -133,10 +134,44 @@ test("resolvePostSignInRedirectTarget avoids sending users back into sign-in", (
   assert.equal(resolvePostSignInRedirectTarget("https://evil.example.com"), "/");
 });
 
+test("resolvePostSignInRedirectTarget falls back to bridge pairing for paired-device flows", () => {
+  const defaultRedirectTarget = getDefaultPostSignInRedirectTarget(true);
+  assert.equal(defaultRedirectTarget, "/bridge/connect");
+  assert.equal(resolvePostSignInRedirectTarget(undefined, undefined, defaultRedirectTarget), "/bridge/connect");
+  assert.equal(resolvePostSignInRedirectTarget("/sign-in", undefined, defaultRedirectTarget), "/bridge/connect");
+  assert.equal(
+    resolvePostSignInRedirectTarget("https://evil.example.com", "https://preview.conductross.com", defaultRedirectTarget),
+    "/bridge/connect",
+  );
+});
+
+test("resolvePostSignInRedirectTarget preserves claim-aware defaults for device-first pairing", () => {
+  const defaultRedirectTarget = "/bridge/connect?claim=claim_123";
+  assert.equal(
+    resolvePostSignInRedirectTarget(undefined, "https://preview.conductross.com", defaultRedirectTarget),
+    "/bridge/connect?claim=claim_123",
+  );
+  assert.equal(
+    resolvePostSignInRedirectTarget("/sign-in/sso-callback", "https://preview.conductross.com", defaultRedirectTarget),
+    "/bridge/connect?claim=claim_123",
+  );
+});
+
+test("resolvePostSignInRedirectTarget accepts same-origin absolute callback targets", () => {
+  assert.equal(
+    resolvePostSignInRedirectTarget(
+      "https://preview.conductross.com/bridge/connect?claim=claim_123",
+      "https://preview.conductross.com",
+    ),
+    "/bridge/connect?claim=claim_123",
+  );
+});
+
 test("buildSignInPath includes redirect_url only when needed", () => {
   assert.equal(buildSignInPath("/bridge/connect?claim=claim_123"), "/sign-in?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123");
   assert.equal(buildSignInPath("/sign-in"), "/sign-in");
   assert.equal(buildSignInPath(undefined), "/sign-in");
+  assert.equal(buildSignInPath(undefined, "/bridge/connect"), "/sign-in?redirect_url=%2Fbridge%2Fconnect");
 });
 
 test("buildHostedSignInPath includes redirect_url only when needed", () => {

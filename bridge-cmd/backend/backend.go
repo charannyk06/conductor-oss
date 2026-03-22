@@ -34,6 +34,92 @@ type launchPlan struct {
 	args []string
 }
 
+func isNodeScriptBinary(binaryPath string) bool {
+	data, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return false
+	}
+	firstLine := strings.SplitN(string(data), "\n", 2)[0]
+	return strings.Contains(firstLine, "node")
+}
+
+func resolveBundledNativeConductorBinary(binaryPath string) string {
+	if !isNodeScriptBinary(binaryPath) {
+		return ""
+	}
+
+	resolvedPath, err := filepath.EvalSymlinks(binaryPath)
+	if err != nil {
+		resolvedPath = binaryPath
+	}
+
+	packageRoot := filepath.Dir(filepath.Dir(resolvedPath))
+	packageNames := []string{}
+	switch runtime.GOOS {
+	case "darwin":
+		if runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64" {
+			packageNames = append(packageNames, "conductor-oss-native-darwin-universal")
+		}
+	case "linux":
+		if runtime.GOARCH == "amd64" {
+			packageNames = append(packageNames, "conductor-oss-native-linux-x64")
+		}
+	case "windows":
+		if runtime.GOARCH == "amd64" {
+			packageNames = append(packageNames, "conductor-oss-native-win32-x64")
+		}
+	}
+
+	binaryName := "conductor"
+	if runtime.GOOS == "windows" {
+		binaryName = "conductor.exe"
+	}
+
+	for _, packageName := range packageNames {
+		candidate := filepath.Join(packageRoot, "node_modules", packageName, "bin", binaryName)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+func findNodeBinary() string {
+	if resolved, err := exec.LookPath("node"); err == nil {
+		return resolved
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	for _, candidate := range []string{
+		filepath.Join(homeDir, ".local", "bin", "node"),
+		filepath.Join(homeDir, ".nvm", "current", "bin", "node"),
+		filepath.Join("/opt/homebrew/bin", "node"),
+		filepath.Join("/usr/local/bin", "node"),
+		filepath.Join("/usr/bin", "node"),
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+
+	return ""
+}
+
+func resolveBinaryLaunch(binaryPath string, args []string) launchPlan {
+	if isNodeScriptBinary(binaryPath) {
+		if nodePath := findNodeBinary(); nodePath != "" {
+			return launchPlan{cmd: nodePath, args: append([]string{binaryPath}, args...)}
+		}
+	}
+
+	return launchPlan{cmd: binaryPath, args: args}
+}
+
 func Ensure(ctx context.Context, opts Options) (func(), error) {
 	stderr := opts.Stderr
 	if stderr == nil {
@@ -157,21 +243,70 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 		return launchPlan{}, err
 	}
 
-	if conductorPath, err := exec.LookPath("conductor"); err == nil {
-		return launchPlan{
-			cmd:  conductorPath,
-			args: []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
-		}, nil
+	if conductorPath := findConductorBinary("conductor"); conductorPath != "" {
+		if nativePath := resolveBundledNativeConductorBinary(conductorPath); nativePath != "" {
+			return launchPlan{
+				cmd:  nativePath,
+				args: []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
+			}, nil
+		}
+		if isNodeScriptBinary(conductorPath) {
+			return resolveBinaryLaunch(
+				conductorPath,
+				[]string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
+			), nil
+		}
+		return resolveBinaryLaunch(
+			conductorPath,
+			[]string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
+		), nil
 	}
 
-	if coPath, err := exec.LookPath("co"); err == nil {
-		return launchPlan{
-			cmd:  coPath,
-			args: []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
-		}, nil
+	if coPath := findConductorBinary("co"); coPath != "" {
+		return resolveBinaryLaunch(
+			coPath,
+			[]string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
+		), nil
 	}
 
 	return launchPlan{}, errors.New("could not find `conductor` or `co`; set CONDUCTOR_BRIDGE_BACKEND_COMMAND to start the local backend")
+}
+
+func findConductorBinary(command string) string {
+	if resolved, err := exec.LookPath(command); err == nil {
+		return resolved
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	candidates := []string{
+		filepath.Join(homeDir, ".conductor", "bin", command),
+		filepath.Join(homeDir, ".local", "bin", command),
+		filepath.Join(homeDir, ".npm-global", "bin", command),
+		filepath.Join("/opt/homebrew/bin", command),
+		filepath.Join("/usr/local/bin", command),
+		filepath.Join("/usr/bin", command),
+	}
+
+	if runtime.GOOS == "windows" {
+		withExtensions := make([]string, 0, len(candidates)*2)
+		for _, candidate := range candidates {
+			withExtensions = append(withExtensions, candidate)
+			withExtensions = append(withExtensions, candidate+".exe")
+		}
+		candidates = withExtensions
+	}
+
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+
+	return ""
 }
 
 func backendPort(backendURL *url.URL) int {

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
+import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
@@ -26,18 +27,12 @@ function extractOutputText(response: unknown): string {
   return "";
 }
 
-function calculateTerminalGeometry(element: HTMLElement): { cols: number; rows: number } {
-  const { width, height } = element.getBoundingClientRect();
-  const cols = Math.max(48, Math.floor(Math.max(width - 28, 320) / 9));
-  const rows = Math.max(14, Math.floor(Math.max(height - 20, 280) / 20));
-  return { cols, rows };
-}
-
 function resetTerminalOutput(terminal: Terminal, value: string) {
   terminal.reset();
   if (value.length > 0) {
     terminal.write(value);
   }
+  terminal.scrollToBottom();
 }
 
 const TERMINAL_THEME = {
@@ -84,12 +79,36 @@ export function BridgeSessionTerminal({
   } = useBridgeTunnel(scope);
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const bridgeInputRef = useRef({ connected, readOnly, sendTerminalInput });
   const lastAppliedInsertNonceRef = useRef(0);
   const [hasOutput, setHasOutput] = useState(false);
   const [loadingOutput, setLoadingOutput] = useState(true);
   const [requestError, setRequestError] = useState<string | null>(null);
   const sessionLabel = sessionState.trim().replace(/[_-]+/g, " ");
+
+  const fitTerminal = () => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) {
+      return null;
+    }
+
+    const previousCols = terminal.cols;
+    const previousRows = terminal.rows;
+    fitAddon.fit();
+    terminal.scrollToBottom();
+
+    const next = { cols: terminal.cols, rows: terminal.rows };
+    if (next.cols < 2 || next.rows < 2) {
+      return null;
+    }
+
+    return {
+      ...next,
+      changed: next.cols !== previousCols || next.rows !== previousRows,
+    };
+  };
 
   useEffect(() => {
     bridgeInputRef.current = { connected, readOnly, sendTerminalInput };
@@ -127,7 +146,10 @@ export function BridgeSessionTerminal({
     });
 
     terminal.open(host);
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
     terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
     const dataSubscription = terminal.onData((data) => {
       const bridgeInput = bridgeInputRef.current;
       if (bridgeInput.readOnly || !bridgeInput.connected) {
@@ -142,12 +164,16 @@ export function BridgeSessionTerminal({
 
     host.addEventListener("click", focusTerminal);
     terminal.focus();
+    window.requestAnimationFrame(() => {
+      fitTerminal();
+    });
 
     return () => {
       host.removeEventListener("click", focusTerminal);
       dataSubscription.dispose();
       terminal.dispose();
       terminalRef.current = null;
+      fitAddonRef.current = null;
     };
   }, []);
 
@@ -169,11 +195,8 @@ export function BridgeSessionTerminal({
     }
 
     const applyGeometry = () => {
-      const next = calculateTerminalGeometry(host);
-      if (terminal.cols !== next.cols || terminal.rows !== next.rows) {
-        terminal.resize(next.cols, next.rows);
-      }
-      if (connected) {
+      const next = fitTerminal();
+      if (next && next.changed && connected) {
         sendTerminalResize(next.cols, next.rows);
       }
     };
@@ -212,6 +235,7 @@ export function BridgeSessionTerminal({
     }
 
     terminal.write(terminalChunk);
+    terminal.scrollToBottom();
     setHasOutput((current) => current || terminalChunk.length > 0);
   }, [terminalChunk, terminalSequence]);
 

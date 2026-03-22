@@ -6,9 +6,25 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"time"
 )
 
 const serviceName = "com.conductor.bridge"
+
+func resolveLaunchdPath(home string) string {
+	return fmt.Sprintf(
+		"%s:%s:%s:%s:%s:%s:%s:%s",
+		filepath.Join(home, ".conductor", "bin"),
+		filepath.Join(home, ".conductor", "npm", "bin"),
+		filepath.Join(home, ".local", "bin"),
+		"/opt/homebrew/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/sbin:/sbin",
+	)
+}
 
 func Install(binaryPath string) error {
 	if binaryPath == "" {
@@ -53,6 +69,38 @@ func Install(binaryPath string) error {
 	}
 }
 
+func RestartServiceIfInstalled() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not find home directory: %w", err)
+	}
+
+	switch runtime.GOOS {
+	case "darwin":
+		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
+		if _, err := os.Stat(plistPath); err != nil {
+			return fmt.Errorf("launchd service not installed: %w", err)
+		}
+		return installLaunchdService(home, plistPath)
+	case "linux":
+		xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+		if xdgConfig == "" {
+			xdgConfig = filepath.Join(home, ".config")
+		}
+		unitPath := filepath.Join(xdgConfig, "systemd", "user", serviceName+".service")
+		if _, err := os.Stat(unitPath); err != nil {
+			return fmt.Errorf("systemd service not installed: %w", err)
+		}
+		cmd := exec.Command("systemctl", "--user", "restart", serviceName)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("restart systemd service: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("auto-restart not supported on %s", runtime.GOOS)
+	}
+}
+
 func installLaunchd(home, binaryPath string) error {
 	plistDir := filepath.Join(home, "Library", "LaunchAgents")
 	if err := os.MkdirAll(plistDir, 0755); err != nil {
@@ -71,6 +119,11 @@ func installLaunchd(home, binaryPath string) error {
         <string>%s</string>
         <string>daemon</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>%s</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -81,18 +134,39 @@ func installLaunchd(home, binaryPath string) error {
     <string>/tmp/conductor-bridge.err</string>
 </dict>
 </plist>
-`, serviceName, binaryPath)
+`, serviceName, binaryPath, resolveLaunchdPath(home))
 
 	if err := os.WriteFile(plistPath, []byte(plist), 0644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
 
-	// Load the service
-	cmd := exec.Command("launchctl", "load", plistPath)
-	cmd.Run() // best effort
+	if err := installLaunchdService(home, plistPath); err != nil {
+		return err
+	}
 
 	fmt.Printf("macOS service installed at %s\n", plistPath)
-	fmt.Println("Run: launchctl load ~/Library/LaunchAgents/com.conductor.bridge.plist")
+	fmt.Println("Conductor Bridge will relaunch automatically on login.")
+	return nil
+}
+
+func installLaunchdService(home, plistPath string) error {
+	uid := strconv.Itoa(os.Getuid())
+	domainTarget := "gui/" + uid
+	serviceTarget := domainTarget + "/" + serviceName
+
+	_ = exec.Command("launchctl", "bootout", serviceTarget).Run()
+
+	if err := exec.Command("launchctl", "bootstrap", domainTarget, plistPath).Run(); err != nil {
+		time.Sleep(300 * time.Millisecond)
+		if printErr := exec.Command("launchctl", "print", serviceTarget).Run(); printErr != nil {
+			if retryErr := exec.Command("launchctl", "bootstrap", domainTarget, plistPath).Run(); retryErr != nil {
+				return fmt.Errorf("bootstrap launchd service: %w", err)
+			}
+		}
+	}
+	if err := exec.Command("launchctl", "kickstart", "-k", serviceTarget).Run(); err != nil {
+		return fmt.Errorf("kickstart launchd service: %w", err)
+	}
 	return nil
 }
 

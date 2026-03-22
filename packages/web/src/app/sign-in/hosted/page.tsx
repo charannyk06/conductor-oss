@@ -4,7 +4,9 @@ import { redirect } from "next/navigation";
 import {
   buildHostedSignInRedirectUrl,
   buildSignInPath,
+  getDefaultPostSignInRedirectTarget,
   getDashboardAccess,
+  requiresPairedDeviceScope,
   resolvePostSignInRedirectTarget,
 } from "@/lib/auth";
 import { isLoopbackHost } from "@/lib/accessControl";
@@ -27,27 +29,37 @@ function firstQueryValue(value: string | string[] | undefined): string | null {
 
 export default async function HostedSignInPage({ searchParams }: HostedSignInPageProps) {
   const resolvedSearchParams = searchParams ? await searchParams : {};
-  const redirectTarget = resolvePostSignInRedirectTarget(firstQueryValue(resolvedSearchParams.redirect_url));
+  const headerStore = await headers();
+  const hostname = resolveRequestHostname(headerStore);
+  const baseUrl = resolveRequestBaseUrl(headerStore);
   const access = await getDashboardAccess();
+  const defaultRedirectTarget = getDefaultPostSignInRedirectTarget(requiresPairedDeviceScope(access));
+  const redirectTarget = resolvePostSignInRedirectTarget(
+    firstQueryValue(resolvedSearchParams.redirect_url),
+    baseUrl,
+    defaultRedirectTarget,
+  );
 
   if (access.ok && access.authenticated) {
     redirect(redirectTarget);
   }
 
-  const headerStore = await headers();
-  const hostname = resolveRequestHostname(headerStore);
-  const baseUrl = resolveRequestBaseUrl(headerStore);
   const clerkConfiguration = resolveClerkConfiguration(hostname, baseUrl);
   const hostedSignInUrl = isLoopbackHost(hostname)
     ? null
-    : buildHostedSignInRedirectUrl(clerkConfiguration.signInUrl, baseUrl, redirectTarget);
+    : buildHostedSignInRedirectUrl(
+      clerkConfiguration.hostedSignInUrl,
+      baseUrl,
+      redirectTarget,
+      defaultRedirectTarget,
+    );
 
   if (hostedSignInUrl) {
     redirect(hostedSignInUrl);
   }
 
   if (!clerkConfiguration.enabled || !clerkConfiguration.publishableKey || !clerkConfiguration.signInUrl) {
-    redirect(buildSignInPath(redirectTarget));
+    redirect(buildSignInPath(redirectTarget, defaultRedirectTarget));
   }
   const authState = await auth();
 
@@ -55,5 +67,5 @@ export default async function HostedSignInPage({ searchParams }: HostedSignInPag
     return authState.redirectToSignIn({ returnBackUrl: redirectTarget });
   }
 
-  redirect(buildSignInPath(redirectTarget));
+  redirect(buildSignInPath(redirectTarget, defaultRedirectTarget));
 }

@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
+  ChevronDown,
+  ChevronUp,
   CheckCircle2,
   Copy,
   ExternalLink,
   Laptop,
   Loader2,
-  Plus,
   RefreshCw,
   TerminalSquare,
   Trash2,
@@ -17,6 +18,12 @@ import {
 import { SessionTerminal } from "@/components/sessions/SessionTerminal";
 import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { Button } from "@/components/ui/Button";
+import {
+  buildBridgeBootstrapConnectCommand,
+  buildBridgeConnectCommand,
+  buildBridgeInstallCommand,
+  buildBridgeManualPairCommand,
+} from "@/lib/bridgeOnboarding";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import type { DashboardSession } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@/lib/types";
@@ -74,8 +81,14 @@ function pickBridgeTestSession(sessions: DashboardSession[]): DashboardSession |
 
 export default function BridgeConnectClient({
   initialClaimToken = null,
+  dashboardUrl,
+  relayUrl,
+  installScriptUrl,
 }: {
   initialClaimToken?: string | null;
+  dashboardUrl: string;
+  relayUrl: string | null;
+  installScriptUrl: string;
 }) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
@@ -83,7 +96,7 @@ export default function BridgeConnectClient({
   const [loading, setLoading] = useState(true);
   const [creatingCode, setCreatingCode] = useState(false);
   const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const [copiedCommand, setCopiedCommand] = useState<"setup" | "install" | "connect" | "manual" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testConnectionOpen, setTestConnectionOpen] = useState(false);
   const [testConnectionLoading, setTestConnectionLoading] = useState(false);
@@ -92,15 +105,64 @@ export default function BridgeConnectClient({
   const [claimStatus, setClaimStatus] = useState<"idle" | "pending" | "paired">(
     initialClaimToken ? "pending" : "idle",
   );
+  const [showAdvancedSetup, setShowAdvancedSetup] = useState(false);
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimedDevice, setClaimedDevice] = useState<{ deviceId: string; deviceName: string } | null>(null);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
 
-  const command = useMemo(() => (
-    pairingCode
-      ? `conductor-bridge pair --code ${pairingCode}\nconductor-bridge daemon`
-      : "conductor-bridge pair --code ABC123\nconductor-bridge daemon"
-  ), [pairingCode]);
+  const bootstrapConnectCommand = useMemo(
+    () => buildBridgeBootstrapConnectCommand(installScriptUrl, dashboardUrl, relayUrl),
+    [dashboardUrl, installScriptUrl, relayUrl],
+  );
+  const installCommand = useMemo(
+    () => buildBridgeInstallCommand(installScriptUrl),
+    [installScriptUrl],
+  );
+  const connectCommand = useMemo(
+    () => buildBridgeConnectCommand(dashboardUrl, relayUrl),
+    [dashboardUrl, relayUrl],
+  );
+  const manualCommand = useMemo(
+    () => buildBridgeManualPairCommand(pairingCode, relayUrl),
+    [pairingCode, relayUrl],
+  );
   const connectedDevices = devices.filter((device) => device.connected);
+  const claimedDeviceRecord = useMemo(
+    () => claimedDevice
+      ? devices.find((device) => device.device_id === claimedDevice.deviceId) ?? null
+      : null,
+    [claimedDevice, devices],
+  );
+  const selectedDevice = useMemo(
+    () => devices.find((device) => device.device_id === selectedDeviceId)
+      ?? claimedDeviceRecord
+      ?? connectedDevices[0]
+      ?? devices[0]
+      ?? null,
+    [claimedDeviceRecord, connectedDevices, devices, selectedDeviceId],
+  );
+  const readyDevice = useMemo(
+    () => (claimedDeviceRecord?.connected ? claimedDeviceRecord : null)
+      ?? (selectedDevice?.connected ? selectedDevice : null)
+      ?? connectedDevices[0]
+      ?? null,
+    [claimedDeviceRecord, connectedDevices, selectedDevice],
+  );
+  const readyDashboardHref = readyDevice
+    ? `/?bridge=${encodeURIComponent(readyDevice.device_id)}`
+    : null;
+
+  useEffect(() => {
+    setSelectedDeviceId((current) => {
+      if (current && devices.some((device) => device.device_id === current)) {
+        return current;
+      }
+      return claimedDeviceRecord?.device_id
+        ?? connectedDevices[0]?.device_id
+        ?? devices[0]?.device_id
+        ?? null;
+    });
+  }, [claimedDeviceRecord, connectedDevices, devices]);
 
   const refreshDevices = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -161,9 +223,30 @@ export default function BridgeConnectClient({
     void completeClaim();
   }, [completeClaim, initialClaimToken]);
 
+  useEffect(() => {
+    if (!initialClaimToken && !(claimStatus === "paired" && connectedDevices.length === 0)) {
+      return;
+    }
+
+    const pollTimer = window.setInterval(() => {
+      void refreshDevices();
+    }, 4_000);
+
+    return () => {
+      window.clearInterval(pollTimer);
+    };
+  }, [claimStatus, connectedDevices.length, initialClaimToken, refreshDevices]);
+
+  useEffect(() => {
+    if (initialClaimToken || pairingCode || creatingCode || !showAdvancedSetup) {
+      return;
+    }
+    void handleGenerateCode();
+  }, [creatingCode, initialClaimToken, pairingCode, showAdvancedSetup]);
+
   async function handleGenerateCode(): Promise<void> {
     setCreatingCode(true);
-    setCopyState("idle");
+    setCopiedCommand(null);
     try {
       const response = await fetch("/api/bridge/devices/code", {
         method: "POST",
@@ -184,13 +267,16 @@ export default function BridgeConnectClient({
     }
   }
 
-  async function handleCopyCommand(): Promise<void> {
+  async function handleCopyCommand(
+    commandText: string,
+    target: "setup" | "install" | "connect" | "manual",
+  ): Promise<void> {
     try {
-      await navigator.clipboard.writeText(command);
-      setCopyState("copied");
+      await navigator.clipboard.writeText(commandText);
+      setCopiedCommand(target);
       setError(null);
     } catch (err) {
-      setCopyState("error");
+      setCopiedCommand(null);
       setError(err instanceof Error ? err.message : "Failed to copy command.");
     }
   }
@@ -266,6 +352,14 @@ export default function BridgeConnectClient({
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                {readyDashboardHref ? (
+                  <Button asChild variant="primary" size="lg">
+                    <Link href={readyDashboardHref}>
+                      <Laptop className="h-4 w-4" />
+                      Continue with {readyDevice?.device_name ?? "this laptop"}
+                    </Link>
+                  </Button>
+                ) : null}
                 <Button
                   type="button"
                   variant="outline"
@@ -289,21 +383,46 @@ export default function BridgeConnectClient({
                   {testConnectionLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <TerminalSquare className="h-4 w-4" />}
                   Test Connection
                 </Button>
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="lg"
-                  disabled={creatingCode}
-                  onClick={() => {
-                    void handleGenerateCode();
-                  }}
-                >
-                  {creatingCode ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                  Add a laptop
-                </Button>
               </div>
             </div>
           </section>
+
+          {readyDevice ? (
+            <section className="rounded-[24px] border border-[rgba(24,197,143,0.26)] bg-[rgba(24,197,143,0.08)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.2)]">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--vk-text-muted)]">
+                    Ready To Use
+                  </p>
+                  <h2 className="mt-2 text-xl font-semibold text-[var(--vk-text-strong)]">
+                    {readyDevice.device_name} is online and ready
+                  </h2>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--vk-text-muted)]">
+                    Continue into the dashboard scoped to this laptop. You can come back here later to pair another machine or troubleshoot the bridge.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button asChild variant="primary" size="lg">
+                    <Link href={readyDashboardHref ?? "/"}>
+                      <Laptop className="h-4 w-4" />
+                      Open {readyDevice.device_name}
+                    </Link>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="lg"
+                    onClick={() => {
+                      void handleOpenTestConnection();
+                    }}
+                  >
+                    <TerminalSquare className="h-4 w-4" />
+                    Open terminal test
+                  </Button>
+                </div>
+              </div>
+            </section>
+          ) : null}
 
           {error ? (
             <section className="rounded-[20px] border border-[color:color-mix(in_srgb,var(--vk-red)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-5 py-4 text-sm text-[var(--vk-red)]">
@@ -331,7 +450,7 @@ export default function BridgeConnectClient({
                   <Button asChild variant="primary" size="lg">
                     <Link href={`/?bridge=${encodeURIComponent(claimedDevice.deviceId)}`}>
                       <Laptop className="h-4 w-4" />
-                      Open {claimedDevice.deviceName}
+                      {claimedDeviceRecord?.connected ? `Continue with ${claimedDevice.deviceName}` : `Open ${claimedDevice.deviceName}`}
                     </Link>
                   </Button>
                 ) : null}
@@ -349,7 +468,9 @@ export default function BridgeConnectClient({
                     <div>
                       <div className="font-medium text-[var(--vk-text-strong)]">{claimedDevice.deviceName} is now paired.</div>
                       <div className="mt-1">
-                        Leave the local `conductor-bridge connect` command running so the device comes online immediately.
+                        {claimedDeviceRecord?.connected
+                          ? "This laptop is online. Use the continue button to return to the dashboard with this device selected."
+                          : "Conductor is restarting the background bridge service for this laptop now. This page will refresh automatically until the device reports online."}
                       </div>
                     </div>
                   </div>
@@ -377,57 +498,204 @@ export default function BridgeConnectClient({
             <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h2 className="text-lg font-semibold text-[var(--vk-text-strong)]">Pairing code</h2>
+                  <h2 className="text-lg font-semibold text-[var(--vk-text-strong)]">Connect this laptop</h2>
                   <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
-                    Generate a one-time code, run the commands on the laptop, and the bridge will store its refresh token at{" "}
-                    <code className="rounded bg-[var(--vk-bg-main)] px-1.5 py-0.5 text-[12px] text-[var(--vk-text-normal)]">
-                      ~/.conductor/bridge-refresh-token
-                    </code>
-                    . Keep the daemon running so the laptop stays online in the dashboard.
+                    New users should only need one command. It installs the bridge, registers the
+                    background service, opens the browser, and pairs the current laptop to this
+                    dashboard.
                   </p>
                 </div>
                 <div className="flex items-center gap-2 rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-1.5 text-xs text-[var(--vk-text-muted)]">
                   <BridgeStatusPill connected={connectedDevices.length > 0} title={`${connectedDevices.length} connected device${connectedDevices.length === 1 ? "" : "s"}`} />
-                  <span>{pairingCode ? "Ready to pair" : "Generate a code"}</span>
+                  <span>{connectedDevices.length > 0 ? "Bridge online" : "Bridge not connected yet"}</span>
                 </div>
               </div>
 
               <div className="mt-6 rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
-                  One-time code
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
+                      Recommended setup
+                    </div>
+                    <h3 className="mt-2 text-base font-semibold text-[var(--vk-text-strong)]">
+                      Install and connect in one step
+                    </h3>
+                    <p className="mt-3 text-sm leading-6 text-[var(--vk-text-muted)]">
+                      Run this once on the laptop you want to use. The script installs the bridge,
+                      registers its background service, and immediately launches the device-claim
+                      flow for this dashboard.
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-1.5 text-xs font-medium text-[var(--vk-text-muted)]">
+                    One command
+                  </span>
                 </div>
-                <div className="mt-3 font-mono text-4xl font-semibold tracking-[0.18em] text-[var(--vk-text-strong)]">
-                  {pairingCode ?? "------"}
-                </div>
-                <div className="mt-3 text-sm text-[var(--vk-text-muted)]">
-                  {pairingCode
-                    ? `Valid for about ${Math.max(1, Math.round((expiresIn ?? 600) / 60))} minutes and invalid after the first successful pair.`
-                    : 'Click "Add a laptop" to mint the next pairing code.'}
-                </div>
-              </div>
-
-              <div className="mt-4 rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-5">
-                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
-                  Command to run
-                </div>
-                <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
-                  {command}
+                <pre className="mt-4 overflow-x-auto whitespace-pre-wrap break-all rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
+                  {bootstrapConnectCommand}
                 </pre>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="primary"
                     size="md"
-                    disabled={!pairingCode}
                     onClick={() => {
-                      void handleCopyCommand();
+                      void handleCopyCommand(bootstrapConnectCommand, "setup");
                     }}
                   >
-                    {copyState === "copied" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                    {copyState === "copied" ? "Command copied" : "Copy command"}
+                    {copiedCommand === "setup" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    {copiedCommand === "setup" ? "Setup command copied" : "Copy setup command"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="md"
+                    onClick={() => {
+                      setShowAdvancedSetup((current) => !current);
+                    }}
+                  >
+                    {showAdvancedSetup ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    {showAdvancedSetup ? "Hide advanced options" : "Show advanced/manual options"}
                   </Button>
                 </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                  <div className="rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--vk-text-muted)]">
+                      1. Run once
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
+                      Paste the command into Terminal on the laptop you want to pair.
+                    </p>
+                  </div>
+                  <div className="rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--vk-text-muted)]">
+                      2. Sign in
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
+                      The command opens this browser flow and preserves the claim token automatically.
+                    </p>
+                  </div>
+                  <div className="rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3">
+                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--vk-text-muted)]">
+                      3. Stay online
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
+                      After pairing, the bridge daemon keeps this laptop available in the dashboard.
+                    </p>
+                  </div>
+                </div>
               </div>
+
+              {showAdvancedSetup ? (
+                <div className="mt-4 space-y-4">
+                  <div className="rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-5">
+                    <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
+                      Install only
+                    </div>
+                    <p className="mt-3 text-sm leading-6 text-[var(--vk-text-muted)]">
+                      Use this if you want to install the bridge first and run connect later from a
+                      new shell.
+                    </p>
+                    <pre className="mt-4 overflow-x-auto whitespace-pre-wrap break-all rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
+                      {installCommand}
+                    </pre>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="md"
+                        onClick={() => {
+                          void handleCopyCommand(installCommand, "install");
+                        }}
+                      >
+                        <Copy className="h-4 w-4" />
+                        {copiedCommand === "install" ? "Install command copied" : "Copy install command"}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-5">
+                    <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
+                      Already installed
+                    </div>
+                    <p className="mt-3 text-sm leading-6 text-[var(--vk-text-muted)]">
+                      If the bridge is already present on this laptop, rerun the direct connect
+                      command instead of reinstalling it.
+                    </p>
+                    <pre className="mt-4 overflow-x-auto whitespace-pre-wrap break-all rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
+                      {connectCommand}
+                    </pre>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="md"
+                        onClick={() => {
+                          void handleCopyCommand(connectCommand, "connect");
+                        }}
+                      >
+                        <Copy className="h-4 w-4" />
+                        {copiedCommand === "connect" ? "Connect command copied" : "Copy connect command"}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-5">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
+                          Manual fallback
+                        </div>
+                        <p className="mt-3 text-sm leading-6 text-[var(--vk-text-muted)]">
+                          Use a one-time code only if the browser claim flow cannot finish on the
+                          same machine.
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="md"
+                        disabled={creatingCode}
+                        onClick={() => {
+                          void handleGenerateCode();
+                        }}
+                      >
+                        {creatingCode ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                        {pairingCode ? "Generate a new code" : "Generate a code"}
+                      </Button>
+                    </div>
+                    <div className="mt-4 rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-4">
+                      <div className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--vk-text-muted)]">
+                        One-time code
+                      </div>
+                      <div className="mt-3 font-mono text-4xl font-semibold tracking-[0.18em] text-[var(--vk-text-strong)]">
+                        {pairingCode ?? "------"}
+                      </div>
+                      <div className="mt-3 text-sm text-[var(--vk-text-muted)]">
+                        {pairingCode
+                          ? `Valid for about ${Math.max(1, Math.round((expiresIn ?? 600) / 60))} minutes and invalid after the first successful pair.`
+                          : 'Generate a code to reveal the manual pair command.'}
+                      </div>
+                    </div>
+                    <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
+                      {manualCommand}
+                    </pre>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="md"
+                        disabled={!pairingCode}
+                        onClick={() => {
+                          void handleCopyCommand(manualCommand, "manual");
+                        }}
+                      >
+                        {copiedCommand === "manual" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                        {copiedCommand === "manual" ? "Manual command copied" : "Copy manual command"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </section>
 
             <section className="rounded-[24px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 shadow-[0_18px_40px_rgba(0,0,0,0.28)]">
@@ -435,7 +703,7 @@ export default function BridgeConnectClient({
                 <div>
                   <h2 className="text-lg font-semibold text-[var(--vk-text-strong)]">Paired devices</h2>
                   <p className="mt-2 text-sm text-[var(--vk-text-muted)]">
-                    Online status comes from the live bridge websocket. Revoking a device removes its refresh token on the relay side.
+                    Pick a laptop below, then continue into the dashboard with that device selected. Revoking a device removes its refresh token on the relay side.
                   </p>
                 </div>
                 <span className="rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-1.5 text-xs text-[var(--vk-text-muted)]">
@@ -453,15 +721,30 @@ export default function BridgeConnectClient({
                   devices.map((device) => (
                     <div
                       key={device.device_id}
-                      className="rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-4"
+                      className={`rounded-[20px] border bg-[var(--vk-bg-main)] p-4 transition-colors ${
+                        selectedDevice?.device_id === device.device_id
+                          ? "border-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(244,179,124,0.18)]"
+                          : "border-[var(--vk-border)]"
+                      }`}
                     >
                       <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0">
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 text-left"
+                          onClick={() => {
+                            setSelectedDeviceId(device.device_id);
+                          }}
+                        >
                           <div className="flex flex-wrap items-center gap-2">
                             <p className="truncate text-sm font-medium text-[var(--vk-text-strong)]">
                               {device.device_name}
                             </p>
                             <BridgeStatusPill connected={device.connected} title={`${device.device_name} is ${device.connected ? "online" : "offline"}`} />
+                            {selectedDevice?.device_id === device.device_id ? (
+                              <span className="rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-1 text-[11px] text-[var(--vk-text-muted)]">
+                                Selected
+                              </span>
+                            ) : null}
                           </div>
                           <p className="mt-2 text-xs text-[var(--vk-text-muted)]">
                             {device.hostname} · {device.os}/{device.arch}
@@ -469,33 +752,64 @@ export default function BridgeConnectClient({
                           <p className="mt-1 text-xs text-[var(--vk-text-muted)]">
                             Relay status: {device.last_status?.hostname ?? device.hostname}
                           </p>
-                        </div>
+                        </button>
 
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          disabled={busyDeviceId === device.device_id}
-                          onClick={() => {
-                            void handleDeleteDevice(device.device_id);
-                          }}
-                          aria-label={`Revoke ${device.device_name}`}
-                        >
-                          {busyDeviceId === device.device_id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
+                        <div className="flex shrink-0 items-center gap-2">
+                          {device.connected ? (
+                            <Button asChild variant={selectedDevice?.device_id === device.device_id ? "primary" : "outline"} size="md">
+                              <Link href={`/?bridge=${encodeURIComponent(device.device_id)}`}>
+                                {selectedDevice?.device_id === device.device_id ? "Continue" : "Open"}
+                              </Link>
+                            </Button>
                           ) : (
-                            <Trash2 className="h-4 w-4" />
+                            <span className="text-xs text-[var(--vk-text-muted)]">Offline</span>
                           )}
-                        </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            disabled={busyDeviceId === device.device_id}
+                            onClick={() => {
+                              void handleDeleteDevice(device.device_id);
+                            }}
+                            aria-label={`Revoke ${device.device_name}`}
+                          >
+                            {busyDeviceId === device.device_id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   ))
                 ) : (
                   <div className="rounded-[20px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-6 text-sm text-[var(--vk-text-muted)]">
-                    No laptops have been paired yet. Generate a code, run the bridge command on a machine, and it will appear here.
+                    No laptops have been paired yet. Run the one-line setup command on the laptop
+                    you want to claim, then finish the browser sign-in it opens.
                   </div>
                 )}
               </div>
+
+              {readyDashboardHref ? (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-4">
+                  <div>
+                    <div className="text-sm font-medium text-[var(--vk-text-strong)]">
+                      Continue with {readyDevice?.device_name ?? "your laptop"}
+                    </div>
+                    <div className="mt-1 text-xs text-[var(--vk-text-muted)]">
+                      Opens the main dashboard scoped to the selected paired device.
+                    </div>
+                  </div>
+                  <Button asChild variant="primary" size="lg">
+                    <Link href={readyDashboardHref}>
+                      <ExternalLink className="h-4 w-4" />
+                      Open dashboard
+                    </Link>
+                  </Button>
+                </div>
+              ) : null}
             </section>
           </div>
         </div>

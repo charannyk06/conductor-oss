@@ -1,7 +1,9 @@
-"use client";
+import { getDefaultPostSignInRedirectTarget, getDashboardAccess, requiresPairedDeviceScope } from "@/lib/auth";
+import { SsoCallbackClient } from "./SsoCallbackClient";
 
-import { AuthenticateWithRedirectCallback } from "@clerk/nextjs";
+export default async function SsoCallbackPage() {
+  const access = await getDashboardAccess();
+  const defaultRedirectTarget = getDefaultPostSignInRedirectTarget(requiresPairedDeviceScope(access));
 
-export default function SsoCallbackPage() {
-  return <AuthenticateWithRedirectCallback signInFallbackRedirectUrl="/sign-in" />;
+  return <SsoCallbackClient defaultRedirectTarget={defaultRedirectTarget} />;
 }

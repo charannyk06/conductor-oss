@@ -16,7 +16,6 @@ cargo build --workspace
 - Rust toolchain (stable)
 - Bun >= 1.2
 - Node.js >= 18
-- tmux
 - git
 
 ### Running locally
@@ -46,23 +45,27 @@ cargo clippy --workspace
 
 ### Default ports
 
-- Dashboard: `http://localhost:3000` (dev) / `http://localhost:4747` (prod)
-- Rust backend: `http://127.0.0.1:4749`
+- Source dev scripts: dashboard `http://localhost:3000`, Rust backend `http://127.0.0.1:4749`
+- Launcher defaults: dashboard `http://127.0.0.1:4747`, Rust backend `http://127.0.0.1:4748`
 
 ## Project Structure
 
-```
-crates/                      # Rust backend (37K+ lines)
+```text
+bridge-cmd/                  # Companion bridge binary used by paired-device flows
+crates/                      # Rust workspace
   conductor-core/            # Types, config, board parsing, task/session models
   conductor-server/          # Axum HTTP server, routes, state, SSE streaming
   conductor-db/              # SQLite persistence via sqlx
   conductor-executors/       # Agent adapters, process management
   conductor-git/             # Git/worktree operations
+  conductor-relay/           # Relay server for bridge and remote terminal flows
+  conductor-types/           # Shared bridge/transport protocol types
   conductor-watcher/         # File system watching
   conductor-cli/             # Rust CLI binary
+  notify-rust/               # Desktop notification support
 packages/                    # TypeScript
   cli/                       # npm CLI entrypoint, native binary launcher
-  core/                      # Shared config types, board parsing
+  core/                      # Shared TS types and schemas
   web/                       # Next.js 16 dashboard
 .github/workflows/           # CI, release, security, docs sync
 ```

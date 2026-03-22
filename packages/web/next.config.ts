@@ -1,5 +1,8 @@
 import type { NextConfig } from "next";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const isVercelDeployment = process.env.VERCEL === "1" || process.env.VERCEL === "true";
+const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
@@ -9,23 +12,28 @@ const securityHeaders = [
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
 ];
 
+const developmentWebpackConfig: Pick<NextConfig, "webpack"> = {
+  webpack(config) {
+    config.watchOptions = {
+      ...config.watchOptions,
+      // Runtime sessions, restore snapshots, and detached worktrees live under .conductor.
+      // Ignoring them prevents dashboard Fast Refresh churn while terminals are active.
+      ignored: ["**/.conductor/**"],
+    };
+    return config;
+  },
+};
+
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // Vercel's runtime loads the traced output directly. Forcing standalone there
+  // produces CommonJS launcher -> ESM app module mismatches under this package's
+  // `type: "module"` setting.
+  output: isVercelDeployment ? undefined : "standalone",
   reactStrictMode: false,
   experimental: {
     turbopackFileSystemCacheForBuild: true,
   },
-  webpack(config, { dev }) {
-    if (dev) {
-      config.watchOptions = {
-        ...config.watchOptions,
-        // Runtime sessions, restore snapshots, and detached worktrees live under .conductor.
-        // Ignoring them prevents dashboard Fast Refresh churn while terminals are active.
-        ignored: ["**/.conductor/**"],
-      };
-    }
-    return config;
-  },
+  ...(process.env.NODE_ENV === "development" ? developmentWebpackConfig : {}),
   serverExternalPackages: [
     "@conductor-oss/core",
     "@puppeteer/browsers",
@@ -33,7 +41,7 @@ const nextConfig: NextConfig = {
     "proxy-agent",
   ],
   // Silence "multiple lockfiles" warning — pin workspace root to the monorepo
-  outputFileTracingRoot: resolve(process.cwd(), "../../"),
+  outputFileTracingRoot: workspaceRoot,
   async headers() {
     return [
       {

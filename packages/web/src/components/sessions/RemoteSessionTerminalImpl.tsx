@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
+import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
@@ -36,18 +37,12 @@ const TERMINAL_THEME = {
   brightWhite: "#fff8f2",
 } as const;
 
-function calculateTerminalGeometry(element: HTMLElement): { cols: number; rows: number } {
-  const { width, height } = element.getBoundingClientRect();
-  const cols = Math.max(48, Math.floor(Math.max(width - 28, 320) / 9));
-  const rows = Math.max(14, Math.floor(Math.max(height - 20, 280) / 20));
-  return { cols, rows };
-}
-
 function resetTerminalOutput(terminal: Terminal, value: string) {
   terminal.reset();
   if (value.length > 0) {
     terminal.write(value);
   }
+  terminal.scrollToBottom();
 }
 
 function encodeResizeFrame(cols: number, rows: number): Uint8Array {
@@ -97,6 +92,7 @@ export function RemoteSessionTerminal({
 }: SessionTerminalProps) {
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const decoderRef = useRef(new TextDecoder());
@@ -137,6 +133,31 @@ export function RemoteSessionTerminal({
     sendTerminalFrame(JSON.stringify({ columns: cols, rows }));
   }, [sendTerminalFrame]);
 
+  const fitTerminal = useCallback(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) {
+      return null;
+    }
+
+    const previousCols = terminal.cols;
+    const previousRows = terminal.rows;
+    fitAddon.fit();
+    terminal.scrollToBottom();
+
+    const next = { cols: terminal.cols, rows: terminal.rows };
+    geometryRef.current = next;
+
+    if (next.cols < 2 || next.rows < 2) {
+      return null;
+    }
+
+    return {
+      ...next,
+      changed: next.cols !== previousCols || next.rows !== previousRows,
+    };
+  }, []);
+
   const scheduleReconnect = useCallback(() => {
     if (sessionClosed) {
       return;
@@ -172,7 +193,10 @@ export function RemoteSessionTerminal({
     });
 
     terminal.open(host);
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
     terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
     const dataSubscription = terminal.onData((data) => {
       if (sessionClosed) {
         return;
@@ -191,14 +215,18 @@ export function RemoteSessionTerminal({
 
     host.addEventListener("click", focusTerminal);
     terminal.focus();
+    window.requestAnimationFrame(() => {
+      fitTerminal();
+    });
 
     return () => {
       host.removeEventListener("click", focusTerminal);
       dataSubscription.dispose();
       terminal.dispose();
       terminalRef.current = null;
+      fitAddonRef.current = null;
     };
-  }, [immersiveMobileMode, sendTerminalFrame, sessionClosed]);
+  }, [fitTerminal, immersiveMobileMode, sendTerminalFrame, sessionClosed]);
 
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
@@ -227,14 +255,13 @@ export function RemoteSessionTerminal({
     terminal.options.lineHeight = immersiveMobileMode ? 1.34 : 1.44;
 
     const applyGeometry = () => {
-      const next = calculateTerminalGeometry(host);
-      geometryRef.current = next;
-      if (terminal.cols !== next.cols || terminal.rows !== next.rows) {
-        terminal.resize(next.cols, next.rows);
+      const next = fitTerminal();
+      if (!next) {
+        return;
       }
       if (!sessionClosed) {
         const socket = socketRef.current;
-        if (socket && socket.readyState === WebSocket.OPEN) {
+        if (next.changed && socket && socket.readyState === WebSocket.OPEN) {
           try {
             socket.send(encodeResizeFrame(next.cols, next.rows));
           } catch {
@@ -258,7 +285,7 @@ export function RemoteSessionTerminal({
       observer?.disconnect();
       window.removeEventListener("resize", applyGeometry);
     };
-  }, [immersiveMobileMode, sessionClosed]);
+  }, [fitTerminal, immersiveMobileMode, sessionClosed]);
 
   useEffect(() => {
     if (sessionClosed) {
@@ -349,6 +376,7 @@ export function RemoteSessionTerminal({
               const text = decoderRef.current.decode(frame.slice(1), { stream: true });
               if (text.length > 0) {
                 terminal.write(text);
+                terminal.scrollToBottom();
               }
               break;
             }

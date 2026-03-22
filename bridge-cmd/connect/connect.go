@@ -17,6 +17,7 @@ import (
 
 	"github.com/charannyk06/conductor-oss/bridge/daemon"
 	"github.com/charannyk06/conductor-oss/bridge/device"
+	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/charannyk06/conductor-oss/bridge/relayurl"
 	"github.com/charannyk06/conductor-oss/bridge/token"
 )
@@ -136,6 +137,12 @@ func Run(ctx context.Context, opts Options) error {
 			fmt.Fprintln(stdout, "Device already paired. Reconnecting bridge daemon.")
 			announceBrowser(openTarget, opts.OpenBrowser, stdout, stderr)
 			if opts.StartupDaemon {
+				if err := install.RestartServiceIfInstalled(); err == nil {
+					fmt.Fprintln(stdout, "Bridge background service restarted.")
+					return nil
+				} else {
+					fmt.Fprintf(stderr, "bridge service restart unavailable, continuing in the current terminal: %v\n", err)
+				}
 				return daemon.Run(ctx, daemon.Options{
 					RelayURL: opts.RelayURL,
 					Store:    store,
@@ -185,6 +192,12 @@ func Run(ctx context.Context, opts Options) error {
 	fmt.Fprintf(stdout, "Refresh token saved to %s\n", store.Path())
 
 	if opts.StartupDaemon {
+		if err := install.RestartServiceIfInstalled(); err == nil {
+			fmt.Fprintln(stdout, "Bridge background service restarted.")
+			return nil
+		} else {
+			fmt.Fprintf(stderr, "bridge service restart unavailable, continuing in the current terminal: %v\n", err)
+		}
 		return daemon.Run(ctx, daemon.Options{
 			RelayURL: opts.RelayURL,
 			Store:    store,
