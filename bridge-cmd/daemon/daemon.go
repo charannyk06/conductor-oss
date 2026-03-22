@@ -61,9 +61,11 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	backendCleanup, err := backend.Ensure(ctx, backend.Options{Stderr: stderr})
-	if err != nil {
-		return err
+	backendCleanup := func() {}
+	if cleanup, err := backend.Ensure(ctx, backend.Options{Stderr: stderr}); err != nil {
+		fmt.Fprintf(stderr, "local backend unavailable; continuing in bridge-only mode: %v\n", err)
+	} else {
+		backendCleanup = cleanup
 	}
 	defer backendCleanup()
 

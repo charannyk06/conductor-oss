@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 )
 
 const serviceName = "com.conductor.bridge"
@@ -87,13 +88,21 @@ func installLaunchd(home, binaryPath string) error {
 		return fmt.Errorf("write plist: %w", err)
 	}
 
-	// Load the service
-	cmd := exec.Command("launchctl", "load", plistPath)
-	cmd.Run() // best effort
+	installLaunchdService(home, plistPath)
 
 	fmt.Printf("macOS service installed at %s\n", plistPath)
-	fmt.Println("Run: launchctl load ~/Library/LaunchAgents/com.conductor.bridge.plist")
+	fmt.Println("Conductor Bridge will relaunch automatically on login.")
 	return nil
+}
+
+func installLaunchdService(home, plistPath string) {
+	uid := strconv.Itoa(os.Getuid())
+	domainTarget := "gui/" + uid
+	serviceTarget := domainTarget + "/" + serviceName
+
+	_ = exec.Command("launchctl", "bootout", serviceTarget).Run()
+	_ = exec.Command("launchctl", "bootstrap", domainTarget, plistPath).Run()
+	_ = exec.Command("launchctl", "kickstart", "-k", serviceTarget).Run()
 }
 
 func installSystemd(home, binaryPath string) error {
