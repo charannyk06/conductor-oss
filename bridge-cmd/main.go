@@ -12,6 +12,7 @@ import (
 
 	"github.com/charannyk06/conductor-oss/bridge/connect"
 	"github.com/charannyk06/conductor-oss/bridge/daemon"
+	"github.com/charannyk06/conductor-oss/bridge/dashboardurl"
 	"github.com/charannyk06/conductor-oss/bridge/device"
 	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/charannyk06/conductor-oss/bridge/pair"
@@ -67,7 +68,7 @@ func runConnect(ctx context.Context, args []string) error {
 	fs.SetOutput(os.Stderr)
 
 	relayURL := fs.String("relay-url", resolveRelayURL(), "Relay base URL")
-	dashboardURL := fs.String("dashboard-url", resolveDashboardURL(), "Hosted dashboard URL")
+	dashboardURL := fs.String("dashboard-url", resolveDashboardURL(), "Hosted dashboard URL (defaults to the last saved dashboard URL)")
 	noBrowser := fs.Bool("no-browser", false, "Print the pairing URL instead of opening the browser")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -146,7 +147,14 @@ func runStatus() error {
 				deviceLine = fmt.Sprintf("device id: %s\n", deviceID)
 			}
 		}
-		fmt.Fprintf(os.Stdout, "paired\n%srefresh token path: %s\nrefresh token length: %d\n", deviceLine, store.Path(), len(refreshToken))
+		dashboardLine := ""
+		dashboardStore, dashboardErr := dashboardurl.NewStore("")
+		if dashboardErr == nil {
+			if dashboardURL, loadErr := dashboardStore.Load(); loadErr == nil {
+				dashboardLine = fmt.Sprintf("dashboard url: %s\n", dashboardURL)
+			}
+		}
+		fmt.Fprintf(os.Stdout, "paired\n%s%srefresh token path: %s\nrefresh token length: %d\n", deviceLine, dashboardLine, store.Path(), len(refreshToken))
 		return nil
 	case errors.Is(err, token.ErrTokenNotFound):
 		fmt.Fprintf(os.Stdout, "not paired\nrun 'conductor-bridge connect' or 'conductor-bridge pair --code CODE' first\n")
@@ -181,6 +189,13 @@ func resolveDashboardURL() string {
 			return value
 		}
 	}
+
+	store, err := dashboardurl.NewStore("")
+	if err == nil {
+		if value, loadErr := store.Load(); loadErr == nil && strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
 	return ""
 }
 
@@ -194,5 +209,7 @@ func usageText() string {
   conductor-bridge pair --code CODE [--relay-url URL]
   conductor-bridge daemon [--relay-url URL]
   conductor-bridge status
-  conductor-bridge install`
+  conductor-bridge install
+
+If --dashboard-url is omitted, connect reuses the last saved dashboard URL when available.`
 }
