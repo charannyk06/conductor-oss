@@ -65,6 +65,7 @@ export default function SessionPageClient({
     enabled: !preferencesLoading && notificationProjectId !== null,
     projectId: notificationProjectId,
     preferences: preferences?.notifications ?? null,
+    bridgeId: effectiveBridgeId,
   });
 
   const topBarTitle = useMemo(() => {

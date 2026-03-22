@@ -1878,6 +1878,7 @@ export default function DashboardClient({
     enabled: !preferencesLoading,
     projectId: notificationProjectId,
     preferences: resolvedPreferences.notifications,
+    bridgeId: effectiveBridgeId,
   });
 
   const handleSelectProject = useCallback((projectId: string | null) => {
