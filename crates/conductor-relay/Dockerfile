@@ -1,4 +1,4 @@
-FROM rust:1.85 as builder
+FROM rust:1.88 AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release -p conductor-relay

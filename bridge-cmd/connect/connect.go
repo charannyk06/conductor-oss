@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/charannyk06/conductor-oss/bridge/daemon"
+	"github.com/charannyk06/conductor-oss/bridge/dashboardurl"
 	"github.com/charannyk06/conductor-oss/bridge/device"
 	"github.com/charannyk06/conductor-oss/bridge/install"
 	"github.com/charannyk06/conductor-oss/bridge/relayurl"
@@ -25,6 +26,13 @@ import (
 const defaultDashboardURL = "https://conductross.com"
 
 var errInvalidSavedPairing = errors.New("saved device pairing is invalid")
+
+type savedPairingSource string
+
+const (
+	savedPairingSourceActive         savedPairingSource = "active"
+	savedPairingSourceDashboardCache savedPairingSource = "dashboard-cache"
+)
 
 type Options struct {
 	RelayURL      string
@@ -72,6 +80,12 @@ type deviceAuthResponse struct {
 	Error      string `json:"error"`
 }
 
+type savedPairingCandidate struct {
+	source       savedPairingSource
+	token        string
+	dashboardURL string
+}
+
 func Run(ctx context.Context, opts Options) error {
 	if strings.TrimSpace(opts.RelayURL) == "" {
 		return fmt.Errorf("relay URL is required")
@@ -109,6 +123,16 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	dashboardStore, err := dashboardurl.NewStore("")
+	if err != nil {
+		return err
+	}
+
+	savedDashboardURL, err := loadSavedDashboardURL(dashboardStore)
+	if err != nil {
+		return err
+	}
+
 	relayStore, err := relayurl.NewStore("")
 	if err != nil {
 		return err
@@ -117,10 +141,20 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	if refreshToken, err := store.Load(); err == nil && strings.TrimSpace(refreshToken) != "" {
-		resolvedDevice, resolveErr := resolveSavedDevice(ctx, opts.RelayURL, refreshToken)
+	announceDashboardTarget(stdout, dashboardURL, savedDashboardURL)
+
+	candidates, err := loadSavedPairingCandidates(store, dashboardURL, savedDashboardURL)
+	if err != nil {
+		return err
+	}
+
+	for _, candidate := range candidates {
+		resolvedDevice, resolveErr := resolveSavedDevice(ctx, opts.RelayURL, candidate.token)
 		switch {
 		case resolveErr == nil:
+			if err := saveActiveDashboardPairing(store, dashboardStore, dashboardURL, candidate.token); err != nil {
+				return err
+			}
 			if strings.TrimSpace(resolvedDevice.DeviceID) != "" {
 				if err := deviceStore.Save(resolvedDevice.DeviceID); err != nil {
 					return err
@@ -132,7 +166,7 @@ func Run(ctx context.Context, opts Options) error {
 				return err
 			}
 
-			fmt.Fprintln(stdout, "Device already paired. Reconnecting bridge daemon.")
+			announceSavedPairingReuse(stdout, candidate, dashboardURL, savedDashboardURL)
 			announceBrowser(openTarget, opts.OpenBrowser, stdout, stderr)
 			if opts.StartupDaemon {
 				if err := install.RestartServiceIfInstalled(); err == nil {
@@ -149,7 +183,7 @@ func Run(ctx context.Context, opts Options) error {
 			}
 			return nil
 		case errors.Is(resolveErr, errInvalidSavedPairing):
-			fmt.Fprintln(stderr, "Saved bridge pairing is invalid or expired. Re-pairing this machine.")
+			announceInvalidSavedPairing(stderr, candidate, dashboardURL, savedDashboardURL)
 		default:
 			return resolveErr
 		}
@@ -159,6 +193,8 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+
+	announceNewPairing(stdout, dashboardURL, len(candidates) > 0)
 
 	claim, err := createClaim(ctx, opts.RelayURL, deviceID)
 	if err != nil {
@@ -177,7 +213,7 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	if err := store.Save(result.RefreshToken); err != nil {
+	if err := saveActiveDashboardPairing(store, dashboardStore, dashboardURL, result.RefreshToken); err != nil {
 		return err
 	}
 	if strings.TrimSpace(result.DeviceID) != "" {
@@ -187,7 +223,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	fmt.Fprintf(stdout, "Device paired: %q\n", strings.TrimSpace(result.DeviceName))
-	fmt.Fprintf(stdout, "Refresh token saved to %s\n", store.Path())
+	fmt.Fprintf(stdout, "Active refresh token saved to %s\n", store.Path())
 
 	if opts.StartupDaemon {
 		if err := install.RestartServiceIfInstalled(); err == nil {
@@ -204,6 +240,123 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	return nil
+}
+
+func loadSavedDashboardURL(store *dashboardurl.Store) (string, error) {
+	dashboardURL, err := store.Load()
+	switch {
+	case err == nil:
+		return strings.TrimSpace(dashboardURL), nil
+	case errors.Is(err, dashboardurl.ErrDashboardURLNotFound):
+		return "", nil
+	default:
+		return "", err
+	}
+}
+
+func loadSavedPairingCandidates(store *token.Store, dashboardURL string, savedDashboardURL string) ([]savedPairingCandidate, error) {
+	activeToken, err := store.Load()
+	if err != nil && !errors.Is(err, token.ErrTokenNotFound) {
+		return nil, err
+	}
+
+	targetDashboardToken, err := store.LoadForDashboard(dashboardURL)
+	if err != nil && !errors.Is(err, token.ErrTokenNotFound) {
+		return nil, err
+	}
+
+	candidates := make([]savedPairingCandidate, 0, 2)
+	seenTokens := make(map[string]struct{}, 2)
+	addCandidate := func(candidate savedPairingCandidate) {
+		trimmedToken := strings.TrimSpace(candidate.token)
+		if trimmedToken == "" {
+			return
+		}
+		if _, exists := seenTokens[trimmedToken]; exists {
+			return
+		}
+		candidate.token = trimmedToken
+		candidates = append(candidates, candidate)
+		seenTokens[trimmedToken] = struct{}{}
+	}
+
+	if savedDashboardURL != "" && savedDashboardURL != dashboardURL {
+		addCandidate(savedPairingCandidate{
+			source:       savedPairingSourceDashboardCache,
+			token:        targetDashboardToken,
+			dashboardURL: dashboardURL,
+		})
+	}
+
+	addCandidate(savedPairingCandidate{
+		source:       savedPairingSourceActive,
+		token:        activeToken,
+		dashboardURL: savedDashboardURL,
+	})
+
+	addCandidate(savedPairingCandidate{
+		source:       savedPairingSourceDashboardCache,
+		token:        targetDashboardToken,
+		dashboardURL: dashboardURL,
+	})
+
+	return candidates, nil
+}
+
+func saveActiveDashboardPairing(tokenStore *token.Store, dashboardStore *dashboardurl.Store, dashboardURL string, refreshToken string) error {
+	if err := tokenStore.Save(refreshToken); err != nil {
+		return err
+	}
+	if err := tokenStore.SaveForDashboard(dashboardURL, refreshToken); err != nil {
+		return err
+	}
+	if err := dashboardStore.Save(dashboardURL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func announceDashboardTarget(stdout io.Writer, dashboardURL string, savedDashboardURL string) {
+	fmt.Fprintf(stdout, "Target dashboard: %s\n", dashboardURL)
+	if savedDashboardURL != "" && savedDashboardURL != dashboardURL {
+		fmt.Fprintf(stdout, "Switching saved dashboard target from %s to %s\n", savedDashboardURL, dashboardURL)
+	}
+}
+
+func announceSavedPairingReuse(stdout io.Writer, candidate savedPairingCandidate, dashboardURL string, savedDashboardURL string) {
+	switch candidate.source {
+	case savedPairingSourceDashboardCache:
+		fmt.Fprintf(stdout, "Reusing the saved pairing cached for %s.\n", dashboardURL)
+		if savedDashboardURL != "" && savedDashboardURL != dashboardURL {
+			fmt.Fprintln(stdout, "That pairing is now the active bridge token for the daemon.")
+		}
+	default:
+		fmt.Fprintln(stdout, "Reusing the current active bridge pairing for this device.")
+		if savedDashboardURL != "" && savedDashboardURL != dashboardURL {
+			fmt.Fprintln(stdout, "No refresh token rotation is needed for this dashboard switch.")
+		}
+	}
+}
+
+func announceInvalidSavedPairing(stderr io.Writer, candidate savedPairingCandidate, dashboardURL string, savedDashboardURL string) {
+	switch candidate.source {
+	case savedPairingSourceDashboardCache:
+		fmt.Fprintf(stderr, "Saved pairing cached for %s is invalid or expired.\n", dashboardURL)
+	default:
+		if savedDashboardURL != "" && savedDashboardURL != dashboardURL {
+			fmt.Fprintf(stderr, "The active pairing saved for %s is invalid or expired.\n", savedDashboardURL)
+			return
+		}
+		fmt.Fprintf(stderr, "Saved pairing for %s is invalid or expired.\n", dashboardURL)
+	}
+}
+
+func announceNewPairing(stdout io.Writer, dashboardURL string, hadSavedPairing bool) {
+	if hadSavedPairing {
+		fmt.Fprintf(stdout, "Creating a new pairing for %s. The relay will rotate the previous refresh token for this device.\n", dashboardURL)
+		return
+	}
+	fmt.Fprintf(stdout, "No saved pairing found for %s. Starting a new pairing.\n", dashboardURL)
 }
 
 func resolveSavedDevice(ctx context.Context, relayURL string, refreshToken string) (deviceAuthResponse, error) {

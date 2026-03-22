@@ -245,7 +245,7 @@ run_connect_if_requested() {
     set -- "$@" --no-browser
   fi
 
-  echo "Starting Conductor Bridge pairing..."
+  echo "Starting Conductor Bridge pairing for dashboard: $CONNECT_DASHBOARD_URL"
   exec "$BRIDGE_BIN" "$@"
 }
 
@@ -257,7 +257,11 @@ ensure_conductor_cli
 install_bridge_service
 
 echo "Installed conductor-bridge to $INSTALL_BIN_DIR/conductor-bridge"
-echo "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
+if [ -n "$CONNECT_DASHBOARD_URL" ]; then
+  echo "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url $CONNECT_DASHBOARD_URL"
+else
+  echo "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
+fi
 run_connect_if_requested
 `;
 }
