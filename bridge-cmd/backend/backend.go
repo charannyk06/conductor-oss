@@ -127,6 +127,14 @@ func resolveBinaryLaunch(binaryPath string, args []string) launchPlan {
 	return launchPlan{cmd: binaryPath, args: args}
 }
 
+func applyLaunchEnv(cmd *exec.Cmd, env []string) {
+	if len(env) == 0 {
+		return
+	}
+
+	cmd.Env = append(os.Environ(), env...)
+}
+
 func Ensure(ctx context.Context, opts Options) (func(), error) {
 	stderr := opts.Stderr
 	if stderr == nil {
@@ -148,6 +156,7 @@ func Ensure(ctx context.Context, opts Options) (func(), error) {
 	}
 
 	cmd := exec.CommandContext(ctx, launch.cmd, launch.args...)
+	applyLaunchEnv(cmd, launch.env)
 	cmd.Stdout = stderr
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
