@@ -97,6 +97,9 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
     let active = false;
     let lastX = 0;
     let lastY = 0;
+    let touchStartAt = 0;
+    let touchMoved = false;
+    const LONG_PRESS_THRESHOLD_MS = 300;
 
     const reset = () => {
       active = false;
@@ -241,7 +244,8 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
             const touch = event.touches[0];
             lastX = touch.clientX;
             lastY = touch.clientY;
-            window.term?.focus?.();
+            touchStartAt = window.performance?.now?.() ?? Date.now();
+            touchMoved = false;
             syncTouchActionMode();
             active = true;
         }, { passive: true });
@@ -251,6 +255,7 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
                 return;
             }
 
+            touchMoved = true;
             const touch = event.touches[0];
             const deltaX = lastX - touch.clientX;
             const deltaY = lastY - touch.clientY;
@@ -284,6 +289,10 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
         }, { passive: false });
 
         terminalRoot.addEventListener('touchend', () => {
+            const touchDuration = (window.performance?.now?.() ?? Date.now()) - touchStartAt;
+            if (!touchMoved && touchDuration < LONG_PRESS_THRESHOLD_MS) {
+                window.term?.focus?.();
+            }
             syncTouchActionMode();
             reset();
         }, { passive: true });
@@ -1399,6 +1408,11 @@ mod tests {
         assert!(injected.contains("eventTarget.dispatchEvent(wheelEvent)"));
         assert!(injected.contains("terminalRoot.addEventListener('touchmove'"));
         assert!(injected.contains("if (!syncTouchActionMode()) {"));
+        assert!(injected.contains("const LONG_PRESS_THRESHOLD_MS = 300;"));
+        assert!(injected.contains("touchStartAt = window.performance?.now?.() ?? Date.now();"));
+        assert!(injected.contains("touchMoved = true;"));
+        assert!(injected.contains("const touchDuration = (window.performance?.now?.() ?? Date.now()) - touchStartAt;"));
+        assert!(injected.contains("if (!touchMoved && touchDuration < LONG_PRESS_THRESHOLD_MS) {"));
         assert!(injected.contains("window.term?.focus?.();"));
         assert!(
             injected.find(TTYD_MOBILE_TOUCH_SHIM_MARKER).unwrap()
