@@ -17,7 +17,32 @@ export function buildBridgeInstallScriptUrl(baseUrl: string): string {
 }
 
 export function buildBridgeInstallCommand(installScriptUrl: string): string {
-  return `curl -fsSL ${shellQuote(installScriptUrl)} | sh && export PATH="$HOME/.local/bin:$PATH"`;
+  return `curl -fsSL ${shellQuote(installScriptUrl)} | sh`;
+}
+
+export function buildBridgeBootstrapConnectCommand(
+  installScriptUrl: string,
+  dashboardUrl: string,
+  relayUrl?: string | null,
+): string {
+  const parts = [
+    "curl",
+    "-fsSL",
+    installScriptUrl,
+    "|",
+    "sh",
+    "-s",
+    "--",
+    "--connect",
+    "--dashboard-url",
+    dashboardUrl,
+  ];
+
+  if (relayUrl?.trim()) {
+    parts.push("--relay-url", relayUrl.trim());
+  }
+
+  return parts.map((part) => (part === "|" ? part : shellQuote(part))).join(" ");
 }
 
 export function buildBridgeConnectCommand(

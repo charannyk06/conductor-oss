@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildBridgeBootstrapConnectCommand,
   buildBridgeConnectCommand,
   buildBridgeInstallCommand,
   buildBridgeInstallScriptUrl,
@@ -17,7 +18,18 @@ test("buildBridgeInstallScriptUrl resolves against the current dashboard origin"
 test("buildBridgeInstallCommand produces a copy-pasteable shell pipeline", () => {
   assert.equal(
     buildBridgeInstallCommand("https://preview.conductross.com/bridge/install.sh"),
-    'curl -fsSL https://preview.conductross.com/bridge/install.sh | sh && export PATH="$HOME/.local/bin:$PATH"',
+    "curl -fsSL https://preview.conductross.com/bridge/install.sh | sh",
+  );
+});
+
+test("buildBridgeBootstrapConnectCommand installs and connects in one step", () => {
+  assert.equal(
+    buildBridgeBootstrapConnectCommand(
+      "https://preview.conductross.com/bridge/install.sh",
+      "https://preview.conductross.com",
+      "https://relay.conductross.com",
+    ),
+    "curl -fsSL https://preview.conductross.com/bridge/install.sh | sh -s -- --connect --dashboard-url https://preview.conductross.com --relay-url https://relay.conductross.com",
   );
 });
 

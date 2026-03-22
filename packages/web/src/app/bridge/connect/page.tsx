@@ -42,7 +42,7 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
               title="Sign in to pair a laptop"
               description={claimToken
                 ? "This browser was opened by a local Conductor bridge command. Sign in so the currently-running machine can be paired to your account without a copy-paste code."
-                : "Sign in first, then install and connect the bridge on the laptop you want to use. The one-time pairing code remains available afterward as a manual fallback."}
+                : "Sign in first, then run the one-command bridge setup on the laptop you want to use. The manual pairing code stays available only as an advanced fallback."}
             />
             <div className="mt-8">
               <Button asChild variant="primary" size="lg">

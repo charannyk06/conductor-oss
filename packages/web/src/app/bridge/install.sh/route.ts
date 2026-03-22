@@ -35,7 +35,60 @@ set -eu
 GO_VERSION="${GO_VERSION}"
 SOURCE_ARCHIVE_URL="${sourceArchiveUrl}"
 INSTALL_BIN_DIR="\${CONDUCTOR_INSTALL_BIN:-$HOME/.local/bin}"
+SERVICE_BIN_DIR="$HOME/.conductor/bin"
 LOCAL_GO_ROOT="$HOME/.local/go"
+BRIDGE_BIN="$INSTALL_BIN_DIR/conductor-bridge"
+CONNECT_AFTER_INSTALL=0
+CONNECT_DASHBOARD_URL=""
+CONNECT_RELAY_URL=""
+CONNECT_NO_BROWSER=0
+
+print_usage() {
+  cat <<'EOF'
+Usage:
+  curl -fsSL <install-url> | sh
+  curl -fsSL <install-url> | sh -s -- --connect --dashboard-url URL [--relay-url URL] [--no-browser]
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --connect)
+        CONNECT_AFTER_INSTALL=1
+        ;;
+      --dashboard-url)
+        shift
+        if [ "$#" -eq 0 ]; then
+          echo "Missing value for --dashboard-url" >&2
+          exit 1
+        fi
+        CONNECT_DASHBOARD_URL="$1"
+        ;;
+      --relay-url)
+        shift
+        if [ "$#" -eq 0 ]; then
+          echo "Missing value for --relay-url" >&2
+          exit 1
+        fi
+        CONNECT_RELAY_URL="$1"
+        ;;
+      --no-browser)
+        CONNECT_NO_BROWSER=1
+        ;;
+      --help|-h)
+        print_usage
+        exit 0
+        ;;
+      *)
+        echo "Unknown option: $1" >&2
+        print_usage >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
 
 ensure_path_line() {
   target_file="$1"
@@ -49,15 +102,15 @@ ensure_path_line() {
 }
 
 configure_shell_path() {
-  ensure_path_line "$HOME/.profile" 'export PATH="$HOME/.local/bin:$PATH"'
+  ensure_path_line "$HOME/.profile" 'export PATH="$HOME/.conductor/bin:$HOME/.local/bin:$PATH"'
 
   user_shell="$(basename "\${SHELL:-}")"
   if [ "$user_shell" = "zsh" ]; then
-    ensure_path_line "$HOME/.zshrc" 'export PATH="$HOME/.local/bin:$PATH"'
+    ensure_path_line "$HOME/.zshrc" 'export PATH="$HOME/.conductor/bin:$HOME/.local/bin:$PATH"'
     ensure_path_line "$HOME/.zshrc" 'export GOROOT="$HOME/.local/go"'
     ensure_path_line "$HOME/.zshrc" 'export PATH="$GOROOT/bin:$PATH"'
   elif [ "$user_shell" = "bash" ]; then
-    ensure_path_line "$HOME/.bashrc" 'export PATH="$HOME/.local/bin:$PATH"'
+    ensure_path_line "$HOME/.bashrc" 'export PATH="$HOME/.conductor/bin:$HOME/.local/bin:$PATH"'
     ensure_path_line "$HOME/.bashrc" 'export GOROOT="$HOME/.local/go"'
     ensure_path_line "$HOME/.bashrc" 'export PATH="$GOROOT/bin:$PATH"'
   fi
@@ -102,14 +155,44 @@ build_bridge() {
   chmod +x "$INSTALL_BIN_DIR/conductor-bridge"
 }
 
+install_bridge_service() {
+  "$INSTALL_BIN_DIR/conductor-bridge" install
+  if [ -x "$SERVICE_BIN_DIR/conductor-bridge" ]; then
+    BRIDGE_BIN="$SERVICE_BIN_DIR/conductor-bridge"
+  fi
+}
+
+run_connect_if_requested() {
+  if [ "$CONNECT_AFTER_INSTALL" -ne 1 ]; then
+    return
+  fi
+
+  if [ -z "$CONNECT_DASHBOARD_URL" ]; then
+    echo "--dashboard-url is required when using --connect" >&2
+    exit 1
+  fi
+
+  set -- connect --dashboard-url "$CONNECT_DASHBOARD_URL"
+  if [ -n "$CONNECT_RELAY_URL" ]; then
+    set -- "$@" --relay-url "$CONNECT_RELAY_URL"
+  fi
+  if [ "$CONNECT_NO_BROWSER" -eq 1 ]; then
+    set -- "$@" --no-browser
+  fi
+
+  echo "Starting Conductor Bridge pairing..."
+  exec "$BRIDGE_BIN" "$@"
+}
+
+parse_args "$@"
 configure_shell_path
 install_go_if_missing
 build_bridge
+install_bridge_service
 
 echo "Installed conductor-bridge to $INSTALL_BIN_DIR/conductor-bridge"
-echo "Open a new terminal or run: source ~/.zshrc"
-echo "If you want to keep using this terminal, run: export PATH=\"$HOME/.local/bin:$PATH\""
-echo "Then run: conductor-bridge connect --dashboard-url <your dashboard URL>"
+echo "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
+run_connect_if_requested
 `;
 }
 
