@@ -268,23 +268,22 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 				env:  updateEnv,
 			}, nil
 		}
+		args := []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)}
 		if isNodeScriptBinary(conductorPath) {
-			return resolveBinaryLaunch(
-				conductorPath,
-				[]string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
-			), nil
+			args = []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace}
 		}
-		return resolveBinaryLaunch(
-			conductorPath,
-			[]string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
-		), nil
+		launch := resolveBinaryLaunch(conductorPath, args)
+		launch.env = updateEnv
+		return launch, nil
 	}
 
 	if coPath := findConductorBinary("co"); coPath != "" {
-		return resolveBinaryLaunch(
+		launch := resolveBinaryLaunch(
 			coPath,
 			[]string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
-		), nil
+		)
+		launch.env = inferCliUpdateEnv(coPath)
+		return launch, nil
 	}
 
 	return launchPlan{}, errors.New("could not find `conductor` or `co`; set CONDUCTOR_BRIDGE_BACKEND_COMMAND to start the local backend")

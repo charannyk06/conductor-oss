@@ -82,7 +82,7 @@ export function describeAutoUpdateSkip(status: AppUpdateStatus): string {
       case "source-checkout":
         return "This laptop is running from a source checkout, so there is no published package to auto-update.";
       case "missing-cli-metadata":
-        return "This laptop did not expose enough package metadata to auto-update itself.";
+        return "This install could not determine its update metadata, so automatic package updates are unavailable.";
       default:
         return "Automatic package updates are unavailable for this laptop.";
     }
