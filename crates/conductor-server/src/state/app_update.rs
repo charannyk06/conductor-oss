@@ -567,9 +567,7 @@ fn trim_log_tail(value: &str) -> String {
 }
 
 fn parse_version(value: &str) -> Option<ParsedVersion> {
-    let mut base = value
-        .trim()
-        .trim_start_matches(|value| value == 'v' || value == 'V');
+    let mut base = value.trim().trim_start_matches(&['v', 'V'][..]);
     let mut prerelease = "";
     if let Some((value_base, value_prerelease)) = base.split_once('-') {
         base = value_base;
