@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   CheckCircle2,
@@ -26,8 +26,11 @@ import {
   buildBridgeManualPairCommand,
 } from "@/lib/bridgeOnboarding";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import type { DashboardSession } from "@/lib/types";
+import type { AppUpdateStatus, DashboardSession } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@/lib/types";
+
+const PAIRING_APP_UPDATE_POLL_INTERVAL_MS = 1_500;
+const PAIRING_APP_UPDATE_POLL_TIMEOUT_MS = 300_000;
 
 type Device = {
   device_id: string;
@@ -67,6 +70,20 @@ type SessionsResponse = DashboardSession[] | {
   error?: string;
 };
 
+type PairingAutoUpdatePhase =
+  | "idle"
+  | "checking"
+  | "updating"
+  | "restarting"
+  | "completed"
+  | "skipped"
+  | "failed";
+
+type PairingAutoUpdateState = {
+  phase: PairingAutoUpdatePhase;
+  message: string | null;
+};
+
 function normalizeSessionsPayload(payload: SessionsResponse | null): DashboardSession[] {
   if (Array.isArray(payload)) {
     return payload;
@@ -82,6 +99,76 @@ function pickBridgeTestSession(sessions: DashboardSession[]): DashboardSession |
 
 function formatDeviceDescriptor(device: Device): string {
   return `${device.hostname} · ${device.os}/${device.arch}`;
+}
+
+function normalizeAppUpdatePayload(payload: unknown): AppUpdateStatus | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  return payload as AppUpdateStatus;
+}
+
+function describeAutoUpdateSkip(status: AppUpdateStatus): string {
+  if (!status.enabled) {
+    switch (status.reason) {
+      case "source-checkout":
+        return "This laptop is running from a source checkout, so there is no published package to auto-update.";
+      case "missing-cli-metadata":
+        return "This laptop did not expose enough package metadata to auto-update itself.";
+      default:
+        return "Automatic package updates are unavailable for this laptop.";
+    }
+  }
+
+  if (!status.canAutoUpdate) {
+    if (status.installMode === "npx") {
+      return "This laptop was launched via npx, so the next launch will pick up the latest package automatically.";
+    }
+    if (status.updateCommand) {
+      return `A newer Conductor release is available, but this install still needs a manual update: ${status.updateCommand}`;
+    }
+    return "A newer Conductor release is available, but this install cannot update itself automatically.";
+  }
+
+  return "This laptop is already running the latest Conductor release.";
+}
+
+async function requestBridgeAppUpdate(
+  deviceId: string,
+  init?: {
+    method?: "GET" | "POST";
+    force?: boolean;
+    body?: { action?: string };
+  },
+): Promise<AppUpdateStatus> {
+  const method = init?.method ?? "GET";
+  const pathname = `/api/bridge/devices/${encodeURIComponent(deviceId)}/app-update`;
+  const url = new URL(withBridgeQuery(pathname, deviceId), window.location.origin);
+  if (init?.force) {
+    url.searchParams.set("force", "1");
+  }
+
+  const response = await fetch(url.toString(), {
+    method,
+    headers: init?.body ? { "Content-Type": "application/json" } : undefined,
+    body: init?.body ? JSON.stringify(init.body) : undefined,
+    cache: "no-store",
+  });
+
+  const payload = await response.json().catch(() => null) as AppUpdateStatus | { error?: string } | null;
+  if (!response.ok) {
+    throw new Error(
+      payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+        ? payload.error
+        : `Failed to update Conductor on this laptop (${response.status})`,
+    );
+  }
+
+  const status = normalizeAppUpdatePayload(payload);
+  if (!status) {
+    throw new Error("Paired device returned an invalid update payload.");
+  }
+  return status;
 }
 
 function Panel({
@@ -179,6 +266,11 @@ export default function BridgeConnectClient({
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimedDevice, setClaimedDevice] = useState<{ deviceId: string; deviceName: string } | null>(null);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [pairingAutoUpdate, setPairingAutoUpdate] = useState<PairingAutoUpdateState>({
+    phase: "idle",
+    message: null,
+  });
+  const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
 
   const bootstrapConnectCommand = useMemo(
     () => buildBridgeBootstrapConnectCommand(installScriptUrl, dashboardUrl, relayUrl),
@@ -252,6 +344,80 @@ export default function BridgeConnectClient({
     }
   }, []);
 
+  const autoUpdateClaimedDevice = useCallback(async (device: Device): Promise<void> => {
+    setPairingAutoUpdate({
+      phase: "checking",
+      message: "Checking whether this laptop needs a Conductor package update.",
+    });
+
+    try {
+      let status = await requestBridgeAppUpdate(device.device_id, { force: true });
+      if (!status.updateAvailable || !status.enabled || !status.canAutoUpdate) {
+        setPairingAutoUpdate({
+          phase: !status.enabled || !status.canAutoUpdate ? "skipped" : "completed",
+          message: describeAutoUpdateSkip(status),
+        });
+        return;
+      }
+
+      status = await requestBridgeAppUpdate(device.device_id, { method: "POST" });
+      setPairingAutoUpdate({
+        phase: "updating",
+        message: status.jobMessage ?? `Installing Conductor ${status.latestVersion ?? "latest"} on this laptop.`,
+      });
+
+      const deadline = Date.now() + PAIRING_APP_UPDATE_POLL_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        if (status.jobStatus !== "running") {
+          break;
+        }
+
+        await new Promise((resolveDelay) => {
+          window.setTimeout(resolveDelay, PAIRING_APP_UPDATE_POLL_INTERVAL_MS);
+        });
+        status = await requestBridgeAppUpdate(device.device_id);
+        setPairingAutoUpdate({
+          phase: "updating",
+          message: status.jobMessage ?? `Installing Conductor ${status.latestVersion ?? "latest"} on this laptop.`,
+        });
+      }
+
+      if (status.jobStatus === "running") {
+        setPairingAutoUpdate({
+          phase: "updating",
+          message: "The package update is still running on this laptop. Leave this page open and Conductor will finish applying it in the background.",
+        });
+        return;
+      }
+
+      if (status.jobStatus === "failed") {
+        throw new Error(status.jobMessage ?? status.error ?? "Automatic package update failed on this laptop.");
+      }
+
+      if (status.restartRequired && status.canRestart) {
+        await requestBridgeAppUpdate(device.device_id, {
+          method: "POST",
+          body: { action: "restart" },
+        });
+        setPairingAutoUpdate({
+          phase: "restarting",
+          message: "Restart requested to finish updating Conductor on this laptop.",
+        });
+        return;
+      }
+
+      setPairingAutoUpdate({
+        phase: "completed",
+        message: status.jobMessage ?? `This laptop is now updated to Conductor ${status.latestVersion ?? "latest"}.`,
+      });
+    } catch (err) {
+      setPairingAutoUpdate({
+        phase: "failed",
+        message: err instanceof Error ? err.message : "Failed to auto-update this laptop after pairing.",
+      });
+    }
+  }, []);
+
   const completeClaim = useCallback(async (): Promise<void> => {
     if (!initialClaimToken) {
       return;
@@ -292,6 +458,20 @@ export default function BridgeConnectClient({
     }
     void completeClaim();
   }, [completeClaim, initialClaimToken]);
+
+  useEffect(() => {
+    if (claimStatus !== "paired" || !claimedDeviceRecord?.connected) {
+      return;
+    }
+
+    const claimedDeviceId = claimedDeviceRecord.device_id;
+    if (autoUpdatedDeviceIdsRef.current.has(claimedDeviceId)) {
+      return;
+    }
+
+    autoUpdatedDeviceIdsRef.current.add(claimedDeviceId);
+    void autoUpdateClaimedDevice(claimedDeviceRecord);
+  }, [autoUpdateClaimedDevice, claimStatus, claimedDeviceRecord]);
 
   useEffect(() => {
     if (!initialClaimToken && !(claimStatus === "paired" && connectedDevices.length === 0)) {
@@ -560,6 +740,19 @@ export default function BridgeConnectClient({
                           ? "This laptop is online and ready to use."
                           : "The bridge service is restarting for this laptop now. This page will refresh until it reports online."}
                       </div>
+                      {pairingAutoUpdate.message ? (
+                        <div className={cn(
+                          "mt-2 text-xs leading-5",
+                          pairingAutoUpdate.phase === "failed"
+                            ? "text-[var(--vk-red)]"
+                            : pairingAutoUpdate.phase === "skipped"
+                              ? "text-[var(--vk-text-muted)]"
+                              : "text-[var(--vk-text-faint)]",
+                        )}
+                        >
+                          {pairingAutoUpdate.message}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 ) : claimError ? (
