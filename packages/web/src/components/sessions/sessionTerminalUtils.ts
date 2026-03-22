@@ -20,6 +20,8 @@ export type TerminalModeState = {
   mouseProtocolEncoding: string;
 };
 
+export type TerminalScrollHostLike = Pick<HTMLElement, "clientHeight" | "scrollHeight" | "scrollTop">;
+
 const MOBILE_TERMINAL_INPUT_MAX_WIDTH_PX = 1024;
 /** Must match the Tailwind `lg:` breakpoint (1024px) used in SessionTerminal / SessionDetail. */
 const COMPACT_TERMINAL_CHROME_MAX_WIDTH_PX = 1024;
@@ -49,6 +51,17 @@ export function sanitizeRemoteTerminalSnapshot(snapshot: string): string {
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/\u0000/g, "");
+}
+
+export function isTerminalScrollHostAtBottom(
+  scrollHost: TerminalScrollHostLike | null | undefined,
+  tolerance = 1,
+): boolean {
+  if (!scrollHost) {
+    return true;
+  }
+
+  return scrollHost.scrollHeight - scrollHost.clientHeight - scrollHost.scrollTop <= tolerance;
 }
 
 export function getSessionTerminalViewportOptions(width: number): SessionTerminalViewportOptions {

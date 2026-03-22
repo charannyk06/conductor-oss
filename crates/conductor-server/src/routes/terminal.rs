@@ -72,35 +72,60 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
     if (window.__conductorTtydMobileTouchShimInstalled) return;
     window.__conductorTtydMobileTouchShimInstalled = true;
 
+    // Keep scroll containment active for ttyd terminals on every platform.
+    // The touch-specific gesture translation below still only activates on
+    // coarse-pointer devices.
+    document.documentElement.classList.add('conductor-ttyd-touch-shim-enabled');
+
     const coarsePointer = typeof window.matchMedia === 'function'
         && window.matchMedia('(pointer: coarse)').matches;
     const maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints || 0;
     if (!coarsePointer && maxTouchPoints <= 0) return;
 
-    document.documentElement.classList.add('conductor-ttyd-touch-shim-enabled');
-
     const bindTouchScroll = () => {
-        const terminalRoot = document.querySelector('.xterm');
-        const scrollHost = document.querySelector('.xterm-viewport')
-            || document.querySelector('.xterm-scrollable-element');
-        if (!terminalRoot || !scrollHost || terminalRoot.dataset.conductorTouchShimBound === 'true') {
-            return false;
+    const terminalRoot = document.querySelector('.xterm');
+    const scrollHost = document.querySelector('.xterm-viewport')
+        || document.querySelector('.xterm-scrollable-element');
+    if (!terminalRoot || !scrollHost || terminalRoot.dataset.conductorTouchShimBound === 'true') {
+        return false;
+    }
+
+    terminalRoot.dataset.conductorTouchShimBound = 'true';
+
+    let followBottom = true;
+    let lastStableScrollTop = scrollHost.scrollTop;
+    let active = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    const reset = () => {
+      active = false;
+    };
+
+    const isScrollHostAtBottom = () =>
+        scrollHost.scrollHeight - scrollHost.clientHeight - scrollHost.scrollTop <= 1;
+
+    const syncFollowBottom = () => {
+        followBottom = isScrollHostAtBottom();
+        lastStableScrollTop = scrollHost.scrollTop;
+    };
+
+    const stickToBottomIfNeeded = () => {
+        if (followBottom) {
+            scrollHost.scrollTop = scrollHost.scrollHeight;
+            lastStableScrollTop = scrollHost.scrollTop;
+            return;
         }
 
-        terminalRoot.dataset.conductorTouchShimBound = 'true';
+        if (scrollHost.scrollTop !== lastStableScrollTop) {
+            scrollHost.scrollTop = lastStableScrollTop;
+        }
+    };
 
-        let active = false;
-        let lastX = 0;
-        let lastY = 0;
-
-        const reset = () => {
-            active = false;
-        };
-
-        const resolveXtermCore = () => window.term?._core || window.term?.core || null;
-        const resolveCoreMouseService = () => {
-            const core = resolveXtermCore();
-            return core?.coreMouseService || core?._coreMouseService || null;
+    const resolveXtermCore = () => window.term?._core || window.term?.core || null;
+    const resolveCoreMouseService = () => {
+        const core = resolveXtermCore();
+        return core?.coreMouseService || core?._coreMouseService || null;
         };
 
         const resolveMouseTrackingMode = () => {
@@ -266,12 +291,15 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
             syncTouchActionMode();
             reset();
         }, { passive: true });
+        scrollHost.addEventListener('scroll', syncFollowBottom, { passive: true });
+        syncFollowBottom();
         syncTouchActionMode();
         return true;
     };
 
     const observer = new MutationObserver(() => {
         bindTouchScroll();
+        stickToBottomIfNeeded();
         syncTouchActionMode();
     });
     bindTouchScroll();
@@ -1360,6 +1388,8 @@ mod tests {
         ));
         assert!(injected.contains("const publicMode = window.term?.modes?.mouseTrackingMode;"));
         assert!(injected.contains("coreMouseService.areMouseEventsActive"));
+        assert!(injected.contains("const syncFollowBottom = () => {"));
+        assert!(injected.contains("const stickToBottomIfNeeded = () => {"));
         assert!(injected.contains("const syncTouchActionMode = (forceActive) => {"));
         assert!(injected.contains("mouseService.getMouseReportCoords"));
         assert!(injected.contains("viewport.getLinesScrolled(wheelLikeEvent)"));
