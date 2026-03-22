@@ -245,7 +245,7 @@ fn infer_cli_package_manifest(candidate_root: &Path) -> CliPackageManifest {
                     .as_deref()
                     .is_some_and(|version| !version.trim().is_empty())
         })
-        .unwrap_or_else(|| CliPackageManifest {
+        .unwrap_or(CliPackageManifest {
             name: None,
             version: None,
         })
