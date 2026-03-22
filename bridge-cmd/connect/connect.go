@@ -127,11 +127,9 @@ func Run(ctx context.Context, opts Options) error {
 				}
 			}
 
-			openTarget := dashboardURL
-			if strings.TrimSpace(resolvedDevice.DeviceID) != "" {
-				if withDevice, err := appendBridgeQuery(dashboardURL, resolvedDevice.DeviceID); err == nil {
-					openTarget = withDevice
-				}
+			openTarget, err := buildReconnectURL(dashboardURL, resolvedDevice.DeviceID)
+			if err != nil {
+				return err
 			}
 
 			fmt.Fprintln(stdout, "Device already paired. Reconnecting bridge daemon.")
@@ -447,6 +445,20 @@ func normalizeHTTPURL(raw string) (string, error) {
 }
 
 func buildClaimURL(dashboardURL string, claimToken string) (string, error) {
+	query := url.Values{}
+	query.Set("claim", strings.TrimSpace(claimToken))
+	return buildBridgeConnectURL(dashboardURL, query)
+}
+
+func buildReconnectURL(dashboardURL string, deviceID string) (string, error) {
+	query := url.Values{}
+	if strings.TrimSpace(deviceID) != "" {
+		query.Set("device", strings.TrimSpace(deviceID))
+	}
+	return buildBridgeConnectURL(dashboardURL, query)
+}
+
+func buildBridgeConnectURL(dashboardURL string, query url.Values) (string, error) {
 	base, err := url.Parse(strings.TrimSpace(dashboardURL))
 	if err != nil {
 		return "", fmt.Errorf("parse dashboard url: %w", err)
@@ -454,18 +466,9 @@ func buildClaimURL(dashboardURL string, claimToken string) (string, error) {
 	base.Path = "/bridge/connect"
 	base.RawQuery = ""
 	base.Fragment = ""
-	base.RawQuery = url.Values{"claim": []string{strings.TrimSpace(claimToken)}}.Encode()
-	return base.String(), nil
-}
-
-func appendBridgeQuery(dashboardURL string, deviceID string) (string, error) {
-	base, err := url.Parse(strings.TrimSpace(dashboardURL))
-	if err != nil {
-		return "", fmt.Errorf("parse dashboard url: %w", err)
+	if len(query) > 0 {
+		base.RawQuery = query.Encode()
 	}
-	query := base.Query()
-	query.Set("bridge", strings.TrimSpace(deviceID))
-	base.RawQuery = query.Encode()
 	return base.String(), nil
 }
 

@@ -171,11 +171,13 @@ function CommandBlock({
 
 export default function BridgeConnectClient({
   initialClaimToken = null,
+  initialSelectedDeviceId = null,
   dashboardUrl,
   relayUrl,
   installScriptUrl,
 }: {
   initialClaimToken?: string | null;
+  initialSelectedDeviceId?: string | null;
   dashboardUrl: string;
   relayUrl: string | null;
   installScriptUrl: string;
@@ -199,7 +201,7 @@ export default function BridgeConnectClient({
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimedDevice, setClaimedDevice] = useState<{ deviceId: string; deviceName: string } | null>(null);
   const [recentPairingDeviceId, setRecentPairingDeviceId] = useState<string | null>(null);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(initialSelectedDeviceId);
   const [pairingAutoUpdate, setPairingAutoUpdate] = useState<BridgeAutoUpdateState>({
     deviceId: null,
     phase: "idle",
@@ -270,8 +272,14 @@ export default function BridgeConnectClient({
 
   useEffect(() => {
     setSelectedDeviceId((current) => {
-      if (current && devices.some((device) => device.device_id === current)) {
+      if (current && (devices.length === 0 || devices.some((device) => device.device_id === current))) {
         return current;
+      }
+      if (
+        initialSelectedDeviceId
+        && (devices.length === 0 || devices.some((device) => device.device_id === initialSelectedDeviceId))
+      ) {
+        return initialSelectedDeviceId;
       }
       return claimedDeviceRecord?.device_id
         ?? recentPairingDeviceRecord?.device_id
@@ -279,7 +287,7 @@ export default function BridgeConnectClient({
         ?? devices[0]?.device_id
         ?? null;
     });
-  }, [claimedDeviceRecord, connectedDevices, devices, recentPairingDeviceRecord]);
+  }, [claimedDeviceRecord, connectedDevices, devices, initialSelectedDeviceId, recentPairingDeviceRecord]);
 
   useEffect(() => {
     const syncRecentPairing = () => {
@@ -392,11 +400,14 @@ export default function BridgeConnectClient({
   useEffect(() => {
     const waitingForRecentPairing = Boolean(recentPairingDeviceId)
       && !recentPairingDeviceRecord?.connected;
+    const waitingForSelectedDevice = Boolean(selectedDeviceId)
+      && !selectedDevice?.connected;
 
     if (
       !initialClaimToken
       && !(claimStatus === "paired" && connectedDevices.length === 0)
       && !waitingForRecentPairing
+      && !waitingForSelectedDevice
     ) {
       return;
     }
@@ -415,6 +426,8 @@ export default function BridgeConnectClient({
     recentPairingDeviceId,
     recentPairingDeviceRecord?.connected,
     refreshDevices,
+    selectedDevice?.connected,
+    selectedDeviceId,
   ]);
 
   useEffect(() => {

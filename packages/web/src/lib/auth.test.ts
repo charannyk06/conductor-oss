@@ -124,6 +124,13 @@ test("resolvePostSignInRedirectTarget preserves bridge claim redirects", () => {
   );
 });
 
+test("resolvePostSignInRedirectTarget preserves bridge device redirects", () => {
+  assert.equal(
+    resolvePostSignInRedirectTarget("/bridge/connect?device=device_123"),
+    "/bridge/connect?device=device_123",
+  );
+});
+
 test("resolvePostSignInRedirectTarget avoids sending users back into sign-in", () => {
   assert.equal(resolvePostSignInRedirectTarget("/sign-in"), "/");
   assert.equal(resolvePostSignInRedirectTarget("/sign-in/sso-callback"), "/");
@@ -165,6 +172,7 @@ test("resolvePostSignInRedirectTarget accepts same-origin absolute callback targ
 
 test("buildSignInPath includes redirect_url only when needed", () => {
   assert.equal(buildSignInPath("/bridge/connect?claim=claim_123"), "/sign-in?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123");
+  assert.equal(buildSignInPath("/bridge/connect?device=device_123"), "/sign-in?redirect_url=%2Fbridge%2Fconnect%3Fdevice%3Ddevice_123");
   assert.equal(buildSignInPath("/sign-in"), "/sign-in");
   assert.equal(buildSignInPath(undefined), "/sign-in");
   assert.equal(buildSignInPath(undefined, "/bridge/connect"), "/sign-in?redirect_url=%2Fbridge%2Fconnect");
