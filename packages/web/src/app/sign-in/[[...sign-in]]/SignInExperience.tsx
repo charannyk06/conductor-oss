@@ -57,7 +57,7 @@ export function SignInExperience({ redirectTarget }: SignInExperienceProps) {
         routing="path"
         path="/sign-in"
         appearance={SIGN_IN_APPEARANCE}
-        oauthFlow="redirect"
+        oauthFlow="auto"
         forceRedirectUrl={redirectTarget}
         fallbackRedirectUrl={redirectTarget}
         signUpForceRedirectUrl={redirectTarget}

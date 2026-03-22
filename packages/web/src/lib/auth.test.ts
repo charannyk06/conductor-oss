@@ -145,6 +145,18 @@ test("resolvePostSignInRedirectTarget falls back to bridge pairing for paired-de
   );
 });
 
+test("resolvePostSignInRedirectTarget preserves claim-aware defaults for device-first pairing", () => {
+  const defaultRedirectTarget = "/bridge/connect?claim=claim_123";
+  assert.equal(
+    resolvePostSignInRedirectTarget(undefined, "https://preview.conductross.com", defaultRedirectTarget),
+    "/bridge/connect?claim=claim_123",
+  );
+  assert.equal(
+    resolvePostSignInRedirectTarget("/sign-in/sso-callback", "https://preview.conductross.com", defaultRedirectTarget),
+    "/bridge/connect?claim=claim_123",
+  );
+});
+
 test("resolvePostSignInRedirectTarget accepts same-origin absolute callback targets", () => {
   assert.equal(
     resolvePostSignInRedirectTarget(

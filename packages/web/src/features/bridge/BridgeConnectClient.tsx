@@ -161,6 +161,13 @@ export default function BridgeConnectClient({
     void completeClaim();
   }, [completeClaim, initialClaimToken]);
 
+  useEffect(() => {
+    if (initialClaimToken || pairingCode || creatingCode) {
+      return;
+    }
+    void handleGenerateCode();
+  }, [creatingCode, initialClaimToken, pairingCode]);
+
   async function handleGenerateCode(): Promise<void> {
     setCreatingCode(true);
     setCopyState("idle");
@@ -299,7 +306,7 @@ export default function BridgeConnectClient({
                   }}
                 >
                   {creatingCode ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                  Add a laptop
+                  {pairingCode ? "Generate a new code" : "Add a laptop"}
                 </Button>
               </div>
             </div>
