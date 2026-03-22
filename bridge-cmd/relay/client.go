@@ -184,15 +184,16 @@ func findTtyd() (string, error) {
 func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	var cmd *exec.Cmd
 	var ttydConn *websocket.Conn
-	var ttydDone <-chan struct{}
 
 	stopTtyd := func() {
 		if ttydConn != nil {
 			_ = ttydConn.Close()
+			ttydConn = nil
 		}
 		if cmd != nil && cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
+		cmd = nil
 	}
 
 	// 1. ttyd is optional for the initial bridge connection. If it is missing,
@@ -200,72 +201,67 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 	if ttydPath, err := findTtyd(); err == nil {
 		port, err := findFreePort()
 		if err != nil {
-			return false, fmt.Errorf("allocate ttyd port: %w", err)
-		}
+			fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", err)
+		} else {
+			cmd = exec.Command(ttydPath, []string{
+				"-p", fmt.Sprintf("%d", port),
+				"-i", "127.0.0.1",
+				"-W", // accept any origin (relay->bridge->browser)
+				"bash",
+			}...)
+			cmd.Env = os.Environ()
+			ttydOut, pipeErr := cmd.StdoutPipe()
+			if pipeErr != nil {
+				fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", pipeErr)
+				stopTtyd()
+			} else if ttydErr, pipeErr := cmd.StderrPipe(); pipeErr != nil {
+				fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", pipeErr)
+				stopTtyd()
+			} else if startErr := cmd.Start(); startErr != nil {
+				fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", startErr)
+				stopTtyd()
+			} else {
+				go func(stdoutPipe io.ReadCloser) {
+					buf := make([]byte, 1024)
+					for {
+						n, err := stdoutPipe.Read(buf)
+						if n > 0 {
+							fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
+						}
+						if err != nil {
+							break
+						}
+					}
+				}(ttydOut)
+				go func(stderrPipe io.ReadCloser) {
+					buf := make([]byte, 1024)
+					for {
+						n, err := stderrPipe.Read(buf)
+						if n > 0 {
+							fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
+						}
+						if err != nil {
+							break
+						}
+					}
+				}(ttydErr)
 
-		cmd = exec.Command(ttydPath, []string{
-			"-p", fmt.Sprintf("%d", port),
-			"-i", "127.0.0.1",
-			"-W", // accept any origin (relay->bridge->browser)
-			"--wdir", os.TempDir(),
-			"bash",
-		}...)
-		cmd.Env = os.Environ()
-		ttydOut, err := cmd.StdoutPipe()
-		if err != nil {
-			return false, fmt.Errorf("ttyd stdout pipe: %w", err)
-		}
-		ttydErr, err := cmd.StderrPipe()
-		if err != nil {
-			return false, fmt.Errorf("ttyd stderr pipe: %w", err)
-		}
-		if err := cmd.Start(); err != nil {
-			return false, fmt.Errorf("start ttyd: %w", err)
-		}
-
-		go func() {
-			buf := make([]byte, 1024)
-			for {
-				n, err := ttydOut.Read(buf)
-				if n > 0 {
-					fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
-				}
-				if err != nil {
-					break
+				time.Sleep(500 * time.Millisecond)
+				if cmd == nil || cmd.Process == nil {
+					fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: ttyd process not started\n")
+					stopTtyd()
+				} else {
+					ttydURL := fmt.Sprintf("ws://127.0.0.1:%d/ws", port)
+					ttydWS, _, dialErr := websocket.DefaultDialer.DialContext(ctx, ttydURL, nil)
+					if dialErr != nil {
+						fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", dialErr)
+						stopTtyd()
+					} else {
+						ttydConn = ttydWS
+					}
 				}
 			}
-		}()
-		go func() {
-			buf := make([]byte, 1024)
-			for {
-				n, err := ttydErr.Read(buf)
-				if n > 0 {
-					fmt.Fprintf(os.Stderr, "[ttyd] %s", string(buf[:n]))
-				}
-				if err != nil {
-					break
-				}
-			}
-		}()
-
-		time.Sleep(500 * time.Millisecond)
-		if cmd.Process == nil {
-			return false, fmt.Errorf("ttyd process not started")
 		}
-
-		ttydURL := fmt.Sprintf("ws://127.0.0.1:%d", port)
-		ttydConn, _, err = websocket.DefaultDialer.DialContext(ctx, ttydURL, nil)
-		if err != nil {
-			stopTtyd()
-			return false, fmt.Errorf("connect to ttyd at %s: %w", ttydURL, err)
-		}
-
-		done := make(chan struct{})
-		ttydDone = done
-		go func() {
-			_ = cmd.Wait()
-			close(done)
-		}()
 	} else {
 		fmt.Fprintf(opts.stderr, "ttyd unavailable; bridge will stay online without the legacy direct terminal mirror: %v\n", err)
 	}
@@ -403,7 +399,8 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 			for {
 				msgType, data, err := ttydConn.ReadMessage()
 				if err != nil {
-					errCh <- fmt.Errorf("ttyd read: %w", err)
+					fmt.Fprintf(opts.stderr, "ttyd mirror disconnected; continuing without the legacy direct terminal mirror: %v\n", err)
+					stopTtyd()
 					return
 				}
 				if msgType == websocket.TextMessage {
@@ -434,9 +431,6 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 		case err := <-errCh:
 			stopTtyd()
 			return false, err
-		case <-ttydDone:
-			stopTtyd()
-			return false, fmt.Errorf("ttyd process exited unexpectedly")
 		case <-heartbeat.C:
 			if err := send(bridgeEnvelope{
 				Type:      "bridge_status",

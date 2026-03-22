@@ -36,6 +36,7 @@ GO_VERSION="${GO_VERSION}"
 SOURCE_ARCHIVE_URL="${sourceArchiveUrl}"
 INSTALL_BIN_DIR="\${CONDUCTOR_INSTALL_BIN:-$HOME/.local/bin}"
 SERVICE_BIN_DIR="$HOME/.conductor/bin"
+CONDUCTOR_NPM_PREFIX="$HOME/.conductor/npm"
 LOCAL_GO_ROOT="$HOME/.local/go"
 BRIDGE_BIN="$INSTALL_BIN_DIR/conductor-bridge"
 CONDUCTOR_WRAPPER_DIR="$HOME/.conductor/bin"
@@ -159,15 +160,11 @@ build_bridge() {
 resolve_conductor_command_path() {
   for candidate in \
     "$CONDUCTOR_WRAPPER_DIR/conductor" \
-    "$CONDUCTOR_WRAPPER_DIR/co" \
+    "$CONDUCTOR_NPM_PREFIX/bin/conductor" \
     "$HOME/.local/bin/conductor" \
-    "$HOME/.local/bin/co" \
     "/opt/homebrew/bin/conductor" \
-    "/opt/homebrew/bin/co" \
     "/usr/local/bin/conductor" \
-    "/usr/local/bin/co" \
-    "/usr/bin/conductor" \
-    "/usr/bin/co"
+    "/usr/bin/conductor"
   do
     if [ -x "$candidate" ]; then
       printf '%s\n' "$candidate"
@@ -177,10 +174,6 @@ resolve_conductor_command_path() {
 
   if command -v conductor >/dev/null 2>&1; then
     command -v conductor
-    return 0
-  fi
-  if command -v co >/dev/null 2>&1; then
-    command -v co
     return 0
   fi
 
@@ -199,25 +192,21 @@ ensure_conductor_cli() {
   fi
 
   echo "Installing conductor-oss CLI..."
-  if ! npm install -g conductor-oss; then
+  mkdir -p "$CONDUCTOR_NPM_PREFIX"
+  if ! npm install -g --prefix "$CONDUCTOR_NPM_PREFIX" conductor-oss; then
     CONDUCTOR_CMD="$(resolve_conductor_command_path || true)"
     if [ -n "$CONDUCTOR_CMD" ]; then
       echo "Using existing Conductor CLI at $CONDUCTOR_CMD"
     else
-      echo "Retrying conductor-oss install with --force to replace an existing co shim..."
-      npm install -g conductor-oss --force
+      echo "Retrying conductor-oss install inside $CONDUCTOR_NPM_PREFIX with --force..."
+      npm install -g --prefix "$CONDUCTOR_NPM_PREFIX" conductor-oss --force
     fi
   fi
 
   CONDUCTOR_CMD="$(resolve_conductor_command_path || true)"
   if [ -z "$CONDUCTOR_CMD" ]; then
-    NPM_PREFIX="$(npm config get prefix 2>/dev/null || true)"
-    if [ -n "$NPM_PREFIX" ]; then
-      if [ -x "$NPM_PREFIX/bin/conductor" ]; then
-        CONDUCTOR_CMD="$NPM_PREFIX/bin/conductor"
-      elif [ -x "$NPM_PREFIX/bin/co" ]; then
-        CONDUCTOR_CMD="$NPM_PREFIX/bin/co"
-      fi
+    if [ -x "$CONDUCTOR_NPM_PREFIX/bin/conductor" ]; then
+      CONDUCTOR_CMD="$CONDUCTOR_NPM_PREFIX/bin/conductor"
     fi
   fi
 
