@@ -5,6 +5,7 @@ import {
   detectCompactTerminalChrome,
   detectMobileTerminalInputRail,
   getSessionTerminalViewportOptions,
+  resolveSessionTerminalViewportOptions,
   sanitizeRemoteTerminalSnapshot,
   TERMINAL_FONT_FAMILY,
 } from "./sessionTerminalUtils";
@@ -58,6 +59,19 @@ test("getSessionTerminalViewportOptions keeps compact fonts for phones and large
     lineHeight: 1.2,
   });
   assert.deepEqual(getSessionTerminalViewportOptions(1280), {
+    fontFamily: TERMINAL_FONT_FAMILY,
+    fontSize: 14,
+    lineHeight: 1.2,
+  });
+});
+
+test("resolveSessionTerminalViewportOptions falls back to a stable desktop width when host sizing is unavailable", () => {
+  assert.deepEqual(resolveSessionTerminalViewportOptions(undefined), {
+    fontFamily: TERMINAL_FONT_FAMILY,
+    fontSize: 14,
+    lineHeight: 1.2,
+  });
+  assert.deepEqual(resolveSessionTerminalViewportOptions(0), {
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: 14,
     lineHeight: 1.2,

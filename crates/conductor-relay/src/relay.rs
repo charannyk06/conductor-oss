@@ -10,7 +10,7 @@ use conductor_types::{BridgeStatus, BridgeToBrowserMessage, BrowserToBridgeMessa
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -34,6 +34,7 @@ struct RelayInner {
     devices: HashMap<String, DeviceRecord>,
     terminal_sessions: HashMap<String, TerminalSessionRecord>,
     pending_api_requests: HashMap<String, PendingApiRequest>,
+    pending_preview_requests: HashMap<String, PendingPreviewRequest>,
     refresh_tokens: HashMap<String, String>,
     rate_limits: HashMap<String, RateBucket>,
     next_connection_id: u64,
@@ -110,9 +111,22 @@ struct PendingApiRequest {
 }
 
 #[derive(Debug)]
+struct PendingPreviewRequest {
+    device_id: String,
+    tx: oneshot::Sender<ProxiedPreviewResponse>,
+}
+
+#[derive(Debug)]
 struct ProxiedApiResponse {
     status: u16,
     body: Value,
+}
+
+#[derive(Debug)]
+struct ProxiedPreviewResponse {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    body_base64: Option<String>,
 }
 
 #[derive(Debug)]
@@ -274,6 +288,25 @@ struct DeviceProxyRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct DevicePreviewRequest {
+    session_id: String,
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    body_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DevicePreviewResponse {
+    status: u16,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    headers: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct DeviceTerminalCreateRequest {
     session_id: String,
 }
@@ -340,6 +373,10 @@ fn build_router(state: RelayState) -> Router {
         .route("/api/devices/list", get(list_devices))
         .route("/api/devices/auth", get(resolve_device_from_token))
         .route("/api/devices/{device_id}/proxy", post(proxy_device_api))
+        .route(
+            "/api/devices/{device_id}/preview",
+            post(proxy_device_preview),
+        )
         .route(
             "/api/devices/{device_id}/terminals",
             post(create_terminal_session),
@@ -552,6 +589,37 @@ async fn proxy_device_api(
         .await
     {
         Ok(response) => response_from_proxied_api(response.status, response.body),
+        Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
+    }
+}
+
+async fn proxy_device_preview(
+    State(state): State<RelayState>,
+    Path(device_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<DevicePreviewRequest>,
+) -> Response {
+    let Some(user_id) = resolve_proxy_user_id(&headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Missing proxied dashboard user." })),
+        )
+            .into_response();
+    };
+
+    match state
+        .forward_device_preview_request(&user_id, &device_id, body)
+        .await
+    {
+        Ok(response) => (
+            StatusCode::OK,
+            Json(DevicePreviewResponse {
+                status: response.status,
+                headers: response.headers,
+                body_base64: response.body_base64,
+            }),
+        )
+            .into_response(),
         Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
     }
 }
@@ -1286,6 +1354,7 @@ impl RelayState {
     async fn unregister_connection(&self, key: &str, peer_kind: PeerKind, connection_id: u64) {
         let mut browsers_to_notify = Vec::new();
         let mut failed_api_requests = Vec::new();
+        let mut failed_preview_requests = Vec::new();
         let mut remove_pending_for_device = false;
         let mut remove_channel = false;
         let mut status_to_broadcast = None;
@@ -1350,6 +1419,18 @@ impl RelayState {
                         failed_api_requests.push(pending.tx);
                     }
                 }
+
+                let preview_ids = inner
+                    .pending_preview_requests
+                    .iter()
+                    .filter(|(_, pending)| pending.device_id == key)
+                    .map(|(request_id, _)| request_id.clone())
+                    .collect::<Vec<_>>();
+                for request_id in preview_ids {
+                    if let Some(pending) = inner.pending_preview_requests.remove(&request_id) {
+                        failed_preview_requests.push(pending.tx);
+                    }
+                }
             }
         }
 
@@ -1357,6 +1438,14 @@ impl RelayState {
             let _ = pending.send(ProxiedApiResponse {
                 status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
                 body: json!({ "error": "Device disconnected." }),
+            });
+        }
+
+        for pending in failed_preview_requests {
+            let _ = pending.send(ProxiedPreviewResponse {
+                status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                headers: BTreeMap::new(),
+                body_base64: None,
             });
         }
 
@@ -1397,6 +1486,18 @@ impl RelayState {
                         return Ok(());
                     }
                 }
+                BrowserToBridgeMessage::PreviewRequest { id, method, .. } => {
+                    if !is_safe_method(method) {
+                        send_bridge_preview_error(
+                            browser_tx,
+                            id,
+                            StatusCode::FORBIDDEN,
+                            "Read-only share links cannot send mutating preview requests.",
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
                 BrowserToBridgeMessage::TerminalResize { .. }
                 | BrowserToBridgeMessage::TerminalInput { .. }
                 | BrowserToBridgeMessage::TerminalProxyStart { .. } => {
@@ -1407,14 +1508,26 @@ impl RelayState {
 
         let now = Instant::now();
         if !self.consume_rate_limit(user_id, now).await {
-            if let BrowserToBridgeMessage::ApiRequest { id, .. } = &message {
-                send_bridge_error(
-                    browser_tx,
-                    id,
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "Rate limit exceeded.",
-                )
-                .await;
+            match &message {
+                BrowserToBridgeMessage::ApiRequest { id, .. } => {
+                    send_bridge_error(
+                        browser_tx,
+                        id,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "Rate limit exceeded.",
+                    )
+                    .await;
+                }
+                BrowserToBridgeMessage::PreviewRequest { id, .. } => {
+                    send_bridge_preview_error(
+                        browser_tx,
+                        id,
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "Rate limit exceeded.",
+                    )
+                    .await;
+                }
+                _ => {}
             }
             return Err(anyhow::anyhow!("rate limit exceeded"));
         }
@@ -1428,14 +1541,26 @@ impl RelayState {
         };
 
         let Some(bridge_tx) = bridge_tx else {
-            if let BrowserToBridgeMessage::ApiRequest { id, .. } = &message {
-                send_bridge_error(
-                    browser_tx,
-                    id,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Bridge is offline.",
-                )
-                .await;
+            match &message {
+                BrowserToBridgeMessage::ApiRequest { id, .. } => {
+                    send_bridge_error(
+                        browser_tx,
+                        id,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Bridge is offline.",
+                    )
+                    .await;
+                }
+                BrowserToBridgeMessage::PreviewRequest { id, .. } => {
+                    send_bridge_preview_error(
+                        browser_tx,
+                        id,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Bridge is offline.",
+                    )
+                    .await;
+                }
+                _ => {}
             }
             return Ok(());
         };
@@ -1460,6 +1585,28 @@ impl RelayState {
                 let _ = pending.tx.send(ProxiedApiResponse {
                     status: *status,
                     body: body.clone(),
+                });
+                return;
+            }
+        }
+
+        if let BridgeToBrowserMessage::PreviewResponse {
+            id,
+            status,
+            headers,
+            body_base64,
+        } = &message
+        {
+            let pending = {
+                let mut inner = self.inner.lock().await;
+                inner.pending_preview_requests.remove(id)
+            };
+
+            if let Some(pending) = pending {
+                let _ = pending.tx.send(ProxiedPreviewResponse {
+                    status: *status,
+                    headers: headers.clone(),
+                    body_base64: body_base64.clone(),
                 });
                 return;
             }
@@ -1977,6 +2124,109 @@ impl RelayState {
             }
         }
     }
+
+    async fn forward_device_preview_request(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        request: DevicePreviewRequest,
+    ) -> std::result::Result<ProxiedPreviewResponse, (StatusCode, String)> {
+        let DevicePreviewRequest {
+            session_id,
+            method,
+            url,
+            headers,
+            body_base64,
+        } = request;
+
+        let normalized_method = method.trim().to_ascii_uppercase();
+        let normalized_url = url.trim();
+        let normalized_session_id = session_id.trim();
+        if normalized_session_id.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Missing preview session id.".to_string(),
+            ));
+        }
+        if normalized_method.is_empty() || normalized_url.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Missing preview method or url.".to_string(),
+            ));
+        }
+
+        let request_id = Uuid::new_v4().to_string();
+        let message = serde_json::to_string(&BrowserToBridgeMessage::PreviewRequest {
+            id: request_id.clone(),
+            session_id: normalized_session_id.to_string(),
+            method: normalized_method,
+            url: normalized_url.to_string(),
+            headers,
+            body_base64,
+        })
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+
+        let (bridge_tx, receiver) = {
+            let mut inner = self.inner.lock().await;
+            match inner.devices.get(device_id) {
+                Some(device) if device.owner_user_id == user_id => {}
+                Some(_) => {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "You do not own this device.".to_string(),
+                    ))
+                }
+                None => return Err((StatusCode::NOT_FOUND, "Device not found.".to_string())),
+            }
+
+            let Some(bridge_tx) = inner
+                .channels
+                .get(device_id)
+                .and_then(|channel| channel.bridge.as_ref().map(|record| record.tx.clone()))
+            else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Device is offline.".to_string(),
+                ));
+            };
+
+            let (tx, rx) = oneshot::channel();
+            inner.pending_preview_requests.insert(
+                request_id.clone(),
+                PendingPreviewRequest {
+                    device_id: device_id.to_string(),
+                    tx,
+                },
+            );
+
+            (bridge_tx, rx)
+        };
+
+        if bridge_tx.send(Message::Text(message.into())).is_err() {
+            let mut inner = self.inner.lock().await;
+            inner.pending_preview_requests.remove(&request_id);
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Device connection is unavailable.".to_string(),
+            ));
+        }
+
+        match tokio::time::timeout(DEVICE_PROXY_TIMEOUT, receiver).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Device connection closed.".to_string(),
+            )),
+            Err(_) => {
+                let mut inner = self.inner.lock().await;
+                inner.pending_preview_requests.remove(&request_id);
+                Err((
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "Device preview request timed out.".to_string(),
+                ))
+            }
+        }
+    }
 }
 
 impl RelayInner {
@@ -2091,6 +2341,27 @@ async fn send_bridge_error(
         id: id.to_string(),
         status: status.as_u16(),
         body: json!({ "error": message }),
+    };
+
+    if let Ok(text) = serde_json::to_string(&response) {
+        let _ = tx.send(Message::Text(text.into()));
+    }
+}
+
+async fn send_bridge_preview_error(
+    tx: &mpsc::UnboundedSender<Message>,
+    id: &str,
+    status: StatusCode,
+    message: &str,
+) {
+    let response = BridgeToBrowserMessage::PreviewResponse {
+        id: id.to_string(),
+        status: status.as_u16(),
+        headers: BTreeMap::from([(
+            "content-type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        )]),
+        body_base64: Some(base64::engine::general_purpose::STANDARD.encode(message.as_bytes())),
     };
 
     if let Ok(text) = serde_json::to_string(&response) {

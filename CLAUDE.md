@@ -17,7 +17,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 - **CLI:** Node.js launcher + Rust native binary
 - **Runtime:** ttyd-first PTY-based session management
 - **Persistence:** SQLite in `.conductor/conductor.db` + Markdown files
-- **Bridge/Remote:** optional relay, bridge, and private remote-access flows in the same repo
+- **Bridge/Access:** optional relay, paired-device bridge, and dashboard access-control flows in the same repo
 
 ### Rust Crates
 
@@ -160,14 +160,14 @@ Tasks flow: `Inbox` -> AI enhance (auto-tag) -> `Ready to Dispatch` -> `Dispatch
 
 The dashboard uses Server-Sent Events for real-time updates. In standalone/production mode, SSE uses direct fetch-and-pipe handlers (not Next.js blob buffering) to avoid buffering issues.
 
-### Access Control and Remote Access
+### Access Control
 
-The dashboard can stay local-only, use a private Tailscale link, validate Cloudflare Access JWT headers, or enable optional Clerk-hosted sign-in flows. Public share-link remote control was removed.
+The dashboard can stay local-only, validate Cloudflare Access JWT headers, or enable optional Clerk-hosted sign-in flows. Public share-link remote control was removed.
 
 ## What NOT to Do
 
 - Do not change `SessionStatus` from enum back to strings
-- Do not turn bridge or remote-access features into hosted state or credential proxying
+- Do not turn bridge or access-control features into hosted state or credential proxying
 - Do not use `pnpm` (project uses `bun`)
 - Do not add default exports in library TypeScript code
 - Do not bypass the write guard for board file operations

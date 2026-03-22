@@ -157,15 +157,6 @@ async fn smoke_all_route_modules() {
                 .unwrap(),
             StatusCode::OK,
         ),
-        (
-            Request::builder()
-                .method("POST")
-                .uri("/api/auth/session")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"token":"disabled"}"#))
-                .unwrap(),
-            StatusCode::NOT_FOUND,
-        ),
     ];
 
     for (request, expected) in requests {

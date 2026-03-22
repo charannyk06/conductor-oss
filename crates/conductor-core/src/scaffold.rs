@@ -74,7 +74,6 @@ pub struct ScaffoldTrustedHeadersConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScaffoldAccessConfig {
     pub require_auth: Option<bool>,
-    pub allow_signed_share_links: Option<bool>,
     pub default_role: Option<String>,
     pub trusted_headers: Option<ScaffoldTrustedHeadersConfig>,
 }
@@ -136,7 +135,6 @@ struct ScaffoldRoot {
 #[serde(rename_all = "camelCase")]
 struct ScaffoldAccessRecord {
     require_auth: bool,
-    allow_signed_share_links: bool,
     default_role: String,
     trusted_headers: ScaffoldTrustedHeadersRecord,
 }
@@ -425,9 +423,6 @@ fn build_access_record(config: Option<&ScaffoldAccessConfig>) -> ScaffoldAccessR
     let trusted_headers = config.and_then(|value| value.trusted_headers.as_ref());
     ScaffoldAccessRecord {
         require_auth: config.and_then(|value| value.require_auth).unwrap_or(false),
-        allow_signed_share_links: config
-            .and_then(|value| value.allow_signed_share_links)
-            .unwrap_or(false),
         default_role: config
             .and_then(|value| value.default_role.as_deref())
             .map(str::trim)
@@ -859,10 +854,6 @@ mod tests {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
 
         assert_eq!(parsed["access"]["requireAuth"].as_bool(), Some(false));
-        assert_eq!(
-            parsed["access"]["allowSignedShareLinks"].as_bool(),
-            Some(false)
-        );
         assert_eq!(parsed["access"]["defaultRole"].as_str(), Some("operator"));
         assert_eq!(
             parsed["access"]["trustedHeaders"]["enabled"].as_bool(),

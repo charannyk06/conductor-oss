@@ -2,7 +2,6 @@ pub mod agents;
 pub mod api_error;
 pub mod app_update;
 pub mod attachments;
-pub mod auth;
 pub mod boards;
 pub mod config;
 pub mod context_files;

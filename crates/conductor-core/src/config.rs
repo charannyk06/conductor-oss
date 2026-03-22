@@ -514,8 +514,6 @@ pub struct DashboardRoleBindings {
 pub struct DashboardAccessConfig {
     #[serde(default)]
     pub require_auth: bool,
-    #[serde(default)]
-    pub allow_signed_share_links: bool,
     #[serde(default = "default_role")]
     pub default_role: String,
     #[serde(default)]
@@ -528,7 +526,6 @@ impl Default for DashboardAccessConfig {
     fn default() -> Self {
         Self {
             require_auth: false,
-            allow_signed_share_links: false,
             default_role: default_role(),
             trusted_headers: TrustedHeaderAccessConfig::default(),
             roles: DashboardRoleBindings::default(),

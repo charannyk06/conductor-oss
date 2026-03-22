@@ -29,14 +29,17 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   if (denied) return denied;
 
   const { id } = await context.params;
+  const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
-    headers: await buildForwardedAccessHeaders(request),
+    request,
+    headers: forwardedHeaders,
   });
   if (!previewContext.session && !previewContext.error) {
     return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
   }
 
   const manager = getPreviewBrowserManager();
+  await manager.configureBridgePreview(id, previewContext.bridgePreview, forwardedHeaders);
   const status = withLookupError(
     await manager.getStatus(id, previewContext.candidateUrls),
     previewContext.error,
@@ -51,8 +54,10 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
   if (deniedAction) return deniedAction;
 
   const { id } = await context.params;
+  const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
-    headers: await buildForwardedAccessHeaders(request),
+    request,
+    headers: forwardedHeaders,
   });
   if (!previewContext.session && !previewContext.error) {
     return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
@@ -66,6 +71,7 @@ export async function POST(request: NextRequest, context: RouteParams): Promise<
   }
 
   const manager = getPreviewBrowserManager();
+  await manager.configureBridgePreview(id, previewContext.bridgePreview, forwardedHeaders);
 
   try {
     await manager.runCommand(id, body);

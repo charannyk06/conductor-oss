@@ -14,13 +14,11 @@ import {
 } from "@/lib/authRedirect";
 import { resolveClerkConfiguration, resolveRequestHostname } from "@/lib/clerkConfig";
 import { verifyTrustedEdgeIdentity } from "@/lib/edgeAuth";
-import { readRemoteAccessRuntimeState } from "@/lib/remoteAccessRuntime";
-import { sanitizeRedirectTarget } from "@/lib/remoteAuth";
+import { sanitizeRedirectTarget } from "@/lib/redirectTarget";
 
 type DashboardIdentityProvider =
   | "local"
   | "clerk"
-  | "tailscale"
   | "trusted-header"
   | "cloudflare-access";
 
@@ -103,7 +101,6 @@ function normalizeDashboardAccessConfig(value: unknown): DashboardAccessConfig |
 
   return {
     requireAuth: payload["requireAuth"] === true ? true : undefined,
-    allowSignedShareLinks: payload["allowSignedShareLinks"] === true ? true : undefined,
     defaultRole: parseDashboardRole(payload["defaultRole"]),
     trustedHeaders: Object.keys(trustedHeaders).length > 0
       ? {
@@ -330,11 +327,6 @@ export function getDashboardConfigSnapshot(): DashboardConfigSnapshot {
   return loadDashboardConfigSnapshot();
 }
 
-export function allowBuiltinRemoteAccess(access: DashboardAccessConfig | null | undefined): boolean {
-  void access;
-  return false;
-}
-
 function getDefaultRole(access: DashboardAccessConfig | null): DashboardRole | null {
   const configured = process.env.CONDUCTOR_ACCESS_DEFAULT_ROLE?.trim().toLowerCase();
   if (configured === "viewer" || configured === "operator" || configured === "admin") {
@@ -422,40 +414,6 @@ async function resolveTrustedHeaderAccess(
   return {
     ...resolved,
     provider: identity.provider,
-  };
-}
-
-async function resolveTailscaleAccess(
-  request: Request | undefined,
-  access: DashboardAccessConfig | null,
-  loopbackRequest: boolean,
-): Promise<DashboardAccess | null> {
-  const runtimeState = readRemoteAccessRuntimeState();
-  const tailscaleRuntimeAvailable = runtimeState?.provider === "tailscale"
-    && (runtimeState.status === "ready" || runtimeState.status === "starting")
-    && Boolean(runtimeState.publicUrl);
-  if (!tailscaleRuntimeAvailable) {
-    return null;
-  }
-
-  const headerStore = await currentHeaders(request);
-  const login = headerStore.get("Tailscale-User-Login")?.trim().toLowerCase() ?? "";
-  if (!login) {
-    if (loopbackRequest) {
-      return null;
-    }
-    return {
-      ok: false,
-      authenticated: false,
-      provider: "tailscale",
-      reason: "Private network sign-in required",
-    };
-  }
-
-  const resolved = resolveRoleForAuthenticatedEmail(login, access);
-  return {
-    ...resolved,
-    provider: "tailscale",
   };
 }
 
@@ -560,9 +518,6 @@ export async function getDashboardAccess(request?: Request): Promise<DashboardAc
 
   const trustedHeaderAccess = await resolveTrustedHeaderAccess(request, access);
   if (trustedHeaderAccess) return trustedHeaderAccess;
-
-  const tailscaleAccess = await resolveTailscaleAccess(request, access, loopbackRequest);
-  if (tailscaleAccess) return tailscaleAccess;
 
   const clerkAccess = await resolveClerkAccess(access, host);
   if (clerkAccess) return clerkAccess;

@@ -60,7 +60,6 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
         .merge(routes::projects::router())
         .merge(routes::tasks::router())
         .merge(routes::terminal::router())
-        .merge(routes::auth::router())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             routes::middleware::require_auth_when_remote,

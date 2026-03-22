@@ -9,7 +9,6 @@ type SetupOptions = InitOptions & {
   ide?: string;
   markdownEditor?: string;
   start?: boolean;
-  tunnel?: boolean;
   yes?: boolean;
 };
 
@@ -36,11 +35,6 @@ export type AgentSetupConfig = {
   installLabel?: string;
   requiredNodeMajor?: number;
   postInstallAuthCommand?: InstallCommand;
-};
-
-export type TunnelSetupConfig = {
-  commands: string[];
-  install?: InstallCommand;
 };
 
 function commandExists(command: string): boolean {
@@ -310,43 +304,10 @@ function buildMarkdownCheck(editor: string): SetupCheck | null {
   };
 }
 
-export function resolveTunnelSetupConfig(provider: string): TunnelSetupConfig {
-  const normalized = provider.trim().toLowerCase();
-  if (normalized === "cloudflare") {
-    return {
-      commands: ["cloudflared"],
-      install: buildPackageInstall("Install Cloudflare Tunnel", "cloudflared", "cloudflared"),
-    };
-  }
-
-  return {
-    commands: [normalized],
-  };
-}
-
-export function buildTunnelCheck(provider: string): SetupCheck {
-  const config = resolveTunnelSetupConfig(provider);
-  const installed = config.commands.some((command) => commandExists(command));
-
-  return {
-    id: `tunnel:${provider}`,
-    label: "Public dashboard tunnel",
-    description: "Exposes the dashboard on a free public URL for remote device access.",
-    installed,
-    detail: installed
-      ? "Ready"
-      : config.install
-        ? "Missing. Conductor can install a free Cloudflare Quick Tunnel for you."
-        : "Missing. Install a supported tunnel binary manually.",
-    install: !installed ? config.install : undefined,
-  };
-}
-
 function buildBaseChecks(
   agent: string,
   ide: string,
   markdownEditor: string,
-  options?: { tunnel?: boolean; tunnelProvider?: string },
 ): SetupCheck[] {
   const checks: SetupCheck[] = [
     {
@@ -388,10 +349,6 @@ function buildBaseChecks(
   const markdownCheck = buildMarkdownCheck(markdownEditor);
   if (markdownCheck) checks.push(markdownCheck);
 
-  if (options?.tunnel) {
-    checks.push(buildTunnelCheck(options.tunnelProvider ?? "cloudflare"));
-  }
-
   return checks;
 }
 
@@ -409,12 +366,11 @@ function rerunChecks(
   agent: string,
   ide: string,
   markdownEditor: string,
-  options?: { tunnel?: boolean; tunnelProvider?: string },
 ): SetupCheck[] {
-  return buildBaseChecks(agent, ide, markdownEditor, options);
+  return buildBaseChecks(agent, ide, markdownEditor);
 }
 
-function startConductor(projectPath: string, configPath: string, options?: { tunnel?: boolean }): void {
+function startConductor(projectPath: string, configPath: string): void {
   const cliEntrypoint = process.argv[1];
   if (!cliEntrypoint || cliEntrypoint.endsWith(".ts")) {
     console.log();
@@ -432,7 +388,6 @@ function startConductor(projectPath: string, configPath: string, options?: { tun
       "--workspace",
       projectPath,
       "--open",
-      ...(options?.tunnel ? ["--tunnel"] : []),
     ],
     {
       cwd: projectPath,
@@ -463,7 +418,6 @@ export function registerSetup(program: Command): void {
     .option("--dashboard-url <url>", "Public dashboard URL written into conductor.yaml")
     .option("--ide <editor>", "Preferred code editor")
     .option("--markdown-editor <editor>", "Preferred markdown app")
-    .option("--tunnel", "Install and launch a free public Cloudflare tunnel for remote access")
     .option("--yes", "Install what is missing without asking for confirmation")
     .option("--no-start", "Do not start Conductor after setup completes")
     .action(async (opts: SetupOptions) => {
@@ -472,16 +426,12 @@ export function registerSetup(program: Command): void {
         const agent = opts.agent?.trim() || "claude-code";
         const ide = opts.ide?.trim() || "vscode";
         const markdownEditor = opts.markdownEditor?.trim() || "obsidian";
-        const tunnelEnabled = opts.tunnel === true;
 
         console.log();
         console.log(chalk.bold("Conductor Setup"));
         console.log(chalk.dim("We’ll scaffold this repo, launch the dashboard, and let the browser finish the guided setup."));
 
-        let checks = rerunChecks(agent, ide, markdownEditor, {
-          tunnel: tunnelEnabled,
-          tunnelProvider: "cloudflare",
-        });
+        let checks = rerunChecks(agent, ide, markdownEditor);
         printChecks(checks);
 
         if (opts.yes) {
@@ -498,10 +448,7 @@ export function registerSetup(program: Command): void {
             }
           }
 
-          checks = rerunChecks(agent, ide, markdownEditor, {
-            tunnel: tunnelEnabled,
-            tunnelProvider: "cloudflare",
-          });
+          checks = rerunChecks(agent, ide, markdownEditor);
           const pendingAuth = checks.filter((check) => !check.installed && check.authCommand);
           for (const check of pendingAuth) {
             if (!check.authCommand) continue;
@@ -511,10 +458,7 @@ export function registerSetup(program: Command): void {
           }
         }
 
-        checks = rerunChecks(agent, ide, markdownEditor, {
-          tunnel: tunnelEnabled,
-          tunnelProvider: "cloudflare",
-        });
+        checks = rerunChecks(agent, ide, markdownEditor);
         printChecks(checks);
 
         console.log();
@@ -544,7 +488,7 @@ export function registerSetup(program: Command): void {
         }
 
         if (opts.start !== false) {
-          startConductor(project.path, configPath, { tunnel: tunnelEnabled });
+          startConductor(project.path, configPath);
           return;
         }
 

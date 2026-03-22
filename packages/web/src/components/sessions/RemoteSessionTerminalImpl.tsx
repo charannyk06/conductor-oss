@@ -7,11 +7,13 @@ import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
+import { resolveSessionTerminalViewportOptions } from "@/components/sessions/sessionTerminalUtils";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 const CMD_OUTPUT = "0".charCodeAt(0);
 const CMD_RESIZE = "1".charCodeAt(0);
 const RECONNECT_MAX_DELAY_MS = 4_000;
+type TerminalSyncMode = "resize" | "handshake";
 
 const TERMINAL_THEME = {
   background: "#060404",
@@ -88,7 +90,6 @@ export function RemoteSessionTerminal({
   sessionId,
   sessionState,
   pendingInsert,
-  immersiveMobileMode = false,
 }: SessionTerminalProps) {
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -99,6 +100,7 @@ export function RemoteSessionTerminal({
   const geometryRef = useRef({ cols: 120, rows: 32 });
   const lastAppliedInsertNonceRef = useRef(0);
   const retryAttemptRef = useRef(0);
+  const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connectionTick, setConnectionTick] = useState(0);
@@ -133,6 +135,28 @@ export function RemoteSessionTerminal({
     sendTerminalFrame(JSON.stringify({ columns: cols, rows }));
   }, [sendTerminalFrame]);
 
+  const clearScheduledLayoutSyncs = useCallback(() => {
+    for (const timer of scheduledLayoutSyncTimersRef.current) {
+      window.clearTimeout(timer);
+    }
+    scheduledLayoutSyncTimersRef.current = [];
+  }, []);
+
+  const applyTerminalViewport = useCallback(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    const viewport = resolveSessionTerminalViewportOptions(
+      terminalHostRef.current?.clientWidth
+      ?? (typeof window === "undefined" ? undefined : window.innerWidth),
+    );
+    terminal.options.fontFamily = viewport.fontFamily;
+    terminal.options.fontSize = viewport.fontSize;
+    terminal.options.lineHeight = viewport.lineHeight;
+  }, []);
+
   const fitTerminal = useCallback(() => {
     const terminal = terminalRef.current;
     const fitAddon = fitAddonRef.current;
@@ -140,6 +164,7 @@ export function RemoteSessionTerminal({
       return null;
     }
 
+    applyTerminalViewport();
     const previousCols = terminal.cols;
     const previousRows = terminal.rows;
     fitAddon.fit();
@@ -156,7 +181,58 @@ export function RemoteSessionTerminal({
       ...next,
       changed: next.cols !== previousCols || next.rows !== previousRows,
     };
-  }, []);
+  }, [applyTerminalViewport]);
+
+  const syncTerminalGeometry = useCallback((
+    mode: TerminalSyncMode,
+    force = false,
+  ) => {
+    const next = fitTerminal();
+    if (!next) {
+      return null;
+    }
+
+    geometryRef.current = { cols: next.cols, rows: next.rows };
+    if (sessionClosed) {
+      return next;
+    }
+
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return next;
+    }
+
+    try {
+      if (mode === "handshake") {
+        sendHandshake();
+      } else if (force || next.changed) {
+        socket.send(encodeResizeFrame(next.cols, next.rows));
+      }
+    } catch {
+      // Ignore transient geometry sync failures while reconnecting.
+    }
+
+    return next;
+  }, [fitTerminal, sendHandshake, sessionClosed]);
+
+  const scheduleHandshakeRefreshes = useCallback(() => {
+    clearScheduledLayoutSyncs();
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      syncTerminalGeometry("handshake", true);
+    });
+    scheduledLayoutSyncTimersRef.current.push(
+      window.setTimeout(() => {
+        syncTerminalGeometry("handshake", true);
+      }, 120),
+      window.setTimeout(() => {
+        syncTerminalGeometry("handshake", true);
+      }, 360),
+    );
+  }, [clearScheduledLayoutSyncs, syncTerminalGeometry]);
 
   const scheduleReconnect = useCallback(() => {
     if (sessionClosed) {
@@ -179,14 +255,17 @@ export function RemoteSessionTerminal({
     }
 
     host.textContent = "";
+    const initialViewport = resolveSessionTerminalViewportOptions(
+      typeof window === "undefined" ? undefined : window.innerWidth,
+    );
     const terminal = new Terminal({
       allowTransparency: true,
       convertEol: true,
       cursorBlink: !sessionClosed,
       disableStdin: sessionClosed,
-      fontFamily: '"JetBrains Mono", "SFMono-Regular", ui-monospace, monospace',
-      fontSize: immersiveMobileMode ? 12 : 13,
-      lineHeight: immersiveMobileMode ? 1.34 : 1.44,
+      fontFamily: initialViewport.fontFamily,
+      fontSize: initialViewport.fontSize,
+      lineHeight: initialViewport.lineHeight,
       letterSpacing: 0.2,
       scrollback: 4_000,
       theme: TERMINAL_THEME,
@@ -216,7 +295,7 @@ export function RemoteSessionTerminal({
     host.addEventListener("click", focusTerminal);
     terminal.focus();
     window.requestAnimationFrame(() => {
-      fitTerminal();
+      syncTerminalGeometry("resize", true);
     });
 
     return () => {
@@ -226,7 +305,7 @@ export function RemoteSessionTerminal({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [fitTerminal, immersiveMobileMode, sendTerminalFrame, sessionClosed]);
+  }, [sendTerminalFrame, sessionClosed, syncTerminalGeometry]);
 
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
@@ -239,8 +318,9 @@ export function RemoteSessionTerminal({
       terminalRef.current.options.disableStdin = sessionClosed;
       terminalRef.current.options.cursorBlink = !sessionClosed;
     }
+    clearScheduledLayoutSyncs();
     closeSocket();
-  }, [closeSocket, sessionClosed, sessionId]);
+  }, [clearScheduledLayoutSyncs, closeSocket, sessionClosed, sessionId]);
 
   useEffect(() => {
     const host = terminalHostRef.current;
@@ -251,24 +331,17 @@ export function RemoteSessionTerminal({
 
     terminal.options.disableStdin = sessionClosed || socketRef.current?.readyState !== WebSocket.OPEN;
     terminal.options.cursorBlink = !sessionClosed && socketRef.current?.readyState === WebSocket.OPEN;
-    terminal.options.fontSize = immersiveMobileMode ? 12 : 13;
-    terminal.options.lineHeight = immersiveMobileMode ? 1.34 : 1.44;
 
     const applyGeometry = () => {
-      const next = fitTerminal();
-      if (!next) {
+      syncTerminalGeometry("resize");
+    };
+
+    const refreshTerminalLayout = () => {
+      if (sessionClosed) {
+        fitTerminal();
         return;
       }
-      if (!sessionClosed) {
-        const socket = socketRef.current;
-        if (next.changed && socket && socket.readyState === WebSocket.OPEN) {
-          try {
-            socket.send(encodeResizeFrame(next.cols, next.rows));
-          } catch {
-            // Ignore transient resize failures while reconnecting.
-          }
-        }
-      }
+      syncTerminalGeometry("handshake", true);
     };
 
     applyGeometry();
@@ -278,14 +351,36 @@ export function RemoteSessionTerminal({
       : new ResizeObserver(() => {
         applyGeometry();
       });
+    const visualViewport = typeof window === "undefined" ? null : window.visualViewport;
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshTerminalLayout();
+      }
+    };
+    const fontSet = typeof document === "undefined" ? null : document.fonts;
+    let fontReadyCancelled = false;
 
     observer?.observe(host);
     window.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("scroll", applyGeometry);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    fontSet?.addEventListener?.("loadingdone", refreshTerminalLayout as EventListener);
+    void fontSet?.ready.then(() => {
+      if (!fontReadyCancelled) {
+        refreshTerminalLayout();
+      }
+    }).catch(() => {});
     return () => {
+      fontReadyCancelled = true;
       observer?.disconnect();
       window.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("scroll", applyGeometry);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      fontSet?.removeEventListener?.("loadingdone", refreshTerminalLayout as EventListener);
     };
-  }, [fitTerminal, immersiveMobileMode, sessionClosed]);
+  }, [fitTerminal, sessionClosed, syncTerminalGeometry]);
 
   useEffect(() => {
     if (sessionClosed) {
@@ -340,16 +435,8 @@ export function RemoteSessionTerminal({
             terminalRef.current.options.cursorBlink = true;
           }
           try {
-            sendHandshake();
-            window.setTimeout(() => {
-              if (socketRef.current === socket && socket.readyState === WebSocket.OPEN) {
-                try {
-                  sendHandshake();
-                } catch {
-                  // Ignore handshake retries during reconnect churn.
-                }
-              }
-            }, 300);
+            syncTerminalGeometry("handshake", true);
+            scheduleHandshakeRefreshes();
             setError(null);
           } catch (nextError) {
             setError(nextError instanceof Error ? nextError.message : "Failed to initialize terminal.");
@@ -413,13 +500,14 @@ export function RemoteSessionTerminal({
 
     return () => {
       cancelled = true;
+      clearScheduledLayoutSyncs();
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;
       }
       closeSocket();
     };
-  }, [closeSocket, connectionTick, scheduleReconnect, sendHandshake, sessionClosed, sessionId]);
+  }, [clearScheduledLayoutSyncs, closeSocket, connectionTick, scheduleHandshakeRefreshes, scheduleReconnect, sessionClosed, sessionId, syncTerminalGeometry]);
 
   useEffect(() => {
     if (!pendingInsert || pendingInsert.nonce <= lastAppliedInsertNonceRef.current) {
@@ -468,7 +556,7 @@ export function RemoteSessionTerminal({
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full">
         <div
           ref={terminalHostRef}
-          className="h-full w-full overflow-hidden rounded-[10px] bg-[#060404]"
+          className="h-full min-h-0 w-full flex-1 overflow-hidden rounded-[10px] bg-[#060404] px-2 py-2 text-left [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto"
         />
         {loading ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#060404]/84">

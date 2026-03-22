@@ -15,6 +15,7 @@ import { usePreferences } from "@/hooks/usePreferences";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
+import { buildAllProjectsHref } from "@/lib/dashboardHref";
 import type { DashboardSession } from "@/lib/types";
 
 export default function SessionPageClient({
@@ -79,10 +80,7 @@ export default function SessionPageClient({
   }, [currentSession, selectedProjectId]);
 
   const dashboardRootHref = useMemo(() => {
-    if (!effectiveBridgeId) {
-      return "/";
-    }
-    return `/?bridge=${encodeURIComponent(effectiveBridgeId)}`;
+    return buildAllProjectsHref(effectiveBridgeId);
   }, [effectiveBridgeId]);
 
   useEffect(() => {
@@ -141,7 +139,7 @@ export default function SessionPageClient({
     }
 
     if (sessionId === params.id) {
-      router.push("/");
+      router.replace(dashboardRootHref);
       return;
     }
 

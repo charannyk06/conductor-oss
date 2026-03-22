@@ -26,6 +26,26 @@ type DeviceProxyOptions = {
   bodyOverride?: unknown;
 };
 
+export type BridgePreviewRequest = {
+  sessionId: string;
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  bodyBase64?: string | null;
+};
+
+export type BridgePreviewResponse = {
+  status: number;
+  headers: Record<string, string>;
+  bodyBase64?: string | null;
+};
+
+type BridgePreviewResponsePayload = {
+  status?: unknown;
+  headers?: unknown;
+  body_base64?: unknown;
+};
+
 function isJsonResponse(response: Response): boolean {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   return contentType.includes("application/json");
@@ -131,6 +151,58 @@ export async function proxyToBridgeDevice(
     statusText: response.statusText,
     headers: headersWithJson,
   });
+}
+
+export async function requestBridgePreview(
+  bridgeId: string,
+  forwardedHeaders: HeadersInit,
+  payload: BridgePreviewRequest,
+): Promise<BridgePreviewResponse> {
+  const relayUrl = requireBridgeRelayUrl();
+  const target = new URL(`/api/devices/${encodeURIComponent(bridgeId)}/preview`, relayUrl);
+  const headers = new Headers(forwardedHeaders);
+  headers.set("Content-Type", "application/json");
+
+  const response = await fetch(target, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      session_id: payload.sessionId,
+      method: payload.method,
+      url: payload.url,
+      headers: payload.headers ?? {},
+      body_base64: payload.bodyBase64 ?? null,
+    }),
+    cache: "no-store",
+    redirect: "manual",
+  });
+
+  const body = await response.json().catch(() => null) as
+    | BridgePreviewResponse
+    | { error?: string }
+    | null;
+
+  if (!response.ok) {
+    throw new Error(
+      body && typeof body === "object" && "error" in body && body.error
+        ? body.error
+        : "Failed to reach paired device preview",
+    );
+  }
+
+  const previewBody = body && typeof body === "object"
+    ? body as BridgePreviewResponsePayload
+    : null;
+
+  return {
+    status: typeof previewBody?.status === "number" ? previewBody.status : 502,
+    headers: previewBody?.headers && typeof previewBody.headers === "object"
+      ? previewBody.headers as Record<string, string>
+      : {},
+    bodyBase64: typeof previewBody?.body_base64 === "string" || previewBody?.body_base64 === null
+      ? previewBody.body_base64 as string | null
+      : undefined,
+  };
 }
 
 export async function guardAndProxyToBridgeDevice(

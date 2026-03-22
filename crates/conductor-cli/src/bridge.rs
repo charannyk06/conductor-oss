@@ -475,6 +475,21 @@ async fn run_bridge_connection_once(
                                             }
                                         }
                                     }
+                                    BrowserToBridgeMessage::PreviewRequest { id, .. } => {
+                                        let payload = BridgeToBrowserMessage::PreviewResponse {
+                                            id,
+                                            status: StatusCode::NOT_IMPLEMENTED.as_u16(),
+                                            headers: std::collections::BTreeMap::from([(
+                                                "content-type".to_string(),
+                                                "text/plain; charset=utf-8".to_string(),
+                                            )]),
+                                            body_base64: Some(
+                                                base64::engine::general_purpose::STANDARD
+                                                    .encode("Preview proxy is not implemented in this bridge runtime."),
+                                            ),
+                                        };
+                                        let _ = tx.send(Message::Text(serde_json::to_string(&payload)?.into()));
+                                    }
                                     BrowserToBridgeMessage::TerminalInput { data } => {
                                         if let Some(session_id) = current_active_session(&active_session).await {
                                             let path = format!("/api/sessions/{session_id}/keys");

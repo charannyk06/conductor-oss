@@ -220,7 +220,6 @@ const TrustedHeaderAccessConfigSchema = z.object({
 
 const DashboardAccessConfigSchema = z.object({
   requireAuth: z.boolean().default(false),
-  allowSignedShareLinks: z.boolean().default(false),
   defaultRole: DashboardRoleSchema.optional(),
   trustedHeaders: TrustedHeaderAccessConfigSchema.optional(),
   roles: DashboardRoleBindingsSchema.optional(),

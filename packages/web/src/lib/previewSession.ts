@@ -1,5 +1,7 @@
 import { readFile } from "node:fs/promises";
+import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
 import { requireRustBackendUrl, resolveRustBackendUrl } from "@/lib/backendUrl";
+import { decodeBridgeSessionId, decorateBridgeSession } from "@/lib/bridgeSessionIds";
 import type { DashboardSession } from "@/lib/types";
 
 const LOCAL_HOST_PATTERN = /(?:127\.0\.0\.1|0\.0\.0\.0|localhost|::1|\[::1\])/i;
@@ -29,23 +31,56 @@ export interface PreviewSessionContext {
   session: DashboardSession | null;
   candidateUrls: string[];
   error: string | null;
+  bridgePreview: BridgePreviewConfig | null;
 }
 
 type PreviewFetchOptions = {
   headers?: HeadersInit;
+  request?: Request;
 };
+
+export interface BridgePreviewConfig {
+  bridgeId: string;
+  sessionId: string;
+  allowedOrigins: string[];
+}
+
+function resolveSessionPath(id: string, suffix = ""): string {
+  const bridgeSession = decodeBridgeSessionId(id);
+  const sessionId = bridgeSession?.sessionId ?? id;
+  return `/api/sessions/${encodeURIComponent(sessionId)}${suffix}`;
+}
+
+async function fetchPreviewResource(
+  id: string,
+  path: string,
+  options: PreviewFetchOptions = {},
+): Promise<Response> {
+  const bridgeSession = decodeBridgeSessionId(id);
+  if (bridgeSession) {
+    if (!options.request) {
+      throw new Error("Bridge preview lookup requires the incoming request context");
+    }
+
+    return proxyToBridgeDevice(options.request, bridgeSession.bridgeId, path, {
+      pathOverride: path,
+    });
+  }
+
+  const backendUrl = requireRustBackendUrl();
+  const target = new URL(path, backendUrl);
+  return fetch(target, {
+    cache: "no-store",
+    headers: options.headers,
+  });
+}
 
 export async function fetchDashboardSessionForPreview(
   id: string,
   options: PreviewFetchOptions = {},
 ): Promise<DashboardSession | null> {
-  const backendUrl = requireRustBackendUrl();
-
-  const target = new URL(`/api/sessions/${encodeURIComponent(id)}`, backendUrl);
-  const response = await fetch(target, {
-    cache: "no-store",
-    headers: options.headers,
-  });
+  const bridgeSession = decodeBridgeSessionId(id);
+  const response = await fetchPreviewResource(id, resolveSessionPath(id), options);
   if (response.status === 404) {
     return null;
   }
@@ -53,7 +88,8 @@ export async function fetchDashboardSessionForPreview(
     throw new Error(`Failed to fetch session ${id}: ${response.status}`);
   }
 
-  return response.json() as Promise<DashboardSession>;
+  const session = await response.json() as DashboardSession;
+  return bridgeSession ? decorateBridgeSession(session, bridgeSession.bridgeId) : session;
 }
 
 export async function loadPreviewSessionContext(
@@ -63,21 +99,86 @@ export async function loadPreviewSessionContext(
   try {
     const session = await fetchDashboardSessionForPreview(id, options);
     if (!session) {
-      return { session: null, candidateUrls: [], error: null };
+      return { session: null, candidateUrls: [], error: null, bridgePreview: null };
     }
 
+    const candidateUrls = await discoverPreviewCandidateUrls(session, options);
     return {
       session,
-      candidateUrls: await discoverPreviewCandidateUrls(session, options),
-      error: null,
+      candidateUrls,
+      error: resolveBridgePreviewWarning(session, candidateUrls),
+      bridgePreview: buildBridgePreviewConfig(session, candidateUrls),
     };
   } catch (error) {
     return {
       session: null,
       candidateUrls: [],
       error: error instanceof Error ? error.message : "Failed to load preview session",
+      bridgePreview: null,
     };
   }
+}
+
+function resolveBridgePreviewWarning(
+  session: DashboardSession,
+  candidateUrls: string[],
+): string | null {
+  if (!session.bridgeId?.trim() || candidateUrls.length > 0) {
+    return null;
+  }
+
+  const previewHints = [
+    session.pr?.previewUrl ?? null,
+    session.metadata.devServerUrl ?? null,
+    session.metadata.devServerURL ?? null,
+    session.metadata.localUrl ?? null,
+    session.metadata.url ?? null,
+    session.summary,
+  ];
+
+  const hasLocalHint = previewHints.some((value) => (
+    extractUrlsFromText(value).some((candidate) => LOCAL_HOST_PATTERN.test(candidate))
+  ));
+
+  if (hasLocalHint) {
+    return "Bridge preview could not find a paired-device local dev server URL for this session.";
+  }
+
+  return "Bridge preview uses the paired device's local dev server, but this session did not report one.";
+}
+
+function buildBridgePreviewConfig(
+  session: DashboardSession,
+  candidateUrls: string[],
+): BridgePreviewConfig | null {
+  const bridgeId = session.bridgeId?.trim();
+  if (!bridgeId) {
+    return null;
+  }
+
+  const allowedOrigins = [...new Set(
+    candidateUrls
+      .filter((candidate) => LOCAL_HOST_PATTERN.test(candidate))
+      .map((candidate) => {
+        try {
+          return new URL(candidate).origin;
+        } catch {
+          return null;
+        }
+      })
+      .filter((origin): origin is string => Boolean(origin)),
+  )];
+
+  if (allowedOrigins.length === 0) {
+    return null;
+  }
+
+  const bridgeSession = decodeBridgeSessionId(session.id);
+  return {
+    bridgeId,
+    sessionId: bridgeSession?.sessionId ?? session.id,
+    allowedOrigins,
+  };
 }
 
 function normalizeCandidateUrl(value: string): string {
@@ -153,15 +254,12 @@ async function fetchSessionOutputForPreview(
   id: string,
   options: PreviewFetchOptions = {},
 ): Promise<string> {
-  const backendUrl = getBackendUrl();
-  if (!backendUrl) return "";
-
   try {
-    const target = new URL(`/api/sessions/${encodeURIComponent(id)}/output?lines=400`, backendUrl);
-    const response = await fetch(target, {
-      cache: "no-store",
-      headers: options.headers,
-    });
+    const response = await fetchPreviewResource(
+      id,
+      resolveSessionPath(id, "/output?lines=400"),
+      options,
+    );
     if (!response.ok) {
       return "";
     }
@@ -211,7 +309,7 @@ export async function discoverPreviewCandidateUrls(
     pushCandidate(candidates, candidate, 80, backendUrl);
   }
 
-  return [...candidates.entries()]
+  const orderedCandidates = [...candidates.entries()]
     .sort(([left, leftPriority], [right, rightPriority]) => {
       if (leftPriority !== rightPriority) {
         return leftPriority - rightPriority;
@@ -222,4 +320,10 @@ export async function discoverPreviewCandidateUrls(
       return left.localeCompare(right);
     })
     .map(([candidate]) => candidate);
+
+  if (session.bridgeId?.trim()) {
+    return orderedCandidates.filter((candidate) => LOCAL_HOST_PATTERN.test(candidate));
+  }
+
+  return orderedCandidates;
 }

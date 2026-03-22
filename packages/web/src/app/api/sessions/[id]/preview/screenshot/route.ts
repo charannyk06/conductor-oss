@@ -14,14 +14,17 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   if (denied) return denied;
 
   const { id } = await context.params;
+  const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
-    headers: await buildForwardedAccessHeaders(request),
+    request,
+    headers: forwardedHeaders,
   });
   if (!previewContext.session && !previewContext.error) {
     return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
   }
 
   const manager = getPreviewBrowserManager();
+  await manager.configureBridgePreview(id, previewContext.bridgePreview, forwardedHeaders);
   try {
     const screenshot = await manager.takeScreenshot(id);
     if (!screenshot) {

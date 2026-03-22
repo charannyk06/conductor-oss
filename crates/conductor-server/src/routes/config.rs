@@ -178,8 +178,6 @@ async fn update_preferences(
     }
 }
 
-const BUILTIN_REMOTE_SESSION_COOKIE: &str = "conductor_session";
-const BUILTIN_REMOTE_SESSION_SECRET_ENV: &str = "CONDUCTOR_REMOTE_SESSION_SECRET";
 const TRUSTED_HEADERS_ENABLED_ENV: &str = "CONDUCTOR_TRUST_AUTH_HEADERS";
 const TRUSTED_PROVIDER_ENV: &str = "CONDUCTOR_TRUST_AUTH_PROVIDER";
 const TRUSTED_EMAIL_HEADER_ENV: &str = "CONDUCTOR_TRUST_AUTH_EMAIL_HEADER";
@@ -630,81 +628,8 @@ fn legacy_admin_emails() -> Vec<String> {
     parse_csv(&env::var("CONDUCTOR_ADMIN_EMAILS").unwrap_or_default())
 }
 
-fn resolve_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    let cookie_header = headers.get("cookie")?.to_str().ok()?;
-    for cookie in cookie_header.split(';') {
-        let mut split = cookie.trim().splitn(2, '=');
-        let key = split.next()?.trim();
-        let value = split.next()?.trim();
-        if key == name {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut mismatch = 0u8;
-    for (lhs, rhs) in left.iter().zip(right.iter()) {
-        mismatch |= lhs ^ rhs;
-    }
-    mismatch == 0
-}
-
-fn verify_builtin_session(secret: &str, value: &str) -> bool {
-    let separator = value.find('.');
-    if separator.is_none() || separator == Some(0) || separator == Some(value.len() - 1) {
-        return false;
-    }
-    let separator = separator.unwrap_or(0);
-    let payload = value[..separator].trim();
-    let signature = value[separator + 1..].trim();
-    let expires_at = match payload.parse::<i64>() {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-    if expires_at <= chrono::Utc::now().timestamp_millis() {
-        return false;
-    }
-
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
-        return false;
-    };
-    mac.update(payload.as_bytes());
-    let expected = hex::encode(mac.finalize().into_bytes());
-    constant_time_equal(expected.as_bytes(), signature.as_bytes())
-}
-
-fn builtin_remote_access_token() -> Option<String> {
-    env::var("CONDUCTOR_REMOTE_ACCESS_TOKEN")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn builtin_remote_session_secret() -> Option<String> {
-    env::var(BUILTIN_REMOTE_SESSION_SECRET_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-pub(crate) fn builtin_remote_auth_enabled() -> bool {
-    builtin_remote_access_token().is_some() && builtin_remote_session_secret().is_some()
-}
-
-pub(crate) fn builtin_remote_auth_allowed(access: &DashboardAccessConfig) -> bool {
-    access.allow_signed_share_links
-}
-
 pub(crate) fn access_control_enabled(access: &DashboardAccessConfig) -> bool {
-    (builtin_remote_auth_allowed(access) && builtin_remote_auth_enabled())
-        || should_require_auth(access)
+    should_require_auth(access)
 }
 
 fn matches_domain(email: &str, domains: &[String]) -> bool {
@@ -871,22 +796,6 @@ pub(crate) async fn resolve_access_identity(
         return identity;
     }
 
-    if builtin_remote_auth_allowed(access) {
-        if let Some(secret) = builtin_remote_session_secret() {
-            if let Some(cookie) = resolve_cookie_value(headers, BUILTIN_REMOTE_SESSION_COOKIE) {
-                if verify_builtin_session(&secret, &cookie) {
-                    return AccessIdentity {
-                        authenticated: true,
-                        role: Some(AccessRole::Admin),
-                        email: Some("builtin".to_string()),
-                        provider: Some("builtin".to_string()),
-                        reason: None,
-                    };
-                }
-            }
-        }
-    }
-
     if let Some(trusted) = resolve_trusted_header_identity(headers, access).await {
         match trusted {
             TrustedHeaderIdentity::NotProvided => {}
@@ -1002,7 +911,6 @@ async fn get_access(State(state): State<Arc<AppState>>, headers: HeaderMap) -> J
 #[serde(rename_all = "camelCase")]
 struct AccessBody {
     require_auth: Option<bool>,
-    allow_signed_share_links: Option<bool>,
     default_role: Option<String>,
     trusted_headers: Option<TrustedHeadersBody>,
     roles: Option<RoleBindingsBody>,
@@ -1037,9 +945,6 @@ async fn update_access(
     let current = state.config.read().await.access.clone();
     let next = DashboardAccessConfig {
         require_auth: body.require_auth.unwrap_or(current.require_auth),
-        allow_signed_share_links: body
-            .allow_signed_share_links
-            .unwrap_or(current.allow_signed_share_links),
         default_role: body.default_role.unwrap_or(current.default_role),
         trusted_headers: body
             .trusted_headers
@@ -1464,8 +1369,8 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
 #[cfg(test)]
 mod tests {
     use super::{
-        access_control_enabled, claude_access_for_model, resolve_access_identity, AccessRole,
-        CloudflareJwk, CloudflareJwksCacheEntry, CLOUDFLARE_JWKS_CACHE,
+        claude_access_for_model, resolve_access_identity, AccessRole, CloudflareJwk,
+        CloudflareJwksCacheEntry, CLOUDFLARE_JWKS_CACHE,
     };
     use axum::http::HeaderMap;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -1744,26 +1649,6 @@ mod tests {
             identity.reason.as_deref(),
             Some("Cloudflare Access is enabled but team domain or audience is missing.")
         );
-    }
-
-    #[test]
-    fn access_control_ignores_builtin_remote_auth_until_share_links_are_enabled() {
-        let _guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
-        unsafe {
-            std::env::set_var("CONDUCTOR_REMOTE_ACCESS_TOKEN", "test-token");
-            std::env::set_var("CONDUCTOR_REMOTE_SESSION_SECRET", "test-secret");
-        }
-
-        assert!(!access_control_enabled(&DashboardAccessConfig::default()));
-        assert!(access_control_enabled(&DashboardAccessConfig {
-            allow_signed_share_links: true,
-            ..DashboardAccessConfig::default()
-        }));
-
-        unsafe {
-            std::env::remove_var("CONDUCTOR_REMOTE_ACCESS_TOKEN");
-            std::env::remove_var("CONDUCTOR_REMOTE_SESSION_SECRET");
-        }
     }
 
     #[tokio::test]

@@ -1,9 +1,9 @@
 /**
  * Proxy the ttyd HTTP frontend through the Next.js dashboard.
  *
- * The ttyd process binds to 127.0.0.1 (unreachable from mobile devices).
- * Routing through this Next.js route makes it accessible via any surface
- * that can reach the dashboard (Tailscale, ngrok, etc.).
+ * The ttyd process binds to 127.0.0.1.
+ * Routing through this Next.js route makes it accessible through the
+ * authenticated dashboard surface instead of exposing ttyd directly.
  */
 import { guardedSessionProxyParamRoute } from "@/lib/proxyRoutes";
 

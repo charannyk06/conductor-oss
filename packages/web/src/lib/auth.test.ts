@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { NextRequest } from "next/server";
-import { clearRemoteAccessRuntimeState } from "./remoteAccessRuntime";
 import {
   buildHostedSignInPath,
   buildHostedSignInRedirectUrl,
@@ -20,7 +19,6 @@ function resetDashboardAuthEnv(): void {
   process.env.CO_CONFIG_PATH = "/tmp/conductor-auth-test-config-does-not-exist.yaml";
   process.env.CONDUCTOR_WORKSPACE = "";
   process.env.CONDUCTOR_REQUIRE_AUTH = "";
-  clearRemoteAccessRuntimeState();
 }
 
 test.afterEach(() => {
@@ -45,8 +43,6 @@ test.after(() => {
   } else {
     process.env.CONDUCTOR_REQUIRE_AUTH = originalRequireAuth;
   }
-
-  clearRemoteAccessRuntimeState();
 });
 
 test("getDashboardAccess keeps loopback access available when remote auth is required", async () => {
@@ -87,8 +83,8 @@ test("getDashboardAccess uses the forwarded host for hosted auth checks", async 
   assert.equal(access.reason, "Authentication is required for non-local dashboard access");
 });
 
-test("guardApiActionAccess allows tunneled same-origin unlock requests via forwarded host", () => {
-  const request = new NextRequest("http://127.0.0.1:3000/api/auth/session", {
+test("guardApiActionAccess allows tunneled same-origin action requests via forwarded host", () => {
+  const request = new NextRequest("http://127.0.0.1:3000/api/preferences", {
     method: "POST",
     headers: {
       origin: "https://dashboard.example.com",
@@ -105,7 +101,7 @@ test("guardApiActionAccess allows tunneled same-origin unlock requests via forwa
 });
 
 test("guardApiActionAccess still blocks mismatched origins", () => {
-  const request = new NextRequest("http://127.0.0.1:3000/api/auth/session", {
+  const request = new NextRequest("http://127.0.0.1:3000/api/preferences", {
     method: "POST",
     headers: {
       origin: "https://evil.example.com",

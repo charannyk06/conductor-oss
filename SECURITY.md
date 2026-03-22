@@ -57,7 +57,7 @@ Conductor is designed to be **local-first and low-attack-surface**:
 ### Local-first by default
 - Core orchestration runs on your machine
 - No hosted control plane is required for normal local use
-- Networked features such as GitHub integration, webhooks, private remote access, or bridge/relay flows are opt-in
+- Networked features such as GitHub integration, webhooks, external identity providers, or bridge/relay flows are opt-in
 
 ### Agent Isolation via Git Worktrees
 - Each agent session runs in a separate `git worktree`, isolated from your main branch
@@ -71,7 +71,7 @@ Conductor is designed to be **local-first and low-attack-surface**:
 
 ### Optional Authentication (Dashboard)
 - The default launcher keeps the dashboard on loopback (`127.0.0.1:4747`)
-- Remote access is expected to use a private Tailscale link or a verified identity layer such as Cloudflare Access
+- Verified public access is expected to sit behind an identity layer such as Cloudflare Access
 - Optional Clerk-backed sign-in flows also exist in the web app
 - Without an auth layer, the dashboard is intended for local use only and should not be exposed to the internet
 
@@ -101,7 +101,7 @@ Conductor is designed to be **local-first and low-attack-surface**:
      secret: "${WEBHOOK_SECRET}"  # use an env var, never hardcode
    ```
 
-5. **Do not publish the dashboard unauthenticated** — if you expose it beyond localhost, use Tailscale, Cloudflare Access, Clerk, or another verified auth boundary with TLS
+5. **Do not publish the dashboard unauthenticated** — if you expose it beyond localhost, use Cloudflare Access, Clerk, or another verified auth boundary with TLS
 
 6. **Keep `~/.conductor/` private** — it may contain repository paths, session metadata, and optional bridge tokens or runtime state. Treat it like any other local secrets-adjacent config directory
 

@@ -14,8 +14,10 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   if (denied) return denied;
 
   const { id } = await context.params;
+  const forwardedHeaders = await buildForwardedAccessHeaders(request);
   const previewContext = await loadPreviewSessionContext(id, {
-    headers: await buildForwardedAccessHeaders(request),
+    request,
+    headers: forwardedHeaders,
   });
   if (!previewContext.session && !previewContext.error) {
     return NextResponse.json({ error: `Session ${id} not found` }, { status: 404 });
@@ -24,6 +26,7 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   const frameId = request.nextUrl.searchParams.get("frameId");
   const interactiveOnly = request.nextUrl.searchParams.get("interactiveOnly") === "1";
   const manager = getPreviewBrowserManager();
+  await manager.configureBridgePreview(id, previewContext.bridgePreview, forwardedHeaders);
 
   try {
     const payload = await manager.inspectDom(id, frameId, interactiveOnly);

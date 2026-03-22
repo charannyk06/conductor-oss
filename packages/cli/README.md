@@ -92,16 +92,15 @@ Conductor currently includes adapters for:
 
 The dashboard only offers agents it can discover on your machine.
 
-## Remote Access
+## Access Control and Bridge
 
-The current package supports local-first usage plus optional remote and access-control flows already present in the app:
+The current package supports local-first usage plus optional access-control and paired-device flows already present in the app:
 
-- Private remote access via Tailscale
 - Verified Cloudflare Access JWT validation and role bindings
 - Optional Clerk-backed sign-in flows in the web app
 - Bridge and relay flows for paired-device execution
 
-Public share-link remote control without an identity layer is no longer supported.
+Unauthenticated public dashboard access is not supported.
 
 ## More Docs
 
