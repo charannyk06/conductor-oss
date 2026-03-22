@@ -1786,7 +1786,10 @@ export default function DashboardClient({
     }
 
     if (selectedSessionId === sessionId) {
-      navigateDashboard({ sessionId: null, tab: null }, "replace");
+      navigateDashboard(
+        { projectId: null, sessionId: null, workspaceView: null, tab: null },
+        "replace",
+      );
     }
 
     await refreshSessions();

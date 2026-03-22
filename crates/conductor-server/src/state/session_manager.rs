@@ -19,7 +19,7 @@ use super::types::{
     DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::{AppState, DETACHED_PID_METADATA_KEY};
+use super::{AppState, DETACHED_PID_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
 
 const PARSER_STATE_KEY: &str = "parserState";
@@ -596,6 +596,11 @@ impl AppState {
             .metadata
             .insert("finishedAt".to_string(), finished_at.clone());
         session.metadata.remove(DETACHED_PID_METADATA_KEY);
+        session.metadata.remove(TTYD_PID_METADATA_KEY);
+        session.metadata.remove(TTYD_WS_URL_METADATA_KEY);
+        session
+            .metadata
+            .remove(super::detached::types::TTYD_PORT_METADATA_KEY);
         session.metadata.remove("terminationRequested");
         session
             .metadata
@@ -654,7 +659,11 @@ impl AppState {
             }
         }
 
-        self.detach_terminal_runtime(session_id).await;
+        self.remove_terminal_host(
+            session_id,
+            Some(TerminalStreamEvent::Error("Terminal closed.".to_string())),
+        )
+        .await;
 
         if let Some(error) = termination_error {
             return Err(error);
@@ -2976,6 +2985,108 @@ mod tests {
         assert_eq!(updated.status, SessionStatus::Archived);
         assert!(!updated.metadata.contains_key(DETACHED_PID_METADATA_KEY));
         assert!(updated.metadata.contains_key("archivedAt"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn archive_session_removes_live_terminal_host_and_ttyd_metadata() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-archive-host-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        let mut child = spawn_sleep_process();
+        let pid = child.id();
+
+        let mut session = SessionRecord::new(
+            "live-archive".to_string(),
+            "demo".to_string(),
+            Some("session/demo".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            Some(pid),
+        );
+        session.status = SessionStatus::Working;
+        session.activity = Some("active".to_string());
+        session.metadata.insert(
+            crate::state::detached::types::RUNTIME_MODE_METADATA_KEY.to_string(),
+            crate::state::detached::types::TTYD_RUNTIME_MODE.to_string(),
+        );
+        session.metadata.insert(
+            crate::state::detached::types::TTYD_PID_METADATA_KEY.to_string(),
+            pid.to_string(),
+        );
+        session.metadata.insert(
+            crate::state::detached::types::TTYD_PORT_METADATA_KEY.to_string(),
+            "41000".to_string(),
+        );
+        session.metadata.insert(
+            crate::state::detached::types::TTYD_WS_URL_METADATA_KEY.to_string(),
+            "ws://127.0.0.1:41000/ws".to_string(),
+        );
+        session
+            .metadata
+            .insert(DETACHED_PID_METADATA_KEY.to_string(), pid.to_string());
+        state.replace_session(session).await.unwrap();
+
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        let handle = state
+            .attach_terminal_runtime("live-archive", input_tx, None, kill_tx)
+            .await;
+        let mut terminal_rx = handle.terminal_tx.subscribe();
+
+        state.archive_session("live-archive").await.unwrap();
+
+        let waited = timeout(test_wait_timeout(), async {
+            loop {
+                if let Ok(Some(_)) = child.try_wait() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "live runtime should terminate");
+
+        let terminal_event = timeout(test_wait_timeout(), terminal_rx.recv())
+            .await
+            .expect("terminal close event should arrive")
+            .expect("terminal channel should stay open long enough for close event");
+        assert!(matches!(
+            terminal_event,
+            TerminalStreamEvent::Error(message) if message == "Terminal closed."
+        ));
+
+        assert!(
+            !state.has_terminal_host("live-archive").await,
+            "archive should evict the live terminal host"
+        );
+
+        let updated = state.get_session("live-archive").await.unwrap();
+        assert_eq!(updated.status, SessionStatus::Archived);
+        assert!(!updated.metadata.contains_key(DETACHED_PID_METADATA_KEY));
+        assert!(!updated
+            .metadata
+            .contains_key(crate::state::detached::types::TTYD_PID_METADATA_KEY));
+        assert!(!updated
+            .metadata
+            .contains_key(crate::state::detached::types::TTYD_PORT_METADATA_KEY));
+        assert!(!updated
+            .metadata
+            .contains_key(crate::state::detached::types::TTYD_WS_URL_METADATA_KEY));
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -485,6 +485,20 @@ impl AppState {
         self.terminal_hosts.remove(session_id).await
     }
 
+    pub(crate) async fn remove_terminal_host(
+        &self,
+        session_id: &str,
+        final_event: Option<TerminalStreamEvent>,
+    ) {
+        let Some(handle) = self.take_terminal_host(session_id).await else {
+            return;
+        };
+        self.terminal_hosts.detach_runtime(&handle).await;
+        if let Some(event) = final_event {
+            let _ = handle.terminal_tx.send(event);
+        }
+    }
+
     pub(crate) async fn ensure_terminal_host(&self, session_id: &str) -> Arc<LiveSessionHandle> {
         if let Some(handle) = self.terminal_hosts.get(session_id).await {
             return handle;
