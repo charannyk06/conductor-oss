@@ -107,6 +107,33 @@ async function fetchRelayTerminalUrl(
   return payload.wsUrl;
 }
 
+type RelayTerminalAvailability =
+  | { available: true }
+  | { available: false; reason: string | null };
+
+async function probeRelayTerminalAvailability(
+  sessionId: string,
+  bridgeId?: string | null,
+): Promise<RelayTerminalAvailability> {
+  const response = await fetch(
+    withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, bridgeId),
+    {
+      cache: "no-store",
+    },
+  );
+  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  if (response.ok) {
+    return { available: true };
+  }
+  if (response.status === 404 || response.status === 409) {
+    return {
+      available: false,
+      reason: payload?.error ?? null,
+    };
+  }
+  throw new Error(payload?.error ?? `Failed to resolve relay terminal availability (${response.status})`);
+}
+
 async function sendFollowUpMessage(
   sessionId: string,
   message: string,
@@ -151,6 +178,7 @@ export function RemoteSessionTerminal({
   const [hasOutput, setHasOutput] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [relayUnavailableReason, setRelayUnavailableReason] = useState<string | null>(null);
   const [promptMessage, setPromptMessage] = useState("");
   const [promptSending, setPromptSending] = useState(false);
   const [promptError, setPromptError] = useState<string | null>(null);
@@ -168,6 +196,7 @@ export function RemoteSessionTerminal({
     : false;
   const showPromptBar = !ttydBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
   const showStoredOutput = !expectsRelayTerminal;
+  const outputFallbackActive = showStoredOutput || relayUnavailableReason !== null;
   const bridgeRecoveryHref = useMemo(
     () => (bridgeId ? buildBridgeRepairHref(bridgeId) : null),
     [bridgeId],
@@ -388,6 +417,7 @@ export function RemoteSessionTerminal({
     setHasOutput(false);
     setLoading(true);
     setError(null);
+    setRelayUnavailableReason(null);
     setPromptMessage("");
     setPromptSending(false);
     setPromptError(null);
@@ -463,7 +493,7 @@ export function RemoteSessionTerminal({
   }, [expectsRelayTerminal, fitTerminal, syncTerminalGeometry]);
 
   useEffect(() => {
-    if (showStoredOutput) {
+    if (outputFallbackActive) {
       let cancelled = false;
       setLoading(true);
       void fetchClosedTerminalOutput(sessionId, bridgeId)
@@ -495,85 +525,99 @@ export function RemoteSessionTerminal({
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setRelayUnavailableReason(null);
 
-    void fetchRelayTerminalUrl(sessionId, bridgeId)
-      .then((wsUrl) => {
+    void probeRelayTerminalAvailability(sessionId, bridgeId)
+      .then((availability) => {
         if (cancelled) {
           return;
         }
 
-        closeSocket();
-        const socket = new WebSocket(wsUrl);
-        socket.binaryType = "arraybuffer";
-        socketRef.current = socket;
+        if (!availability.available) {
+          setRelayUnavailableReason(
+            availability.reason ?? "This session no longer exposes a live ttyd terminal.",
+          );
+          return;
+        }
 
-        socket.onopen = () => {
-          retryAttemptRef.current = 0;
-          decoderRef.current = new TextDecoder();
-          setHasOutput(false);
-          if (terminalRef.current) {
-            resetTerminalOutput(terminalRef.current, "", followBottomRef.current);
-            terminalRef.current.options.disableStdin = false;
-            terminalRef.current.options.cursorBlink = true;
-          }
-          try {
-            syncTerminalGeometry("handshake", true);
-            scheduleHandshakeRefreshes();
-            setError(null);
-          } catch (nextError) {
-            setError(nextError instanceof Error ? nextError.message : "Failed to initialize terminal.");
-          } finally {
-            setLoading(false);
-          }
-        };
-
-        socket.onmessage = (event) => {
-          const terminal = terminalRef.current;
-          if (!terminal) {
+        return fetchRelayTerminalUrl(sessionId, bridgeId).then((wsUrl) => {
+          if (cancelled) {
             return;
           }
 
-          const frame = typeof event.data === "string"
-            ? new TextEncoder().encode(event.data)
-            : new Uint8Array(event.data as ArrayBuffer);
-          if (frame.length === 0) {
-            return;
-          }
+          closeSocket();
+          const socket = new WebSocket(wsUrl);
+          socket.binaryType = "arraybuffer";
+          socketRef.current = socket;
 
-          switch (frame[0]) {
-            case CMD_OUTPUT: {
-              const text = decoderRef.current.decode(frame.slice(1), { stream: true });
-              if (text.length > 0) {
-                terminal.write(text);
-                if (followBottomRef.current) {
-                  terminal.scrollToBottom();
-                }
-                setHasOutput(true);
-              }
-              break;
+          socket.onopen = () => {
+            retryAttemptRef.current = 0;
+            decoderRef.current = new TextDecoder();
+            setHasOutput(false);
+            if (terminalRef.current) {
+              resetTerminalOutput(terminalRef.current, "", followBottomRef.current);
+              terminalRef.current.options.disableStdin = false;
+              terminalRef.current.options.cursorBlink = true;
             }
-            default:
-              break;
-          }
-        };
+            try {
+              syncTerminalGeometry("handshake", true);
+              scheduleHandshakeRefreshes();
+              setError(null);
+            } catch (nextError) {
+              setError(nextError instanceof Error ? nextError.message : "Failed to initialize terminal.");
+            } finally {
+              setLoading(false);
+            }
+          };
 
-        socket.onerror = () => {
-          if (!cancelled) {
-            setError("Relay terminal connection failed.");
-          }
-        };
+          socket.onmessage = (event) => {
+            const terminal = terminalRef.current;
+            if (!terminal) {
+              return;
+            }
 
-        socket.onclose = () => {
-          socketRef.current = null;
-          if (terminalRef.current) {
-            terminalRef.current.options.disableStdin = true;
-            terminalRef.current.options.cursorBlink = false;
-          }
-          if (!cancelled) {
-            setError("Relay terminal disconnected.");
-            scheduleReconnect();
-          }
-        };
+            const frame = typeof event.data === "string"
+              ? new TextEncoder().encode(event.data)
+              : new Uint8Array(event.data as ArrayBuffer);
+            if (frame.length === 0) {
+              return;
+            }
+
+            switch (frame[0]) {
+              case CMD_OUTPUT: {
+                const text = decoderRef.current.decode(frame.slice(1), { stream: true });
+                if (text.length > 0) {
+                  terminal.write(text);
+                  if (followBottomRef.current) {
+                    terminal.scrollToBottom();
+                  }
+                  setHasOutput(true);
+                }
+                break;
+              }
+              default:
+                break;
+            }
+          };
+
+          socket.onerror = () => {
+            if (!cancelled) {
+              setError("Relay terminal connection failed.");
+            }
+          };
+
+          socket.onclose = () => {
+            socketRef.current = null;
+            if (terminalRef.current) {
+              terminalRef.current.options.disableStdin = true;
+              terminalRef.current.options.cursorBlink = false;
+            }
+            if (!cancelled) {
+              setError("Relay terminal disconnected.");
+              scheduleReconnect();
+            }
+          };
+        });
       })
       .catch((nextError) => {
         if (!cancelled) {
@@ -600,7 +644,7 @@ export function RemoteSessionTerminal({
     scheduleHandshakeRefreshes,
     scheduleReconnect,
     sessionId,
-    showStoredOutput,
+    outputFallbackActive,
     syncTerminalGeometry,
   ]);
 
@@ -646,6 +690,7 @@ export function RemoteSessionTerminal({
   const handleRetry = useCallback(() => {
     retryAttemptRef.current = 0;
     setError(null);
+    setRelayUnavailableReason(null);
     setConnectionTick((value) => value + 1);
   }, []);
 
@@ -654,7 +699,8 @@ export function RemoteSessionTerminal({
     : showPromptBar
       ? "Session is waiting for input"
       : "Live terminal is not active";
-  const emptyStateDescription = error
+  const emptyStateDescription = relayUnavailableReason
+    ?? error
     ?? (expectsRelayTerminal
       ? "Reconnecting to the existing relay terminal."
       : ttydBacked
