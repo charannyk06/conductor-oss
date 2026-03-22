@@ -63,10 +63,8 @@ Rust workspace tests were run with `cargo test --workspace` and passed. This rev
   - Any unauthenticated attacker who can reach the relay can enumerate active share links, attach to them, browse the paired machine's filesystem metadata, and send arbitrary `GET` requests into the victim's local backend, which can expose sessions, diffs, workspace files, and configuration data far outside the intended shared session.
   - Attackers can also revoke all active shares by calling the unauthenticated delete route.
 - Fix:
-  - Require authenticated ownership checks for listing and deleting shares.
-  - Make share URLs unguessable and non-enumerable; never return all active share IDs publicly.
-  - Enforce `session_scope` on every share-backed browser request before forwarding `ApiRequest`, `PreviewRequest`, `FileBrowse`, or terminal-related messages.
-  - Restrict bridged file browsing to the intended workspace root, not arbitrary filesystem paths.
+  - Resolved by removing the terminal sharing feature from the dashboard and relay.
+  - Keep bridged file browsing restricted to the intended workspace root, not arbitrary filesystem paths.
 - Mitigation:
   - Disable relay share functionality until access control and scope enforcement are fixed.
   - If shares must stay enabled temporarily, gate them behind authenticated dashboard routes only and rotate any active share IDs.

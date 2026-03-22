@@ -28,7 +28,6 @@ pub struct RelayState {
 #[derive(Debug, Default)]
 struct RelayInner {
     channels: HashMap<String, BridgeChannel>,
-    shares: HashMap<String, ShareRecord>,
     pairing_codes: HashMap<String, PendingPairing>,
     device_claims: HashMap<String, PendingDeviceClaim>,
     devices: HashMap<String, DeviceRecord>,
@@ -52,15 +51,6 @@ struct ConnectionRecord {
     id: u64,
     user_id: String,
     tx: mpsc::UnboundedSender<Message>,
-}
-
-#[derive(Debug, Clone)]
-struct ShareRecord {
-    owner_user_id: String,
-    device_id: String,
-    session_scope: String,
-    read_only: bool,
-    created_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -168,34 +158,6 @@ impl RateBucket {
 struct WsQuery {
     token: Option<String>,
     jwt: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct ShareCreateRequest {
-    device_id: String,
-    session_id: Option<String>,
-    session_scope: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ShareListItem {
-    share_id: String,
-    session_scope: String,
-    browser_url: String,
-    read_only: bool,
-    created_at_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SharePublicItem {
-    share_id: String,
-    read_only: bool,
-    created_at_secs: u64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct ShareOutputQuery {
-    lines: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -338,7 +300,6 @@ struct RelayHealth {
     ok: bool,
     bridge_channels: usize,
     browser_connections: usize,
-    share_links: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,7 +320,6 @@ const RELAY_JWT_ISSUER: &str = "conductor-dashboard";
 const RELAY_JWT_AUDIENCE: &str = "conductor-relay";
 const RELAY_JWT_SCOPE_DASHBOARD_API: &str = "dashboard-api";
 const RELAY_JWT_SCOPE_TERMINAL_BROWSER: &str = "terminal-browser";
-const SHARE_PREFIX: &str = "share-";
 const PAIRING_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEVICE_ACCESS_TOKEN_TTL_SECS: u64 = 3600;
 const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -400,12 +360,6 @@ fn build_router(state: RelayState) -> Router {
             post(create_terminal_session),
         )
         .route("/api/devices/{device_id}", delete(delete_device))
-        .route("/api/shares", get(list_shares).post(create_share))
-        .route(
-            "/api/shares/{share_id}",
-            get(get_share).delete(delete_share),
-        )
-        .route("/api/shares/{share_id}/output", get(get_share_output))
         .route("/bridge/{scope}", get(bridge_ws))
         .route("/browser/{scope}", get(browser_ws))
         .route("/terminal/{terminal_id}/browser", get(browser_terminal_ws))
@@ -439,7 +393,6 @@ async fn health(State(state): State<RelayState>) -> Json<RelayHealth> {
         ok: true,
         bridge_channels,
         browser_connections,
-        share_links: inner.shares.len(),
     })
 }
 
@@ -844,211 +797,6 @@ async fn delete_bridge(
     }
 }
 
-async fn list_shares(State(state): State<RelayState>, headers: HeaderMap) -> Response {
-    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
-        )
-            .into_response();
-    };
-
-    let inner = state.inner.lock().await;
-    let shares: Vec<ShareListItem> = inner
-        .shares
-        .iter()
-        .filter(|(_, share)| share.owner_user_id == user_id)
-        .map(|(share_id, share)| ShareListItem {
-            share_id: share_id.clone(),
-            session_scope: share.session_scope.clone(),
-            browser_url: format!("/bridge/share/{share_id}"),
-            read_only: share.read_only,
-            created_at_secs: share.created_at.elapsed().as_secs(),
-        })
-        .collect();
-    (StatusCode::OK, Json(json!({ "shares": shares }))).into_response()
-}
-
-async fn create_share(
-    State(state): State<RelayState>,
-    headers: HeaderMap,
-    Json(body): Json<ShareCreateRequest>,
-) -> Response {
-    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
-        )
-            .into_response();
-    };
-
-    let session_scope = match body
-        .session_scope
-        .or(body.session_id)
-        .map(|value| value.trim().to_string())
-    {
-        Some(scope) if !scope.is_empty() => scope,
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "Missing session id." })),
-            )
-                .into_response();
-        }
-    };
-
-    let device_id = body.device_id.trim();
-    if device_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Missing device id." })),
-        )
-            .into_response();
-    }
-
-    let mut inner = state.inner.lock().await;
-    match inner.devices.get(device_id) {
-        Some(device) if device.owner_user_id == user_id => {}
-        Some(_) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "Device access denied." })),
-            )
-                .into_response();
-        }
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "Device not found." })),
-            )
-                .into_response();
-        }
-    }
-
-    let share_id = Uuid::new_v4().to_string();
-    let browser_url = format!("/bridge/share/{share_id}");
-    inner.shares.insert(
-        share_id.clone(),
-        ShareRecord {
-            owner_user_id: user_id,
-            device_id: device_id.to_string(),
-            session_scope: session_scope.clone(),
-            read_only: true,
-            created_at: Instant::now(),
-        },
-    );
-
-    (
-        StatusCode::CREATED,
-        Json(json!({
-            "shareId": share_id,
-            "sessionScope": session_scope,
-            "browserUrl": browser_url,
-            "readOnly": true,
-        })),
-    )
-        .into_response()
-}
-
-async fn get_share(State(state): State<RelayState>, Path(share_id): Path<String>) -> Response {
-    let inner = state.inner.lock().await;
-    let Some(share) = inner.shares.get(&share_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Share link not found." })),
-        )
-            .into_response();
-    };
-
-    (
-        StatusCode::OK,
-        Json(SharePublicItem {
-            share_id,
-            read_only: share.read_only,
-            created_at_secs: share.created_at.elapsed().as_secs(),
-        }),
-    )
-        .into_response()
-}
-
-async fn get_share_output(
-    State(state): State<RelayState>,
-    Path(share_id): Path<String>,
-    Query(query): Query<ShareOutputQuery>,
-) -> Response {
-    let Some(share) = state.get_share_record(&share_id).await else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Share link not found." })),
-        )
-            .into_response();
-    };
-
-    let lines = query.lines.unwrap_or(500).clamp(1, 2000);
-    let output_path = format!("/api/sessions/{}/output?lines={lines}", share.session_scope);
-
-    match state
-        .forward_device_api_request(
-            &share.owner_user_id,
-            &share.device_id,
-            "GET",
-            &output_path,
-            None,
-        )
-        .await
-    {
-        Ok(response) => response_from_proxied_api(response.status, response.body),
-        Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
-    }
-}
-
-async fn delete_share(
-    State(state): State<RelayState>,
-    Path(share_id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let Some(user_id) = resolve_dashboard_api_user_id(&headers) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Missing or invalid dashboard relay token." })),
-        )
-            .into_response();
-    };
-
-    let mut inner = state.inner.lock().await;
-    match inner.shares.get(&share_id) {
-        Some(share) if share.owner_user_id == user_id => {}
-        Some(_) => {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "Share access denied." })),
-            )
-                .into_response();
-        }
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "error": "Share link not found." })),
-            )
-                .into_response();
-        }
-    }
-
-    if inner.shares.remove(&share_id).is_some() {
-        (
-            StatusCode::OK,
-            Json(json!({ "shareId": share_id, "deleted": true })),
-        )
-            .into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": "Share link not found." })),
-        )
-            .into_response()
-    }
-}
-
 async fn browser_ws(
     ws: WebSocketUpgrade,
     State(state): State<RelayState>,
@@ -1065,23 +813,15 @@ async fn browser_ws(
             .into_response();
     }
 
-    let (bridge_key, read_only, user_id) =
+    let (bridge_key, user_id) =
         match resolve_browser_connection(&scope, &headers, query.token.as_deref()).await {
             Ok(value) => value,
             Err(response) => return response,
         };
 
     ws.on_upgrade(move |socket| async move {
-        if let Err(err) = handle_connection(
-            state,
-            bridge_key,
-            PeerKind::Browser,
-            read_only,
-            user_id,
-            socket,
-            None,
-        )
-        .await
+        if let Err(err) =
+            handle_connection(state, bridge_key, PeerKind::Browser, user_id, socket, None).await
         {
             warn!(error = %err, "browser websocket closed");
         }
@@ -1128,7 +868,6 @@ async fn bridge_ws(
             state,
             channel_key,
             PeerKind::Bridge,
-            false,
             user_id,
             socket,
             initial_status,
@@ -1142,19 +881,10 @@ async fn bridge_ws(
 }
 
 async fn resolve_browser_connection(
-    scope: &str,
+    _scope: &str,
     headers: &HeaderMap,
     token: Option<&str>,
-) -> Result<(String, bool, String), Response> {
-    if let Some(share_id) = scope.strip_prefix(SHARE_PREFIX) {
-        let _ = share_id;
-        return Err((
-            StatusCode::GONE,
-            Json(json!({ "error": "Shared terminal websocket access has been disabled." })),
-        )
-            .into_response());
-    }
-
+) -> Result<(String, String), Response> {
     let Some(bridge_token) = resolve_token(headers, token) else {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -1164,14 +894,13 @@ async fn resolve_browser_connection(
     };
 
     let user_id = resolve_user_id(None, Some(&bridge_token));
-    Ok((bridge_token, false, user_id))
+    Ok((bridge_token, user_id))
 }
 
 async fn handle_connection(
     state: RelayState,
     key: String,
     peer_kind: PeerKind,
-    read_only: bool,
     user_id: String,
     socket: WebSocket,
     initial_status: Option<BridgeStatus>,
@@ -1222,9 +951,7 @@ async fn handle_connection(
                         match serde_json::from_str::<BrowserToBridgeMessage>(&raw_text) {
                             Ok(parsed) => {
                                 if let Err(err) = state
-                                    .route_browser_message(
-                                        &key, &user_id, read_only, parsed, raw_text, &tx,
-                                    )
+                                    .route_browser_message(&key, &user_id, parsed, raw_text, &tx)
                                     .await
                                 {
                                     warn!(error = %err, "browser message routing failed");
@@ -1654,46 +1381,10 @@ impl RelayState {
         &self,
         key: &str,
         user_id: &str,
-        read_only: bool,
         message: BrowserToBridgeMessage,
         raw_text: String,
         browser_tx: &mpsc::UnboundedSender<Message>,
     ) -> Result<()> {
-        if read_only {
-            match &message {
-                BrowserToBridgeMessage::Ping | BrowserToBridgeMessage::FileBrowse { .. } => {}
-                BrowserToBridgeMessage::ApiRequest { id, method, .. } => {
-                    if !is_safe_method(method) {
-                        send_bridge_error(
-                            browser_tx,
-                            id,
-                            StatusCode::FORBIDDEN,
-                            "Read-only share links cannot send mutating requests.",
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-                BrowserToBridgeMessage::PreviewRequest { id, method, .. } => {
-                    if !is_safe_method(method) {
-                        send_bridge_preview_error(
-                            browser_tx,
-                            id,
-                            StatusCode::FORBIDDEN,
-                            "Read-only share links cannot send mutating preview requests.",
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-                BrowserToBridgeMessage::TerminalResize { .. }
-                | BrowserToBridgeMessage::TerminalInput { .. }
-                | BrowserToBridgeMessage::TerminalProxyStart { .. } => {
-                    return Ok(());
-                }
-            }
-        }
-
         let now = Instant::now();
         if !self.consume_rate_limit(user_id, now).await {
             match &message {
@@ -1956,11 +1647,6 @@ impl RelayState {
         }
 
         (bridge_txs, browser_txs, pending_api_requests, removed)
-    }
-
-    async fn get_share_record(&self, share_id: &str) -> Option<ShareRecord> {
-        let inner = self.inner.lock().await;
-        inner.shares.get(share_id).cloned()
     }
 
     async fn create_pairing_code(&self, user_id: String, _suggested_name: String) -> String {
@@ -2516,13 +2202,6 @@ fn response_from_proxied_api(status: u16, body: Value) -> Response {
         }
         _ => (status_code, Json(body)).into_response(),
     }
-}
-
-fn is_safe_method(method: &str) -> bool {
-    matches!(
-        method.to_ascii_uppercase().as_str(),
-        "GET" | "HEAD" | "OPTIONS"
-    )
 }
 
 async fn send_bridge_error(

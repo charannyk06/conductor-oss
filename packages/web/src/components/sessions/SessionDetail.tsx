@@ -5,10 +5,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Globe,
-  Loader2,
   LayoutDashboard,
   PanelLeftOpen,
-  Share2,
   SquareTerminal,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
@@ -124,8 +122,6 @@ export function SessionDetail({
   const terminalInsertNonceRef = useRef(0);
   const autoPreviewOpenedRef = useRef(false);
   const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
-  const [shareBusy, setShareBusy] = useState(false);
-  const [shareError, setShareError] = useState<string | null>(null);
   const activeTab = useMemo(
     () => resolveSessionTab(searchParams.get("tab")),
     [searchParams],
@@ -149,59 +145,6 @@ export function SessionDetail({
       ...request,
     });
   }, []);
-  const handleCreateShare = useCallback(async () => {
-    if (!session?.bridgeId) {
-      setShareError("Share links are only available for paired-device sessions.");
-      return;
-    }
-
-    setShareBusy(true);
-    setShareError(null);
-
-    try {
-      const response = await fetch("/api/bridge/shares", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ device_id: session.bridgeId, session_id: sessionId }),
-      });
-
-      const payload = (await response.json().catch(() => null)) as {
-        shareId?: string;
-        error?: string;
-      } | null;
-
-      if (!response.ok) {
-        throw new Error(payload?.error ?? `Failed to create share link (${response.status})`);
-      }
-
-      const shareId = payload?.shareId?.trim();
-      if (!shareId) {
-        throw new Error("Relay did not return a share id.");
-      }
-
-      const sharePagePath = `/bridge/share/${encodeURIComponent(shareId)}`;
-      const absoluteShareUrl = typeof window !== "undefined"
-        ? new URL(sharePagePath, window.location.origin).toString()
-        : sharePagePath;
-
-      try {
-        await navigator.clipboard.writeText(absoluteShareUrl);
-      } catch {
-        // Clipboard access is best-effort.
-      }
-
-      const opened = window.open(sharePagePath, "_blank", "noopener,noreferrer");
-      if (!opened) {
-        window.location.assign(sharePagePath);
-      }
-    } catch (err) {
-      setShareError(err instanceof Error ? err.message : "Failed to create share link.");
-    } finally {
-      setShareBusy(false);
-    }
-  }, [session?.bridgeId, sessionId]);
   useEffect(() => {
     autoPreviewOpenedRef.current = false;
     terminalInsertNonceRef.current = 0;
@@ -259,7 +202,6 @@ export function SessionDetail({
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
-  const canCreateShare = Boolean(session.bridgeId);
 
   const sessionTabs = (
     <TabsList className="flex w-full overflow-x-auto sm:w-fit sm:inline-flex">
@@ -302,25 +244,6 @@ export function SessionDetail({
                     <PanelLeftOpen className="h-4 w-4" />
                   </Button>
               ) : null}
-              {canCreateShare ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-                  onClick={() => {
-                    void handleCreateShare();
-                  }}
-                  disabled={shareBusy}
-                  aria-label="Create share link"
-                >
-                  {shareBusy ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Share2 className="h-4 w-4" />
-                  )}
-                </Button>
-              ) : null}
               <div className="flex min-w-0 flex-1 items-center gap-1.5">
                 <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
                 <span className="text-[12px] font-medium text-[#efe8e1]">{compactStatusLabel}</span>
@@ -338,26 +261,6 @@ export function SessionDetail({
             {sessionTabs}
             <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
               <div className="flex items-center gap-1.5">
-                {canCreateShare ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 shrink-0 text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
-                    onClick={() => {
-                      void handleCreateShare();
-                    }}
-                    disabled={shareBusy}
-                    aria-label="Create share link"
-                    title="Create share link"
-                  >
-                    {shareBusy ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Share2 className="h-4 w-4" />
-                    )}
-                  </Button>
-                ) : null}
                 <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
                 <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
                 <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
@@ -366,12 +269,6 @@ export function SessionDetail({
             </div>
           </div>
         )}
-
-        {shareError ? (
-          <div className="px-2 pt-1 text-[11px] text-[var(--status-error)]">
-            {shareError}
-          </div>
-        ) : null}
 
         <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           <TabsContent value="overview" className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">

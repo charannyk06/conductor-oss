@@ -2669,7 +2669,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
             </nav>
           </aside>
 
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <header className="flex items-center justify-between border-b border-[var(--vk-border)] px-4 py-3 sm:py-4">
               <div>
                 <h3 className="text-[20px] leading-[24px] text-[var(--vk-text-strong)] sm:text-[27px] sm:leading-[27px]">
