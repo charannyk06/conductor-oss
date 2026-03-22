@@ -1591,6 +1591,7 @@ mod tests {
     #[test]
     fn format_codex_model_label_formats_correctly() {
         assert_eq!(format_codex_model_label("gpt-4o-mini"), "GPT-4o-Mini");
+        assert_eq!(format_codex_model_label("gpt-5.4-mini"), "GPT-5.4-Mini");
         assert_eq!(format_codex_model_label("codex-mini"), "Codex-Mini");
     }
 

@@ -939,6 +939,12 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<
           "GPT-5.4"
         ),
         modelOption(
+          "gpt-5.4-mini",
+          "Smaller GPT-5.4 variant for faster or lower-cost coding tasks.",
+          ["chatgpt", "api"],
+          "GPT-5.4-Mini"
+        ),
+        modelOption(
           "gpt-5.3-codex",
           "Balanced Codex coding model.",
           ["chatgpt", "api"],
@@ -955,6 +961,12 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<
           "Previous generation Codex coding model.",
           ["chatgpt", "api"],
           "GPT-5.2-Codex"
+        ),
+        modelOption(
+          "gpt-5.2",
+          "Previous frontier model for professional work with configurable reasoning effort.",
+          ["chatgpt", "api"],
+          "GPT-5.2"
         ),
         modelOption(
           "gpt-5.1-codex-max",
@@ -977,6 +989,12 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<
           "GPT-5.4"
         ),
         modelOption(
+          "gpt-5.4-mini",
+          "Smaller GPT-5.4 variant for faster or lower-cost coding tasks.",
+          ["chatgpt", "api"],
+          "GPT-5.4-Mini"
+        ),
+        modelOption(
           "gpt-5.3-codex",
           "Balanced Codex coding model.",
           ["chatgpt", "api"],
@@ -987,6 +1005,12 @@ const STATIC_AGENT_MODEL_CATALOGS: Record<
           "Previous generation Codex coding model.",
           ["chatgpt", "api"],
           "GPT-5.2-Codex"
+        ),
+        modelOption(
+          "gpt-5.2",
+          "Previous frontier model for professional work with configurable reasoning effort.",
+          ["chatgpt", "api"],
+          "GPT-5.2"
         ),
         modelOption(
           "gpt-5.1-codex-max",
