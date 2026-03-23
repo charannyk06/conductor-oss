@@ -69,7 +69,7 @@ jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"]
 
 # HTTP client (for webhooks, GitHub API)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 futures-util = "0.3"
 url = "2.5"
 
