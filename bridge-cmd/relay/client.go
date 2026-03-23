@@ -78,6 +78,11 @@ type bridgeEnvelope struct {
 	Hostname  string `json:"hostname,omitempty"`
 	OS        string `json:"os,omitempty"`
 	Connected bool   `json:"connected,omitempty"`
+	Version   string `json:"version,omitempty"`
+}
+
+type backendHealthPayload struct {
+	Version string `json:"version"`
 }
 
 type terminalAttachError struct {
@@ -137,6 +142,7 @@ func Run(ctx context.Context, opts Options) error {
 	if heartbeat <= 0 {
 		heartbeat = defaultHeartbeatInterval
 	}
+	version := resolveLocalConductorVersion()
 
 	backoff := time.Second
 	for {
@@ -146,6 +152,7 @@ func Run(ctx context.Context, opts Options) error {
 			scope:             scope,
 			hostname:          hostname,
 			osName:            osName,
+			version:           version,
 			stderr:            stderr,
 			heartbeatInterval: heartbeat,
 		})
@@ -180,6 +187,7 @@ type sessionOptions struct {
 	scope             string
 	hostname          string
 	osName            string
+	version           string
 	stderr            io.Writer
 	heartbeatInterval time.Duration
 }
@@ -330,6 +338,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 		Hostname:  opts.hostname,
 		OS:        opts.osName,
 		Connected: true,
+		Version:   opts.version,
 	}); err != nil {
 		stopTtyd()
 		return false, fmt.Errorf("send bridge_status: %w", err)
@@ -494,6 +503,7 @@ func runSession(ctx context.Context, opts sessionOptions) (bool, error) {
 				Hostname:  opts.hostname,
 				OS:        opts.osName,
 				Connected: true,
+				Version:   opts.version,
 			}); err != nil {
 				stopTtyd()
 				return false, fmt.Errorf("send bridge_status: %w", err)
@@ -1089,6 +1099,44 @@ func backendRequestTimeout(path string) time.Duration {
 	default:
 		return 20 * time.Second
 	}
+}
+
+func resolveLocalConductorVersion() string {
+	backendURL := strings.TrimSpace(os.Getenv("CONDUCTOR_BACKEND_URL"))
+	if backendURL == "" {
+		backendURL = "http://127.0.0.1:4749"
+	}
+
+	healthURL, err := url.Parse(backendURL)
+	if err != nil {
+		return ""
+	}
+	healthURL.Path = "/api/health"
+	healthURL.RawQuery = ""
+	healthURL.Fragment = ""
+
+	req, err := http.NewRequest(http.MethodGet, healthURL.String(), nil)
+	if err != nil {
+		return ""
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+
+	var payload backendHealthPayload
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(payload.Version)
 }
 
 func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentType string) (*http.Response, error) {

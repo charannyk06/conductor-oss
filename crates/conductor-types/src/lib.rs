@@ -66,6 +66,8 @@ pub enum BridgeToBrowserMessage {
         hostname: String,
         os: String,
         connected: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     Pong,
 }
@@ -91,6 +93,8 @@ pub struct BridgeStatus {
     pub hostname: String,
     pub os: String,
     pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[cfg(test)]
@@ -139,5 +143,27 @@ mod tests {
         let encoded = serde_json::to_string(&msg).expect("serialize");
         let decoded: BridgeToBrowserMessage = serde_json::from_str(&encoded).expect("deserialize");
         assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn bridge_status_serializes_optional_version() {
+        let msg = BridgeToBrowserMessage::BridgeStatus {
+            hostname: "Mac".to_string(),
+            os: "darwin".to_string(),
+            connected: true,
+            version: Some("0.3.4".to_string()),
+        };
+
+        let value = serde_json::to_value(msg).expect("serialize");
+        assert_eq!(
+            value,
+            json!({
+                "type": "bridge_status",
+                "hostname": "Mac",
+                "os": "darwin",
+                "connected": true,
+                "version": "0.3.4"
+            })
+        );
     }
 }

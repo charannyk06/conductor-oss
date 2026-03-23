@@ -14,6 +14,7 @@ test("normalizeBridgeDevice coerces malformed bridge payloads into safe defaults
       hostname: null,
       os: undefined,
       connected: 1,
+      version: " 0.3.4 ",
     },
   });
 
@@ -28,6 +29,7 @@ test("normalizeBridgeDevice coerces malformed bridge payloads into safe defaults
       hostname: "macbook-pro",
       os: "darwin",
       connected: false,
+      version: "0.3.4",
     },
   });
 });
@@ -46,6 +48,7 @@ test("normalizeBridgeDevices ignores non-object entries and keeps valid booleans
         hostname: "relay-host-1",
         os: "darwin",
         connected: true,
+        version: "",
       },
     },
   ]);
@@ -56,4 +59,5 @@ test("normalizeBridgeDevices ignores non-object entries and keeps valid booleans
   assert.equal(normalized[0]?.connected, true);
   assert.equal(normalized[0]?.last_status?.hostname, "relay-host-1");
   assert.equal(normalized[0]?.last_status?.connected, true);
+  assert.equal(normalized[0]?.last_status?.version, null);
 });

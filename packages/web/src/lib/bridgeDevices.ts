@@ -9,6 +9,7 @@ type RawBridgeDevice = {
     hostname?: unknown;
     os?: unknown;
     connected?: unknown;
+    version?: unknown;
   } | null;
 };
 
@@ -23,6 +24,7 @@ export type BridgeDeviceRecord = {
     hostname: string;
     os: string;
     connected: boolean;
+    version: string | null;
   } | null;
 };
 
@@ -48,9 +50,17 @@ export function normalizeBridgeDevice(raw: RawBridgeDevice): BridgeDeviceRecord 
         hostname: asNonEmptyString(raw.last_status.hostname, hostname),
         os: asNonEmptyString(raw.last_status.os, os),
         connected: raw.last_status.connected === true,
+        version: typeof raw.last_status.version === "string" && raw.last_status.version.trim().length > 0
+          ? raw.last_status.version.trim()
+          : null,
       }
       : null,
   };
+}
+
+export function formatBridgeVersionSuffix(version: string | null | undefined): string {
+  const normalized = typeof version === "string" ? version.trim() : "";
+  return normalized ? ` (build ${normalized})` : "";
 }
 
 export function normalizeBridgeDevices(value: unknown): BridgeDeviceRecord[] {

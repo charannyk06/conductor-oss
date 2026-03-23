@@ -61,6 +61,11 @@ function bridgeUpdateMessage(
   return status.jobMessage ?? `Installing Conductor ${status.latestVersion ?? "latest"} on ${device.device_name}.`;
 }
 
+function formatBuildVersionSuffix(status: AppUpdateStatus): string {
+  const version = status.currentVersion?.trim();
+  return version ? ` (build ${version})` : "";
+}
+
 function normalizeBridgeUpdateError(message: string | null, status: number): string {
   const normalized = message?.trim() ?? "";
   if (isLegacyBridgeBuildErrorMessage(normalized)) {
@@ -90,7 +95,7 @@ export function describeAutoUpdateSkip(status: AppUpdateStatus): string {
   }
 
   if (!status.updateAvailable) {
-    return "This laptop is already running the latest Conductor release.";
+    return `This laptop is already running the latest Conductor release${formatBuildVersionSuffix(status)}.`;
   }
 
   if (!status.canAutoUpdate) {
@@ -103,7 +108,7 @@ export function describeAutoUpdateSkip(status: AppUpdateStatus): string {
     return "A newer Conductor release is available, but this install cannot update itself automatically.";
   }
 
-  return "This laptop is already running the latest Conductor release.";
+  return `This laptop is already running the latest Conductor release${formatBuildVersionSuffix(status)}.`;
 }
 
 export async function requestBridgeAppUpdate(

@@ -41,7 +41,7 @@ import {
   buildBridgeManualPairCommand,
 } from "@/lib/bridgeOnboarding";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import { normalizeBridgeDevices } from "@/lib/bridgeDevices";
+import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import type { DashboardSession } from "@/lib/types";
 import { TERMINAL_STATUSES } from "@/lib/types";
 
@@ -56,6 +56,7 @@ type Device = {
     hostname: string;
     os: string;
     connected: boolean;
+    version: string | null;
   } | null;
 };
 
@@ -104,7 +105,7 @@ function pickBridgeTestSession(sessions: DashboardSession[]): DashboardSession |
 }
 
 function formatDeviceDescriptor(device: Device): string {
-  return `${device.hostname} · ${device.os}/${device.arch}`;
+  return `${device.hostname} · ${device.os}/${device.arch}${formatBridgeVersionSuffix(device.last_status?.version)}`;
 }
 
 function Panel({
@@ -1144,7 +1145,7 @@ export default function BridgeConnectClient({
                               {formatDeviceDescriptor(device)}
                             </div>
                             <div className="mt-1 text-xs text-[var(--vk-text-muted)]">
-                              Relay: {device.last_status?.hostname ?? device.hostname}
+                              Relay: {device.last_status?.hostname ?? device.hostname}{formatBridgeVersionSuffix(device.last_status?.version)}
                             </div>
                             {pairingAutoUpdate.message && pairingAutoUpdate.deviceId === device.device_id ? (
                               <div className={cn(

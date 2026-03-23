@@ -23,15 +23,24 @@ function installModeHint(mode: AppInstallMode): string | null {
   }
 }
 
-function noticeTitle(update: AppUpdateStatus): string {
+function formatBuildVersionSuffix(update: AppUpdateStatus): string {
+  const version = update.currentVersion?.trim();
+  return version ? ` (build ${version})` : "";
+}
+
+export function noticeTitle(update: AppUpdateStatus): string {
+  const buildVersionSuffix = formatBuildVersionSuffix(update);
+
   if (!update.enabled && update.reason) {
-    return "Conductor update unavailable";
+    return `Conductor update unavailable${buildVersionSuffix}`;
   }
-  if (update.restarting) return "Restarting Conductor";
-  if (update.jobStatus === "running") return "Updating Conductor";
-  if (update.jobStatus === "completed") return "Conductor updated";
-  if (update.jobStatus === "failed") return "Update failed";
-  return update.latestVersion ? `Conductor ${update.latestVersion} is available` : "Conductor update available";
+  if (update.restarting) return `Restarting Conductor${buildVersionSuffix}`;
+  if (update.jobStatus === "running") return `Updating Conductor${buildVersionSuffix}`;
+  if (update.jobStatus === "completed") return `Conductor updated${buildVersionSuffix}`;
+  if (update.jobStatus === "failed") return `Update failed${buildVersionSuffix}`;
+  return update.latestVersion
+    ? `Conductor ${update.latestVersion} is available${buildVersionSuffix}`
+    : `Conductor update available${buildVersionSuffix}`;
 }
 
 function noticeDescription(update: AppUpdateStatus): string {

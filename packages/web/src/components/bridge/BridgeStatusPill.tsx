@@ -19,8 +19,8 @@ import {
   requestBridgeServiceRestart,
 } from "@/lib/bridgeDeviceControl";
 import { buildBridgeInstallScriptUrl } from "@/lib/bridgeOnboarding";
+import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
-import { normalizeBridgeDevices } from "@/lib/bridgeDevices";
 
 type BridgeDevice = {
   device_id: string;
@@ -33,6 +33,7 @@ type BridgeDevice = {
     hostname: string;
     os: string;
     connected: boolean;
+    version: string | null;
   } | null;
 };
 
@@ -366,10 +367,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                           {device.device_name}
                         </div>
                         <div className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
-                          {device.hostname} · {device.os}/{device.arch}
+                          {device.hostname} · {device.os}/{device.arch}{formatBridgeVersionSuffix(device.last_status?.version)}
                         </div>
                         <div className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
-                          Relay: {device.last_status?.hostname ?? device.hostname}
+                          Relay: {device.last_status?.hostname ?? device.hostname}{formatBridgeVersionSuffix(device.last_status?.version)}
                         </div>
                         {autoUpdate.message && autoUpdate.deviceId === device.device_id ? (
                           <div className={cn(

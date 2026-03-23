@@ -26,3 +26,17 @@ test("describeAutoUpdateSkip keeps source checkout messaging explicit", () => {
     "This laptop is running from a source checkout, so there is no published package to auto-update.",
   );
 });
+
+test("describeAutoUpdateSkip includes the current build version when already up to date", () => {
+  const status = {
+    enabled: true,
+    reason: null,
+    updateAvailable: false,
+    currentVersion: "0.3.4",
+  } as AppUpdateStatus;
+
+  assert.equal(
+    describeAutoUpdateSkip(status),
+    "This laptop is already running the latest Conductor release (build 0.3.4).",
+  );
+});

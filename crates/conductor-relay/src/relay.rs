@@ -854,6 +854,7 @@ async fn bridge_ws(
                     hostname: device.name.clone(),
                     os: format_device_os(&device.os, &device.arch),
                     connected: true,
+                    version: None,
                 }),
             )
         } else {
@@ -1257,6 +1258,7 @@ impl RelayState {
                     hostname: host_name(),
                     os: env::consts::OS.to_string(),
                     connected: true,
+                    version: None,
                 }));
             }
             PeerKind::Browser => {
@@ -1293,11 +1295,13 @@ impl RelayState {
                                     hostname: last.hostname,
                                     os: last.os,
                                     connected: false,
+                                    version: last.version,
                                 })
                                 .unwrap_or(BridgeStatus {
                                     hostname: host_name(),
                                     os: env::consts::OS.to_string(),
                                     connected: false,
+                                    version: None,
                                 });
                             channel.last_status = Some(status.clone());
                             status_to_broadcast = Some(status);
@@ -1370,6 +1374,7 @@ impl RelayState {
                 hostname: status.hostname,
                 os: status.os,
                 connected: status.connected,
+                version: status.version,
             }) {
                 for browser in browsers_to_notify {
                     let _ = browser.send(Message::Text(text.clone().into()));
@@ -1502,12 +1507,14 @@ impl RelayState {
                 hostname,
                 os,
                 connected,
+                version,
             } = &message
             {
                 channel.last_status = Some(BridgeStatus {
                     hostname: hostname.clone(),
                     os: os.clone(),
                     connected: *connected,
+                    version: normalize_bridge_version(version.clone()),
                 });
             }
 
@@ -1537,11 +1544,13 @@ impl RelayState {
                     hostname: last.hostname,
                     os: last.os,
                     connected,
+                    version: last.version,
                 })
                 .unwrap_or(BridgeStatus {
                     hostname: host_name(),
                     os: env::consts::OS.to_string(),
                     connected,
+                    version: None,
                 });
 
             channel.last_status = Some(status.clone());
@@ -1557,6 +1566,7 @@ impl RelayState {
             hostname: status.hostname,
             os: status.os,
             connected: status.connected,
+            version: status.version,
         }) {
             for browser in browsers {
                 let _ = browser.send(Message::Text(text.clone().into()));
@@ -1575,6 +1585,7 @@ impl RelayState {
                     hostname: host_name(),
                     os: env::consts::OS.to_string(),
                     connected: false,
+                    version: None,
                 })
         };
 
@@ -1582,6 +1593,7 @@ impl RelayState {
             hostname: status.hostname,
             os: status.os,
             connected: status.connected,
+            version: status.version,
         }) {
             let _ = tx.send(Message::Text(text.into()));
         }
@@ -1857,6 +1869,7 @@ impl RelayState {
                                 hostname: device.name.clone(),
                                 os: format_device_os(&device.os, &device.arch),
                                 connected: false,
+                                version: None,
                             })
                         });
 
@@ -2305,6 +2318,12 @@ fn host_name() -> String {
     env::var("HOSTNAME")
         .or_else(|_| env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn normalize_bridge_version(version: Option<String>) -> Option<String> {
+    version
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn format_device_os(os: &str, arch: &str) -> String {
