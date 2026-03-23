@@ -204,6 +204,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     ? devices.find((device) => device.device_id === selectedBridgeId) ?? null
     : null;
   const shouldLinkToDeviceScreen = !loading && connectedDevices.length === 0;
+  const shouldLinkToDeviceScreen = !loading && connectedDevices.length === 0;
   const recentPairingDevice = recentPairingDeviceId
     ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
     : null;
@@ -312,6 +313,24 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       void refreshDevices(false);
     }, 2_000);
   }, [refreshDevices]);
+
+  if (shouldLinkToDeviceScreen) {
+    return (
+      <Link
+        href={BRIDGE_CONNECT_PATH}
+        prefetch
+        className="inline-flex"
+        title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
+      >
+        <StatusBadge
+          connected={false}
+          className={className}
+          title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
+          suffix={<ArrowUpRight className="h-3.5 w-3.5" />}
+        />
+      </Link>
+    );
+  }
 
   if (shouldLinkToDeviceScreen) {
     return (
