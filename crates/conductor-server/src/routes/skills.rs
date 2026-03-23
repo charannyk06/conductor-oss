@@ -52,28 +52,270 @@ struct SkillCatalogEntry {
 }
 
 static SKILL_CATALOG: &[SkillCatalogEntry] = &[
-    SkillCatalogEntry { id: "pdf", name: "PDF Processing", summary: "Read PDFs, extract tables, fill forms, and merge or split files.", category: "document", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/pdf"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/pdf" },
-    SkillCatalogEntry { id: "docx", name: "DOCX", summary: "Create and edit Word docs with formatting, comments, and tracked changes.", category: "document", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/docx"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/docx" },
-    SkillCatalogEntry { id: "pptx", name: "PPTX", summary: "Generate slide decks with layouts, charts, and speaker notes.", category: "document", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/pptx"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/pptx" },
-    SkillCatalogEntry { id: "xlsx", name: "XLSX", summary: "Spreadsheet formulas, analysis, and charts from natural language.", category: "document", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/xlsx"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/xlsx" },
-    SkillCatalogEntry { id: "doc-coauthoring", name: "Doc Co-Authoring", summary: "Collaborative writing workflow for back-and-forth drafting.", category: "document", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/doc-coauthoring"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/doc-coauthoring" },
-    SkillCatalogEntry { id: "frontend-design", name: "Frontend Design", summary: "Higher-quality UI design systems, typography, and layout instincts.", category: "design", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/frontend-design"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/frontend-design" },
-    SkillCatalogEntry { id: "canvas-design", name: "Canvas Design", summary: "Generate posters, social graphics, and covers from prompts.", category: "design", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/canvas-design"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/canvas-design" },
-    SkillCatalogEntry { id: "algorithmic-art", name: "Algorithmic Art", summary: "Fractal, geometric, and p5.js driven generative art workflows.", category: "design", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/algorithmic-art"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/algorithmic-art" },
-    SkillCatalogEntry { id: "theme-factory", name: "Theme Factory", summary: "Batch generate cohesive color themes from one prompt.", category: "design", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/theme-factory"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/theme-factory" },
-    SkillCatalogEntry { id: "web-artifacts-builder", name: "Web Artifacts Builder", summary: "Generate dashboards, calculators, and other web artifacts quickly.", category: "design", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/web-artifacts-builder"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/web-artifacts-builder" },
-    SkillCatalogEntry { id: "superpowers", name: "Superpowers", summary: "Battle-tested TDD, debugging, and plan-to-execute skill collection.", category: "engineering", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/obra/superpowers.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/obra/superpowers" },
-    SkillCatalogEntry { id: "systematic-debugging", name: "Systematic Debugging", summary: "Root-cause-first debugging workflow from the Superpowers ecosystem.", category: "engineering", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/obra/superpowers.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/obra/superpowers" },
-    SkillCatalogEntry { id: "file-search", name: "File Search", summary: "Ripgrep and tree navigation patterns for codebase search.", category: "engineering", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/massgen/massgen.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/massgen/massgen" },
-    SkillCatalogEntry { id: "context-optimization", name: "Context Optimization", summary: "Token-budget and context compression patterns for agent workflows.", category: "engineering", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/muratcankoylan/agent-skills-for-context-engineering.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/muratcankoylan/agent-skills-for-context-engineering" },
-    SkillCatalogEntry { id: "skill-creator", name: "Skill Creator", summary: "Describe a workflow and generate a SKILL.md package structure.", category: "engineering", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/skill-creator"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/skill-creator" },
-    SkillCatalogEntry { id: "remotion-best-practices", name: "Remotion Best Practices", summary: "Video-generation workflows, composition structure, and render guidance.", category: "engineering", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/remotion-dev/remotion.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/remotion-dev/remotion" },
-    SkillCatalogEntry { id: "marketing-skills", name: "Marketing Skills", summary: "CRO, copywriting, SEO, email, and growth workflow collection.", category: "marketing", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/coreyhaines31/marketingskills.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/coreyhaines31/marketingskills" },
-    SkillCatalogEntry { id: "claude-seo", name: "Claude SEO", summary: "Site audits, schema validation, and SEO-focused workflows.", category: "marketing", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/AgriciDaniel/claude-seo.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/AgriciDaniel/claude-seo" },
-    SkillCatalogEntry { id: "brand-guidelines", name: "Brand Guidelines", summary: "Encode brand rules so they apply consistently in future work.", category: "marketing", verified: true, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/anthropics/skills.git", source_subpath: Some("skills/brand-guidelines"), package_kind: "directory", docs_url: "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines" },
-    SkillCatalogEntry { id: "notebooklm-integration", name: "NotebookLM Integration", summary: "NotebookLM bridge workflows for summaries, mind maps, and flashcards.", category: "knowledge", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/PleasePrompto/notebooklm-skill.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/PleasePrompto/notebooklm-skill" },
-    SkillCatalogEntry { id: "obsidian-skills", name: "Obsidian Skills", summary: "Vault-native note workflows, tagging, and linking patterns.", category: "knowledge", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/kepano/obsidian-skills.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/kepano/obsidian-skills" },
-    SkillCatalogEntry { id: "excel-mcp-server", name: "Excel MCP Server", summary: "Excel automation and MCP style spreadsheet workflows.", category: "knowledge", verified: false, compatible_agents: &[CLAUDE_AGENT], repo_url: "https://github.com/haris-musa/excel-mcp-server.git", source_subpath: None, package_kind: "repository", docs_url: "https://github.com/haris-musa/excel-mcp-server" },
+    SkillCatalogEntry {
+        id: "pdf",
+        name: "PDF Processing",
+        summary: "Read PDFs, extract tables, fill forms, and merge or split files.",
+        category: "document",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/pdf"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/pdf",
+    },
+    SkillCatalogEntry {
+        id: "docx",
+        name: "DOCX",
+        summary: "Create and edit Word docs with formatting, comments, and tracked changes.",
+        category: "document",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/docx"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/docx",
+    },
+    SkillCatalogEntry {
+        id: "pptx",
+        name: "PPTX",
+        summary: "Generate slide decks with layouts, charts, and speaker notes.",
+        category: "document",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/pptx"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/pptx",
+    },
+    SkillCatalogEntry {
+        id: "xlsx",
+        name: "XLSX",
+        summary: "Spreadsheet formulas, analysis, and charts from natural language.",
+        category: "document",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/xlsx"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/xlsx",
+    },
+    SkillCatalogEntry {
+        id: "doc-coauthoring",
+        name: "Doc Co-Authoring",
+        summary: "Collaborative writing workflow for back-and-forth drafting.",
+        category: "document",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/doc-coauthoring"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/doc-coauthoring",
+    },
+    SkillCatalogEntry {
+        id: "frontend-design",
+        name: "Frontend Design",
+        summary: "Higher-quality UI design systems, typography, and layout instincts.",
+        category: "design",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/frontend-design"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/frontend-design",
+    },
+    SkillCatalogEntry {
+        id: "canvas-design",
+        name: "Canvas Design",
+        summary: "Generate posters, social graphics, and covers from prompts.",
+        category: "design",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/canvas-design"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/canvas-design",
+    },
+    SkillCatalogEntry {
+        id: "algorithmic-art",
+        name: "Algorithmic Art",
+        summary: "Fractal, geometric, and p5.js driven generative art workflows.",
+        category: "design",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/algorithmic-art"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/algorithmic-art",
+    },
+    SkillCatalogEntry {
+        id: "theme-factory",
+        name: "Theme Factory",
+        summary: "Batch generate cohesive color themes from one prompt.",
+        category: "design",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/theme-factory"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/theme-factory",
+    },
+    SkillCatalogEntry {
+        id: "web-artifacts-builder",
+        name: "Web Artifacts Builder",
+        summary: "Generate dashboards, calculators, and other web artifacts quickly.",
+        category: "design",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/web-artifacts-builder"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/web-artifacts-builder",
+    },
+    SkillCatalogEntry {
+        id: "superpowers",
+        name: "Superpowers",
+        summary: "Battle-tested TDD, debugging, and plan-to-execute skill collection.",
+        category: "engineering",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/obra/superpowers.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/obra/superpowers",
+    },
+    SkillCatalogEntry {
+        id: "systematic-debugging",
+        name: "Systematic Debugging",
+        summary: "Root-cause-first debugging workflow from the Superpowers ecosystem.",
+        category: "engineering",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/obra/superpowers.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/obra/superpowers",
+    },
+    SkillCatalogEntry {
+        id: "file-search",
+        name: "File Search",
+        summary: "Ripgrep and tree navigation patterns for codebase search.",
+        category: "engineering",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/massgen/massgen.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/massgen/massgen",
+    },
+    SkillCatalogEntry {
+        id: "context-optimization",
+        name: "Context Optimization",
+        summary: "Token-budget and context compression patterns for agent workflows.",
+        category: "engineering",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/muratcankoylan/agent-skills-for-context-engineering.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/muratcankoylan/agent-skills-for-context-engineering",
+    },
+    SkillCatalogEntry {
+        id: "skill-creator",
+        name: "Skill Creator",
+        summary: "Describe a workflow and generate a SKILL.md package structure.",
+        category: "engineering",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/skill-creator"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/skill-creator",
+    },
+    SkillCatalogEntry {
+        id: "remotion-best-practices",
+        name: "Remotion Best Practices",
+        summary: "Video-generation workflows, composition structure, and render guidance.",
+        category: "engineering",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/remotion-dev/remotion.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/remotion-dev/remotion",
+    },
+    SkillCatalogEntry {
+        id: "marketing-skills",
+        name: "Marketing Skills",
+        summary: "CRO, copywriting, SEO, email, and growth workflow collection.",
+        category: "marketing",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/coreyhaines31/marketingskills.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/coreyhaines31/marketingskills",
+    },
+    SkillCatalogEntry {
+        id: "claude-seo",
+        name: "Claude SEO",
+        summary: "Site audits, schema validation, and SEO-focused workflows.",
+        category: "marketing",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/AgriciDaniel/claude-seo.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/AgriciDaniel/claude-seo",
+    },
+    SkillCatalogEntry {
+        id: "brand-guidelines",
+        name: "Brand Guidelines",
+        summary: "Encode brand rules so they apply consistently in future work.",
+        category: "marketing",
+        verified: true,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/anthropics/skills.git",
+        source_subpath: Some("skills/brand-guidelines"),
+        package_kind: "directory",
+        docs_url: "https://github.com/anthropics/skills/tree/main/skills/brand-guidelines",
+    },
+    SkillCatalogEntry {
+        id: "notebooklm-integration",
+        name: "NotebookLM Integration",
+        summary: "NotebookLM bridge workflows for summaries, mind maps, and flashcards.",
+        category: "knowledge",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/PleasePrompto/notebooklm-skill.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/PleasePrompto/notebooklm-skill",
+    },
+    SkillCatalogEntry {
+        id: "obsidian-skills",
+        name: "Obsidian Skills",
+        summary: "Vault-native note workflows, tagging, and linking patterns.",
+        category: "knowledge",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/kepano/obsidian-skills.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/kepano/obsidian-skills",
+    },
+    SkillCatalogEntry {
+        id: "excel-mcp-server",
+        name: "Excel MCP Server",
+        summary: "Excel automation and MCP style spreadsheet workflows.",
+        category: "knowledge",
+        verified: false,
+        compatible_agents: &[CLAUDE_AGENT],
+        repo_url: "https://github.com/haris-musa/excel-mcp-server.git",
+        source_subpath: None,
+        package_kind: "repository",
+        docs_url: "https://github.com/haris-musa/excel-mcp-server",
+    },
 ];
 
 #[derive(Debug, Deserialize)]
@@ -123,9 +365,7 @@ async fn get_catalog() -> ApiResponse {
     }))
 }
 
-async fn get_installed_skills(
-    Query(query): Query<InstalledSkillsQuery>,
-) -> ApiResponse {
+async fn get_installed_skills(Query(query): Query<InstalledSkillsQuery>) -> ApiResponse {
     let agent = query.agent.as_deref().unwrap_or(CLAUDE_AGENT).trim();
     if agent != CLAUDE_AGENT {
         return ok(json!({
@@ -136,7 +376,12 @@ async fn get_installed_skills(
         }));
     }
 
-    let workspace_path = query.workspace_path.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(PathBuf::from);
+    let workspace_path = query
+        .workspace_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
     match scan_claude_skill_installs(workspace_path.as_deref()) {
         Ok((skills, custom_skills)) => ok(json!({
             "agent": agent,
@@ -188,13 +433,20 @@ async fn install_skill(
     Json(request): Json<SkillInstallRequest>,
 ) -> ApiResponse {
     if request.agent.trim() != CLAUDE_AGENT {
-        return error(StatusCode::BAD_REQUEST, "This first release only supports Claude Code skills");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "This first release only supports Claude Code skills",
+        );
     }
-    let Some(entry) = SKILL_CATALOG.iter().find(|entry| entry.id == request.skill_id) else {
+    let Some(entry) = SKILL_CATALOG
+        .iter()
+        .find(|entry| entry.id == request.skill_id)
+    else {
         return error(StatusCode::NOT_FOUND, "Skill not found");
     };
     let install_scope = request.scope.trim();
-    let target_path = match resolve_install_target(install_scope, request.workspace_path.as_deref()) {
+    let target_path = match resolve_install_target(install_scope, request.workspace_path.as_deref())
+    {
         Ok(path) => path,
         Err(err) => return error(StatusCode::BAD_REQUEST, err),
     };
@@ -203,7 +455,12 @@ async fn install_skill(
         Err(err) => return error(StatusCode::BAD_GATEWAY, err.to_string()),
     };
 
-    if let Some(session_id) = request.session_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(session_id) = request
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         let mut active = state.active_session_skills.lock().await;
         let entry = active.entry(session_id.to_string()).or_default();
         if !entry.iter().any(|value| value == &request.skill_id) {
@@ -220,20 +477,25 @@ async fn install_skill(
     }))
 }
 
-async fn uninstall_skill(
-    Json(request): Json<SkillInstallRequest>,
-) -> ApiResponse {
+async fn uninstall_skill(Json(request): Json<SkillInstallRequest>) -> ApiResponse {
     if request.agent.trim() != CLAUDE_AGENT {
-        return error(StatusCode::BAD_REQUEST, "This first release only supports Claude Code skills");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "This first release only supports Claude Code skills",
+        );
     }
     let install_scope = request.scope.trim();
-    let target_path = match resolve_install_target(install_scope, request.workspace_path.as_deref()) {
+    let target_path = match resolve_install_target(install_scope, request.workspace_path.as_deref())
+    {
         Ok(path) => path,
         Err(err) => return error(StatusCode::BAD_REQUEST, err),
     };
     let skill_dir = target_path.join(request.skill_id.trim());
     if !skill_dir.exists() {
-        return error(StatusCode::NOT_FOUND, "Skill is not installed in that scope");
+        return error(
+            StatusCode::NOT_FOUND,
+            "Skill is not installed in that scope",
+        );
     }
     match fs::remove_dir_all(&skill_dir) {
         Ok(_) => ok(json!({
@@ -249,10 +511,15 @@ fn resolve_install_target(scope: &str, workspace_path: Option<&str>) -> Result<P
     match scope {
         "user" => Ok(resolve_claude_user_skills_dir()),
         "workspace" => {
-            let Some(raw_workspace_path) = workspace_path.map(str::trim).filter(|value| !value.is_empty()) else {
+            let Some(raw_workspace_path) = workspace_path
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
                 return Err("workspacePath is required for workspace scope".to_string());
             };
-            Ok(PathBuf::from(raw_workspace_path).join(".claude").join("skills"))
+            Ok(PathBuf::from(raw_workspace_path)
+                .join(".claude")
+                .join("skills"))
         }
         _ => Err("scope must be 'user' or 'workspace'".to_string()),
     }
@@ -266,14 +533,22 @@ fn resolve_user_home_dir() -> Result<PathBuf, String> {
 }
 
 fn resolve_claude_user_skills_dir() -> PathBuf {
-    resolve_user_home_dir().unwrap_or_else(|_| PathBuf::from(".")).join(".claude").join("skills")
+    resolve_user_home_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".claude")
+        .join("skills")
 }
 
 fn catalog_map() -> HashMap<&'static str, &'static SkillCatalogEntry> {
-    SKILL_CATALOG.iter().map(|entry| (entry.id, entry)).collect()
+    SKILL_CATALOG
+        .iter()
+        .map(|entry| (entry.id, entry))
+        .collect()
 }
 
-fn scan_claude_skill_installs(workspace_path: Option<&Path>) -> Result<(Vec<InstalledSkillStatus>, Vec<Value>), std::io::Error> {
+fn scan_claude_skill_installs(
+    workspace_path: Option<&Path>,
+) -> Result<(Vec<InstalledSkillStatus>, Vec<Value>), std::io::Error> {
     let user_dir = resolve_claude_user_skills_dir();
     let workspace_dir = workspace_path.map(|path| path.join(".claude").join("skills"));
     let catalog_by_id = catalog_map();
@@ -284,12 +559,18 @@ fn scan_claude_skill_installs(workspace_path: Option<&Path>) -> Result<(Vec<Inst
         let user_path = user_dir.join(entry.id);
         let workspace_path_for_skill = workspace_dir.as_ref().map(|path| path.join(entry.id));
         let installed_user = user_path.exists();
-        let installed_workspace = workspace_path_for_skill.as_ref().map(|path| path.exists()).unwrap_or(false);
+        let installed_workspace = workspace_path_for_skill
+            .as_ref()
+            .map(|path| path.exists())
+            .unwrap_or(false);
         let mut install_paths = Vec::new();
         if installed_user {
             install_paths.push(user_path.to_string_lossy().to_string());
         }
-        if let Some(path) = workspace_path_for_skill.as_ref().filter(|path| path.exists()) {
+        if let Some(path) = workspace_path_for_skill
+            .as_ref()
+            .filter(|path| path.exists())
+        {
             install_paths.push(path.to_string_lossy().to_string());
         }
         results.push(InstalledSkillStatus {
@@ -336,7 +617,12 @@ async fn perform_skill_install(
     }
 
     let clone_status = Command::new("git")
-        .args(["clone", "--depth=1", entry.repo_url, temp_root.to_string_lossy().as_ref()])
+        .args([
+            "clone",
+            "--depth=1",
+            entry.repo_url,
+            temp_root.to_string_lossy().as_ref(),
+        ])
         .status()?;
     if !clone_status.success() {
         return Err(anyhow::anyhow!("Failed to clone skill repository"));
@@ -347,7 +633,9 @@ async fn perform_skill_install(
         None => temp_root.clone(),
     };
     if !source_root.exists() {
-        return Err(anyhow::anyhow!("Skill source path was not found in the repository"));
+        return Err(anyhow::anyhow!(
+            "Skill source path was not found in the repository"
+        ));
     }
 
     copy_dir_recursive(&source_root, &install_target)?;
