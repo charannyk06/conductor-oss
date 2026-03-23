@@ -23,6 +23,26 @@ export type BridgeAutoUpdateState = {
   message: string | null;
 };
 
+export function formatBridgeAutoUpdatePhaseLabel(phase: BridgeAutoUpdatePhase): string {
+  switch (phase) {
+    case "checking":
+      return "Checking";
+    case "updating":
+      return "Updating";
+    case "restarting":
+      return "Restarting";
+    case "completed":
+      return "Completed";
+    case "skipped":
+      return "Skipped";
+    case "failed":
+      return "Failed";
+    case "idle":
+    default:
+      return "Idle";
+  }
+}
+
 export type BridgeAutoUpdateDevice = {
   device_id: string;
   device_name: string;

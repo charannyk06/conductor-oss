@@ -89,9 +89,66 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
     const maxTouchPoints = typeof navigator === 'undefined' ? 0 : navigator.maxTouchPoints || 0;
     if (!compactViewport && !coarsePointer && maxTouchPoints <= 0) return;
 
+    let scrollHost = null;
+    let followBottom = true;
+    let lastStableScrollTop = 0;
+    let active = false;
+    let lastX = 0;
+    let lastY = 0;
+    let touchStartAt = 0;
+    let touchMoved = false;
+    const LONG_PRESS_THRESHOLD_MS = 300;
+
+    const resolveXtermCore = () => window.term?._core || window.term?.core || null;
+    const resolveCoreMouseService = () => {
+        const core = resolveXtermCore();
+        return core?.coreMouseService || core?._coreMouseService || null;
+    };
+
+    const resolveMouseTrackingMode = () => {
+        const publicMode = window.term?.modes?.mouseTrackingMode;
+        if (typeof publicMode === 'string' && publicMode.length > 0) {
+            return publicMode.toLowerCase();
+        }
+
+        const coreMouseService = resolveCoreMouseService();
+        const activeProtocol = coreMouseService?.activeProtocol;
+        if (typeof activeProtocol === 'string' && activeProtocol.length > 0) {
+            return activeProtocol.toLowerCase();
+        }
+
+        return coreMouseService?.areMouseEventsActive ? 'unknown' : 'none';
+    };
+
+    const isMouseProtocolActive = () => {
+        return resolveMouseTrackingMode() !== 'none';
+    };
+
+    const syncTouchActionMode = (forceActive) => {
+        const activeMode = typeof forceActive === 'boolean' ? forceActive : isMouseProtocolActive();
+        document.documentElement.classList.toggle('conductor-ttyd-wheel-mode', activeMode);
+        return activeMode;
+    };
+
+    const stickToBottomIfNeeded = () => {
+        if (!scrollHost) {
+            return;
+        }
+
+        if (followBottom) {
+            scrollHost.scrollTop = scrollHost.scrollHeight;
+            lastStableScrollTop = scrollHost.scrollTop;
+            return;
+        }
+
+        if (scrollHost.scrollTop !== lastStableScrollTop) {
+            scrollHost.scrollTop = lastStableScrollTop;
+        }
+    };
+
     const bindTouchScroll = () => {
     const terminalRoot = document.querySelector('.xterm');
-    const scrollHost = document.querySelector('.xterm-viewport')
+    const nextScrollHost = document.querySelector('.xterm-viewport')
         || document.querySelector('.xterm-scrollable-element');
     if (!terminalRoot) {
         return false;
@@ -99,20 +156,12 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
     if (terminalRoot.dataset.conductorTouchShimBound === 'true') {
         return false;
     }
-    if (!scrollHost) {
+    if (!nextScrollHost) {
         return false;
     }
 
     terminalRoot.dataset.conductorTouchShimBound = 'true';
-
-    let followBottom = true;
-    let lastStableScrollTop = scrollHost.scrollTop;
-    let active = false;
-    let lastX = 0;
-    let lastY = 0;
-    let touchStartAt = 0;
-    let touchMoved = false;
-    const LONG_PRESS_THRESHOLD_MS = 300;
+    scrollHost = nextScrollHost;
 
     const reset = () => {
       active = false;
@@ -124,18 +173,6 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
     const syncFollowBottom = () => {
         followBottom = isScrollHostAtBottom();
         lastStableScrollTop = scrollHost.scrollTop;
-    };
-
-    const stickToBottomIfNeeded = () => {
-        if (followBottom) {
-            scrollHost.scrollTop = scrollHost.scrollHeight;
-            lastStableScrollTop = scrollHost.scrollTop;
-            return;
-        }
-
-        if (scrollHost.scrollTop !== lastStableScrollTop) {
-            scrollHost.scrollTop = lastStableScrollTop;
-        }
     };
 
     const scrollTerminalViewport = (deltaY) => {
@@ -150,37 +187,6 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
         lastStableScrollTop = scrollHost.scrollTop;
         return true;
     };
-
-    const resolveXtermCore = () => window.term?._core || window.term?.core || null;
-    const resolveCoreMouseService = () => {
-        const core = resolveXtermCore();
-        return core?.coreMouseService || core?._coreMouseService || null;
-        };
-
-        const resolveMouseTrackingMode = () => {
-            const publicMode = window.term?.modes?.mouseTrackingMode;
-            if (typeof publicMode === 'string' && publicMode.length > 0) {
-                return publicMode.toLowerCase();
-            }
-
-            const coreMouseService = resolveCoreMouseService();
-            const activeProtocol = coreMouseService?.activeProtocol;
-            if (typeof activeProtocol === 'string' && activeProtocol.length > 0) {
-                return activeProtocol.toLowerCase();
-            }
-
-            return coreMouseService?.areMouseEventsActive ? 'unknown' : 'none';
-        };
-
-        const isMouseProtocolActive = () => {
-            return resolveMouseTrackingMode() !== 'none';
-        };
-
-        const syncTouchActionMode = (forceActive) => {
-            const active = typeof forceActive === 'boolean' ? forceActive : isMouseProtocolActive();
-            document.documentElement.classList.toggle('conductor-ttyd-wheel-mode', active);
-            return active;
-        };
 
         const dispatchCoreMouseWheel = (deltaY, clientX, clientY) => {
             const core = resolveXtermCore();

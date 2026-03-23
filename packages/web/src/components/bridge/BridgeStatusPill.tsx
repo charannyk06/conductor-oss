@@ -10,6 +10,7 @@ import {
   isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
   runBridgeAutoUpdate,
+  formatBridgeAutoUpdatePhaseLabel,
   type BridgeAutoUpdateState,
 } from "@/lib/bridgeAppUpdate";
 import { isLegacyBridgeBuildErrorMessage } from "@/lib/bridgeBuildCompatibility";
@@ -110,8 +111,19 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     message: null,
   });
   const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
+  const relayUrl = resolveBridgeRelayUrl();
+  const relayConfigured = Boolean(relayUrl);
 
   const refreshDevices = useCallback(async (showSpinner: boolean) => {
+    if (!relayConfigured) {
+      if (showSpinner) {
+        setLoading(false);
+      }
+      setDevices([]);
+      setError(null);
+      return;
+    }
+
     if (showSpinner) {
       setLoading(true);
     }
@@ -128,9 +140,16 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [relayConfigured]);
 
   useEffect(() => {
+    if (!relayConfigured) {
+      setLoading(false);
+      setDevices([]);
+      setError(null);
+      return;
+    }
+
     let cancelled = false;
     let pollTimer: number | null = null;
 
@@ -152,7 +171,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
         window.clearInterval(pollTimer);
       }
     };
-  }, [refreshDevices]);
+  }, [relayConfigured, refreshDevices]);
 
   useEffect(() => {
     const syncRecentPairing = () => {
@@ -181,7 +200,6 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
   const connectedDevices = devices.filter((device) => device.connected);
   const selectedBridgeId = searchParams.get("bridge")?.trim() || null;
   const dashboardUrl = typeof window === "undefined" ? "" : window.location.origin;
-  const relayUrl = resolveBridgeRelayUrl();
   const selectedBridgeDevice = selectedBridgeId
     ? devices.find((device) => device.device_id === selectedBridgeId) ?? null
     : null;
@@ -190,7 +208,9 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
     : null;
   const connected = connectedDevices.length > 0;
-  const title = error
+  const title = !relayConfigured
+    ? "Bridge relay URL is not configured"
+    : error
     ?? (connected
       ? `${connectedDevices.length} bridge${connectedDevices.length === 1 ? "" : "s"} online`
       : devices.length > 0
@@ -348,7 +368,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
             ) : null}
             {autoUpdate.message ? (
               <div className={cn(
-                "mt-2 text-[12px] leading-5",
+                "mt-2 flex flex-wrap items-center gap-2 text-[12px] leading-5",
                 autoUpdate.phase === "failed"
                   ? "text-[var(--vk-red)]"
                   : autoUpdate.phase === "skipped"
@@ -356,7 +376,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                     : "text-[var(--vk-text-faint)]",
               )}
               >
-                {autoUpdate.message}
+                <span className="inline-flex items-center rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">
+                  {formatBridgeAutoUpdatePhaseLabel(autoUpdate.phase)}
+                </span>
+                <span>{autoUpdate.message}</span>
               </div>
             ) : null}
           </div>
@@ -395,7 +418,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                         </div>
                         {autoUpdate.message && autoUpdate.deviceId === device.device_id ? (
                           <div className={cn(
-                            "mt-1 text-[11px] leading-5",
+                            "mt-1 flex flex-wrap items-center gap-2 text-[11px] leading-5",
                             autoUpdate.phase === "failed"
                               ? "text-[var(--vk-red)]"
                               : autoUpdate.phase === "skipped"
@@ -403,7 +426,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                                 : "text-[var(--vk-text-faint)]",
                           )}
                           >
-                            {autoUpdate.message}
+                            <span className="inline-flex items-center rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">
+                              {formatBridgeAutoUpdatePhaseLabel(autoUpdate.phase)}
+                            </span>
+                            <span>{autoUpdate.message}</span>
                           </div>
                         ) : null}
                         {serviceAction.message && serviceAction.deviceId === device.device_id ? (

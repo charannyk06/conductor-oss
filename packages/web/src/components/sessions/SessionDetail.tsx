@@ -329,7 +329,7 @@ export function SessionDetail({
 
           <TabsContent
             value="skills"
-            className="min-h-0 h-full min-w-0 w-full overflow-y-auto overscroll-contain focus-visible:outline-none lg:overflow-hidden [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+            className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
           >
             <SessionSkills
               session={session}
