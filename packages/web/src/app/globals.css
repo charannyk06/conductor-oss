@@ -201,6 +201,7 @@ a:hover {
   .overflow-y-auto,
   .overflow-auto {
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   }
 }
 
