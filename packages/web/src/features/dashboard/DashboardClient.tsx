@@ -263,6 +263,8 @@ type NewWorkspacePayload = {
   mode: "git" | "local";
   projectId?: string;
   agent: string;
+  agentModel?: string;
+  agentReasoningEffort?: string;
   defaultBranch: string;
   useWorktree?: boolean;
   gitUrl?: string;
@@ -2204,16 +2206,18 @@ export default function DashboardClient({
       </AppShell>
 
       {newWorkspaceOpen ? (
-        <NewWorkspaceDialog
-          open={newWorkspaceOpen}
-          onClose={handleCloseNewWorkspaceDialog}
-          onCreate={handleCreateWorkspace}
-          creating={creatingWorkspace}
-          error={newWorkspaceError}
-          defaultAgent={resolvedCodingAgent}
-          agentOptions={agentOptions}
-          bridgeId={effectiveBridgeId}
-        />
+      <NewWorkspaceDialog
+        open={newWorkspaceOpen}
+        onClose={handleCloseNewWorkspaceDialog}
+        onCreate={handleCreateWorkspace}
+        creating={creatingWorkspace}
+        error={newWorkspaceError}
+        defaultAgent={resolvedCodingAgent}
+        agentOptions={agentOptions}
+        modelAccess={resolvedPreferences.modelAccess}
+        runtimeModelCatalogs={runtimeModelCatalogs}
+        bridgeId={effectiveBridgeId}
+      />
       ) : null}
 
       {preferencesDialogOpen || onboardingRequired ? (
@@ -2479,6 +2483,22 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     if (!selectedModelValue) return "Default";
     return modelMenuOptions.find((option) => option.id === selectedModelValue)?.label ?? selectedModelValue;
   }, [modelMenuOptions, selectedAgentState, selectedModelValue]);
+  const availableReasoningOptions = useMemo(
+    () => getSelectableAgentReasoningOptions(
+      selectedAgent,
+      modelAccess,
+      runtimeModelCatalogs,
+      selectedModelValue,
+    ),
+    [modelAccess, runtimeModelCatalogs, selectedAgent, selectedModelValue],
+  );
+  const selectedReasoningValue = resolveReasoningSelectionValue(modelSelection) ?? "";
+  const selectedReasoningLabel = useMemo(() => {
+    const selected = availableReasoningOptions.find((option) => option.id === selectedReasoningValue);
+    if (selected) return selected.label;
+    if (selectedReasoningValue) return selectedReasoningValue;
+    return availableReasoningOptions[0]?.label ?? "Default";
+  }, [availableReasoningOptions, selectedReasoningValue]);
   const lightMenuClass = "z-50 min-w-[240px] max-w-[calc(100vw-32px)] rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)] sm:max-w-none";
   const scrollMenuClass = `${lightMenuClass} max-h-[min(360px,50vh)] overflow-y-auto`;
   const lightMenuItemClass = "flex min-h-[44px] cursor-default items-center gap-2 rounded-[3px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)] sm:min-h-[36px]";
@@ -2510,6 +2530,26 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     || selectedTask?.id
     || "Link task";
   const selectedTaskSubtitle = selectedTask ? getLinkedTaskTitle(selectedTask.text) : "Choose a task, bug, or issue from this project's board";
+  const updateSelectedModel = (nextModel: string) => {
+    const nextReasoningOptions = getSelectableAgentReasoningOptions(
+      selectedAgent,
+      modelAccess,
+      runtimeModelCatalogs,
+      nextModel,
+    );
+    setModelSelection({
+      catalogModel: nextModel,
+      customModel: "",
+      reasoningEffort: nextReasoningOptions.some((option) => option.id === modelSelection.reasoningEffort)
+        ? modelSelection.reasoningEffort
+        : getSelectableDefaultReasoningEffort(
+          selectedAgent,
+          modelAccess,
+          runtimeModelCatalogs,
+          nextModel,
+        ),
+    });
+  };
 
   return (
     <section className="flex h-full min-h-0 items-start justify-center overflow-auto bg-[var(--vk-bg-main)] px-3 py-4 sm:items-center sm:px-6 sm:py-6">
@@ -2726,6 +2766,43 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                     </DropdownMenu.Portal>
                   </DropdownMenu.Root>
 
+                  {availableReasoningOptions.length > 0 ? (
+                    <DropdownMenu.Root>
+                      <DropdownMenu.Trigger asChild>
+                        <button
+                          type="button"
+                          aria-label="Select reasoning effort"
+                          className="inline-flex h-[29px] items-center gap-[4px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <span>{`Reasoning: ${selectedReasoningLabel}`}</span>
+                          <ChevronDown className="h-[10px] w-[10px] text-[var(--vk-text-muted)]" />
+                        </button>
+                      </DropdownMenu.Trigger>
+                      <DropdownMenu.Portal>
+                        <DropdownMenu.Content align="start" sideOffset={6} className={lightMenuClass}>
+                          <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
+                            Reasoning
+                          </p>
+                          {availableReasoningOptions.map((option) => (
+                            <DropdownMenu.Item
+                              key={option.id}
+                              onSelect={() => setModelSelection({
+                                ...modelSelection,
+                                reasoningEffort: option.id,
+                              })}
+                              className={lightMenuItemClass}
+                            >
+                              <span>{option.label}</span>
+                              <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                                {selectedReasoningValue === option.id ? <Check className="h-4 w-4" /> : null}
+                              </span>
+                            </DropdownMenu.Item>
+                          ))}
+                        </DropdownMenu.Content>
+                      </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                  ) : null}
+
                   <DropdownMenu.Root>
                     <DropdownMenu.Trigger asChild>
                       <button
@@ -2757,16 +2834,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                         {modelMenuOptions.map((option) => (
                           <DropdownMenu.Item
                             key={option.id}
-                            onSelect={() => setModelSelection({
-                              catalogModel: option.id,
-                              customModel: "",
-                              reasoningEffort: getSelectableDefaultReasoningEffort(
-                                selectedAgent,
-                                modelAccess,
-                                runtimeModelCatalogs,
-                                option.id,
-                              ),
-                            })}
+                            onSelect={() => updateSelectedModel(option.id)}
                             className={lightMenuItemClass}
                           >
                             <span>{option.label}</span>

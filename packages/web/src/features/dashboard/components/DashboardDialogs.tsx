@@ -175,6 +175,8 @@ export type NewWorkspacePayload = {
   mode: "git" | "local";
   projectId?: string;
   agent: string;
+  agentModel?: string;
+  agentReasoningEffort?: string;
   defaultBranch: string;
   useWorktree?: boolean;
   gitUrl?: string;
@@ -869,6 +871,8 @@ export function NewWorkspaceDialog({
   error,
   defaultAgent,
   agentOptions,
+  modelAccess,
+  runtimeModelCatalogs,
   bridgeId,
 }: {
   open: boolean;
@@ -878,6 +882,8 @@ export function NewWorkspaceDialog({
   error: string | null;
   defaultAgent: string;
   agentOptions: string[];
+  modelAccess: ModelAccessPreferences;
+  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   bridgeId?: string | null;
 }) {
   const [mode, setMode] = useState<"git" | "local">("git");
@@ -889,6 +895,7 @@ export function NewWorkspaceDialog({
   const [clonePath, setClonePath] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("main");
   const [agent, setAgent] = useState(defaultAgent);
+  const [modelSelection, setModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
   const [useWorktree, setUseWorktree] = useState(false);
   const [initializeGit, setInitializeGit] = useState(true);
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
@@ -916,6 +923,7 @@ export function NewWorkspaceDialog({
     setInitializeGit(true);
     setUseWorktree(false);
     setAgent(defaultAgent);
+    setModelSelection(emptyModelSelection());
     setGithubRepos([]);
     setGithubReposLoaded(false);
     setGithubReposError(null);
@@ -927,6 +935,27 @@ export function NewWorkspaceDialog({
     setFolderPickerOpen(false);
     setFolderPickerTarget("local");
   }, [defaultAgent, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    setModelSelection((current) => {
+      const next = buildModelSelection(
+        agent,
+        modelAccess,
+        runtimeModelCatalogs,
+        resolveModelSelectionValue(current) ?? null,
+        resolveReasoningSelectionValue(current) ?? null,
+      );
+      if (
+        current.catalogModel === next.catalogModel
+        && current.customModel === next.customModel
+        && current.reasoningEffort === next.reasoningEffort
+      ) {
+        return current;
+      }
+      return next;
+    });
+  }, [agent, modelAccess, open, runtimeModelCatalogs]);
 
   useEffect(() => {
     if (!open) return;
@@ -1160,6 +1189,8 @@ export function NewWorkspaceDialog({
             mode,
             projectId: projectId.trim() || undefined,
             agent,
+            agentModel: resolveModelSelectionValue(modelSelection) ?? "",
+            agentReasoningEffort: resolveReasoningSelectionValue(modelSelection) ?? "",
             defaultBranch: defaultBranch.trim(),
             useWorktree,
             gitUrl: gitUrl.trim(),
@@ -1169,6 +1200,8 @@ export function NewWorkspaceDialog({
             mode,
             projectId: projectId.trim() || undefined,
             agent,
+            agentModel: resolveModelSelectionValue(modelSelection) ?? "",
+            agentReasoningEffort: resolveReasoningSelectionValue(modelSelection) ?? "",
             defaultBranch: defaultBranch.trim(),
             useWorktree,
             path: localPath.trim(),
@@ -1607,6 +1640,31 @@ export function NewWorkspaceDialog({
                     </span>
                   ) : null}
                 </div>
+
+                {supportsAgentModelSelection(agent) ? (
+                  <div className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3 sm:p-4">
+                    <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                      <div>
+                        <p className="text-[13px] font-medium text-[var(--vk-text-strong)]">
+                          Agent defaults
+                        </p>
+                        <p className="mt-0.5 text-[11px] leading-5 text-[var(--vk-text-muted)]">
+                          Choose the model and reasoning this workspace should inherit when sessions launch.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="mt-3">
+                      <AgentModelSelector
+                        compact
+                        agent={agent}
+                        modelAccess={modelAccess}
+                        runtimeModelCatalogs={runtimeModelCatalogs}
+                        selection={modelSelection}
+                        onChange={setModelSelection}
+                      />
+                    </div>
+                  </div>
+                ) : null}
 
                 <details className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
                   <summary className="cursor-pointer list-none px-3 py-3 text-[13px] text-[var(--vk-text-normal)] marker:hidden">

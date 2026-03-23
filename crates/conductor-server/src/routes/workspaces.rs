@@ -50,6 +50,8 @@ struct CreateWorkspaceBody {
     mode: String,
     project_id: Option<String>,
     agent: Option<String>,
+    agent_model: Option<String>,
+    agent_reasoning_effort: Option<String>,
     default_branch: Option<String>,
     use_worktree: Option<bool>,
     git_url: Option<String>,
@@ -72,6 +74,8 @@ async fn list_workspaces(State(state): State<Arc<AppState>>) -> ApiResponse {
                 "path": resolve_path(&state.workspace_path, &project.path).to_string_lossy().to_string(),
                 "defaultBranch": project.default_branch.clone(),
                 "agent": project.agent.clone().unwrap_or_else(|| config.preferences.coding_agent.clone()),
+                "agentModel": project.agent_config.model.clone(),
+                "agentReasoningEffort": project.agent_config.reasoning_effort.clone(),
             })
         })
         .collect::<Vec<_>>();
@@ -125,6 +129,14 @@ async fn create_workspace(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "main".to_string());
     let requested_agent = body.agent.clone().filter(|value| !value.trim().is_empty());
+    let requested_model = body
+        .agent_model
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let requested_reasoning_effort = body
+        .agent_reasoning_effort
+        .clone()
+        .filter(|value| !value.trim().is_empty());
 
     if mode == "git" {
         let Some(git_url) = body
@@ -175,6 +187,8 @@ async fn create_workspace(
             state,
             &project_id,
             requested_agent,
+            requested_model,
+            requested_reasoning_effort,
             Some(git_url.to_string()),
             canonical_path,
             default_branch,
@@ -218,6 +232,8 @@ async fn create_workspace(
             state,
             &project_id,
             requested_agent,
+            requested_model,
+            requested_reasoning_effort,
             repo,
             canonical_path,
             default_branch,
@@ -231,6 +247,8 @@ async fn persist_workspace(
     state: Arc<AppState>,
     project_id: &str,
     agent: Option<String>,
+    agent_model: Option<String>,
+    agent_reasoning_effort: Option<String>,
     repo: Option<String>,
     path: PathBuf,
     default_branch: String,
@@ -251,6 +269,8 @@ async fn persist_workspace(
     project.path = path.to_string_lossy().to_string();
     project.default_branch = default_branch.clone();
     project.agent = agent;
+    project.agent_config.model = agent_model;
+    project.agent_config.reasoning_effort = agent_reasoning_effort;
     project.runtime = Some("ttyd".to_string());
     project.workspace = Some(if use_worktree {
         "worktree".to_string()
