@@ -869,7 +869,7 @@ export function SessionOverview({ session, sessionId, active }: SessionOverviewP
       </div>
 
       {/* Tab content */}
-      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain">
         {innerTab === "changes" ? (
           <SessionDiff key={sessionId} sessionId={sessionId} active={active} />
         ) : (

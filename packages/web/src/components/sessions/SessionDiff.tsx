@@ -1067,7 +1067,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
         </label>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {loading && !payload.hasDiff && !error ? (
           <div className="flex h-full items-center justify-center p-8 text-[13px] text-[var(--vk-text-muted)]">
             Loading session diff...
@@ -1161,7 +1161,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
               })}
             </div>
 
-            <div className="min-h-0 overflow-hidden">
+            <div className="min-h-0 overflow-y-auto overscroll-contain">
               {!selectedEntry ? (
                 <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
                   <FileCode2 className="h-8 w-8 text-[var(--vk-text-muted)]" />
