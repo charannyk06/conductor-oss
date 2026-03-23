@@ -1,0 +1,311 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowUpRight, CheckCircle2, Cpu, Loader2, Search, Wrench } from "lucide-react";
+import type { DashboardSession } from "@/lib/types";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
+import type { CustomInstalledSkill, InstalledSkillStatus, SkillCatalogEntry } from "@/lib/skills";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { Card, CardContent, CardHeader } from "@/components/ui/Card";
+import { ScrollArea } from "@/components/ui/ScrollArea";
+
+type SessionSkillsProps = {
+  session: DashboardSession;
+  sessionId: string;
+  active: boolean;
+};
+
+type InstallScope = "user" | "workspace";
+
+type ToastState = { kind: "success" | "error"; message: string } | null;
+
+function detectSessionAgent(session: DashboardSession): string {
+  return (
+    session.metadata["agent"]?.trim() ||
+    session.metadata["executor"]?.trim() ||
+    session.metadata["runtimeAgent"]?.trim() ||
+    ""
+  );
+}
+
+function detectWorkspacePath(session: DashboardSession): string | null {
+  return session.metadata["workspacePath"]?.trim() || null;
+}
+
+export function SessionSkills({ session, sessionId, active }: SessionSkillsProps) {
+  const bridgeId = session.bridgeId ?? null;
+  const agent = detectSessionAgent(session);
+  const workspacePath = detectWorkspacePath(session);
+  const agentSupported = agent === "claude-code";
+  const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<InstallScope>(workspacePath ? "workspace" : "user");
+  const [catalog, setCatalog] = useState<SkillCatalogEntry[]>([]);
+  const [installed, setInstalled] = useState<Record<string, InstalledSkillStatus>>({});
+  const [activeSkillIds, setActiveSkillIds] = useState<string[]>([]);
+  const [customSkills, setCustomSkills] = useState<CustomInstalledSkill[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [actionSkillId, setActionSkillId] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState>(null);
+
+  const refresh = useCallback(async () => {
+    if (!active) return;
+    setLoading(true);
+    setToast(null);
+    try {
+      const [catalogRes, installedRes, activeRes] = await Promise.all([
+        fetch("/api/skills/catalog", { cache: "no-store" }),
+        fetch(
+          withBridgeQuery(
+            `/api/skills/installed?agent=${encodeURIComponent(agent || "claude-code")}${workspacePath ? `&workspacePath=${encodeURIComponent(workspacePath)}` : ""}`,
+            bridgeId,
+          ),
+          { cache: "no-store" },
+        ),
+        fetch(
+          withBridgeQuery(`/api/skills/session-active?sessionId=${encodeURIComponent(sessionId)}`, bridgeId),
+          { cache: "no-store" },
+        ),
+      ]);
+      const catalogPayload = await catalogRes.json();
+      const installedPayload = await installedRes.json();
+      const activePayload = await activeRes.json();
+      const installedMap = Object.fromEntries(
+        ((installedPayload.skills as InstalledSkillStatus[] | undefined) ?? []).map((entry) => [entry.skillId, entry]),
+      );
+      setCatalog((catalogPayload.skills as SkillCatalogEntry[] | undefined) ?? []);
+      setInstalled(installedMap);
+      setCustomSkills((installedPayload.customSkills as CustomInstalledSkill[] | undefined) ?? []);
+      setActiveSkillIds((activePayload.skillIds as string[] | undefined) ?? []);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to load skills";
+      setToast({ kind: "error", message });
+    } finally {
+      setLoading(false);
+    }
+  }, [active, agent, bridgeId, sessionId, workspacePath]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const filteredCatalog = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return catalog.filter((entry) => {
+      if (needle.length === 0) return true;
+      return (
+        entry.name.toLowerCase().includes(needle) ||
+        entry.summary.toLowerCase().includes(needle) ||
+        entry.category.toLowerCase().includes(needle)
+      );
+    });
+  }, [catalog, query]);
+
+  const runAction = useCallback(async (skill: SkillCatalogEntry, mode: "install" | "activate" | "deactivate" | "uninstall") => {
+    setActionSkillId(skill.id);
+    setToast(null);
+    try {
+      const pathname =
+        mode === "install"
+          ? "/api/skills/install"
+          : mode === "activate"
+            ? "/api/skills/activate"
+            : mode === "deactivate"
+              ? "/api/skills/deactivate"
+              : "/api/skills/uninstall";
+      const payload =
+        mode === "activate" || mode === "deactivate"
+          ? { sessionId, skillId: skill.id }
+          : {
+              skillId: skill.id,
+              agent: agent || "claude-code",
+              scope,
+              workspacePath,
+              sessionId,
+            };
+      const response = await fetch(withBridgeQuery(pathname, bridgeId), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.error || "Skill action failed");
+      }
+      const messages: Record<typeof mode, string> = {
+        install: `${skill.name} installed and activated for this session.`,
+        activate: `${skill.name} is active for this session.`,
+        deactivate: `${skill.name} is no longer active for this session.`,
+        uninstall: `${skill.name} was removed from ${scope} scope.`,
+      };
+      setToast({ kind: "success", message: messages[mode] });
+      await refresh();
+    } catch (error) {
+      setToast({ kind: "error", message: error instanceof Error ? error.message : "Skill action failed" });
+    } finally {
+      setActionSkillId(null);
+    }
+  }, [agent, bridgeId, refresh, scope, sessionId, workspacePath]);
+
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+      <Card>
+        <CardHeader className="space-y-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-1.5">
+              <h2 className="text-[15px] font-semibold text-[var(--vk-text-normal)]">Skills</h2>
+              <p className="text-[13px] text-[var(--vk-text-muted)]">
+                Install Claude-style skills from the curated catalog on the paired device, detect what is already installed, and mark a skill as active for this session.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 text-[12px] text-[var(--vk-text-muted)] lg:items-end">
+              <div className="flex items-center gap-2"><Cpu className="h-3.5 w-3.5" /> Agent: <span className="font-medium text-[var(--vk-text-normal)]">{agent || "unknown"}</span></div>
+              <div>Device: <span className="font-medium text-[var(--vk-text-normal)]">{bridgeId ?? "local"}</span></div>
+              <div>Workspace: <span className="font-medium text-[var(--vk-text-normal)]">{workspacePath ?? "Unavailable"}</span></div>
+            </div>
+          </div>
+          <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+            <label className="flex items-center gap-2 rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
+              <Search className="h-3.5 w-3.5" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search skills"
+                className="w-full bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-[12px] text-[var(--vk-text-muted)]">
+              Install scope
+              <select
+                value={scope}
+                onChange={(event) => setScope(event.target.value as InstallScope)}
+                className="rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)]"
+              >
+                <option value="user">User, ~/.claude/skills</option>
+                <option value="workspace" disabled={!workspacePath}>Workspace, .claude/skills</option>
+              </select>
+            </label>
+          </div>
+          {!agentSupported ? (
+            <div className="rounded-[14px] border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[12px] text-amber-100">
+              This first release installs Claude Code skills only. Current session agent is <span className="font-semibold">{agent || "unknown"}</span>.
+            </div>
+          ) : null}
+          {toast ? (
+            <div className={`rounded-[14px] border px-3 py-2 text-[12px] ${toast.kind === "error" ? "border-red-400/35 bg-red-400/10 text-red-100" : "border-emerald-400/35 bg-emerald-400/10 text-emerald-100"}`}>
+              {toast.message}
+            </div>
+          ) : null}
+        </CardHeader>
+      </Card>
+
+      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <ScrollArea className="min-h-0 rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-surface)] p-3">
+          <div className="space-y-3 pr-2">
+            {loading ? (
+              <div className="flex min-h-[220px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading skills...
+              </div>
+            ) : filteredCatalog.length === 0 ? (
+              <div className="flex min-h-[220px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+                No matching skills found.
+              </div>
+            ) : (
+              filteredCatalog.map((skill) => {
+                const installState = installed[skill.id];
+                const isInstalled = Boolean(installState?.installedUser || installState?.installedWorkspace);
+                const isActive = activeSkillIds.includes(skill.id);
+                const working = actionSkillId === skill.id;
+                const incompatible = !skill.compatibleAgents.includes(agent || "claude-code");
+                return (
+                  <Card key={skill.id} className="border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+                    <CardHeader className="space-y-3">
+                      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-[14px] font-semibold text-[var(--vk-text-normal)]">{skill.name}</h3>
+                            {skill.verified ? <Badge>Verified</Badge> : <Badge variant="outline">Community</Badge>}
+                            <Badge variant="outline">{skill.category}</Badge>
+                            {isInstalled ? <Badge variant="outline">Installed</Badge> : null}
+                            {isActive ? <Badge variant="outline">Active now</Badge> : null}
+                            {incompatible ? <Badge variant="outline">Unsupported</Badge> : null}
+                          </div>
+                          <p className="text-[13px] text-[var(--vk-text-muted)]">{skill.summary}</p>
+                        </div>
+                        <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">
+                          <a
+                            href={skill.docsUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[12px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                          >
+                            Docs <ArrowUpRight className="h-3 w-3" />
+                          </a>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-[12px] text-[var(--vk-text-muted)]">
+                        {skill.compatibleAgents.map((compatibleAgent) => (
+                          <Badge key={compatibleAgent} variant="outline">{compatibleAgent}</Badge>
+                        ))}
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {installState?.installPaths?.length ? (
+                        <div className="rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-surface)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                          Installed at: {installState.installPaths.join(" • ")}
+                        </div>
+                      ) : null}
+                      <div className="flex flex-wrap gap-2">
+                        {isInstalled ? (
+                          isActive ? (
+                            <Button type="button" variant="outline" size="sm" disabled={working} onClick={() => void runAction(skill, "deactivate")}>
+                              {working ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Wrench className="mr-1 h-3.5 w-3.5" />} Deactivate
+                            </Button>
+                          ) : (
+                            <Button type="button" size="sm" disabled={working || incompatible} onClick={() => void runAction(skill, "activate")}>
+                              {working ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1 h-3.5 w-3.5" />} Use in session
+                            </Button>
+                          )
+                        ) : (
+                          <Button type="button" size="sm" disabled={working || incompatible || !agentSupported} onClick={() => void runAction(skill, "install")}>
+                            {working ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1 h-3.5 w-3.5" />} Install and use
+                          </Button>
+                        )}
+                        {isInstalled ? (
+                          <Button type="button" variant="outline" size="sm" disabled={working} onClick={() => void runAction(skill, "uninstall")}>
+                            {working ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null} Uninstall
+                          </Button>
+                        ) : null}
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })
+            )}
+          </div>
+        </ScrollArea>
+
+        <Card className="min-h-0 border-[var(--vk-border)] bg-[var(--vk-bg-surface)]">
+          <CardHeader className="flex-col items-start gap-1.5">
+            <h3 className="text-[14px] font-semibold text-[var(--vk-text-normal)]">Detected custom skills</h3>
+            <p className="text-[13px] text-[var(--vk-text-muted)]">
+              Extra skill folders already present on the paired machine that do not match the curated catalog.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-2 text-[13px] text-[var(--vk-text-muted)]">
+            {customSkills.length === 0 ? (
+              <p>No custom skill folders detected.</p>
+            ) : (
+              customSkills.map((skill) => (
+                <div key={skill.id} className="rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2">
+                  <div className="font-medium text-[var(--vk-text-normal)]">{skill.name}</div>
+                  <div className="text-[12px] text-[var(--vk-text-muted)]">Detected from {skill.source}</div>
+                </div>
+              ))
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}

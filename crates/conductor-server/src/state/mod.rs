@@ -124,6 +124,7 @@ pub struct AppState {
     runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
     dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
     feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
+    pub active_session_skills: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl AppState {
@@ -153,6 +154,7 @@ impl AppState {
             runtime_status_cache: Mutex::new(HashMap::new()),
             dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
             feed_payload_cache: Mutex::new(HashMap::new()),
+            active_session_skills: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.load_sessions_from_disk().await;

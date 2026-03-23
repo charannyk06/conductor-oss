@@ -15,6 +15,7 @@ pub mod projects;
 pub mod repositories;
 pub mod session_workspace;
 pub mod sessions;
+pub mod skills;
 pub mod tasks;
 pub mod terminal;
 pub mod ttyd_protocol;
