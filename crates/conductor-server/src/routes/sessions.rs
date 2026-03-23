@@ -289,21 +289,23 @@ async fn spawn_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SpawnBody>,
 ) -> ApiResponse {
+    let project_id = body.project_id.clone();
     let prompt = body.prompt.unwrap_or_default();
+
     let linked_board_task = if let Some(task_link_key) = body
         .issue_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        resolve_board_task_identity(&state, &body.project_id, task_link_key).await
+        resolve_board_task_identity(&state, &project_id, task_link_key).await
     } else {
         None
     };
 
     match state
         .spawn_session(SpawnRequest {
-            project_id: body.project_id,
+            project_id: project_id.clone(),
             bridge_id: body.bridge_id,
             prompt,
             issue_id: body.issue_id,
@@ -334,7 +336,7 @@ async fn spawn_session(
             if let Some((task_id, _)) = linked_board_task {
                 let _ = update_board_task_attempt_ref(
                     &state,
-                    &body.project_id,
+                    &project_id,
                     &task_id,
                     &session.id,
                     None,
