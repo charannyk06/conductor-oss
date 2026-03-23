@@ -1420,6 +1420,7 @@ export default function BridgeConnectClient({
                 <div className="min-h-[420px] flex-1 overflow-hidden rounded-[20px] border border-[var(--vk-border)] bg-[#060404]">
                   <SessionTerminal
                     sessionId={testSession.id}
+                    projectId={testSession.projectId}
                     bridgeId={testSession.bridgeId}
                     sessionState={testSession.status}
                     pendingInsert={null}

@@ -6,6 +6,7 @@ import type { TerminalInsertRequest } from "../terminalInsert";
 
 export interface SessionTerminalProps {
   sessionId: string;
+  projectId: string;
   bridgeId?: string | null;
   sessionState: string;
   runtimeMode?: string | null;

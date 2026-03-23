@@ -364,6 +364,74 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
 </script>
 "#;
 
+fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let script = format!(
+        r#"<!-- conductor-ttyd-paste-shim -->
+<script>
+(function() {{
+    if (window.__conductorTtydPasteShimInstalled) return;
+    window.__conductorTtydPasteShimInstalled = true;
+
+    const PROJECT_ID = "{project_id}";
+    const SESSION_ID = "{session_id}";
+    const TIMESTAMP = {timestamp};
+
+    async function uploadImage(blob) {{
+        const formData = new FormData();
+        formData.append('projectId', PROJECT_ID);
+        formData.append('taskRef', SESSION_ID);
+        formData.append('files', blob, 'clipboard-' + TIMESTAMP + '.png');
+        
+        try {{
+            const response = await fetch('/api/attachments', {{
+                method: 'POST',
+                body: formData,
+            }});
+            if (response.ok) {{
+                const data = await response.json();
+                const path = data.files?.[0]?.path || data.path || data.absolutePath;
+                if (path && window.term) {{
+                    window.term.write('\r\n[pasted image: ' + path + ']\r\n');
+                }}
+            }}
+        }} catch (e) {{
+            // Silently ignore upload failures
+        }}
+    }}
+
+    function extractImageFromClipboard(clipboardData) {{
+        if (!clipboardData.items) return null;
+        for (let i = 0; i < clipboardData.items.length; i++) {{
+            const item = clipboardData.items[i];
+            if (item.type.startsWith('image/')) {{
+                return item.getAsFile();
+            }}
+        }}
+        return null;
+    }}
+
+    document.addEventListener('paste', async function(event) {{
+        if (!event.clipboardData) return;
+        
+        const imageBlob = extractImageFromClipboard(event.clipboardData);
+        if (imageBlob) {{
+            event.preventDefault();
+            await uploadImage(imageBlob);
+        }}
+    }}, true);
+}})(document);
+</script>"#,
+        project_id = project_id,
+        session_id = session_id,
+        timestamp = timestamp
+    );
+    script
+}
+
 fn ttyd_session_ws_url(session: &SessionRecord) -> Option<String> {
     let runtime_mode = session
         .metadata
@@ -448,6 +516,36 @@ fn inject_ttyd_mobile_touch_shim(html: &str) -> String {
     let mut output = String::with_capacity(html.len() + TTYD_MOBILE_TOUCH_SHIM.len());
     output.push_str(html);
     output.push_str(TTYD_MOBILE_TOUCH_SHIM);
+    output
+}
+
+const TTYD_PASTE_SHIM_MARKER: &str = "conductor-ttyd-paste-shim";
+
+fn inject_ttyd_paste_shim(html: &str, project_id: &str, session_id: &str) -> String {
+    let paste_shim = ttyd_paste_shim_script(project_id, session_id);
+    if html.contains(TTYD_PASTE_SHIM_MARKER) {
+        return html.to_string();
+    }
+
+    if let Some(index) = html.rfind("</body>") {
+        let mut output = String::with_capacity(html.len() + paste_shim.len());
+        output.push_str(&html[..index]);
+        output.push_str(&paste_shim);
+        output.push_str(&html[index..]);
+        return output;
+    }
+
+    if let Some(index) = html.rfind("</html>") {
+        let mut output = String::with_capacity(html.len() + paste_shim.len());
+        output.push_str(&html[..index]);
+        output.push_str(&paste_shim);
+        output.push_str(&html[index..]);
+        return output;
+    }
+
+    let mut output = String::with_capacity(html.len() + paste_shim.len());
+    output.push_str(html);
+    output.push_str(&paste_shim);
     output
 }
 
@@ -773,12 +871,16 @@ async fn terminal_ttyd_frontend(
             .into_response();
         }
     };
-    let body =
-        if content_type_is_html(&content_type) && should_inject_ttyd_mobile_touch_shim(&session) {
-            inject_ttyd_mobile_touch_shim(&String::from_utf8_lossy(&body)).into_bytes()
-        } else {
-            body.to_vec()
-        };
+    let body = if content_type_is_html(&content_type) {
+        let mut html = String::from_utf8_lossy(&body).into_owned();
+        html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
+        if should_inject_ttyd_mobile_touch_shim(&session) {
+            html = inject_ttyd_mobile_touch_shim(&html);
+        }
+        html.into_bytes()
+    } else {
+        body.to_vec()
+    };
 
     let mut response = Response::new(body.into());
     *response.status_mut() = status;

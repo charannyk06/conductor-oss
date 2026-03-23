@@ -16,6 +16,10 @@ import {
   isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
 } from "@/components/sessions/sessionTerminalUtils";
+import {
+  extractImageFromClipboard,
+  uploadClipboardImage,
+} from "@/lib/clipboardImage";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 const CMD_OUTPUT = "0".charCodeAt(0);
@@ -158,6 +162,7 @@ async function sendFollowUpMessage(
 
 export function RemoteSessionTerminal({
   sessionId,
+  projectId,
   bridgeId,
   sessionState,
   runtimeMode,
@@ -396,7 +401,35 @@ export function RemoteSessionTerminal({
       terminal.focus();
     };
 
+    const handlePaste = async (event: ClipboardEvent) => {
+      if (!expectsRelayTerminal || !event.clipboardData) {
+        return;
+      }
+
+      try {
+        const imageBlob = await extractImageFromClipboard(event.clipboardData);
+        if (imageBlob) {
+          event.preventDefault();
+          try {
+            const result = await uploadClipboardImage({
+              imageBlob,
+              projectId,
+              taskRef: sessionId,
+              bridgeId,
+            });
+            const imagePath = result.absolutePath || result.path;
+            sendTerminalFrame(encodeInputFrame(`\r\n[pasted image: ${imagePath}]\r\n`));
+          } catch {
+            // Image upload failed - silently ignore
+          }
+        }
+      } catch {
+        // Not an image paste or clipboard access denied - let xterm handle normally
+      }
+    };
+
     host.addEventListener("click", focusTerminal);
+    host.addEventListener("paste", handlePaste);
     terminal.focus();
     window.requestAnimationFrame(() => {
       syncTerminalGeometry("resize", true);
@@ -404,6 +437,7 @@ export function RemoteSessionTerminal({
 
     return () => {
       host.removeEventListener("click", focusTerminal);
+      host.removeEventListener("paste", handlePaste);
       scrollHost?.removeEventListener("scroll", syncFollowBottom);
       dataSubscription.dispose();
       cleanupMobileTouchScroll?.();
@@ -411,7 +445,7 @@ export function RemoteSessionTerminal({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [expectsRelayTerminal, sendTerminalFrame, syncTerminalGeometry]);
+  }, [expectsRelayTerminal, projectId, sendTerminalFrame, syncTerminalGeometry, bridgeId, sessionId]);
 
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
