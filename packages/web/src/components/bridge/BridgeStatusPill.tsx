@@ -204,7 +204,6 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     ? devices.find((device) => device.device_id === selectedBridgeId) ?? null
     : null;
   const shouldLinkToDeviceScreen = !loading && connectedDevices.length === 0;
-  const shouldLinkToDeviceScreen = !loading && connectedDevices.length === 0;
   const recentPairingDevice = recentPairingDeviceId
     ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
     : null;
