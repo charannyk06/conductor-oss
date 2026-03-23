@@ -85,7 +85,7 @@ func RestartServiceIfInstalled() error {
 	switch runtime.GOOS {
 	case "darwin":
 		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
-		return installLaunchdService(home, plistPath)
+		return restartLaunchdServiceDetached(home, plistPath)
 	case "linux":
 		cmd := exec.Command("systemctl", "--user", "restart", serviceName)
 		if err := cmd.Run(); err != nil {
@@ -235,6 +235,22 @@ func installWindowsStartup(home, binaryPath string) error {
 	}
 	fmt.Printf("Windows startup launcher installed at %s\n", startupScript)
 	fmt.Println("Conductor Bridge will start automatically when you sign in.")
+	return nil
+}
+
+func restartLaunchdServiceDetached(home, plistPath string) error {
+	uid := strconv.Itoa(os.Getuid())
+	serviceTarget := "gui/" + uid + "/" + serviceName
+	script := fmt.Sprintf("sleep 1; launchctl bootout %q >/dev/null 2>&1 || true; launchctl bootstrap %q %q; launchctl kickstart -k %q", serviceTarget, "gui/"+uid, plistPath, serviceTarget)
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("schedule detached launchd restart: %w", err)
+	}
+	if cmd.Process != nil {
+		_ = cmd.Process.Release()
+	}
 	return nil
 }
 

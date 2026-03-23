@@ -13,7 +13,7 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
     deviceId,
     "/_bridge/service/restart",
     {
-      role: "admin",
+      role: "operator",
       requireActionGuard: true,
     },
   );

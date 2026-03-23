@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChevronDown, Download, Laptop, Loader2, RefreshCw, Wrench } from "lucide-react";
+import { ArrowUpRight, ChevronDown, Download, Laptop, Loader2, RefreshCw, Wrench } from "lucide-react";
 import { BridgeLocalRepairNotice } from "@/components/bridge/BridgeLocalRepairNotice";
 import {
   isBridgeAutoUpdateInFlight,
@@ -185,6 +185,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
   const selectedBridgeDevice = selectedBridgeId
     ? devices.find((device) => device.device_id === selectedBridgeId) ?? null
     : null;
+  const shouldLinkToDeviceScreen = !loading && connectedDevices.length === 0;
   const recentPairingDevice = recentPairingDeviceId
     ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
     : null;
@@ -238,11 +239,13 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
         deviceId: device.device_id,
         kind: "restart",
         status: "completed",
-        message,
+        message: `${message} Waiting for ${device.device_name} to reconnect.`,
       });
-      window.setTimeout(() => {
-        void refreshDevices(false);
-      }, 2_000);
+      [2_000, 5_000, 10_000, 20_000, 35_000].forEach((delay) => {
+        window.setTimeout(() => {
+          void refreshDevices(false);
+        }, delay);
+      });
     } catch (err) {
       setServiceAction({
         deviceId: device.device_id,
@@ -289,6 +292,24 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       void refreshDevices(false);
     }, 2_000);
   }, [refreshDevices]);
+
+  if (shouldLinkToDeviceScreen) {
+    return (
+      <Link
+        href={BRIDGE_CONNECT_PATH}
+        prefetch
+        className="inline-flex"
+        title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
+      >
+        <StatusBadge
+          connected={false}
+          className={className}
+          title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
+          suffix={<ArrowUpRight className="h-3.5 w-3.5" />}
+        />
+      </Link>
+    );
+  }
 
   return (
     <DropdownMenu.Root>
@@ -476,7 +497,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
               prefetch
               className="flex items-center justify-between rounded-[12px] px-3 py-2 text-[13px] font-medium text-[var(--vk-text-normal)] outline-none transition-colors hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]"
             >
-              <span>Open bridge connection</span>
+              <span>Open paired devices</span>
               <Laptop className="h-4 w-4 text-[var(--vk-text-muted)]" />
             </Link>
           </DropdownMenu.Item>
