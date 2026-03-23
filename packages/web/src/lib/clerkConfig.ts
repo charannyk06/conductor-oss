@@ -21,6 +21,29 @@ function normalizeEnvValue(value?: string | null): string {
   return (value ?? "").trim();
 }
 
+function parseRequestHost(value: string): { hostname: string; host: string } | null {
+  const normalized = normalizeEnvValue(value);
+  if (!normalized) {
+    return null;
+  }
+
+  const candidate = normalized.includes("://") ? normalized : `https://${normalized}`;
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return null;
+    }
+
+    return {
+      hostname: parsed.hostname.toLowerCase(),
+      host: parsed.host.toLowerCase(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function normalizeHostname(value?: string | null): string {
   return normalizeEnvValue(value).toLowerCase().replace(/^\[|\]$/g, "");
 }
@@ -276,25 +299,15 @@ export function isDevelopmentClerkKey(value?: string | null): boolean {
 }
 
 export function resolveRequestHostname(headerStore: Headers): string {
-  const forwardedHost = headerStore.get("x-forwarded-host")?.split(",")[0]?.trim();
-  const requestHost = forwardedHost || headerStore.get("host")?.trim() || "";
-  return requestHost.split(":")[0]?.trim().toLowerCase() ?? "";
+  return parseRequestHost(headerStore.get("host") ?? "")?.hostname ?? "";
 }
 
 export function resolveRequestBaseUrl(headerStore: Headers): string | null {
-  const forwardedHost = headerStore.get("x-forwarded-host")?.split(",")[0]?.trim();
-  const requestHost = forwardedHost || headerStore.get("host")?.trim() || "";
+  const requestHost = parseRequestHost(headerStore.get("host") ?? "");
   if (!requestHost) return null;
 
-  const requestHostname = requestHost.split(":")[0]?.trim().toLowerCase() ?? "";
-  const forwardedProto = headerStore.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
-  const protocol = forwardedProto === "http" || forwardedProto === "https"
-    ? forwardedProto
-    : isLoopbackHost(requestHostname)
-    ? "http"
-    : "https";
-
-  return `${protocol}://${requestHost}`;
+  const protocol = isLoopbackHost(requestHost.hostname) ? "http" : "https";
+  return `${protocol}://${requestHost.host}`;
 }
 
 export function resolveClerkConfiguration(hostname?: string | null, baseUrl?: string | null): ClerkConfiguration {

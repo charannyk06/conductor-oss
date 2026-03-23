@@ -4,6 +4,7 @@ import {
   resolveClerkConfiguration,
   resolveClerkFrontendApiUrl,
   resolveRequestBaseUrl,
+  resolveRequestHostname,
 } from "./clerkConfig";
 
 const originalPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
@@ -248,12 +249,21 @@ test("resolveRequestBaseUrl keeps loopback requests on http when no proxy protoc
   assert.equal(resolveRequestBaseUrl(headers), "http://127.0.0.1:3000");
 });
 
-test("resolveRequestBaseUrl respects forwarded https on hosted deployments", () => {
+test("resolveRequestBaseUrl ignores forwarded headers and uses the request host", () => {
   const headers = new Headers({
-    host: "127.0.0.1:3000",
-    "x-forwarded-host": "preview.conductross.com",
-    "x-forwarded-proto": "https",
+    host: "preview.conductross.com",
+    "x-forwarded-host": "127.0.0.1:3000",
+    "x-forwarded-proto": "http",
   });
 
   assert.equal(resolveRequestBaseUrl(headers), "https://preview.conductross.com");
+});
+
+test("resolveRequestHostname preserves bracketed IPv6 literals", () => {
+  const headers = new Headers({
+    host: "[::1]:3000",
+  });
+
+  assert.equal(resolveRequestHostname(headers), "[::1]");
+  assert.equal(resolveRequestBaseUrl(headers), "http://[::1]:3000");
 });

@@ -2,6 +2,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { isLoopbackHost } from "@/lib/accessControl";
+import { resolveRequestHostname } from "@/lib/clerkConfig";
 import { sanitizeRedirectTarget } from "@/lib/redirectTarget";
 
 function getErrorMessage(code: string | null | undefined): string | null {
@@ -23,12 +24,7 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
   const nextPath = sanitizeRedirectTarget(nextValue);
   const errorMessage = getErrorMessage(errorValue);
   const headerStore = await headers();
-  const forwardedHost = headerStore.get("x-forwarded-host")
-    ?.split(",")[0]
-    ?.trim()
-    .split(":")[0]
-    ?.toLowerCase() ?? "";
-  const requestHost = forwardedHost || (headerStore.get("host")?.split(":")[0]?.trim().toLowerCase() ?? "");
+  const requestHost = resolveRequestHostname(headerStore);
 
   if (isLoopbackHost(requestHost)) {
     redirect(nextPath);

@@ -11,11 +11,7 @@ const STRIP_REQUEST_HEADERS = [
 ] as const;
 
 function resolveProxyBaseUrl(request: NextRequest): string {
-  const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
-  const protocol = forwardedProto === "http" || forwardedProto === "https" ? forwardedProto : "https";
-  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
-  const host = forwardedHost || request.headers.get("host")?.trim() || request.nextUrl.host;
-  return `${protocol}://${host}/__clerk`;
+  return new URL("/__clerk", request.nextUrl.origin).toString();
 }
 
 function resolveClientIp(request: NextRequest): string {
