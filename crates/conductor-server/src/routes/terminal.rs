@@ -415,7 +415,7 @@ fn content_type_is_html(content_type: &HeaderValue) -> bool {
 }
 
 fn should_inject_ttyd_mobile_touch_shim(session: &SessionRecord) -> bool {
-    session.agent.trim().eq_ignore_ascii_case("opencode")
+    ttyd_session_ws_url(session).is_some()
 }
 
 fn inject_ttyd_mobile_touch_shim(html: &str) -> String {
@@ -1484,24 +1484,50 @@ mod tests {
     }
 
     #[test]
-    fn should_inject_ttyd_mobile_touch_shim_only_for_opencode_sessions() {
-        let opencode_session = SessionRecord::builder(
-            "session-opencode".to_string(),
+    fn should_inject_ttyd_mobile_touch_shim_for_all_ttyd_sessions() {
+        let mut ttyd_codex_session = SessionRecord::builder(
+            "session-ttyd-codex".to_string(),
+            "project-1".to_string(),
+            "codex".to_string(),
+            "prompt".to_string(),
+        )
+        .build();
+        ttyd_codex_session.metadata.insert(
+            RUNTIME_MODE_METADATA_KEY.to_string(),
+            TTYD_RUNTIME_MODE.to_string(),
+        );
+        ttyd_codex_session.metadata.insert(
+            TTYD_WS_URL_METADATA_KEY.to_string(),
+            "ws://127.0.0.1:41002/ws".to_string(),
+        );
+
+        let mut ttyd_opencode_session = SessionRecord::builder(
+            "session-ttyd-opencode".to_string(),
             "project-1".to_string(),
             "opencode".to_string(),
             "prompt".to_string(),
         )
         .build();
-        let codex_session = SessionRecord::builder(
-            "session-codex".to_string(),
+        ttyd_opencode_session.metadata.insert(
+            RUNTIME_MODE_METADATA_KEY.to_string(),
+            TTYD_RUNTIME_MODE.to_string(),
+        );
+        ttyd_opencode_session.metadata.insert(
+            TTYD_WS_URL_METADATA_KEY.to_string(),
+            "ws://127.0.0.1:41003/ws".to_string(),
+        );
+
+        let non_ttyd_session = SessionRecord::builder(
+            "session-non-ttyd".to_string(),
             "project-1".to_string(),
             "codex".to_string(),
             "prompt".to_string(),
         )
         .build();
 
-        assert!(should_inject_ttyd_mobile_touch_shim(&opencode_session));
-        assert!(!should_inject_ttyd_mobile_touch_shim(&codex_session));
+        assert!(should_inject_ttyd_mobile_touch_shim(&ttyd_codex_session));
+        assert!(should_inject_ttyd_mobile_touch_shim(&ttyd_opencode_session));
+        assert!(!should_inject_ttyd_mobile_touch_shim(&non_ttyd_session));
     }
 
     #[test]
