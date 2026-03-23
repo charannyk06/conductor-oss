@@ -59,6 +59,16 @@ struct CreateWorkspaceBody {
     initialize_git: Option<bool>,
 }
 
+struct PersistWorkspaceRequest {
+    agent: Option<String>,
+    agent_model: Option<String>,
+    agent_reasoning_effort: Option<String>,
+    repo: Option<String>,
+    path: PathBuf,
+    default_branch: String,
+    use_worktree: bool,
+}
+
 async fn list_workspaces(State(state): State<Arc<AppState>>) -> ApiResponse {
     let config = state.config.read().await.clone();
     let projects = config
@@ -186,13 +196,15 @@ async fn create_workspace(
         return persist_workspace(
             state,
             &project_id,
-            requested_agent,
-            requested_model,
-            requested_reasoning_effort,
-            Some(git_url.to_string()),
-            canonical_path,
-            default_branch,
-            body.use_worktree.unwrap_or(true),
+            PersistWorkspaceRequest {
+                agent: requested_agent,
+                agent_model: requested_model,
+                agent_reasoning_effort: requested_reasoning_effort,
+                repo: Some(git_url.to_string()),
+                path: canonical_path,
+                default_branch,
+                use_worktree: body.use_worktree.unwrap_or(true),
+            },
         )
         .await;
     } else {
@@ -231,13 +243,15 @@ async fn create_workspace(
         return persist_workspace(
             state,
             &project_id,
-            requested_agent,
-            requested_model,
-            requested_reasoning_effort,
-            repo,
-            canonical_path,
-            default_branch,
-            body.use_worktree.unwrap_or(true),
+            PersistWorkspaceRequest {
+                agent: requested_agent,
+                agent_model: requested_model,
+                agent_reasoning_effort: requested_reasoning_effort,
+                repo,
+                path: canonical_path,
+                default_branch,
+                use_worktree: body.use_worktree.unwrap_or(true),
+            },
         )
         .await;
     }
@@ -246,13 +260,7 @@ async fn create_workspace(
 async fn persist_workspace(
     state: Arc<AppState>,
     project_id: &str,
-    agent: Option<String>,
-    agent_model: Option<String>,
-    agent_reasoning_effort: Option<String>,
-    repo: Option<String>,
-    path: PathBuf,
-    default_branch: String,
-    use_worktree: bool,
+    request: PersistWorkspaceRequest,
 ) -> ApiResponse {
     let board_dir = project_id.to_string();
     if let Err(err) = ensure_board_file(&state.workspace_path, &board_dir) {
@@ -265,14 +273,14 @@ async fn persist_workspace(
         .entry(project_id.to_string())
         .or_insert_with(ProjectConfig::default);
     project.name = Some(project_id.to_string());
-    project.repo = repo.or_else(|| Some(project_id.to_string()));
-    project.path = path.to_string_lossy().to_string();
-    project.default_branch = default_branch.clone();
-    project.agent = agent;
-    project.agent_config.model = agent_model;
-    project.agent_config.reasoning_effort = agent_reasoning_effort;
+    project.repo = request.repo.or_else(|| Some(project_id.to_string()));
+    project.path = request.path.to_string_lossy().to_string();
+    project.default_branch = request.default_branch.clone();
+    project.agent = request.agent;
+    project.agent_config.model = request.agent_model;
+    project.agent_config.reasoning_effort = request.agent_reasoning_effort;
     project.runtime = Some("ttyd".to_string());
-    project.workspace = Some(if use_worktree {
+    project.workspace = Some(if request.use_worktree {
         "worktree".to_string()
     } else {
         "local".to_string()
@@ -286,21 +294,21 @@ async fn persist_workspace(
     }
 
     let config = state.config.read().await.clone();
-    info!(project_id, path = %path.display(), "Persisted workspace project; syncing local scaffold");
-    if let Err(err) = ensure_project_root_board(&path, project_id) {
+    info!(project_id, path = %request.path.display(), "Persisted workspace project; syncing local scaffold");
+    if let Err(err) = ensure_project_root_board(&request.path, project_id) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
     let mirrored = match sync_project_local_config(&config, &state.workspace_path, project_id) {
         Ok(mirrored) => mirrored,
         Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
-    if let Err(err) = sync_support_files_for_directory(&config, &path) {
+    if let Err(err) = sync_support_files_for_directory(&config, &request.path) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
     if let Err(err) = sync_support_files_for_directory(&config, &state.workspace_path) {
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
-    info!(project_id, mirrored, path = %path.display(), "Finished syncing workspace project scaffold");
+    info!(project_id, mirrored, path = %request.path.display(), "Finished syncing workspace project scaffold");
 
     created(json!({
         "project": {
