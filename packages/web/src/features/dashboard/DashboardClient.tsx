@@ -2503,7 +2503,11 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     : hasProject
       ? projectLabel
       : "Select project";
-  const selectedTaskLabel = selectedTask?.taskRef?.trim() || "Link task";
+  const selectedTaskLabel =
+    selectedTask?.taskRef?.trim()
+    || selectedTask?.issueId?.trim()
+    || selectedTask?.id
+    || "Link task";
   const selectedTaskSubtitle = selectedTask ? getLinkedTaskTitle(selectedTask.text) : "Choose a task, bug, or issue from this project's board";
 
   return (

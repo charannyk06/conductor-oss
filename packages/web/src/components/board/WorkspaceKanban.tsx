@@ -2068,7 +2068,7 @@ export function WorkspaceKanban({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col">
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <header className="border-b border-[var(--vk-border)] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] p-px">
@@ -2347,7 +2347,7 @@ export function WorkspaceKanban({
         )}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto p-4">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 touch-pan-x touch-pan-y">
         {loading ? (
           <div className="flex h-full items-center justify-center text-[var(--vk-text-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -2359,7 +2359,7 @@ export function WorkspaceKanban({
           </div>
         ) : (
           <div
-            className="flex min-h-full min-w-0 snap-x snap-mandatory items-start gap-3 overflow-x-auto pb-3 sm:snap-none"
+            className="flex min-h-full min-w-0 snap-x snap-mandatory items-start gap-3 overflow-x-auto pb-3 touch-pan-x sm:snap-none"
           >
             {visibleColumns.map((column) => {
               const fullColumn = allColumns.find(
@@ -2405,12 +2405,12 @@ export function WorkspaceKanban({
                   </button>
                 </header>
 
-                <div
-                  className={cn(
-                    "flex-1 overflow-y-auto px-3 pb-3 pt-2",
-                    draggingTask?.role === column.role &&
-                      "bg-[rgba(255,255,255,0.02)]"
-                  )}
+          <div
+            className={cn(
+              "flex-1 min-h-0 overflow-y-auto px-3 pb-3 pt-2 touch-pan-y overscroll-contain",
+              draggingTask?.role === column.role &&
+                "bg-[rgba(255,255,255,0.02)]"
+            )}
                   onDragOver={(event) =>
                     dragEnabled ? handleColumnDragOver(event, column.role) : undefined
                   }
