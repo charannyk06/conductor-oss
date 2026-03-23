@@ -7,6 +7,7 @@ import {
   Globe,
   LayoutDashboard,
   PanelLeftOpen,
+  Sparkles,
   SquareTerminal,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
@@ -40,6 +41,16 @@ const SessionPreview = dynamic(
   },
 );
 
+const SessionSkills = dynamic(
+  () => import("./SessionSkills").then((mod) => mod.SessionSkills),
+  {
+    loading: () => (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading skills...
+      </div>
+    ),
+  },
+);
 
 interface SessionDetailProps {
   sessionId: string;
@@ -50,10 +61,10 @@ interface SessionDetailProps {
   onOpenSidebar?: () => void;
 }
 
-type SessionTab = "overview" | "terminal" | "preview";
+type SessionTab = "overview" | "terminal" | "preview" | "skills";
 
 function resolveSessionTab(value: string | null): SessionTab {
-  if (value === "overview" || value === "terminal" || value === "preview") {
+  if (value === "overview" || value === "terminal" || value === "preview" || value === "skills") {
     return value;
   }
   return "terminal";
@@ -217,6 +228,10 @@ export function SessionDetail({
         <Globe className="h-3.5 w-3.5" />
         Preview
       </TabsTrigger>
+      <TabsTrigger value="skills" className={tabTriggerClass}>
+        <Sparkles className="h-3.5 w-3.5" />
+        Skills
+      </TabsTrigger>
     </TabsList>
   );
 
@@ -310,6 +325,17 @@ export function SessionDetail({
                 onConnectionChange={handlePreviewConnectionChange}
               />
             ) : null}
+          </TabsContent>
+
+          <TabsContent
+            value="skills"
+            className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+          >
+            <SessionSkills
+              session={session}
+              sessionId={sessionId}
+              active={active && activeTab === "skills"}
+            />
           </TabsContent>
         </div>
       </Tabs>
