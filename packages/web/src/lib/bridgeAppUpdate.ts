@@ -205,7 +205,7 @@ export async function runBridgeAutoUpdate(
     });
   };
 
-  updateState("checking", `Checking whether ${device.device_name} needs a Conductor package update.`);
+  updateState("checking", `Checking for Conductor updates on ${device.device_name}.`);
 
   try {
     let status = await requestBridgeAppUpdate(device.device_id, { force: true });

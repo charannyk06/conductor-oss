@@ -322,7 +322,8 @@ const RELAY_JWT_SCOPE_DASHBOARD_API: &str = "dashboard-api";
 const RELAY_JWT_SCOPE_TERMINAL_BROWSER: &str = "terminal-browser";
 const PAIRING_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEVICE_ACCESS_TOKEN_TTL_SECS: u64 = 3600;
-const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(30);
+const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(45);
+const DEVICE_PICKER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BRIDGE_PROXY_META_KEY: &str = "$bridgeProxy";
 
 pub async fn serve() -> Result<()> {
@@ -1988,7 +1989,7 @@ impl RelayState {
             ));
         }
 
-        match tokio::time::timeout(DEVICE_PROXY_TIMEOUT, receiver).await {
+        match tokio::time::timeout(device_proxy_timeout_for_url(normalized_path), receiver).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err((
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2125,6 +2126,17 @@ impl RelayInner {
 async fn close_senders(senders: Vec<mpsc::UnboundedSender<Message>>) {
     for sender in senders {
         let _ = sender.send(Message::Close(None));
+    }
+}
+
+fn device_proxy_timeout_for_url(url: &str) -> Duration {
+    let normalized = url.trim();
+    if normalized.starts_with("/api/filesystem/pick-directory") {
+        DEVICE_PICKER_TIMEOUT
+    } else if normalized.starts_with("/api/filesystem/directory") {
+        Duration::from_secs(90)
+    } else {
+        DEVICE_PROXY_TIMEOUT
     }
 }
 
@@ -2417,6 +2429,22 @@ mod tests {
 
         let missing = state.poll_device_claim(&created.poll_token).await;
         assert!(matches!(missing, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[test]
+    fn device_proxy_timeout_tracks_slow_filesystem_routes() {
+        assert_eq!(
+            device_proxy_timeout_for_url("/api/filesystem/pick-directory"),
+            DEVICE_PICKER_TIMEOUT
+        );
+        assert_eq!(
+            device_proxy_timeout_for_url("/api/filesystem/directory?path=C:/Users"),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            device_proxy_timeout_for_url("/api/sessions"),
+            DEVICE_PROXY_TIMEOUT
+        );
     }
 
     #[tokio::test]

@@ -113,10 +113,25 @@ async fn read_directory(
     }
 }
 
+fn resolve_user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            Some(PathBuf::from(format!(
+                "{}{}",
+                drive.to_string_lossy(),
+                path.to_string_lossy()
+            )))
+        })
+}
+
 /// Allowed root directories for filesystem browsing.
 fn allowed_browse_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+    if let Some(home) = resolve_user_home_dir() {
         roots.push(home);
     }
     // On macOS, /Volumes is common for external drives.
@@ -127,6 +142,15 @@ fn allowed_browse_roots() -> Vec<PathBuf> {
     {
         roots.push(PathBuf::from("/home"));
         roots.push(PathBuf::from("/opt"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        for drive_letter in b'A'..=b'Z' {
+            let drive_root = PathBuf::from(format!("{}:\\", drive_letter as char));
+            if drive_root.exists() {
+                roots.push(drive_root);
+            }
+        }
     }
     roots
 }
@@ -167,7 +191,7 @@ fn is_within_allowed_roots(path: &Path, workspace_path: &Path) -> bool {
 
 fn expand_path(value: &str, workspace_path: &Path) -> PathBuf {
     if let Some(stripped) = value.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = resolve_user_home_dir() {
             return home.join(stripped);
         }
     }

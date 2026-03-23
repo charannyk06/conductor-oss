@@ -1080,6 +1080,17 @@ func handleBridgeInstallRequest(method string, body interface{}) (bool, apiRespo
 	}
 }
 
+func backendRequestTimeout(path string) time.Duration {
+	switch path {
+	case "/api/filesystem/pick-directory":
+		return 5 * time.Minute
+	case "/api/filesystem/directory":
+		return 60 * time.Second
+	default:
+		return 20 * time.Second
+	}
+}
+
 func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentType string) (*http.Response, error) {
 	backendURL := "http://127.0.0.1:4749" + path
 	var requestBody io.Reader
@@ -1095,7 +1106,7 @@ func doBackendAPIRequest(method, path string, requestBodyBytes []byte, contentTy
 		req.Header.Set("Content-Type", contentType)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: backendRequestTimeout(path)}
 	return client.Do(req)
 }
 
@@ -1105,7 +1116,7 @@ func ensureLocalBackendForProxy() error {
 
 	_, err := backend.Ensure(context.Background(), backend.Options{
 		Stderr:         os.Stderr,
-		StartupTimeout: 20 * time.Second,
+		StartupTimeout: 45 * time.Second,
 	})
 	return err
 }
