@@ -11,6 +11,9 @@ import { Button } from "@/components/ui/Button";
 interface ProjectItem {
   id: string;
   description?: string | null;
+  defaultBranch?: string | null;
+  agentModel?: string | null;
+  agentReasoningEffort?: string | null;
 }
 
 interface WorkspaceSidebarPanelProps {
@@ -59,6 +62,20 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
     () => projects.find((project) => project.id === confirmUnlinkProjectId) ?? null,
     [confirmUnlinkProjectId, projects],
   );
+
+  const getProjectDefaultsLabel = (project: ProjectItem): string | null => {
+    const parts: string[] = [];
+
+    if (project.agentModel?.trim()) {
+      parts.push(`Model: ${project.agentModel.trim()}`);
+    }
+
+    if (project.agentReasoningEffort?.trim()) {
+      parts.push(`Reasoning: ${project.agentReasoningEffort.trim()}`);
+    }
+
+    return parts.length > 0 ? parts.join(" · ") : null;
+  };
 
   async function handleConfirmUnlink(): Promise<void> {
     if (!onUnlinkProject || !confirmUnlinkProjectId) return;
@@ -119,6 +136,7 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
               const selected = selectedProjectId === project.id;
               const counts = sessionCountByProject.get(project.id) ?? { total: 0, active: 0 };
               const isUnlinking = unlinkingId === project.id;
+              const defaultsLabel = getProjectDefaultsLabel(project);
               return (
                 <div
                   key={project.id}
@@ -145,6 +163,11 @@ export const WorkspaceSidebarPanel = memo(function WorkspaceSidebarPanel({
                       {project.description ? (
                         <span className="block truncate text-[11px] text-[var(--vk-text-muted)]">
                           {project.description}
+                        </span>
+                      ) : null}
+                      {defaultsLabel ? (
+                        <span className="block truncate text-[11px] text-[var(--vk-text-muted)]">
+                          {defaultsLabel}
                         </span>
                       ) : null}
                     </span>
