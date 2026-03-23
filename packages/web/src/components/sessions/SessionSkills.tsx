@@ -8,7 +8,6 @@ import type { CustomInstalledSkill, InstalledSkillStatus, SkillCatalogEntry } fr
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
-import { ScrollArea } from "@/components/ui/ScrollArea";
 
 type SessionSkillsProps = {
   session: DashboardSession;
@@ -148,7 +147,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
   }, [agent, bridgeId, refresh, scope, sessionId, workspacePath]);
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-hidden">
+    <div className="flex h-full min-h-0 min-w-0 flex-col gap-3 overflow-y-auto overscroll-contain pb-4 lg:overflow-hidden lg:pb-0">
       <Card>
         <CardHeader className="space-y-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -199,9 +198,9 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
         </CardHeader>
       </Card>
 
-      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <ScrollArea className="min-h-0 rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-surface)] p-3">
-          <div className="space-y-3 pr-2">
+      <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px] lg:overflow-hidden">
+        <div className="min-h-0 rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-surface)] p-3 lg:overflow-y-auto">
+          <div className="space-y-3 lg:pr-2">
             {loading ? (
               <div className="flex min-h-[220px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading skills...
@@ -283,9 +282,9 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
               })
             )}
           </div>
-        </ScrollArea>
+        </div>
 
-        <Card className="min-h-0 border-[var(--vk-border)] bg-[var(--vk-bg-surface)]">
+        <Card className="min-h-0 border-[var(--vk-border)] bg-[var(--vk-bg-surface)] lg:overflow-y-auto">
           <CardHeader className="flex-col items-start gap-1.5">
             <h3 className="text-[14px] font-semibold text-[var(--vk-text-normal)]">Detected custom skills</h3>
             <p className="text-[13px] text-[var(--vk-text-muted)]">
