@@ -13,7 +13,7 @@ export async function POST(request: Request, context: RouteContext): Promise<Res
     deviceId,
     "/_bridge/install",
     {
-      role: "admin",
+      role: "operator",
       requireActionGuard: true,
     },
   );
