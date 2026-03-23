@@ -334,14 +334,9 @@ async fn spawn_session(
     {
         Ok(session) => {
             if let Some((task_id, _)) = linked_board_task {
-                let _ = update_board_task_attempt_ref(
-                    &state,
-                    &project_id,
-                    &task_id,
-                    &session.id,
-                    None,
-                )
-                .await;
+                let _ =
+                    update_board_task_attempt_ref(&state, &project_id, &task_id, &session.id, None)
+                        .await;
             }
 
             let session_value = state.serialize_dashboard_session(&session).await;
