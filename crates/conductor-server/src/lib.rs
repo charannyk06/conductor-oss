@@ -65,6 +65,10 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
             state.clone(),
             routes::middleware::require_auth_when_remote,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::middleware::rate_limit_global,
+        ))
         .with_state(state)
         .layer({
             let mut origins: Vec<HeaderValue> = vec![
