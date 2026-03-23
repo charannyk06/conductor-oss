@@ -75,8 +75,10 @@ impl Executor for OpenCodeExecutor {
             let mut args = Vec::new();
 
             if let Some(model) = &options.model {
-                args.push("--model".to_string());
-                args.push(model.clone());
+                if let Some(model) = normalize_model_id(Some(model)) {
+                    args.push("--model".to_string());
+                    args.push(model);
+                }
             }
 
             if let Some(reasoning_effort) = normalize_variant(options.reasoning_effort.as_deref()) {
@@ -106,8 +108,10 @@ impl Executor for OpenCodeExecutor {
         ];
 
         if let Some(model) = &options.model {
-            args.push("--model".to_string());
-            args.push(model.clone());
+            if let Some(model) = normalize_model_id(Some(model)) {
+                args.push("--model".to_string());
+                args.push(model);
+            }
         }
 
         if let Some(reasoning_effort) = normalize_variant(options.reasoning_effort.as_deref()) {
@@ -166,6 +170,18 @@ fn normalize_variant(reasoning_effort: Option<&str>) -> Option<String> {
     };
 
     Some(variant.to_string())
+}
+
+fn normalize_model_id(model: Option<&str>) -> Option<String> {
+    let value = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    if value.contains('/') {
+        Some(value.to_string())
+    } else {
+        None
+    }
 }
 
 fn extract_text_output(value: &Value) -> ExecutorOutput {
@@ -409,6 +425,29 @@ mod tests {
         assert!(args.contains(&"openai/gpt-5".to_string()));
         assert!(args.contains(&"--variant".to_string()));
         assert!(args.contains(&"max".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("Review the repo"));
+    }
+
+    #[test]
+    fn build_args_skips_invalid_model_format() {
+        let executor = OpenCodeExecutor::new(PathBuf::from("/usr/bin/opencode"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("."),
+            prompt: "Review the repo".to_string(),
+            model: Some("gpt-5".to_string()),
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(!args.contains(&"--model".to_string()));
+        assert!(args.contains(&"--thinking".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("Review the repo"));
     }
 

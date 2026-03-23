@@ -185,8 +185,6 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--format",
             "json",
             "--thinking",
-            "--model",
-            "gpt-5",
             "--variant",
             "max",
             "opencode",

@@ -56,9 +56,17 @@ packages/cli/native/
 IMPLEMENTATION_COMPLETE.md
 IMPLEMENTATION_ROADMAP.md
 TTYD_IMPLEMENTATION_SUMMARY.md
+AGENTS.md
+CLAUDE.md
+MIGRATION-PLAN.md
 docs/TTYD_TERMINAL_IMPLEMENTATION.md
+docs/PRD-*.md
+docs/terminal-qa-matrix.md
+docs/terminal-rollout.md
 docs/research/
 docs/SUPERSET_INTEGRATION.md
+security_review*.md
+security_*_report.md
 refactor.py
 rewrite.py
 research/
