@@ -2774,7 +2774,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                           aria-label="Select reasoning effort"
                           className="inline-flex h-[29px] items-center gap-[4px] rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          <span>{`Reasoning: ${selectedReasoningLabel}`}</span>
+                          <span>{selectedReasoningLabel}</span>
                           <ChevronDown className="h-[10px] w-[10px] text-[var(--vk-text-muted)]" />
                         </button>
                       </DropdownMenu.Trigger>
