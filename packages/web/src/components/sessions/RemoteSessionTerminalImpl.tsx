@@ -8,6 +8,7 @@ import { Terminal } from "xterm";
 import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/Button";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
+import { attachMobileTouchScrollShim } from "@/components/sessions/terminal/mobileTouchScroll";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildBridgeRepairHref } from "@/lib/bridgeOnboarding";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "@/components/sessions/terminal/terminalConstants";
@@ -378,6 +379,7 @@ export function RemoteSessionTerminal({
     };
     syncFollowBottom();
     scrollHost?.addEventListener("scroll", syncFollowBottom, { passive: true });
+    const cleanupMobileTouchScroll = attachMobileTouchScrollShim(terminal, host);
     const dataSubscription = terminal.onData((data) => {
       if (!expectsRelayTerminal) {
         return;
@@ -404,6 +406,7 @@ export function RemoteSessionTerminal({
       host.removeEventListener("click", focusTerminal);
       scrollHost?.removeEventListener("scroll", syncFollowBottom);
       dataSubscription.dispose();
+      cleanupMobileTouchScroll?.();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
@@ -733,7 +736,7 @@ export function RemoteSessionTerminal({
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full">
         <div
           ref={terminalHostRef}
-          className="h-full min-h-0 w-full flex-1 overflow-hidden overscroll-contain rounded-[10px] bg-[#060404] px-2 py-2 text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch]"
+          className="h-full min-h-0 w-full flex-1 overflow-hidden overscroll-contain rounded-[10px] bg-[#060404] px-2 py-2 text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
         />
         {!loading && !hasOutput ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#060404]/84 px-4">
