@@ -65,7 +65,7 @@ import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import { normalizeBridgeDevices } from "@/lib/bridgeDevices";
+import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import {
   isPairedBridgeScopePending,
@@ -293,6 +293,7 @@ type BridgeDevice = {
     hostname: string;
     os: string;
     connected: boolean;
+    version: string | null;
   } | null;
 };
 
@@ -1155,7 +1156,7 @@ export default function DashboardClient({
           setBridges(normalizeBridgeDevices(payload?.devices).map((device) => ({
             bridgeId: device.device_id,
             hostname: device.last_status?.hostname ?? device.hostname,
-            os: device.last_status?.os ?? `${device.os}/${device.arch}`,
+            os: `${device.last_status?.os ?? `${device.os}/${device.arch}`}${formatBridgeVersionSuffix(device.last_status?.version)}`,
             capabilities: [],
             connected: device.connected,
             status: device.connected ? "connected" : "offline",

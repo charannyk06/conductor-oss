@@ -51,6 +51,7 @@ export type BridgeToBrowserMessage =
       hostname: string;
       os: string;
       connected: boolean;
+      version?: string | null;
     }
   | {
       type: "pong";
@@ -60,6 +61,7 @@ export interface BridgeStatus {
   hostname: string;
   os: string;
   connected: boolean;
+  version?: string | null;
 }
 
 export const BRIDGE_TOKEN_STORAGE_KEY = "conductor-bridge-token";

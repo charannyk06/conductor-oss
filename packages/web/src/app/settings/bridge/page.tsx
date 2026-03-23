@@ -11,6 +11,7 @@ import {
   clearBridgeSettings,
   readBridgeSettings,
 } from "@/lib/bridge";
+import { formatBridgeVersionSuffix } from "@/lib/bridgeDevices";
 
 type RelayBridge = {
   bridge_id: string;
@@ -20,6 +21,7 @@ type RelayBridge = {
     hostname: string;
     os: string;
     connected: boolean;
+    version: string | null;
   } | null;
 };
 
@@ -160,7 +162,7 @@ export default function BridgeSettingsPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <div className="font-medium">
-                          {bridge.last_status?.hostname ?? bridge.bridge_id}
+                          {bridge.last_status?.hostname ?? bridge.bridge_id}{formatBridgeVersionSuffix(bridge.last_status?.version)}
                         </div>
                         <div className="mt-1 text-xs text-[var(--vk-text-muted)]">
                           {bridge.last_status?.os ?? "unknown"} · {bridge.browser_count} browser connection{bridge.browser_count === 1 ? "" : "s"}
