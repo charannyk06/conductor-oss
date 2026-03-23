@@ -60,6 +60,7 @@ function terminalUrlChanged(current: string | null, next: string): boolean {
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
+    projectId,
     bridgeId,
     sessionState,
     runtimeMode,
@@ -504,6 +505,7 @@ function sessionTerminalPropsEqual(
 ): boolean {
   return (
     previous.sessionId === next.sessionId
+    && previous.projectId === next.projectId
     && previous.bridgeId === next.bridgeId
     && previous.sessionState === next.sessionState
     && previous.runtimeMode === next.runtimeMode

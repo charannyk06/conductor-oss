@@ -305,6 +305,7 @@ export function SessionDetail({
           >
             <SessionTerminal
               sessionId={sessionId}
+              projectId={session.projectId}
               bridgeId={session.bridgeId ?? null}
               sessionState={status}
               runtimeMode={session.metadata["runtimeMode"]?.trim() ?? null}
