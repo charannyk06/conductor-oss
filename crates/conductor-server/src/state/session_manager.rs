@@ -3,12 +3,15 @@ use chrono::{Duration as ChronoDuration, Utc};
 use conductor_core::types::AgentKind;
 use conductor_executors::agents::build_runtime_env;
 use conductor_executors::executor::{ExecutorInput, ExecutorOutput, SpawnOptions};
-use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::bridge_registry::{
+    bridge_offline_status, normalize_bridge_capabilities, normalize_bridge_text,
+    BridgeConnectionRecord, BridgeConnectionStatus, BRIDGE_HEARTBEAT_TIMEOUT_SECS,
+};
 use super::helpers::{
     append_output, is_runtime_status_line, merge_assistant_fragment, runtime_tool_metadata,
     sanitize_terminal_text,
@@ -31,72 +34,6 @@ pub(crate) struct OutputConsumerConfig {
     pub mirror_terminal_output: bool,
     pub output_is_parsed: bool,
     pub timeout: Option<std::time::Duration>,
-}
-
-const BRIDGE_OFFLINE_STATUS: &str = "bridge_offline";
-const BRIDGE_HEARTBEAT_TIMEOUT_SECS: i64 = 60;
-
-#[derive(Clone, Debug)]
-pub(crate) struct BridgeConnectionRecord {
-    pub bridge_id: String,
-    pub hostname: String,
-    pub os: String,
-    pub capabilities: Vec<String>,
-    pub connected: bool,
-    pub connected_at: chrono::DateTime<Utc>,
-    pub last_seen_at: chrono::DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct BridgeConnectionStatus {
-    pub bridge_id: String,
-    pub hostname: String,
-    pub os: String,
-    pub capabilities: Vec<String>,
-    pub connected: bool,
-    pub status: String,
-    pub connected_at: String,
-    pub last_seen_at: String,
-}
-
-impl From<&BridgeConnectionRecord> for BridgeConnectionStatus {
-    fn from(value: &BridgeConnectionRecord) -> Self {
-        Self {
-            bridge_id: value.bridge_id.clone(),
-            hostname: value.hostname.clone(),
-            os: value.os.clone(),
-            capabilities: value.capabilities.clone(),
-            connected: value.connected,
-            status: if value.connected { "online" } else { "offline" }.to_string(),
-            connected_at: value.connected_at.to_rfc3339(),
-            last_seen_at: value.last_seen_at.to_rfc3339(),
-        }
-    }
-}
-
-fn normalize_bridge_text(value: String, fallback: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn normalize_bridge_capabilities(capabilities: Vec<String>) -> Vec<String> {
-    let mut normalized = capabilities
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-    normalized.sort();
-    normalized.dedup();
-    normalized
-}
-
-fn bridge_offline_status() -> SessionStatus {
-    SessionStatus::Other(BRIDGE_OFFLINE_STATUS.to_string())
 }
 
 impl AppState {

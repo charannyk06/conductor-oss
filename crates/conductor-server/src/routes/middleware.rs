@@ -2,11 +2,98 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 use super::config::{access_control_enabled, resolve_access_identity, AccessRole};
 use crate::state::AppState;
+
+const GLOBAL_RATE_LIMIT_REQUESTS: u64 = 2000;
+const GLOBAL_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+struct GlobalRateLimitEntry {
+    count: u64,
+    window_start: Instant,
+}
+
+struct GlobalRateLimiter {
+    entries: RwLock<HashMap<String, GlobalRateLimitEntry>>,
+}
+
+impl GlobalRateLimiter {
+    async fn check_rate_limit(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let mut entries = self.entries.write().await;
+
+        let entry = entries
+            .entry(key.to_string())
+            .or_insert_with(|| GlobalRateLimitEntry {
+                count: 0,
+                window_start: now,
+            });
+
+        if now.duration_since(entry.window_start)
+            >= Duration::from_secs(GLOBAL_RATE_LIMIT_WINDOW_SECS)
+        {
+            entry.count = 1;
+            entry.window_start = now;
+            return true;
+        }
+
+        if entry.count >= GLOBAL_RATE_LIMIT_REQUESTS {
+            return false;
+        }
+
+        entry.count += 1;
+        true
+    }
+}
+
+static GLOBAL_RATE_LIMITER: std::sync::LazyLock<GlobalRateLimiter, fn() -> GlobalRateLimiter> =
+    std::sync::LazyLock::new(|| GlobalRateLimiter {
+        entries: RwLock::new(HashMap::new()),
+    });
+
+fn extract_client_ip(request: &Request<Body>) -> String {
+    if let Some(forwarded) = request.headers().get("x-forwarded-for") {
+        if let Ok(forwarded_str) = forwarded.to_str() {
+            return forwarded_str
+                .split(',')
+                .next()
+                .unwrap_or("unknown")
+                .trim()
+                .to_string();
+        }
+    }
+    if let Some(real_ip) = request.headers().get("x-real-ip") {
+        if let Ok(ip_str) = real_ip.to_str() {
+            return ip_str.trim().to_string();
+        }
+    }
+    "global".to_string()
+}
+
+pub async fn rate_limit_global(
+    State(_state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let client_ip = extract_client_ip(&request);
+
+    if !GLOBAL_RATE_LIMITER.check_rate_limit(&client_ip).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", "60")],
+            axum::Json(serde_json::json!({ "error": "Rate limit exceeded. Try again later." })),
+        )
+            .into_response();
+    }
+
+    next.run(request).await.into_response()
+}
 
 pub async fn require_auth_when_remote(
     State(state): State<Arc<AppState>>,

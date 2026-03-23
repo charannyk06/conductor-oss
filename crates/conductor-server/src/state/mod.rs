@@ -1,5 +1,6 @@
 mod app_update;
 mod board_collaboration;
+mod bridge_registry;
 mod detached;
 mod helpers;
 mod runtime_status;
@@ -12,6 +13,7 @@ mod workspace;
 
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
+pub(crate) use bridge_registry::{BridgeConnectionRecord, BridgeConnectionStatus};
 pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use detached::DETACHED_PID_METADATA_KEY;
 pub(crate) use detached::{
@@ -23,9 +25,7 @@ pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
-pub(crate) use session_manager::{
-    BridgeConnectionRecord, BridgeConnectionStatus, OutputConsumerConfig,
-};
+pub(crate) use session_manager::OutputConsumerConfig;
 pub use types::{
     ConversationEntry, LiveSessionHandle, SessionPrInfo, SessionRecord, SessionStatus,
     SpawnRequest, TerminalRestoreSnapshot, TerminalStreamChunk, TerminalStreamEvent,
@@ -94,7 +94,7 @@ const TERMINAL_RESTORE_PERSIST_INTERVAL: Duration = Duration::from_millis(250);
 const TERMINAL_RESTORE_FORCE_SEQUENCE_DELTA: u64 = 24;
 const TERMINAL_HOST_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(500);
 const TERMINAL_HOST_IDLE_EVICTION_TTL: Duration = Duration::from_secs(45);
-const BRIDGE_REGISTRY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
+const BRIDGE_REGISTRY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 pub(crate) fn ttyd_binary_available(workspace_path: &Path) -> bool {
