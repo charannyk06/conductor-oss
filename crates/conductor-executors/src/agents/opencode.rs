@@ -173,9 +173,7 @@ fn normalize_variant(reasoning_effort: Option<&str>) -> Option<String> {
 }
 
 fn normalize_model_id(model: Option<&str>) -> Option<String> {
-    let value = model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
+    let value = model.map(str::trim).filter(|value| !value.is_empty())?;
 
     if value.contains('/') {
         Some(value.to_string())

@@ -836,7 +836,9 @@ pub(crate) async fn resolve_board_task_identity(
     }
     let normalized = trimmed.trim_start_matches('#');
 
-    let board_path = resolve_board_path_for_project(state, project_id).await.ok()?;
+    let board_path = resolve_board_path_for_project(state, project_id)
+        .await
+        .ok()?;
     let board = parse_board(&board_path, project_id);
 
     board
@@ -850,7 +852,8 @@ pub(crate) async fn resolve_board_task_identity(
                     .as_deref()
                     .map(str::trim)
                     .is_some_and(|task_ref| {
-                        task_ref.eq_ignore_ascii_case(trimmed) || task_ref.eq_ignore_ascii_case(normalized)
+                        task_ref.eq_ignore_ascii_case(trimmed)
+                            || task_ref.eq_ignore_ascii_case(normalized)
                     })
                 || task
                     .issue_id

@@ -314,7 +314,9 @@ async fn spawn_session(
             reasoning_effort: body.reasoning_effort,
             branch: body.branch,
             base_branch: body.base_branch,
-            task_id: linked_board_task.as_ref().map(|(task_id, _)| task_id.clone()),
+            task_id: linked_board_task
+                .as_ref()
+                .map(|(task_id, _)| task_id.clone()),
             task_ref: linked_board_task
                 .as_ref()
                 .and_then(|(_, task_ref)| task_ref.clone()),
