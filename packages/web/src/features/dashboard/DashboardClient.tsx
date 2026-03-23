@@ -2,7 +2,14 @@
 
 import dynamic from "next/dynamic";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { type FormEvent, memo, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type ChangeEvent,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { GitBranchIcon, LockIcon, MarkGithubIcon, RepoIcon } from "@primer/octicons-react";
 import {
@@ -41,6 +48,7 @@ import {
   Search,
   SlidersHorizontal,
   Settings2,
+  Paperclip,
   type LucideIcon,
   Volume2,
   VolumeX,
@@ -64,6 +72,7 @@ import { TopBar } from "@/components/layout/TopBar";
 import { BridgeStatusPill } from "@/components/bridge/BridgeStatusPill";
 import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTerminalUtils";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
@@ -282,6 +291,7 @@ type CreateSessionOptions = {
   permissionMode?: CreatePermissionMode;
   issueId?: string;
   bridgeId?: string;
+  attachments?: string[];
 };
 
 type BridgeDevice = {
@@ -1247,7 +1257,7 @@ export default function DashboardClient({
       projectId?: string | null;
       sessionId?: string | null;
       workspaceView?: DashboardWorkspaceView | null;
-      tab?: "overview" | "chat" | "diff" | "preview" | null;
+      tab?: "overview" | "chat" | "diff" | "preview" | "terminal" | null;
       bridgeId?: string | null;
     },
     mode: "push" | "replace" = "push",
@@ -1693,7 +1703,7 @@ export default function DashboardClient({
     openWorkspaceDialog();
   }, [pendingWorkspaceSetup, preferencesDialogOpen]);
 
-  const handleCreateSession = useCallback(async (options?: CreateSessionOptions) => {
+  const handleCreateSession = useCallback(async (options?: CreateSessionOptions): Promise<boolean> => {
     const trimmedPrompt = prompt.trim();
     const resolvedModel = resolveModelSelectionValue(launchModelSelection);
     const resolvedReasoningEffort = resolveReasoningSelectionValue(launchModelSelection);
@@ -1701,13 +1711,13 @@ export default function DashboardClient({
 
     if (requiresPairedDeviceScope && !targetBridgeId) {
       setCreateError("Pair or reconnect a laptop before launching an agent session.");
-      return;
+      return false;
     }
 
     const projectId = options?.projectId ?? selectedProjectId ?? projects[0]?.id;
     if (!projectId) {
       setCreateError("No project is configured in conductor.yaml");
-      return;
+      return false;
     }
 
     const effectiveAgent = selectedAgent || DEFAULT_AGENT;
@@ -1719,7 +1729,7 @@ export default function DashboardClient({
           : `${getAgentLabel(effectiveAgent)} is not installed on this machine yet. Open setup and try again.`,
       );
       openAgentSetup(effectiveAgent);
-      return;
+      return false;
     }
 
     setCreating(true);
@@ -1740,6 +1750,7 @@ export default function DashboardClient({
           ...(options?.permissionMode ? { permissionMode: options.permissionMode } : {}),
           ...(resolvedModel ? { model: resolvedModel } : {}),
           ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
+          ...(options?.attachments && options.attachments.length > 0 ? { attachments: options.attachments } : {}),
         }),
       });
 
@@ -1762,13 +1773,15 @@ export default function DashboardClient({
         {
           projectId,
           sessionId: data.session.id,
-          tab: null,
+          tab: "terminal",
           bridgeId: targetBridgeId,
         },
         "push",
       );
+      return true;
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Failed to create workspace");
+      return false;
     } finally {
       setCreating(false);
     }
@@ -2296,7 +2309,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   error: string | null;
   onOpenAddWorkspace: () => void;
   onOpenAgentSetup: (agent: string) => void;
-  onCreate: (options?: CreateSessionOptions) => void;
+  onCreate: (options?: CreateSessionOptions) => Promise<boolean>;
 }) {
   const orderedAgentOptions = useMemo(() => {
     const rankMap = new Map(KNOWN_AGENT_ORDER.map((name, index) => [name, index]));
@@ -2337,6 +2350,9 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
   const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [useWorktree, setUseWorktree] = useState(false);
   const [permissionMode, setPermissionMode] = useState<CreatePermissionMode>("default");
+  const [sessionAttachments, setSessionAttachments] = useState<File[]>([]);
+  const [attachmentsUploading, setAttachmentsUploading] = useState(false);
+  const [attachmentsError, setAttachmentsError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedProject) {
@@ -2509,6 +2525,8 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     { id: "plan", label: "Plan", icon: List },
   ];
   const selectedPermission = permissionOptions.find((option) => option.id === permissionMode) ?? permissionOptions[0];
+  const attachmentInputId = "launchpad-attachment-input";
+  const isCreatingSession = creating || attachmentsUploading;
   const getProjectDisplayName = (project: ConfigProject): string => {
     const repo = project.repo?.trim();
     if (repo) {
@@ -2530,6 +2548,29 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     || selectedTask?.id
     || "Link task";
   const selectedTaskSubtitle = selectedTask ? getLinkedTaskTitle(selectedTask.text) : "Choose a task, bug, or issue from this project's board";
+  const launchPayloadProjectId = selectedProject?.id ?? effectiveProjectId ?? null;
+  const launchAttachments = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const nextFiles = Array.from(event.currentTarget.files ?? []);
+      event.currentTarget.value = "";
+      if (!nextFiles.length) return;
+
+      const signatures = new Set(
+        sessionAttachments.map((file) => `${file.name}:${file.size}:${file.lastModified}`),
+      );
+      const uniqueFiles = nextFiles.filter(
+        (file) => !signatures.has(`${file.name}:${file.size}:${file.lastModified}`),
+      );
+      if (uniqueFiles.length > 0) {
+        setSessionAttachments((current) => [...current, ...uniqueFiles]);
+      }
+      setAttachmentsError(null);
+    },
+    [sessionAttachments],
+  );
+  const removeAttachment = useCallback((indexToRemove: number) => {
+    setSessionAttachments((current) => current.filter((_, index) => index !== indexToRemove));
+  }, []);
   const updateSelectedModel = (nextModel: string) => {
     const nextReasoningOptions = getSelectableAgentReasoningOptions(
       selectedAgent,
@@ -2550,6 +2591,75 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
         ),
     });
   };
+  const handleLaunch = useCallback(async () => {
+    setAttachmentsError(null);
+    if (!launchPayloadProjectId || !selectedProject) {
+      return onCreate({
+        projectId: launchPayloadProjectId ?? undefined,
+        ...(useWorktree
+          ? { baseBranch: selectedBranch || selectedProject?.defaultBranch || undefined }
+          : { branch: selectedBranch || selectedProject?.defaultBranch || undefined }),
+        issueId: issueId.trim() || undefined,
+        bridgeId: selectedBridgeId || undefined,
+        useWorktree,
+        permissionMode,
+      });
+    }
+
+    setAttachmentsUploading(true);
+    setAttachmentsError(null);
+    let attachmentPaths: string[] | undefined;
+
+    try {
+      if (sessionAttachments.length > 0) {
+        attachmentPaths = await uploadProjectAttachments({
+          files: sessionAttachments,
+          projectId: selectedProject.id,
+          taskRef: issueId.trim() || undefined,
+          bridgeId: selectedBridgeId || undefined,
+        });
+      }
+    } catch (err) {
+      setAttachmentsError(err instanceof Error ? err.message : "Failed to upload attachment");
+      return false;
+    } finally {
+      setAttachmentsUploading(false);
+    }
+
+    const created = await onCreate({
+      projectId: launchPayloadProjectId ?? undefined,
+      ...(useWorktree
+        ? { baseBranch: selectedBranch || selectedProject.defaultBranch || undefined }
+        : { branch: selectedBranch || selectedProject.defaultBranch || undefined }),
+      issueId: issueId.trim() || undefined,
+      bridgeId: selectedBridgeId || undefined,
+      useWorktree,
+      permissionMode,
+      ...(attachmentPaths && attachmentPaths.length > 0 ? { attachments: attachmentPaths } : {}),
+    });
+
+    if (created) {
+      setSessionAttachments([]);
+      setAttachmentsError(null);
+    }
+
+    return created;
+  }, [
+    issueId,
+    launchPayloadProjectId,
+    onCreate,
+    permissionMode,
+    selectedBranch,
+    selectedProject,
+    selectedProject?.defaultBranch,
+    selectedBridgeId,
+    sessionAttachments,
+    useWorktree,
+  ]);
+  useEffect(() => {
+    setSessionAttachments([]);
+    setAttachmentsError(null);
+  }, [launchPayloadProjectId]);
 
   return (
     <section className="flex h-full min-h-0 items-start justify-center overflow-auto bg-[var(--vk-bg-main)] px-3 py-4 sm:items-center sm:px-6 sm:py-6">
@@ -2706,8 +2816,27 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                   onChange={(e) => setPrompt(e.target.value)}
                   placeholder="Optional launch prompt. Leave empty to open the native CLI."
                   rows={1}
-                  className="min-h-[24px] w-full resize-none bg-transparent pr-8 text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                  className="min-h-[24px] w-full resize-none bg-transparent pr-16 text-[16px] leading-[24px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
                 />
+                <label
+                  htmlFor={attachmentInputId}
+                  className={`absolute right-[18px] top-0 inline-flex h-[24px] w-[24px] items-center justify-center rounded-[4px] ${
+                    launchPayloadProjectId
+                      ? "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                      : "cursor-not-allowed opacity-50"
+                  }`}
+                >
+                  <input
+                    id={attachmentInputId}
+                    type="file"
+                    accept="*/*"
+                    multiple
+                    onChange={launchAttachments}
+                    disabled={!launchPayloadProjectId || isCreatingSession}
+                    className="hidden"
+                  />
+                  <Paperclip className="h-[14px] w-[14px]" />
+                </label>
                 <button
                   type="button"
                   aria-label="Preview"
@@ -2716,6 +2845,31 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                   <Eye className="h-[14px] w-[14px]" />
                 </button>
               </div>
+              {sessionAttachments.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {sessionAttachments.map((file, index) => (
+                    <span
+                      key={`${file.name}-${file.size}-${file.lastModified}-${index}`}
+                      className="inline-flex max-w-full items-center gap-1 rounded-[999px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2 py-1 text-[11px] text-[var(--vk-text-muted)]"
+                    >
+                      <span
+                        className="max-w-[160px] truncate"
+                        title={file.name}
+                      >
+                        {file.name}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={`Remove attachment ${file.name}`}
+                        onClick={() => removeAttachment(index)}
+                        className="inline-flex h-[14px] w-[14px] items-center justify-center rounded-full text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
 
               <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                 <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1 gap-y-2">
@@ -2973,20 +3127,11 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                 <div className="flex w-full justify-end sm:w-auto">
                   <button
                     type="button"
-                    onClick={() => onCreate({
-                      projectId: effectiveProjectId ?? undefined,
-                      ...(useWorktree
-                        ? { baseBranch: selectedBranch || selectedProject?.defaultBranch || undefined }
-                        : { branch: selectedBranch || selectedProject?.defaultBranch || undefined }),
-                      issueId: issueId.trim() || undefined,
-                      bridgeId: selectedBridgeId || undefined,
-                      useWorktree,
-                      permissionMode,
-                    })}
-                    disabled={creating || !effectiveProjectId}
+                    onClick={handleLaunch}
+                    disabled={isCreatingSession || !effectiveProjectId}
                     className="inline-flex min-h-[29px] items-center justify-center rounded-[3px] bg-[var(--vk-bg-hover)] px-[8px] py-[6.5px] text-[16px] leading-[16px] text-[var(--vk-text-strong)] transition-colors hover:bg-[var(--vk-bg-active)] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Launch"}
+                    {isCreatingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : "Launch"}
                   </button>
                 </div>
               </div>
@@ -3034,6 +3179,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
         </div>
 
         {error && <p className="pt-2 text-[12px] text-[var(--status-error)]">{error}</p>}
+        {attachmentsError && <p className="pt-2 text-[12px] text-[var(--status-error)]">{attachmentsError}</p>}
       </div>
     </section>
   );
