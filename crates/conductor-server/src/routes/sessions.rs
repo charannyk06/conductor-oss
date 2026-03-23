@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
-use crate::routes::boards::update_board_task_attempt_ref;
+use crate::routes::boards::{resolve_board_task_identity, update_board_task_attempt_ref};
 use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
     build_normalized_chat_feed, trim_lines_tail, AppState, SessionRecord, SessionStatus,
@@ -273,6 +273,7 @@ struct SpawnBody {
     project_id: String,
     bridge_id: Option<String>,
     prompt: Option<String>,
+    #[serde(alias = "issue_id")]
     issue_id: Option<String>,
     agent: Option<String>,
     use_worktree: Option<bool>,
@@ -288,10 +289,23 @@ async fn spawn_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SpawnBody>,
 ) -> ApiResponse {
+    let project_id = body.project_id.clone();
     let prompt = body.prompt.unwrap_or_default();
+
+    let linked_board_task = if let Some(task_link_key) = body
+        .issue_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        resolve_board_task_identity(&state, &project_id, task_link_key).await
+    } else {
+        None
+    };
+
     match state
         .spawn_session(SpawnRequest {
-            project_id: body.project_id,
+            project_id: project_id.clone(),
             bridge_id: body.bridge_id,
             prompt,
             issue_id: body.issue_id,
@@ -302,8 +316,12 @@ async fn spawn_session(
             reasoning_effort: body.reasoning_effort,
             branch: body.branch,
             base_branch: body.base_branch,
-            task_id: None,
-            task_ref: None,
+            task_id: linked_board_task
+                .as_ref()
+                .map(|(task_id, _)| task_id.clone()),
+            task_ref: linked_board_task
+                .as_ref()
+                .and_then(|(_, task_ref)| task_ref.clone()),
             attempt_id: None,
             parent_task_id: None,
             retry_of_session_id: None,
@@ -315,6 +333,12 @@ async fn spawn_session(
         .await
     {
         Ok(session) => {
+            if let Some((task_id, _)) = linked_board_task {
+                let _ =
+                    update_board_task_attempt_ref(&state, &project_id, &task_id, &session.id, None)
+                        .await;
+            }
+
             let session_value = state.serialize_dashboard_session(&session).await;
             created(json!({ "session": session_value }))
         }
