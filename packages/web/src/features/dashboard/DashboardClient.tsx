@@ -81,6 +81,7 @@ import {
   isPairedBridgeScopeReady,
   resolveSelectedBridgeId,
 } from "@/lib/bridgeScope";
+import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
   getRuntimeCatalogDefaultModelForAccess,
@@ -1069,6 +1070,7 @@ export default function DashboardClient({
   const effectiveBridgeId = selectedBridgeIdValue ?? selectedSessionBridgeId;
   const [bridges, setBridges] = useState<DashboardBridgeConnection[]>([]);
   const [bridgeInventoryStatus, setBridgeInventoryStatus] = useState<BridgeInventoryStatus>("loading");
+  const bridgeRelayUrl = resolveBridgeRelayUrl();
   const connectedBridges = useMemo(
     () => bridges.filter((bridge) => bridge.connected),
     [bridges],
@@ -1154,6 +1156,15 @@ export default function DashboardClient({
 
 
   useEffect(() => {
+    if (!bridgeRelayUrl) {
+      setBridges([]);
+      setBridgeInventoryStatus("ready");
+      if (requiresPairedDeviceScope) {
+        router.replace("/bridge/connect");
+      }
+      return;
+    }
+
     let cancelled = false;
     const refreshIntervalMs = bridgeScopePending ? 4_000 : 15_000;
 
@@ -1194,7 +1205,7 @@ export default function DashboardClient({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [bridgeScopePending]);
+  }, [bridgeRelayUrl, bridgeScopePending, requiresPairedDeviceScope, router]);
 
   useEffect(() => {
     const nextSelectedBridgeId = resolveSelectedBridgeId({

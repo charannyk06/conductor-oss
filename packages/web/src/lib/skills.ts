@@ -5,6 +5,7 @@ export interface SkillCatalogEntry {
   category: string;
   verified: boolean;
   compatibleAgents: string[];
+  icon: string;
   repoUrl: string;
   sourceSubpath?: string | null;
   packageKind: string;

@@ -32,6 +32,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 const rootClass = `${GeistSans.variable} ${tomorrow.variable} ${orbitron.variable} ${jetbrainsMono.variable}`;
+const isVercelDeployment = process.env.VERCEL === "1" || process.env.VERCEL === "true";
 
 export const metadata: Metadata = {
   title: "Conductor",
@@ -62,7 +63,7 @@ function Shell({ children }: { children: React.ReactNode }) {
         <TooltipProvider>
           <ThemeProvider>
             {children}
-            <Analytics />
+            {isVercelDeployment ? <Analytics /> : null}
           </ThemeProvider>
         </TooltipProvider>
       </body>

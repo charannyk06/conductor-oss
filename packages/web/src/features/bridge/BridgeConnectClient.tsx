@@ -25,6 +25,7 @@ import {
   isBridgeAutoUpdateInFlight,
   readRecentBridgePairing,
   runBridgeAutoUpdate,
+  formatBridgeAutoUpdatePhaseLabel,
   type BridgeAutoUpdateState,
   writeRecentBridgePairing,
 } from "@/lib/bridgeAppUpdate";
@@ -218,6 +219,7 @@ export default function BridgeConnectClient({
     message: null,
   });
   const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
+  const relayConfigured = Boolean(relayUrl?.trim());
 
   const bootstrapConnectCommand = useMemo(
     () => buildBridgeBootstrapConnectCommand(installScriptUrl, dashboardUrl, relayUrl),
@@ -313,6 +315,13 @@ export default function BridgeConnectClient({
   }, []);
 
   const refreshDevices = useCallback(async (): Promise<void> => {
+    if (!relayConfigured) {
+      setLoading(false);
+      setDevices([]);
+      setError(null);
+      return;
+    }
+
     setLoading(true);
     try {
       const response = await fetch("/api/bridge/devices", { cache: "no-store" });
@@ -328,10 +337,16 @@ export default function BridgeConnectClient({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [relayConfigured]);
 
   const completeClaim = useCallback(async (): Promise<void> => {
     if (!initialClaimToken) {
+      return;
+    }
+
+    if (!relayConfigured) {
+      setClaimStatus("idle");
+      setClaimError("Bridge relay URL is not configured.");
       return;
     }
 
@@ -363,18 +378,30 @@ export default function BridgeConnectClient({
       setClaimStatus("idle");
       setClaimError(err instanceof Error ? err.message : "Failed to complete the laptop claim.");
     }
-  }, [initialClaimToken, refreshDevices]);
+  }, [initialClaimToken, relayConfigured, refreshDevices]);
 
   useEffect(() => {
+    if (!relayConfigured) {
+      setLoading(false);
+      return;
+    }
+
     void refreshDevices();
-  }, [refreshDevices]);
+  }, [relayConfigured, refreshDevices]);
 
   useEffect(() => {
     if (!initialClaimToken) {
       return;
     }
+
+    if (!relayConfigured) {
+      setClaimStatus("idle");
+      setClaimError("Bridge relay URL is not configured.");
+      return;
+    }
+
     void completeClaim();
-  }, [completeClaim, initialClaimToken]);
+  }, [completeClaim, initialClaimToken, relayConfigured]);
 
   useEffect(() => {
     const autoUpdateDevice = (claimedDeviceRecord?.connected ? claimedDeviceRecord : null)
@@ -439,13 +466,18 @@ export default function BridgeConnectClient({
   ]);
 
   useEffect(() => {
-    if (initialClaimToken || pairingCode || creatingCode || !showAdvancedSetup) {
+    if (!relayConfigured || initialClaimToken || pairingCode || creatingCode || !showAdvancedSetup) {
       return;
     }
     void handleGenerateCode();
-  }, [creatingCode, initialClaimToken, pairingCode, showAdvancedSetup]);
+  }, [creatingCode, initialClaimToken, pairingCode, relayConfigured, showAdvancedSetup]);
 
   async function handleGenerateCode(): Promise<void> {
+    if (!relayConfigured) {
+      setError("Bridge relay URL is not configured.");
+      return;
+    }
+
     setCreatingCode(true);
     setCopiedCommand(null);
     try {
@@ -483,6 +515,10 @@ export default function BridgeConnectClient({
   }
 
   async function handleDeleteDevice(deviceId: string): Promise<void> {
+    if (!relayConfigured) {
+      return;
+    }
+
     setBusyDeviceId(deviceId);
     try {
       const response = await fetch(`/api/bridge/devices/${encodeURIComponent(deviceId)}`, {
@@ -501,6 +537,10 @@ export default function BridgeConnectClient({
   }
 
   async function handleRestartBridgeService(device: Device): Promise<void> {
+    if (!relayConfigured) {
+      return;
+    }
+
     setServiceAction({
       deviceId: device.device_id,
       kind: "restart",
@@ -530,6 +570,10 @@ export default function BridgeConnectClient({
   }
 
   async function handleRepairBridge(device: Device): Promise<void> {
+    if (!relayConfigured) {
+      return;
+    }
+
     setServiceAction({
       deviceId: device.device_id,
       kind: "repair",
@@ -559,6 +603,10 @@ export default function BridgeConnectClient({
   }
 
   async function handleUpdateBridgeDevice(device: Device): Promise<void> {
+    if (!relayConfigured) {
+      return;
+    }
+
     await runBridgeAutoUpdate(device, setPairingAutoUpdate);
     window.setTimeout(() => {
       void refreshDevices();
@@ -566,6 +614,13 @@ export default function BridgeConnectClient({
   }
 
   async function handleOpenTestConnection(): Promise<void> {
+    if (!relayConfigured) {
+      setTestConnectionOpen(true);
+      setTestConnectionLoading(false);
+      setTestConnectionError("Bridge relay URL is not configured.");
+      return;
+    }
+
     setTestConnectionOpen(true);
     setTestConnectionLoading(true);
     setTestConnectionError(null);
@@ -649,6 +704,7 @@ export default function BridgeConnectClient({
                   type="button"
                   variant="outline"
                   size="lg"
+                  disabled={!relayConfigured}
                   onClick={() => {
                     void refreshDevices();
                   }}
@@ -661,7 +717,7 @@ export default function BridgeConnectClient({
                   type="button"
                   variant="outline"
                   size="lg"
-                  disabled={testConnectionLoading || connectedDevices.length === 0}
+                  disabled={!relayConfigured || testConnectionLoading || connectedDevices.length === 0}
                   onClick={() => {
                     void handleOpenTestConnection();
                   }}
@@ -672,6 +728,18 @@ export default function BridgeConnectClient({
               </div>
             </div>
           </Panel>
+
+          {!relayConfigured ? (
+            <Panel className="border-[color:color-mix(in_srgb,var(--vk-orange)_34%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-orange)_12%,transparent)] shadow-none">
+              <Eyebrow>Bridge relay</Eyebrow>
+              <h2 className="mt-2 text-xl font-semibold text-[var(--vk-text-strong)]">
+                Bridge relay URL is not configured
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
+                Set <code>CONDUCTOR_BRIDGE_RELAY_URL</code> to enable paired-device refresh, claims, and bridge management on this page.
+              </p>
+            </Panel>
+          ) : null}
 
           {readyDevice ? (
             <Panel className="border-[rgba(24,197,143,0.32)] bg-[rgba(24,197,143,0.08)] shadow-none">
@@ -697,6 +765,7 @@ export default function BridgeConnectClient({
                     type="button"
                     variant="outline"
                     size="lg"
+                    disabled={!relayConfigured || testConnectionLoading}
                     onClick={() => {
                       void handleOpenTestConnection();
                     }}
@@ -758,7 +827,7 @@ export default function BridgeConnectClient({
                       </div>
                       {pairingAutoUpdate.message ? (
                         <div className={cn(
-                          "mt-2 text-xs leading-5",
+                          "mt-2 flex flex-wrap items-center gap-2 text-xs leading-5",
                           pairingAutoUpdate.phase === "failed"
                             ? "text-[var(--vk-red)]"
                             : pairingAutoUpdate.phase === "skipped"
@@ -766,7 +835,10 @@ export default function BridgeConnectClient({
                               : "text-[var(--vk-text-faint)]",
                         )}
                         >
-                          {pairingAutoUpdate.message}
+                          <span className="inline-flex items-center rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">
+                            {formatBridgeAutoUpdatePhaseLabel(pairingAutoUpdate.phase)}
+                          </span>
+                          <span>{pairingAutoUpdate.message}</span>
                         </div>
                       ) : null}
                     </div>
@@ -932,7 +1004,7 @@ export default function BridgeConnectClient({
                               type="button"
                               variant="outline"
                               size="md"
-                              disabled={creatingCode}
+                              disabled={creatingCode || !relayConfigured}
                               onClick={() => {
                                 void handleGenerateCode();
                               }}
@@ -948,7 +1020,7 @@ export default function BridgeConnectClient({
                           type="button"
                           variant="outline"
                           size="md"
-                          disabled={!pairingCode}
+                          disabled={!pairingCode || !relayConfigured}
                           onClick={() => {
                             void handleCopyCommand(manualCommand, "manual");
                           }}
@@ -994,7 +1066,7 @@ export default function BridgeConnectClient({
                     </div>
                     {pairingAutoUpdate.message && pairingAutoUpdate.deviceId === selectedDevice.device_id ? (
                       <div className={cn(
-                        "text-xs leading-5",
+                        "flex flex-wrap items-center gap-2 text-xs leading-5",
                         pairingAutoUpdate.phase === "failed"
                           ? "text-[var(--vk-red)]"
                           : pairingAutoUpdate.phase === "skipped"
@@ -1002,7 +1074,10 @@ export default function BridgeConnectClient({
                             : "text-[var(--vk-text-faint)]",
                       )}
                       >
-                        {pairingAutoUpdate.message}
+                        <span className="inline-flex items-center rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">
+                          {formatBridgeAutoUpdatePhaseLabel(pairingAutoUpdate.phase)}
+                        </span>
+                        <span>{pairingAutoUpdate.message}</span>
                       </div>
                     ) : null}
                     {serviceAction.message && serviceAction.deviceId === selectedDevice.device_id ? (
@@ -1149,7 +1224,7 @@ export default function BridgeConnectClient({
                             </div>
                             {pairingAutoUpdate.message && pairingAutoUpdate.deviceId === device.device_id ? (
                               <div className={cn(
-                                "mt-2 text-xs leading-5",
+                                "mt-2 flex flex-wrap items-center gap-2 text-xs leading-5",
                                 pairingAutoUpdate.phase === "failed"
                                   ? "text-[var(--vk-red)]"
                                   : pairingAutoUpdate.phase === "skipped"
@@ -1157,7 +1232,10 @@ export default function BridgeConnectClient({
                                     : "text-[var(--vk-text-faint)]",
                               )}
                               >
-                                {pairingAutoUpdate.message}
+                                <span className="inline-flex items-center rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">
+                                  {formatBridgeAutoUpdatePhaseLabel(pairingAutoUpdate.phase)}
+                                </span>
+                                <span>{pairingAutoUpdate.message}</span>
                               </div>
                             ) : null}
                             {serviceAction.message && serviceAction.deviceId === device.device_id ? (
