@@ -67,15 +67,15 @@ test("getDashboardAccess still denies non-local requests without remote identity
   assert.equal(access.reason, "Authentication is required for non-local dashboard access");
 });
 
-test("getDashboardAccess uses the forwarded host for hosted auth checks", async () => {
+test("getDashboardAccess ignores spoofed forwarded loopback hosts for remote requests", async () => {
   resetDashboardAuthEnv();
   process.env.CONDUCTOR_REQUIRE_AUTH = "true";
 
-  const access = await getDashboardAccess(new Request("http://127.0.0.1:3000/api/access", {
+  const access = await getDashboardAccess(new Request("https://dashboard.example.com/api/access", {
     headers: {
-      host: "127.0.0.1:3000",
-      "x-forwarded-host": "preview.conductross.com",
-      "x-forwarded-proto": "https",
+      host: "dashboard.example.com",
+      "x-forwarded-host": "127.0.0.1:3000",
+      "x-forwarded-proto": "http",
     },
   }));
 
@@ -83,15 +83,15 @@ test("getDashboardAccess uses the forwarded host for hosted auth checks", async 
   assert.equal(access.reason, "Authentication is required for non-local dashboard access");
 });
 
-test("guardApiActionAccess allows tunneled same-origin action requests via forwarded host", () => {
-  const request = new NextRequest("http://127.0.0.1:3000/api/preferences", {
+test("guardApiActionAccess ignores spoofed forwarded hosts for same-origin requests", () => {
+  const request = new NextRequest("https://dashboard.example.com/api/preferences", {
     method: "POST",
     headers: {
       origin: "https://dashboard.example.com",
       referer: "https://dashboard.example.com/unlock",
-      host: "127.0.0.1:3000",
-      "x-forwarded-host": "dashboard.example.com",
-      "x-forwarded-proto": "https",
+      host: "dashboard.example.com",
+      "x-forwarded-host": "127.0.0.1:3000",
+      "x-forwarded-proto": "http",
       "sec-fetch-site": "same-origin",
     },
   });

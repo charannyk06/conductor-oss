@@ -342,16 +342,21 @@ async function currentHeaders(request?: Request): Promise<Headers> {
 
 async function currentHost(request?: Request): Promise<string> {
   if (request) {
-    const forwardedHost = resolveRequestHostname(request.headers);
-    if (forwardedHost) {
-      return forwardedHost;
+    try {
+      const requestUrlHost = new URL(request.url).hostname.trim().toLowerCase();
+      if (requestUrlHost) {
+        return requestUrlHost;
+      }
+    } catch {
+      // Fall through to the header-based fallback below.
     }
 
-    try {
-      return new URL(request.url).hostname.trim().toLowerCase();
-    } catch {
-      return "";
+    const headerHost = resolveRequestHostname(request.headers);
+    if (headerHost) {
+      return headerHost;
     }
+
+    return "";
   }
   const headerStore = await headers();
   return resolveRequestHostname(headerStore);
@@ -576,19 +581,7 @@ function matchesHost(value: string, expectedHost: string, allowedHosts: Set<stri
 }
 
 function resolveExpectedActionHost(request: NextRequest): string {
-  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
-  if (forwardedHost) {
-    const forwardedProto = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
-    const parsed = parseHostParts(
-      `${forwardedProto === "http" || forwardedProto === "https" ? forwardedProto : "https"}://${forwardedHost}`,
-      request.nextUrl.host,
-    );
-    if (parsed?.host) {
-      return parsed.host;
-    }
-  }
-
-  return request.headers.get("host")?.trim() || request.nextUrl.host;
+  return request.nextUrl.host.trim().toLowerCase() || request.headers.get("host")?.trim().toLowerCase() || "";
 }
 
 function guardActionOrigin(request: NextRequest): NextResponse | null {
