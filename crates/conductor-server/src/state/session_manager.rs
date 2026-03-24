@@ -241,6 +241,198 @@ fn persisted_output_line(event: &ExecutorOutput) -> Option<String> {
     }
 }
 
+fn extract_quoted_or_bare_token(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut token = trimmed;
+    if token.len() >= 2 {
+        let first = token.chars().next().unwrap_or_default();
+        let last = token.chars().last().unwrap_or_default();
+        if (first == '\'' && last == '\'') || (first == '"' && last == '"') {
+            token = &token[1..token.len() - 1];
+        }
+    }
+
+    let token = token
+        .trim_matches(|current| {
+            current == ';' || current == ',' || current == '.' || current == ':' || current == ')'
+        })
+        .trim_matches(|current| current == '\'' || current == '"' || current == '`');
+
+    if token.is_empty() {
+        return None;
+    }
+
+    Some(token.to_string())
+}
+
+fn parse_branch_from_output(line: &str) -> Option<String> {
+    parse_branch_from_status_line(line)
+        .or_else(|| parse_branch_from_command_line(line))
+        .filter(|branch| is_valid_branch_name(branch))
+}
+
+fn parse_branch_from_status_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    const PREFIXES: [&str; 3] = [
+        "switched to a new branch ",
+        "switched to branch ",
+        "already on ",
+    ];
+    for prefix in PREFIXES {
+        if lowered.starts_with(prefix) {
+            return extract_quoted_or_bare_token(&trimmed[prefix.len()..]);
+        }
+    }
+
+    if lowered.starts_with("on branch ") {
+        return extract_quoted_or_bare_token(&trimmed["on branch ".len()..]);
+    }
+
+    None
+}
+
+fn strip_prompt_prefix(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    for marker in ["$ ", "# ", "% "] {
+        if let Some(index) = trimmed.rfind(marker) {
+            let command = trimmed[index + marker.len()..].trim_start();
+            if command.starts_with("git ") {
+                return command;
+            }
+        }
+    }
+
+    if trimmed.starts_with("git ") {
+        return trimmed;
+    }
+
+    line
+}
+
+fn looks_like_commit_hash(value: &str) -> bool {
+    (7..=40).contains(&value.len()) && value.chars().all(|char| char.is_ascii_hexdigit())
+}
+
+fn is_valid_branch_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+
+    if name == "." || name == "HEAD" || name.starts_with('-') {
+        return false;
+    }
+
+    if looks_like_commit_hash(name) {
+        return false;
+    }
+
+    if name.contains("..")
+        || name.contains("/.")
+        || name.contains(".lock")
+        || name.contains('@')
+        || name.contains('\\')
+        || name.chars().any(|char| char.is_whitespace())
+        || name
+            .chars()
+            .any(|char| matches!(char, '~' | '^' | ':' | '?' | '*' | '['))
+    {
+        return false;
+    }
+
+    if !name
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '/' | '_' | '-' | '.' | '+'))
+    {
+        return false;
+    }
+
+    if name.contains('.') {
+        return false;
+    }
+
+    true
+}
+
+fn parse_branch_from_command_line(line: &str) -> Option<String> {
+    let command = strip_prompt_prefix(line);
+    let tokens = command
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+
+    if tokens.len() < 3 {
+        return None;
+    }
+
+    if tokens[0] != "git" {
+        return None;
+    }
+
+    let action = tokens[1];
+    if action != "checkout" && action != "switch" {
+        return None;
+    }
+
+    let mut index = 2;
+    while index < tokens.len() {
+        let token = tokens[index];
+        match token {
+            "-b" | "-B" | "-c" | "-C" | "--create" | "--orphan" => {
+                index = index.saturating_add(1);
+                if index >= tokens.len() {
+                    return None;
+                }
+                return extract_quoted_or_bare_token(tokens[index]);
+            }
+            t if t.starts_with("--create=") => {
+                return extract_quoted_or_bare_token(&t[9..]);
+            }
+            t if t.starts_with("--orphan=") => {
+                return extract_quoted_or_bare_token(&t[9..]);
+            }
+            "--" => {
+                return None;
+            }
+            t if t.starts_with('-') => {
+                index = index.saturating_add(1);
+                continue;
+            }
+            _ => {
+                let candidate = extract_quoted_or_bare_token(token)?;
+                if !is_valid_branch_name(&candidate) {
+                    return None;
+                }
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn maybe_update_session_branch_from_output(session: &mut SessionRecord, line: &str) {
+    let Some(branch) = parse_branch_from_output(line) else {
+        return;
+    };
+
+    if session.branch.as_deref() == Some(&branch) {
+        return;
+    }
+
+    let next_branch = branch.trim();
+    if next_branch.is_empty() {
+        return;
+    }
+
+    session.branch = Some(next_branch.to_string());
+}
+
 fn detached_runtime_pid(session: &SessionRecord) -> Option<u32> {
     session
         .metadata
@@ -265,6 +457,8 @@ fn runtime_pids(session: &SessionRecord) -> Vec<u32> {
 
 /// Shared Stdout event handler used by both `append_and_apply` and `apply_runtime_event`.
 fn apply_stdout_event(session: &mut SessionRecord, line: &str, is_live: bool) {
+    maybe_update_session_branch_from_output(session, line);
+
     if is_live && !session.status.is_terminal() {
         session.status = SessionStatus::Working;
         session.activity = Some("active".to_string());
@@ -1182,6 +1376,8 @@ impl AppState {
                 apply_stdout_event(session, stdout_line, is_live);
             }
             ExecutorOutput::Stderr(ref stderr_line) => {
+                maybe_update_session_branch_from_output(session, stderr_line);
+
                 if detect_parser_state(session, stderr_line) {
                     append_runtime_status_entry(session, stderr_line);
                     session.summary = Some(stderr_line.trim().to_string());
@@ -1263,6 +1459,8 @@ impl AppState {
                 apply_stdout_event(session, &line, is_live);
             }
             ExecutorOutput::Stderr(line) => {
+                maybe_update_session_branch_from_output(session, &line);
+
                 if detect_parser_state(session, &line) {
                     append_runtime_status_entry(session, &line);
                     session.summary = Some(line.trim().to_string());

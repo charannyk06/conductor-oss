@@ -56,7 +56,7 @@ export default function SessionPageClient({
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
-    return tab !== "overview" && tab !== "preview" && tab !== "diff";
+    return tab === null || tab === "terminal";
   }, [searchParams]);
   const immersiveTerminalMode = terminalTabActive && compactTerminalChrome;
   const notificationProjectId = currentSession?.projectId ?? null;
@@ -176,13 +176,8 @@ export default function SessionPageClient({
           selectedSessionId={params.id}
           onSelectSession={(sessionId, options) => {
             const params = new URLSearchParams();
-            if (options?.tab) {
-              params.set("tab", options.tab);
-            }
-            const query = params.toString();
-            router.push(query.length > 0
-              ? `/sessions/${encodeURIComponent(sessionId)}?${query}`
-              : `/sessions/${encodeURIComponent(sessionId)}`);
+            params.set("tab", options?.tab ?? "terminal");
+            router.push(`/sessions/${encodeURIComponent(sessionId)}?${params.toString()}`);
             closeSidebarOnMobile();
           }}
           onArchiveSession={handleArchiveSession}

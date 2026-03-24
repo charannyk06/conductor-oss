@@ -18,6 +18,7 @@ export type TerminalConnectionInfo = {
   terminalUrl: string | null;
   interactive: boolean;
   reason: string | null;
+  expiresInSeconds?: number | null;
 };
 
 declare global {

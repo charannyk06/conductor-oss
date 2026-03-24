@@ -88,6 +88,13 @@ impl AppState {
         if !is_safe_git_ref(base_ref) {
             return Err(anyhow!("Invalid base branch name: '{base_ref}'"));
         }
+        if let Err(err) = sync_remote_refs(&repo_path).await {
+            tracing::warn!(
+                project_id,
+                error = %err,
+                "Failed to sync remote refs before creating worktree"
+            );
+        }
 
         let branch_exists =
             git_ref_exists(&repo_path, &format!("refs/heads/{session_branch}")).await;
@@ -355,6 +362,10 @@ impl AppState {
 }
 
 async fn resolve_branch_start_ref(repo_path: &Path, branch: &str) -> Option<String> {
+    if let Err(err) = sync_remote_refs(repo_path).await {
+        tracing::warn!(error = %err, "Failed to sync remote refs before resolving branch start ref");
+    }
+
     if git_ref_exists(repo_path, &format!("refs/heads/{branch}")).await {
         return Some(branch.to_string());
     }
@@ -387,6 +398,45 @@ async fn resolve_branch_start_ref(repo_path: &Path, branch: &str) -> Option<Stri
         .collect::<Vec<_>>();
 
     select_remote_tracking_ref(branch, &refs)
+}
+
+async fn sync_remote_refs(repo_path: &Path) -> Result<()> {
+    const SYNC_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
+    let repo_path_str = repo_path.to_string_lossy().into_owned();
+
+    let output = match tokio::time::timeout(SYNC_REMOTE_TIMEOUT, async {
+        let mut command = Command::new("git");
+        command.args([
+            "-C",
+            repo_path_str.as_str(),
+            "remote",
+            "update",
+            "--prune",
+            "--",
+        ]);
+        command.env("GIT_TERMINAL_PROMPT", "0");
+        command.output().await
+    })
+    .await
+    {
+        Ok(output) => output?,
+        Err(err) => {
+            tracing::warn!(
+                repo_path = %repo_path.display(),
+                error = %err,
+                "Timed out while syncing remote refs"
+            );
+            return Ok(());
+        }
+    };
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git remote update --prune failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(())
 }
 
 async fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {
