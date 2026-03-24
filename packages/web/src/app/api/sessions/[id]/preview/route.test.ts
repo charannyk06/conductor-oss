@@ -257,11 +257,12 @@ test("GET resolves bridge-backed preview session context via the paired device a
       lastError: string | null;
     };
 
-      assert.equal(payload.connected, false);
-      assert.deepEqual(payload.candidateUrls, [
-        "http://127.0.0.1:3000/",
-        "http://localhost:3002/",
-      ]);
+    assert.equal(payload.connected, false);
+    assert.deepEqual(payload.candidateUrls, [
+      "http://127.0.0.1:3000/",
+      "https://deploy-preview.example.com/",
+      "http://localhost:3002/",
+    ]);
     assert.equal(payload.currentUrl, null);
     assert.equal(payload.title, null);
     assert.match(payload.screenshotKey, /^\d+$/);
