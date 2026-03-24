@@ -3,6 +3,9 @@
 ## Status
 Draft — 2026-03-19
 
+> Archive note
+> This is a historical planning document. The shipped product has since evolved into a local-first Rust + Next.js app with a multi-agent Skills tab and launcher-backed dashboard/backend env wiring. Keep the flow diagrams below as context, not as source-of-truth implementation.
+
 ---
 
 ## 1. Overview
@@ -29,7 +32,7 @@ A developer downloads one binary, runs one command, logs in with GitHub OAuth, a
 5. Dashboard shows their laptop as "connected"
 6. User adds a workspace (native folder picker opens)
 7. Picks ~/projects/shadower
-8. Clicks "New session" → selects Claude Code → full terminal opens
+8. Clicks "New session" → selects a coding agent → full terminal opens
 9. All data stays on laptop. All agents run on laptop.
 10. User travels, opens phone, opens conductor.app
 11. Session still running. Terminal still live. Files still local.
@@ -69,9 +72,9 @@ conductor bridge
 Opens conductor.app
   → Already logged in
   → Dashboard shows workspace and active sessions
-Starts new session: ~/projects/shadower, Claude Code
+Starts new session: ~/projects/shadower, selected agent
   → Terminal opens in browser (ttyd iframe)
-  → Claude Code runs on laptop, reads/writes ~/projects/shadower
+  → Selected agent runs on laptop, reads/writes ~/projects/shadower
   → Output streams to browser in real-time
 Closes laptop, goes to bed
   → Session keeps running
@@ -83,9 +86,9 @@ Closes laptop, goes to bed
 Opens conductor.app on phone
   → Dashboard responsive, mobile-friendly
   → Shows active sessions
-  → Taps Claude Code session
+  → Taps the session
   → Full terminal opens (ttyd iframe, touch-friendly)
-  → Can watch Claude Code writing files
+  → Can watch the selected agent writing files
   → Can send commands (Ctrl+C to stop)
 ```
 

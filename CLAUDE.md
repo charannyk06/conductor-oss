@@ -4,7 +4,7 @@
 
 ## What is Conductor OSS
 
-Conductor is a local-first AI agent orchestrator. It turns Markdown kanban boards into dispatched coding tasks, runs them via agent CLIs (Claude Code, Codex, Gemini, etc.) in isolated worktrees, and streams results through a dashboard.
+Conductor is a local-first AI agent orchestrator. It turns Markdown kanban boards into dispatched coding tasks, runs them via agent CLIs (Claude Code, Codex, Gemini, Qwen Code, Amp, Cursor CLI, OpenCode, Droid, GitHub Copilot, CCR) in isolated worktrees, and streams results through a dashboard with a multi-agent Skills tab.
 
 **One command. Markdown-native. Local-first by default.**
 
@@ -12,7 +12,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 
 ### Stack
 
-- **Backend:** Rust (axum, tokio, sqlx/SQLite). Repo dev scripts use port 4749; the launcher defaults to 4748.
+- **Backend:** Rust (axum, tokio, sqlx/SQLite). Repo dev scripts use port 4749; the launcher defaults to 4748 and forwards `CONDUCTOR_BACKEND_URL` / `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` into the dashboard.
 - **Dashboard:** Next.js (packages/web). Repo dev scripts use port 3000; the launcher defaults to 4747.
 - **CLI:** Node.js launcher + Rust native binary
 - **Runtime:** ttyd-first PTY-based session management
@@ -54,7 +54,11 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 
 ### Supported Agents
 
-Claude Code, Codex, Gemini, Qwen Code, Amp, Cursor Agent, OpenCode, Droid, GitHub Copilot, CCR
+Claude Code, Codex, Gemini, Qwen Code, Amp, Cursor CLI, OpenCode, Droid, GitHub Copilot, CCR
+
+### Skills
+
+The dashboard Skills tab installs official skill bundles for the supported agents and maps them to the correct user/workspace roots automatically. It also detects custom skill folders already present on the machine.
 
 Each adapter in `crates/conductor-executors/src/agents/` defines launch commands, process detection, and prompt delivery methods.
 

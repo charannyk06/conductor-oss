@@ -2,9 +2,12 @@
 
 **Revised after Mar 20 design review with Charann**
 
+> Archive note
+> This was a proposed hosted bridge model. The shipped product instead remains local-first by default, with optional bridge/relay access-control flows and a multi-agent dashboard experience. Use this doc as historical context only.
+
 ## What It Is
 
-Conductor is a **self-hosted** (or Charann-hosted) SaaS. Users log in via the web dashboard. Their laptop runs coding agents locally. The dashboard is the universal interface from any device.
+This was a proposed hosted bridge model. The shipped product instead keeps the dashboard local-first by default, forwards backend URLs into the web app through the launcher, and layers optional bridge/relay access-control flows on top. Users still run coding agents locally on their own machine.
 
 The bridge is a background service on the user's laptop that pairs **once** with their account and stays connected forever.
 

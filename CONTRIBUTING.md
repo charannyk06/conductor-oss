@@ -47,6 +47,8 @@ cargo clippy --workspace
 
 - Source dev scripts: dashboard `http://localhost:3000`, Rust backend `http://127.0.0.1:4749`
 - Launcher defaults: dashboard `http://127.0.0.1:4747`, Rust backend `http://127.0.0.1:4748`
+- `co start` forwards the Rust backend URL into the dashboard automatically through `CONDUCTOR_BACKEND_URL` and `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL`.
+- If you run the dashboard by itself, set `CONDUCTOR_BACKEND_URL` or `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` so proxy routes such as skills and previews can reach the backend.
 
 ## Project Structure
 
@@ -115,6 +117,8 @@ Each adapter defines:
 - Process name for detection
 - Prompt delivery method
 - Optional setup/validation logic
+
+The dashboard Skills tab uses the same agent catalog to install official skill bundles into the correct user/workspace roots for each supported agent.
 
 Register new adapters in `crates/conductor-executors/src/agents/mod.rs` and add discovery in `crates/conductor-executors/src/discovery.rs`.
 

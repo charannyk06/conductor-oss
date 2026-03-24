@@ -16,6 +16,93 @@ use crate::state::AppState;
 type ApiResponse = (StatusCode, Json<Value>);
 
 const CLAUDE_AGENT: &str = "claude-code";
+const GENERIC_SKILL_AGENT: &str = "generic-open-standard";
+const GENERIC_PROJECT_SKILL_ROOTS: &[&str] = &[".agents/skills"];
+const GENERIC_USER_SKILL_ROOTS: &[&str] = &["~/.agents/skills"];
+const ALL_SKILL_AGENTS: &[&str] = &[
+    CLAUDE_AGENT,
+    "codex",
+    "gemini",
+    "amp",
+    "cursor-cli",
+    "opencode",
+    "droid",
+    "qwen-code",
+    "ccr",
+    "github-copilot",
+];
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillAgentCatalogEntry {
+    id: &'static str,
+    name: &'static str,
+    project_roots: &'static [&'static str],
+    user_roots: &'static [&'static str],
+}
+
+static SKILL_AGENT_CATALOG: &[SkillAgentCatalogEntry] = &[
+    SkillAgentCatalogEntry {
+        id: CLAUDE_AGENT,
+        name: "Claude Code",
+        project_roots: &[".claude/skills", ".agents/skills"],
+        user_roots: &["~/.claude/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "codex",
+        name: "Codex",
+        project_roots: &[".agents/skills", ".codex/skills"],
+        user_roots: &["~/.agents/skills", "~/.codex/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "gemini",
+        name: "Gemini CLI",
+        project_roots: &[".gemini/skills", ".agents/skills"],
+        user_roots: &["~/.gemini/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "amp",
+        name: "Amp",
+        project_roots: &[".agents/skills"],
+        user_roots: &["~/.config/agents/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "cursor-cli",
+        name: "Cursor",
+        project_roots: &[".cursor/skills", ".agents/skills"],
+        user_roots: &["~/.cursor/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "opencode",
+        name: "OpenCode",
+        project_roots: &[".opencode/skills", ".agents/skills"],
+        user_roots: &["~/.config/opencode/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "droid",
+        name: "Droid",
+        project_roots: &[".factory/skills", ".agent/skills"],
+        user_roots: &["~/.factory/skills", "~/.agent/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "qwen-code",
+        name: "Qwen Code",
+        project_roots: &[".qwen/skills", ".agents/skills"],
+        user_roots: &["~/.qwen/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "ccr",
+        name: "CCR",
+        project_roots: &[".agents/skills"],
+        user_roots: &["~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "github-copilot",
+        name: "GitHub Copilot",
+        project_roots: &[".github/skills", ".claude/skills", ".agents/skills"],
+        user_roots: &["~/.copilot/skills", "~/.claude/skills", "~/.agents/skills"],
+    },
+];
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -59,7 +146,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Read PDFs, extract tables, fill forms, and merge or split files.",
         category: "document",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "FileText",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/pdf"),
@@ -72,7 +159,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Create and edit Word docs with formatting, comments, and tracked changes.",
         category: "document",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "FileText",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/docx"),
@@ -85,7 +172,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Generate slide decks with layouts, charts, and speaker notes.",
         category: "document",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Presentation",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/pptx"),
@@ -98,7 +185,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Spreadsheet formulas, analysis, and charts from natural language.",
         category: "document",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Table2",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/xlsx"),
@@ -111,7 +198,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Collaborative writing workflow for back-and-forth drafting.",
         category: "document",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "UsersRound",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/doc-coauthoring"),
@@ -124,7 +211,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Higher-quality UI design systems, typography, and layout instincts.",
         category: "design",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Palette",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/frontend-design"),
@@ -137,7 +224,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Generate posters, social graphics, and covers from prompts.",
         category: "design",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Image",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/canvas-design"),
@@ -150,7 +237,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Fractal, geometric, and p5.js driven generative art workflows.",
         category: "design",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Sparkles",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/algorithmic-art"),
@@ -163,7 +250,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Batch generate cohesive color themes from one prompt.",
         category: "design",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Palette",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/theme-factory"),
@@ -176,7 +263,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Generate dashboards, calculators, and other web artifacts quickly.",
         category: "design",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "LayoutGrid",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/web-artifacts-builder"),
@@ -189,7 +276,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Battle-tested TDD, debugging, and plan-to-execute skill collection.",
         category: "engineering",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Rocket",
         repo_url: "https://github.com/obra/superpowers.git",
         source_subpath: None,
@@ -202,7 +289,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Root-cause-first debugging workflow from the Superpowers ecosystem.",
         category: "engineering",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Bug",
         repo_url: "https://github.com/obra/superpowers.git",
         source_subpath: None,
@@ -215,7 +302,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Ripgrep and tree navigation patterns for codebase search.",
         category: "engineering",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Search",
         repo_url: "https://github.com/massgen/massgen.git",
         source_subpath: None,
@@ -228,7 +315,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Token-budget and context compression patterns for agent workflows.",
         category: "engineering",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Workflow",
         repo_url: "https://github.com/muratcankoylan/agent-skills-for-context-engineering.git",
         source_subpath: None,
@@ -241,7 +328,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Describe a workflow and generate a SKILL.md package structure.",
         category: "engineering",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Wand2",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/skill-creator"),
@@ -254,7 +341,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Video-generation workflows, composition structure, and render guidance.",
         category: "engineering",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Video",
         repo_url: "https://github.com/remotion-dev/remotion.git",
         source_subpath: None,
@@ -267,7 +354,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "CRO, copywriting, SEO, email, and growth workflow collection.",
         category: "marketing",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Megaphone",
         repo_url: "https://github.com/coreyhaines31/marketingskills.git",
         source_subpath: None,
@@ -280,7 +367,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Site audits, schema validation, and SEO-focused workflows.",
         category: "marketing",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Globe",
         repo_url: "https://github.com/AgriciDaniel/claude-seo.git",
         source_subpath: None,
@@ -293,7 +380,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Encode brand rules so they apply consistently in future work.",
         category: "marketing",
         verified: true,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "BookOpen",
         repo_url: "https://github.com/anthropics/skills.git",
         source_subpath: Some("skills/brand-guidelines"),
@@ -306,7 +393,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "NotebookLM bridge workflows for summaries, mind maps, and flashcards.",
         category: "knowledge",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "NotebookPen",
         repo_url: "https://github.com/PleasePrompto/notebooklm-skill.git",
         source_subpath: None,
@@ -319,7 +406,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Vault-native note workflows, tagging, and linking patterns.",
         category: "knowledge",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "BookOpen",
         repo_url: "https://github.com/kepano/obsidian-skills.git",
         source_subpath: None,
@@ -332,7 +419,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         summary: "Excel automation and MCP style spreadsheet workflows.",
         category: "knowledge",
         verified: false,
-        compatible_agents: &[CLAUDE_AGENT],
+        compatible_agents: ALL_SKILL_AGENTS,
         icon: "Table2",
         repo_url: "https://github.com/haris-musa/excel-mcp-server.git",
         source_subpath: None,
@@ -383,21 +470,13 @@ struct InstalledSkillStatus {
 async fn get_catalog() -> ApiResponse {
     ok(json!({
         "skills": SKILL_CATALOG,
-        "agents": [CLAUDE_AGENT],
-        "catalogKind": "curated-claude-skills"
+        "agents": SKILL_AGENT_CATALOG,
+        "catalogKind": "curated-open-agent-skills"
     }))
 }
 
 async fn get_installed_skills(Query(query): Query<InstalledSkillsQuery>) -> ApiResponse {
-    let agent = query.agent.as_deref().unwrap_or(CLAUDE_AGENT).trim();
-    if agent != CLAUDE_AGENT {
-        return ok(json!({
-            "agent": agent,
-            "supported": false,
-            "skills": Vec::<Value>::new(),
-            "customSkills": Vec::<Value>::new(),
-        }));
-    }
+    let agent = query.agent.as_deref().unwrap_or(GENERIC_SKILL_AGENT).trim();
 
     let workspace_path = query
         .workspace_path
@@ -405,7 +484,7 @@ async fn get_installed_skills(Query(query): Query<InstalledSkillsQuery>) -> ApiR
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    match scan_claude_skill_installs(workspace_path.as_deref()) {
+    match scan_skill_installs(agent, workspace_path.as_deref()) {
         Ok((skills, custom_skills)) => ok(json!({
             "agent": agent,
             "supported": true,
@@ -455,12 +534,6 @@ async fn install_skill(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SkillInstallRequest>,
 ) -> ApiResponse {
-    if request.agent.trim() != CLAUDE_AGENT {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "This first release only supports Claude Code skills",
-        );
-    }
     let Some(entry) = SKILL_CATALOG
         .iter()
         .find(|entry| entry.id == request.skill_id)
@@ -468,13 +541,16 @@ async fn install_skill(
         return error(StatusCode::NOT_FOUND, "Skill not found");
     };
     let install_scope = request.scope.trim();
-    let target_path = match resolve_install_target(install_scope, request.workspace_path.as_deref())
-    {
+    let target_paths = match resolve_install_targets(
+        request.agent.trim(),
+        install_scope,
+        request.workspace_path.as_deref(),
+    ) {
         Ok(path) => path,
         Err(err) => return error(StatusCode::BAD_REQUEST, err),
     };
-    let install_result = match perform_skill_install(entry, &target_path).await {
-        Ok(path) => path,
+    let install_result = match perform_skill_install(entry, &target_paths).await {
+        Ok(paths) => paths,
         Err(err) => return error(StatusCode::BAD_GATEWAY, err.to_string()),
     };
 
@@ -495,57 +571,50 @@ async fn install_skill(
         "ok": true,
         "skillId": request.skill_id,
         "scope": install_scope,
-        "installedPath": install_result.to_string_lossy().to_string(),
+        "installedPath": install_result
+            .first()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        "installedPaths": install_result
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
         "sessionId": request.session_id,
     }))
 }
 
 async fn uninstall_skill(Json(request): Json<SkillInstallRequest>) -> ApiResponse {
-    if request.agent.trim() != CLAUDE_AGENT {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "This first release only supports Claude Code skills",
-        );
-    }
     let install_scope = request.scope.trim();
-    let target_path = match resolve_install_target(install_scope, request.workspace_path.as_deref())
-    {
+    let target_paths = match resolve_install_targets(
+        request.agent.trim(),
+        install_scope,
+        request.workspace_path.as_deref(),
+    ) {
         Ok(path) => path,
         Err(err) => return error(StatusCode::BAD_REQUEST, err),
     };
-    let skill_dir = target_path.join(request.skill_id.trim());
-    if !skill_dir.exists() {
+    let removed_paths = match remove_skill_installations(&target_paths, request.skill_id.trim()) {
+        Ok(paths) => paths,
+        Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    if removed_paths.is_empty() {
         return error(
             StatusCode::NOT_FOUND,
             "Skill is not installed in that scope",
         );
     }
-    match fs::remove_dir_all(&skill_dir) {
-        Ok(_) => ok(json!({
-            "ok": true,
-            "skillId": request.skill_id,
-            "removedPath": skill_dir.to_string_lossy().to_string(),
-        })),
-        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
-    }
-}
-
-fn resolve_install_target(scope: &str, workspace_path: Option<&str>) -> Result<PathBuf, String> {
-    match scope {
-        "user" => Ok(resolve_claude_user_skills_dir()),
-        "workspace" => {
-            let Some(raw_workspace_path) = workspace_path
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                return Err("workspacePath is required for workspace scope".to_string());
-            };
-            Ok(PathBuf::from(raw_workspace_path)
-                .join(".claude")
-                .join("skills"))
-        }
-        _ => Err("scope must be 'user' or 'workspace'".to_string()),
-    }
+    ok(json!({
+        "ok": true,
+        "skillId": request.skill_id,
+        "removedPath": removed_paths
+            .first()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        "removedPaths": removed_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>(),
+    }))
 }
 
 fn resolve_user_home_dir() -> Result<PathBuf, String> {
@@ -555,11 +624,8 @@ fn resolve_user_home_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "Unable to resolve the current user home directory".to_string())
 }
 
-fn resolve_claude_user_skills_dir() -> PathBuf {
-    resolve_user_home_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".claude")
-        .join("skills")
+fn resolve_skill_agent_profile(agent: &str) -> Option<&'static SkillAgentCatalogEntry> {
+    SKILL_AGENT_CATALOG.iter().find(|entry| entry.id == agent)
 }
 
 fn catalog_map() -> HashMap<&'static str, &'static SkillCatalogEntry> {
@@ -569,32 +635,96 @@ fn catalog_map() -> HashMap<&'static str, &'static SkillCatalogEntry> {
         .collect()
 }
 
-fn scan_claude_skill_installs(
+fn resolve_skill_root_specs(agent: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    resolve_skill_agent_profile(agent)
+        .map(|profile| (profile.project_roots, profile.user_roots))
+        .unwrap_or((GENERIC_PROJECT_SKILL_ROOTS, GENERIC_USER_SKILL_ROOTS))
+}
+
+fn resolve_skill_root_path(root: &str, workspace_path: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(stripped) = root.strip_prefix("~/") {
+        return Ok(resolve_user_home_dir()?.join(stripped));
+    }
+
+    let Some(workspace_path) = workspace_path else {
+        return Err("workspacePath is required for workspace scope".to_string());
+    };
+
+    Ok(workspace_path.join(root))
+}
+
+fn resolve_skill_target_paths(
+    roots: &[&'static str],
+    workspace_path: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+
+    for root in roots {
+        let path = resolve_skill_root_path(root, workspace_path)?;
+        if seen.insert(path.clone()) {
+            resolved.push(path);
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn resolve_install_targets(
+    agent: &str,
+    scope: &str,
+    workspace_path: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    let (project_roots, user_roots) = resolve_skill_root_specs(agent);
+    let workspace_path = workspace_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    match scope {
+        "user" => resolve_skill_target_paths(user_roots, None),
+        "workspace" => {
+            let Some(workspace_path) = workspace_path.as_deref() else {
+                return Err("workspacePath is required for workspace scope".to_string());
+            };
+            resolve_skill_target_paths(project_roots, Some(workspace_path))
+        }
+        _ => Err("scope must be 'user' or 'workspace'".to_string()),
+    }
+}
+
+fn scan_skill_installs(
+    agent: &str,
     workspace_path: Option<&Path>,
 ) -> Result<(Vec<InstalledSkillStatus>, Vec<Value>), std::io::Error> {
-    let user_dir = resolve_claude_user_skills_dir();
-    let workspace_dir = workspace_path.map(|path| path.join(".claude").join("skills"));
+    let (project_roots, user_roots) = resolve_skill_root_specs(agent);
+    let user_dirs = resolve_skill_target_paths(user_roots, None).map_err(std::io::Error::other)?;
+    let workspace_dirs = workspace_path
+        .map(|path| {
+            resolve_skill_target_paths(project_roots, Some(path)).map_err(std::io::Error::other)
+        })
+        .transpose()?
+        .unwrap_or_default();
     let catalog_by_id = catalog_map();
-    let mut custom_names: HashSet<String> = HashSet::new();
+    let mut custom_sources: HashMap<String, String> = HashMap::new();
     let mut results = Vec::with_capacity(SKILL_CATALOG.len());
 
     for entry in SKILL_CATALOG {
-        let user_path = user_dir.join(entry.id);
-        let workspace_path_for_skill = workspace_dir.as_ref().map(|path| path.join(entry.id));
-        let installed_user = user_path.exists();
-        let installed_workspace = workspace_path_for_skill
-            .as_ref()
-            .map(|path| path.exists())
-            .unwrap_or(false);
+        let user_paths = user_dirs
+            .iter()
+            .map(|path| path.join(entry.id))
+            .collect::<Vec<_>>();
+        let workspace_paths = workspace_dirs
+            .iter()
+            .map(|path| path.join(entry.id))
+            .collect::<Vec<_>>();
+        let installed_user = user_paths.iter().any(|path| path.exists());
+        let installed_workspace = workspace_paths.iter().any(|path| path.exists());
         let mut install_paths = Vec::new();
-        if installed_user {
-            install_paths.push(user_path.to_string_lossy().to_string());
-        }
-        if let Some(path) = workspace_path_for_skill
-            .as_ref()
-            .filter(|path| path.exists())
-        {
-            install_paths.push(path.to_string_lossy().to_string());
+        for path in user_paths.into_iter().chain(workspace_paths.into_iter()) {
+            if path.exists() {
+                install_paths.push(path.to_string_lossy().to_string());
+            }
         }
         results.push(InstalledSkillStatus {
             skill_id: entry.id.to_string(),
@@ -604,24 +734,29 @@ fn scan_claude_skill_installs(
         });
     }
 
-    for base in [Some(user_dir.as_path()), workspace_dir.as_deref()] {
-        if let Some(dir) = base.filter(|path| path.exists()) {
-            for entry in fs::read_dir(dir)?.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !catalog_by_id.contains_key(name.as_str()) {
-                    custom_names.insert(name);
-                }
+    for dir in user_dirs.iter().chain(workspace_dirs.iter()) {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in fs::read_dir(dir)?.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !catalog_by_id.contains_key(name.as_str()) {
+                custom_sources
+                    .entry(name)
+                    .or_insert_with(|| path.to_string_lossy().to_string());
             }
         }
     }
 
-    let custom_skills = custom_names
+    let mut custom_skills = custom_sources.into_iter().collect::<Vec<_>>();
+    custom_skills.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    let custom_skills = custom_skills
         .into_iter()
-        .map(|name| json!({ "id": name, "name": name, "source": "custom" }))
+        .map(|(name, source)| json!({ "id": name, "name": name, "source": source }))
         .collect::<Vec<_>>();
 
     Ok((results, custom_skills))
@@ -629,15 +764,10 @@ fn scan_claude_skill_installs(
 
 async fn perform_skill_install(
     entry: &SkillCatalogEntry,
-    install_root: &Path,
-) -> Result<PathBuf, anyhow::Error> {
+    install_roots: &[PathBuf],
+) -> Result<Vec<PathBuf>, anyhow::Error> {
     let temp_root = std::env::temp_dir().join(format!("conductor-skill-{}", Uuid::new_v4()));
-    let install_target = install_root.join(entry.id);
     fs::create_dir_all(&temp_root)?;
-    fs::create_dir_all(install_root)?;
-    if install_target.exists() {
-        fs::remove_dir_all(&install_target)?;
-    }
 
     let clone_status = Command::new("git")
         .args([
@@ -661,9 +791,33 @@ async fn perform_skill_install(
         ));
     }
 
-    copy_dir_recursive(&source_root, &install_target)?;
+    let mut installed_paths = Vec::new();
+    for install_root in install_roots {
+        fs::create_dir_all(install_root)?;
+        let install_target = install_root.join(entry.id);
+        if install_target.exists() {
+            fs::remove_dir_all(&install_target)?;
+        }
+        copy_dir_recursive(&source_root, &install_target)?;
+        installed_paths.push(install_target);
+    }
     let _ = fs::remove_dir_all(&temp_root);
-    Ok(install_target)
+    Ok(installed_paths)
+}
+
+fn remove_skill_installations(
+    install_roots: &[PathBuf],
+    skill_id: &str,
+) -> Result<Vec<PathBuf>, std::io::Error> {
+    let mut removed_paths = Vec::new();
+    for install_root in install_roots {
+        let skill_dir = install_root.join(skill_id);
+        if skill_dir.exists() {
+            fs::remove_dir_all(&skill_dir)?;
+            removed_paths.push(skill_dir);
+        }
+    }
+    Ok(removed_paths)
 }
 
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), std::io::Error> {
@@ -682,4 +836,72 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), std::io::Error
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routes::TEST_ENV_LOCK;
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn resolve_install_targets_for_claude_includes_shared_and_native_roots() {
+        let _guard = TEST_ENV_LOCK.blocking_lock();
+        let previous_home = std::env::var_os("HOME");
+        let home = make_temp_dir("conductor-skills-home");
+        let workspace = make_temp_dir("conductor-skills-workspace");
+        std::env::set_var("HOME", &home);
+
+        let targets = resolve_install_targets(
+            CLAUDE_AGENT,
+            "workspace",
+            Some(workspace.to_string_lossy().as_ref()),
+        )
+        .expect("resolve install targets");
+
+        let rendered = targets
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|path| path.ends_with(".claude/skills")));
+        assert!(rendered.iter().any(|path| path.ends_with(".agents/skills")));
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn resolve_install_targets_for_unknown_agent_uses_generic_open_standard_roots() {
+        let _guard = TEST_ENV_LOCK.blocking_lock();
+        let previous_home = std::env::var_os("HOME");
+        let home = make_temp_dir("conductor-skills-home");
+        std::env::set_var("HOME", &home);
+
+        let targets =
+            resolve_install_targets("custom-agent", "user", None).expect("resolve install targets");
+
+        let rendered = targets
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.len(), 1);
+        assert!(rendered[0].ends_with(".agents/skills"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
 }

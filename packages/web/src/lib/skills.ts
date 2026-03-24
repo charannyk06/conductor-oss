@@ -12,6 +12,13 @@ export interface SkillCatalogEntry {
   docsUrl: string;
 }
 
+export interface SkillAgentCatalogEntry {
+  id: string;
+  name: string;
+  projectRoots: string[];
+  userRoots: string[];
+}
+
 export interface InstalledSkillStatus {
   skillId: string;
   installedUser: boolean;
