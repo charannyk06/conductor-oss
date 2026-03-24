@@ -249,17 +249,12 @@ func buildRestartCommand(goos, home string) (restartCommand, error) {
 	case "darwin":
 		uid := strconv.Itoa(os.Getuid())
 		serviceTarget := "gui/" + uid + "/" + serviceName
-		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
-		script := fmt.Sprintf(
-			"sleep 1; launchctl bootout %q >/dev/null 2>&1 || true; launchctl bootstrap %q %q; launchctl kickstart -k %q",
-			serviceTarget,
-			"gui/"+uid,
-			plistPath,
-			serviceTarget,
-		)
+		// Only kickstart the loaded job here. A bootout/bootstrap sequence can kill
+		// the helper itself when the request originates from inside the launchd job
+		// we are trying to restart.
 		return restartCommand{
-			name: "sh",
-			args: []string{"-c", script},
+			name: "launchctl",
+			args: []string{"kickstart", "-k", serviceTarget},
 		}, nil
 	case "linux":
 		unitName := serviceName + ".service"
