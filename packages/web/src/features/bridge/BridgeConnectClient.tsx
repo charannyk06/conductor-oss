@@ -554,11 +554,13 @@ export default function BridgeConnectClient({
         deviceId: device.device_id,
         kind: "restart",
         status: "completed",
-        message,
+        message: `${message} Waiting for ${device.device_name} to reconnect.`,
       });
-      window.setTimeout(() => {
-        void refreshDevices();
-      }, 2_000);
+      [2_000, 5_000, 10_000, 20_000, 35_000].forEach((delay) => {
+        window.setTimeout(() => {
+          void refreshDevices();
+        }, delay);
+      });
     } catch (err) {
       setServiceAction({
         deviceId: device.device_id,

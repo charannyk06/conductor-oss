@@ -12,23 +12,14 @@ func TestBuildRestartCommandDarwin(t *testing.T) {
 		t.Fatalf("buildRestartCommand returned error: %v", err)
 	}
 
-	if cmd.name != "sh" {
-		t.Fatalf("cmd.name = %q, want %q", cmd.name, "sh")
+	if cmd.name != "launchctl" {
+		t.Fatalf("cmd.name = %q, want %q", cmd.name, "launchctl")
 	}
-	if len(cmd.args) != 2 {
-		t.Fatalf("len(cmd.args) = %d, want 2", len(cmd.args))
+	if got := strings.Join(cmd.args, " "); !strings.Contains(got, "kickstart -k gui/") || !strings.Contains(got, "/com.conductor.bridge") {
+		t.Fatalf("darwin restart args = %q, want kickstart for the bridge service", got)
 	}
-
-	script := cmd.args[1]
-	for _, want := range []string{
-		"launchctl bootout",
-		"launchctl bootstrap",
-		"launchctl kickstart -k",
-		"com.conductor.bridge.plist",
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("darwin restart script %q does not contain %q", script, want)
-		}
+	if strings.Contains(strings.Join(cmd.args, " "), "bootout") || strings.Contains(strings.Join(cmd.args, " "), "bootstrap") {
+		t.Fatalf("darwin restart args should not bootout/bootstrap the current launchd job: %q", strings.Join(cmd.args, " "))
 	}
 }
 
