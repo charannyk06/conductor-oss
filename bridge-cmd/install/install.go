@@ -13,6 +13,13 @@ import (
 
 const serviceName = "com.conductor.bridge"
 
+var lookPath = exec.LookPath
+
+type restartCommand struct {
+	name string
+	args []string
+}
+
 func resolveLaunchdPath(home string) string {
 	return fmt.Sprintf(
 		"%s:%s:%s:%s:%s:%s:%s:%s",
@@ -84,24 +91,23 @@ func RestartServiceIfInstalled() error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
-		return restartLaunchdServiceDetached(home, plistPath)
+		cmd, err := buildRestartCommand(runtime.GOOS, home)
+		if err != nil {
+			return err
+		}
+		return runDetachedRestartCommand(cmd)
 	case "linux":
-		cmd := exec.Command("systemctl", "--user", "restart", serviceName)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("restart systemd service: %w", err)
+		cmd, err := buildRestartCommand(runtime.GOOS, home)
+		if err != nil {
+			return err
 		}
-		return nil
+		return runDetachedRestartCommand(cmd)
 	case "windows":
-		binaryPath := filepath.Join(home, ".conductor", "bin", "conductor-bridge.exe")
-		if _, err := os.Stat(binaryPath); err != nil {
-			binaryPath = filepath.Join(home, ".conductor", "bin", "conductor-bridge")
+		cmd, err := buildRestartCommand(runtime.GOOS, home)
+		if err != nil {
+			return err
 		}
-		cmd := exec.Command("cmd", "/C", "start", "", "/B", binaryPath, "daemon")
-		if err := cmd.Start(); err != nil {
-			return fmt.Errorf("restart windows bridge daemon: %w", err)
-		}
-		return nil
+		return runDetachedRestartCommand(cmd)
 	default:
 		return fmt.Errorf("auto-restart not supported on %s", runtime.GOOS)
 	}
@@ -238,15 +244,69 @@ func installWindowsStartup(home, binaryPath string) error {
 	return nil
 }
 
-func restartLaunchdServiceDetached(home, plistPath string) error {
-	uid := strconv.Itoa(os.Getuid())
-	serviceTarget := "gui/" + uid + "/" + serviceName
-	script := fmt.Sprintf("sleep 1; launchctl bootout %q >/dev/null 2>&1 || true; launchctl bootstrap %q %q; launchctl kickstart -k %q", serviceTarget, "gui/"+uid, plistPath, serviceTarget)
-	cmd := exec.Command("sh", "-c", script)
+func buildRestartCommand(goos, home string) (restartCommand, error) {
+	switch goos {
+	case "darwin":
+		uid := strconv.Itoa(os.Getuid())
+		serviceTarget := "gui/" + uid + "/" + serviceName
+		plistPath := filepath.Join(home, "Library", "LaunchAgents", serviceName+".plist")
+		script := fmt.Sprintf(
+			"sleep 1; launchctl bootout %q >/dev/null 2>&1 || true; launchctl bootstrap %q %q; launchctl kickstart -k %q",
+			serviceTarget,
+			"gui/"+uid,
+			plistPath,
+			serviceTarget,
+		)
+		return restartCommand{
+			name: "sh",
+			args: []string{"-c", script},
+		}, nil
+	case "linux":
+		unitName := serviceName + ".service"
+		if _, err := lookPath("systemd-run"); err == nil {
+			script := fmt.Sprintf("sleep 1; systemctl --user restart %s", serviceName)
+			return restartCommand{
+				name: "systemd-run",
+				args: []string{
+					"--user",
+					"--collect",
+					"--quiet",
+					"--unit",
+					serviceName + "-restart",
+					"sh",
+					"-c",
+					script,
+				},
+			}, nil
+		}
+		return restartCommand{
+			name: "systemctl",
+			args: []string{"--user", "restart", unitName},
+		}, nil
+	case "windows":
+		binaryPath := filepath.Join(home, ".conductor", "bin", "conductor-bridge.exe")
+		if _, err := os.Stat(binaryPath); err != nil {
+			binaryPath = filepath.Join(home, ".conductor", "bin", "conductor-bridge")
+		}
+		script := fmt.Sprintf(
+			"@echo off\r\ntaskkill /F /IM conductor-bridge.exe /T >nul 2>&1\r\ntaskkill /F /IM conductor-bridge /T >nul 2>&1\r\ntimeout /t 1 /nobreak >nul\r\nstart \"\" /B \"%s\" daemon\r\n",
+			binaryPath,
+		)
+		return restartCommand{
+			name: "cmd",
+			args: []string{"/C", script},
+		}, nil
+	default:
+		return restartCommand{}, fmt.Errorf("auto-restart not supported on %s", goos)
+	}
+}
+
+func runDetachedRestartCommand(cmdSpec restartCommand) error {
+	cmd := exec.Command(cmdSpec.name, cmdSpec.args...)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("schedule detached launchd restart: %w", err)
+		return fmt.Errorf("schedule detached restart: %w", err)
 	}
 	if cmd.Process != nil {
 		_ = cmd.Process.Release()

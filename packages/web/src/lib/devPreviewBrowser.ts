@@ -157,35 +157,59 @@ function isLocalHost(hostname: string): boolean {
   return LOCAL_NAVIGATION_HOSTS.includes(normalized as (typeof LOCAL_NAVIGATION_HOSTS)[number]);
 }
 
-function buildNavigationCandidates(value: string): string[] {
+export type PreviewNavigationMode = "bridge" | "direct" | "blocked";
+
+export function resolvePreviewNavigationMode(
+  value: string,
+  bridgePreview: BridgePreviewConfig | null,
+): PreviewNavigationMode {
+  if (!bridgePreview) {
+    return "direct";
+  }
+
+  try {
+    const parsed = new URL(value);
+    const isLocal = isLocalHost(normalizeNavigationHostname(parsed.hostname));
+    if (bridgePreview.allowedOrigins.includes(parsed.origin)) {
+      return "bridge";
+    }
+    return isLocal ? "blocked" : "direct";
+  } catch {
+    return "direct";
+  }
+}
+
+export function buildPreviewNavigationCandidates(value: string): string[] {
   const normalizedInput = normalizeNavigationInput(value);
   try {
     const parsed = new URL(normalizedInput);
     const normalized = parsed.toString();
     const hostname = normalizeNavigationHostname(parsed.hostname);
+    const protocol = parsed.protocol.toLowerCase();
 
-    // SECURITY: Only allow navigation to local addresses to prevent SSRF
-    if (!isLocalHost(hostname)) {
+    if (protocol !== "http:" && protocol !== "https:") {
       throw new Error(
-        `Navigation blocked: only localhost URLs are allowed. Got hostname "${parsed.hostname}".`,
+        `Navigation blocked: only http and https URLs are allowed. Got protocol "${parsed.protocol}".`,
       );
     }
 
-    const variants = new Set<string>([normalized]);
-    for (const hostname of LOCAL_NAVIGATION_HOSTS) {
-      const candidate = new URL(normalized);
-      candidate.hostname = hostname;
-      variants.add(candidate.toString());
+    if (isLocalHost(hostname)) {
+      const variants = new Set<string>([normalized]);
+      for (const hostname of LOCAL_NAVIGATION_HOSTS) {
+        const candidate = new URL(normalized);
+        candidate.hostname = hostname;
+        variants.add(candidate.toString());
+      }
+      return [...variants];
     }
-    return [...variants];
+
+    return [normalized];
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("Navigation blocked:")) {
       throw error;
     }
-    // SECURITY: If we can't parse the URL, reject it rather than passing an
-    // unvalidated string to page.goto() which could cause SSRF.
     throw new Error(
-      `Navigation blocked: could not parse "${normalizedInput}" as a valid localhost URL.`,
+      `Navigation blocked: could not parse "${normalizedInput}" as a valid URL.`,
     );
   }
 }
@@ -337,8 +361,15 @@ class PreviewBrowserManager {
     }
   }
 
-  private async syncRequestInterception(state: PreviewState, page: Page): Promise<void> {
-    const shouldIntercept = Boolean(state.bridgePreview);
+  private async syncRequestInterception(
+    state: PreviewState,
+    page: Page,
+    targetUrl?: string,
+  ): Promise<void> {
+    const shouldIntercept = resolvePreviewNavigationMode(
+      targetUrl ?? page.url(),
+      state.bridgePreview,
+    ) === "bridge";
     if (state.requestInterceptionEnabled === shouldIntercept) {
       return;
     }
@@ -704,35 +735,28 @@ class PreviewBrowserManager {
 
   async connect(sessionId: string, url: string): Promise<void> {
     const { state, page } = await this.ensurePage(sessionId);
-    const candidates = buildNavigationCandidates(url);
-    if (state.bridgePreview) {
-      const candidateOrigins = new Set(
-        candidates.map((candidate) => {
-          try {
-            return new URL(candidate).origin;
-          } catch {
-            return null;
-          }
-        }),
-      );
-      const allowed = state.bridgePreview.allowedOrigins.some((origin) => candidateOrigins.has(origin));
-      if (!allowed) {
-        throw new Error("Bridge preview only allows navigation to the session's reported local dev server origin.");
-      }
-    }
-
+    const candidates = buildPreviewNavigationCandidates(url);
     let lastError: unknown = null;
 
     for (const candidate of candidates) {
+      const navigationMode = resolvePreviewNavigationMode(candidate, state.bridgePreview);
+      if (navigationMode === "blocked") {
+        lastError = new Error("Bridge preview only allows navigation to the session's reported local dev server origin.");
+        continue;
+      }
+
       const previousUrl = page.url();
       try {
+        await this.syncRequestInterception(state, page, candidate);
         await page.goto(candidate, { waitUntil: "domcontentloaded" });
+        await this.syncRequestInterception(state, page);
         state.selectedElement = null;
         state.lastError = null;
         state.activeFrameId = this.ensureFrameId(state, page.mainFrame());
         return;
       } catch (error) {
         if (await this.navigationProducedUsablePage(page, candidate, previousUrl, error)) {
+          await this.syncRequestInterception(state, page);
           state.selectedElement = null;
           state.lastError = null;
           state.activeFrameId = this.ensureFrameId(state, page.mainFrame());

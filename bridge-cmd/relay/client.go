@@ -1049,7 +1049,7 @@ func handleBridgeServiceRestartRequest(method string) (bool, apiResponse) {
 		Status: http.StatusAccepted,
 		Body: map[string]any{
 			"ok":      true,
-			"message": "Bridge service restart requested. This laptop should reconnect shortly.",
+			"message": "Bridge service restart scheduled. This laptop should reconnect once the bridge is back online.",
 		},
 	}
 }

@@ -1002,7 +1002,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               </div>
             ) : (
               <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
-                Connect a local dev URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select UI elements and queue browser context into terminal input.
+                Connect a local dev URL or explicit preview URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select UI elements and queue browser context into terminal input.
               </div>
             )}
           </div>

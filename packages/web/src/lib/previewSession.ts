@@ -13,14 +13,12 @@ const DIRECT_URL_METADATA_KEYS = new Set([
   "devServerUrl",
   "devServerURL",
   "localUrl",
-  "url",
 ]);
 const DIRECT_URL_METADATA_PRIORITY: Record<string, number> = {
   devServerUrl: 0,
   devServerURL: 0,
   localUrl: 10,
   previewUrl: 50,
-  url: 30,
 };
 
 function getBackendUrl(): string {
@@ -129,6 +127,7 @@ function resolveBridgePreviewWarning(
 
   const previewHints = [
     session.pr?.previewUrl ?? null,
+    session.metadata.previewUrl ?? null,
     session.metadata.devServerUrl ?? null,
     session.metadata.devServerURL ?? null,
     session.metadata.localUrl ?? null,
@@ -137,7 +136,7 @@ function resolveBridgePreviewWarning(
   ];
 
   const hasLocalHint = previewHints.some((value) => (
-    extractUrlsFromText(value).some((candidate) => LOCAL_HOST_PATTERN.test(candidate))
+    extractUrlsFromText(value).some((candidate) => isLoopbackUrl(candidate))
   ));
 
   if (hasLocalHint) {
@@ -158,7 +157,7 @@ function buildBridgePreviewConfig(
 
   const allowedOrigins = [...new Set(
     candidateUrls
-      .filter((candidate) => LOCAL_HOST_PATTERN.test(candidate))
+      .filter((candidate) => isLoopbackUrl(candidate))
       .map((candidate) => {
         try {
           return new URL(candidate).origin;
@@ -232,15 +231,37 @@ function extractUrlsFromText(value: string | null | undefined): string[] {
   return matches.map(normalizeCandidateUrl);
 }
 
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return LOCAL_HOST_PATTERN.test(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function pushCandidate(
   candidates: Map<string, number>,
   value: string | null | undefined,
   priority: number,
   backendUrl: string,
+  allowRemote = false,
 ) {
   if (!value?.trim()) return;
   const normalized = normalizeCandidateUrl(value);
   if (!normalized || shouldIgnoreCandidateUrl(normalized, backendUrl)) {
+    return;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return;
+    }
+    if (!allowRemote && !isLoopbackUrl(normalized)) {
+      return;
+    }
+  } catch {
     return;
   }
 
@@ -278,16 +299,22 @@ export async function discoverPreviewCandidateUrls(
   const candidates = new Map<string, number>();
 
   if (session.pr?.previewUrl?.trim()) {
-    pushCandidate(candidates, session.pr.previewUrl, 50, backendUrl);
+    pushCandidate(candidates, session.pr.previewUrl, 50, backendUrl, true);
   }
 
   if (session.metadata.devServerUrl?.trim()) {
-    pushCandidate(candidates, session.metadata.devServerUrl, 0, backendUrl);
+    pushCandidate(candidates, session.metadata.devServerUrl, 0, backendUrl, true);
   }
 
   for (const [key, value] of Object.entries(session.metadata)) {
     if (DIRECT_URL_METADATA_KEYS.has(key) && value.trim()) {
-      pushCandidate(candidates, value, DIRECT_URL_METADATA_PRIORITY[key] ?? 30, backendUrl);
+      pushCandidate(
+        candidates,
+        value,
+        DIRECT_URL_METADATA_PRIORITY[key] ?? 30,
+        backendUrl,
+        true,
+      );
     }
     for (const candidate of extractUrlsFromText(value)) {
       pushCandidate(candidates, candidate, 60, backendUrl);
@@ -314,16 +341,12 @@ export async function discoverPreviewCandidateUrls(
       if (leftPriority !== rightPriority) {
         return leftPriority - rightPriority;
       }
-      const leftScore = LOCAL_HOST_PATTERN.test(left) ? 0 : 1;
-      const rightScore = LOCAL_HOST_PATTERN.test(right) ? 0 : 1;
+      const leftScore = isLoopbackUrl(left) ? 0 : 1;
+      const rightScore = isLoopbackUrl(right) ? 0 : 1;
       if (leftScore !== rightScore) return leftScore - rightScore;
       return left.localeCompare(right);
     })
     .map(([candidate]) => candidate);
-
-  if (session.bridgeId?.trim()) {
-    return orderedCandidates.filter((candidate) => LOCAL_HOST_PATTERN.test(candidate));
-  }
 
   return orderedCandidates;
 }

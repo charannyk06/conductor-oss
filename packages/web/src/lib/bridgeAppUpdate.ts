@@ -1,5 +1,8 @@
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import { isLegacyBridgeBuildErrorMessage, legacyBridgeBuildActionMessage } from "@/lib/bridgeBuildCompatibility";
+import {
+  isLegacyBridgeBuildErrorMessage,
+  legacyBridgeBuildActionMessage,
+} from "@/lib/bridgeBuildCompatibility";
 import type { AppUpdateStatus } from "@/lib/types";
 
 export const BRIDGE_APP_UPDATE_POLL_INTERVAL_MS = 1_500;
@@ -23,7 +26,9 @@ export type BridgeAutoUpdateState = {
   message: string | null;
 };
 
-export function formatBridgeAutoUpdatePhaseLabel(phase: BridgeAutoUpdatePhase): string {
+export function formatBridgeAutoUpdatePhaseLabel(
+  phase: BridgeAutoUpdatePhase
+): string {
   switch (phase) {
     case "checking":
       return "Checking";
@@ -51,10 +56,14 @@ export type BridgeAutoUpdateDevice = {
 
 export function isBridgeAutoUpdateInFlight(
   state: BridgeAutoUpdateState,
-  deviceId: string,
+  deviceId: string
 ): boolean {
-  return state.deviceId === deviceId
-    && (state.phase === "checking" || state.phase === "updating" || state.phase === "restarting");
+  return (
+    state.deviceId === deviceId &&
+    (state.phase === "checking" ||
+      state.phase === "updating" ||
+      state.phase === "restarting")
+  );
 }
 
 type RecentBridgePairing = {
@@ -69,16 +78,24 @@ function isRecentBridgePairing(value: unknown): value is RecentBridgePairing {
   }
 
   const candidate = value as Record<string, unknown>;
-  return typeof candidate["deviceId"] === "string"
-    && typeof candidate["pairedAt"] === "string"
-    && (candidate["deviceName"] === null || typeof candidate["deviceName"] === "string");
+  return (
+    typeof candidate["deviceId"] === "string" &&
+    typeof candidate["pairedAt"] === "string" &&
+    (candidate["deviceName"] === null ||
+      typeof candidate["deviceName"] === "string")
+  );
 }
 
 function bridgeUpdateMessage(
   device: Pick<BridgeAutoUpdateDevice, "device_name">,
-  status: AppUpdateStatus,
+  status: AppUpdateStatus
 ): string {
-  return status.jobMessage ?? `Installing Conductor ${status.latestVersion ?? "latest"} on ${device.device_name}.`;
+  return (
+    status.jobMessage ??
+    `Installing Conductor ${status.latestVersion ?? "latest"} on ${
+      device.device_name
+    }.`
+  );
 }
 
 function formatBuildVersionSuffix(status: AppUpdateStatus): string {
@@ -86,7 +103,10 @@ function formatBuildVersionSuffix(status: AppUpdateStatus): string {
   return version ? ` (build ${version})` : "";
 }
 
-function normalizeBridgeUpdateError(message: string | null, status: number): string {
+function normalizeBridgeUpdateError(
+  message: string | null,
+  status: number
+): string {
   const normalized = message?.trim() ?? "";
   if (isLegacyBridgeBuildErrorMessage(normalized)) {
     return legacyBridgeBuildActionMessage("update");
@@ -95,7 +115,9 @@ function normalizeBridgeUpdateError(message: string | null, status: number): str
   return normalized || `Failed to update Conductor on this laptop (${status})`;
 }
 
-export function normalizeAppUpdatePayload(payload: unknown): AppUpdateStatus | null {
+export function normalizeAppUpdatePayload(
+  payload: unknown
+): AppUpdateStatus | null {
   if (!payload || typeof payload !== "object") {
     return null;
   }
@@ -115,7 +137,9 @@ export function describeAutoUpdateSkip(status: AppUpdateStatus): string {
   }
 
   if (!status.updateAvailable) {
-    return `This laptop is already running the latest Conductor release${formatBuildVersionSuffix(status)}.`;
+    return `This laptop is already running the latest Conductor release${formatBuildVersionSuffix(
+      status
+    )}.`;
   }
 
   if (!status.canAutoUpdate) {
@@ -128,7 +152,9 @@ export function describeAutoUpdateSkip(status: AppUpdateStatus): string {
     return "A newer Conductor release is available, but this install cannot update itself automatically.";
   }
 
-  return `This laptop is already running the latest Conductor release${formatBuildVersionSuffix(status)}.`;
+  return `This laptop is already running the latest Conductor release${formatBuildVersionSuffix(
+    status
+  )}.`;
 }
 
 export async function requestBridgeAppUpdate(
@@ -137,11 +163,16 @@ export async function requestBridgeAppUpdate(
     method?: "GET" | "POST";
     force?: boolean;
     body?: { action?: string };
-  },
+  }
 ): Promise<AppUpdateStatus> {
   const method = init?.method ?? "GET";
-  const pathname = `/api/bridge/devices/${encodeURIComponent(deviceId)}/app-update`;
-  const url = new URL(withBridgeQuery(pathname, deviceId), window.location.origin);
+  const pathname = `/api/bridge/devices/${encodeURIComponent(
+    deviceId
+  )}/app-update`;
+  const url = new URL(
+    withBridgeQuery(pathname, deviceId),
+    window.location.origin
+  );
   if (init?.force) {
     url.searchParams.set("force", "1");
   }
@@ -153,11 +184,18 @@ export async function requestBridgeAppUpdate(
     cache: "no-store",
   });
 
-  const payload = await response.json().catch(() => null) as AppUpdateStatus | { error?: string } | null;
+  const payload = (await response.json().catch(() => null)) as
+    | AppUpdateStatus
+    | { error?: string }
+    | null;
   if (!response.ok) {
-    const errorMessage = payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-      ? payload.error
-      : null;
+    const errorMessage =
+      payload &&
+      typeof payload === "object" &&
+      "error" in payload &&
+      typeof payload.error === "string"
+        ? payload.error
+        : null;
     throw new Error(normalizeBridgeUpdateError(errorMessage, response.status));
   }
 
@@ -183,7 +221,10 @@ export function writeRecentBridgePairing(pairing: {
   };
 
   try {
-    window.localStorage.setItem(RECENT_BRIDGE_PAIRING_STORAGE_KEY, JSON.stringify(payload));
+    window.localStorage.setItem(
+      RECENT_BRIDGE_PAIRING_STORAGE_KEY,
+      JSON.stringify(payload)
+    );
   } catch {
     // Ignore storage write failures.
   }
@@ -195,7 +236,9 @@ export function readRecentBridgePairing(): RecentBridgePairing | null {
   }
 
   try {
-    const stored = window.localStorage.getItem(RECENT_BRIDGE_PAIRING_STORAGE_KEY);
+    const stored = window.localStorage.getItem(
+      RECENT_BRIDGE_PAIRING_STORAGE_KEY
+    );
     if (!stored) {
       return null;
     }
@@ -207,7 +250,10 @@ export function readRecentBridgePairing(): RecentBridgePairing | null {
     }
 
     const pairedAt = Date.parse(parsed.pairedAt);
-    if (!Number.isFinite(pairedAt) || Date.now() - pairedAt > RECENT_BRIDGE_PAIRING_TTL_MS) {
+    if (
+      !Number.isFinite(pairedAt) ||
+      Date.now() - pairedAt > RECENT_BRIDGE_PAIRING_TTL_MS
+    ) {
       window.localStorage.removeItem(RECENT_BRIDGE_PAIRING_STORAGE_KEY);
       return null;
     }
@@ -220,9 +266,12 @@ export function readRecentBridgePairing(): RecentBridgePairing | null {
 
 export async function runBridgeAutoUpdate(
   device: BridgeAutoUpdateDevice,
-  onState: (next: BridgeAutoUpdateState) => void,
+  onState: (next: BridgeAutoUpdateState) => void
 ): Promise<void> {
-  const updateState = (phase: BridgeAutoUpdatePhase, message: string | null) => {
+  const updateState = (
+    phase: BridgeAutoUpdatePhase,
+    message: string | null
+  ) => {
     onState({
       deviceId: device.device_id,
       phase,
@@ -230,29 +279,41 @@ export async function runBridgeAutoUpdate(
     });
   };
 
-  updateState("checking", `Checking for Conductor updates on ${device.device_name}.`);
+  updateState(
+    "checking",
+    `Checking for Conductor updates on ${device.device_name}.`
+  );
 
   try {
-    let status = await requestBridgeAppUpdate(device.device_id, { force: true });
+    let status = await requestBridgeAppUpdate(device.device_id, {
+      force: true,
+    });
 
     if (status.restarting) {
       updateState(
         "restarting",
-        status.jobMessage ?? `Restart requested on ${device.device_name}. This page will reconnect once the bridge runtime is back online.`,
+        status.jobMessage ??
+          `Restart scheduled on ${device.device_name}. This page will reconnect once the bridge runtime is back online.`
       );
       return;
     }
 
     if (status.jobStatus === "running") {
       updateState("updating", bridgeUpdateMessage(device, status));
-    } else if (!status.updateAvailable || !status.enabled || !status.canAutoUpdate) {
+    } else if (
+      !status.updateAvailable ||
+      !status.enabled ||
+      !status.canAutoUpdate
+    ) {
       updateState(
         !status.enabled || !status.canAutoUpdate ? "skipped" : "completed",
-        describeAutoUpdateSkip(status),
+        describeAutoUpdateSkip(status)
       );
       return;
     } else {
-      status = await requestBridgeAppUpdate(device.device_id, { method: "POST" });
+      status = await requestBridgeAppUpdate(device.device_id, {
+        method: "POST",
+      });
       updateState("updating", bridgeUpdateMessage(device, status));
     }
 
@@ -270,7 +331,8 @@ export async function runBridgeAutoUpdate(
       if (status.restarting) {
         updateState(
           "restarting",
-          status.jobMessage ?? `Restart requested on ${device.device_name}. This page will reconnect once the bridge runtime is back online.`,
+          status.jobMessage ??
+            `Restart scheduled on ${device.device_name}. This page will reconnect once the bridge runtime is back online.`
         );
         return;
       }
@@ -281,13 +343,17 @@ export async function runBridgeAutoUpdate(
     if (status.jobStatus === "running") {
       updateState(
         "updating",
-        `The package update is still running on ${device.device_name}. Leave this page open and Conductor will finish applying it in the background.`,
+        `The package update is still running on ${device.device_name}. Leave this page open and Conductor will finish applying it in the background.`
       );
       return;
     }
 
     if (status.jobStatus === "failed") {
-      throw new Error(status.jobMessage ?? status.error ?? `Automatic package update failed on ${device.device_name}.`);
+      throw new Error(
+        status.jobMessage ??
+          status.error ??
+          `Automatic package update failed on ${device.device_name}.`
+      );
     }
 
     if (status.restartRequired) {
@@ -298,26 +364,33 @@ export async function runBridgeAutoUpdate(
         });
         updateState(
           "restarting",
-          status.jobMessage ?? `Restart requested on ${device.device_name} to finish updating Conductor.`,
+          status.jobMessage ??
+            `Restart scheduled on ${device.device_name} to finish updating Conductor.`
         );
         return;
       }
 
       updateState(
         "completed",
-        status.jobMessage ?? `The latest Conductor package is installed on ${device.device_name}. Restart that laptop to finish updating.`,
+        status.jobMessage ??
+          `The latest Conductor package is installed on ${device.device_name}. Restart that laptop to finish updating.`
       );
       return;
     }
 
     updateState(
       "completed",
-      status.jobMessage ?? `${device.device_name} is now updated to Conductor ${status.latestVersion ?? "latest"}.`,
+      status.jobMessage ??
+        `${device.device_name} is now updated to Conductor ${
+          status.latestVersion ?? "latest"
+        }.`
     );
   } catch (error) {
     updateState(
       "failed",
-      error instanceof Error ? error.message : `Failed to auto-update ${device.device_name}.`,
+      error instanceof Error
+        ? error.message
+        : `Failed to auto-update ${device.device_name}.`
     );
   }
 }

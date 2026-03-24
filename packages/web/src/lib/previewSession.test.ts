@@ -78,7 +78,6 @@ test("discoverPreviewCandidateUrls prefers explicit dev server urls and ignores 
       "http://127.0.0.1:3000/",
       "http://localhost:3001/",
       "https://deploy-preview.example.com/",
-      "https://preview.example.com/",
       "http://localhost:3002/",
     ]);
   } finally {
@@ -88,7 +87,7 @@ test("discoverPreviewCandidateUrls prefers explicit dev server urls and ignores 
   }
 });
 
-test("discoverPreviewCandidateUrls keeps paired-device localhost urls for secure bridge preview", async () => {
+test("discoverPreviewCandidateUrls skips bridge output without request context", async () => {
   const previousBackendUrl = process.env.CONDUCTOR_BACKEND_URL;
   const previousFetch = global.fetch;
 
@@ -113,7 +112,7 @@ test("discoverPreviewCandidateUrls keeps paired-device localhost urls for secure
 
     assert.deepEqual(urls, [
       "http://127.0.0.1:3000/",
-      "http://localhost:3002/",
+      "https://deploy-preview.example.com/",
     ]);
   } finally {
     process.env.CONDUCTOR_BACKEND_URL = previousBackendUrl;
