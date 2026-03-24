@@ -338,7 +338,9 @@ fn is_valid_branch_name(name: &str) -> bool {
         || name.contains('@')
         || name.contains('\\')
         || name.chars().any(|char| char.is_whitespace())
-        || name.chars().any(|char| matches!(char, '~' | '^' | ':' | '?' | '*' | '['))
+        || name
+            .chars()
+            .any(|char| matches!(char, '~' | '^' | ':' | '?' | '*' | '['))
     {
         return false;
     }

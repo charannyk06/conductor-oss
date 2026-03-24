@@ -404,22 +404,19 @@ async fn sync_remote_refs(repo_path: &Path) -> Result<()> {
     const SYNC_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
     let repo_path_str = repo_path.to_string_lossy().into_owned();
 
-    let output = match tokio::time::timeout(
-        SYNC_REMOTE_TIMEOUT,
-        async {
-            let mut command = Command::new("git");
-            command.args([
-                "-C",
-                repo_path_str.as_str(),
-                "remote",
-                "update",
-                "--prune",
-                "--",
-            ]);
-            command.env("GIT_TERMINAL_PROMPT", "0");
-            command.output().await
-        },
-    )
+    let output = match tokio::time::timeout(SYNC_REMOTE_TIMEOUT, async {
+        let mut command = Command::new("git");
+        command.args([
+            "-C",
+            repo_path_str.as_str(),
+            "remote",
+            "update",
+            "--prune",
+            "--",
+        ]);
+        command.env("GIT_TERMINAL_PROMPT", "0");
+        command.output().await
+    })
     .await
     {
         Ok(output) => output?,

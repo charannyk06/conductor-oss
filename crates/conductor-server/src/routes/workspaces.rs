@@ -7,9 +7,9 @@ use conductor_core::{sync_project_local_config, sync_support_files_for_directory
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::process::Command;
 use tracing::info;
 
