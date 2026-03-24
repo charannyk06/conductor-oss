@@ -302,7 +302,7 @@ export function SessionCard({
           {/* Actions */}
           <div className="flex flex-wrap gap-2">
             <a
-              href={`/sessions/${encodeURIComponent(session.id)}`}
+              href={`/sessions/${encodeURIComponent(session.id)}?tab=terminal`}
               onClick={(e) => e.stopPropagation()}
               className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)] hover:no-underline"
             >

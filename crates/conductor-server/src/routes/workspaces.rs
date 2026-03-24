@@ -514,6 +514,38 @@ async fn init_repository(path: &Path, branch: &str) -> anyhow::Result<()> {
 }
 
 async fn detect_local_branches(path: &Path) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    if path.join(".git").exists() {
+        match Command::new("git")
+            .args([
+                "-C",
+                path.to_string_lossy().as_ref(),
+                "remote",
+                "update",
+                "--prune",
+                "--",
+            ])
+            .output()
+            .await
+        {
+            Ok(sync_output) => {
+                if !sync_output.status.success() {
+                    tracing::warn!(
+                        "Failed to sync remote refs for '{}': {}",
+                        path.display(),
+                        String::from_utf8_lossy(&sync_output.stderr).trim()
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to run git remote update --prune for '{}': {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+
     let branch_output = Command::new("git")
         .args([
             "-C",

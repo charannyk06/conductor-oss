@@ -23,7 +23,9 @@ interface WorkspaceSidebarPanelProps {
   onUnlinkProject?: (projectId: string) => Promise<void>;
   sessions: DashboardSession[];
   selectedSessionId: string | null;
-  onSelectSession: (sessionId: string, options?: { tab?: "overview" | "preview" | "diff" }) => void;
+  onSelectSession: (sessionId: string, options?: {
+    tab?: "overview" | "preview" | "diff" | "terminal";
+  }) => void;
   onArchiveSession?: (sessionId: string) => Promise<void> | void;
   onCreateWorkspace: () => void;
 }

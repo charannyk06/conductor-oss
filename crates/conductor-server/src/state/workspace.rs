@@ -88,6 +88,13 @@ impl AppState {
         if !is_safe_git_ref(base_ref) {
             return Err(anyhow!("Invalid base branch name: '{base_ref}'"));
         }
+        if let Err(err) = sync_remote_refs(&repo_path).await {
+            tracing::warn!(
+                project_id,
+                error = %err,
+                "Failed to sync remote refs before creating worktree"
+            );
+        }
 
         let branch_exists =
             git_ref_exists(&repo_path, &format!("refs/heads/{session_branch}")).await;
@@ -355,6 +362,10 @@ impl AppState {
 }
 
 async fn resolve_branch_start_ref(repo_path: &Path, branch: &str) -> Option<String> {
+    if let Err(err) = sync_remote_refs(repo_path).await {
+        tracing::warn!(error = %err, "Failed to sync remote refs before resolving branch start ref");
+    }
+
     if git_ref_exists(repo_path, &format!("refs/heads/{branch}")).await {
         return Some(branch.to_string());
     }
@@ -387,6 +398,28 @@ async fn resolve_branch_start_ref(repo_path: &Path, branch: &str) -> Option<Stri
         .collect::<Vec<_>>();
 
     select_remote_tracking_ref(branch, &refs)
+}
+
+async fn sync_remote_refs(repo_path: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            repo_path.to_string_lossy().as_ref(),
+            "remote",
+            "update",
+            "--prune",
+            "--",
+        ])
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "git remote update --prune failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    Ok(())
 }
 
 async fn git_ref_exists(repo_path: &Path, ref_name: &str) -> bool {

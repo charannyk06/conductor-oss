@@ -1058,7 +1058,11 @@ export default function DashboardClient({
   );
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
-    return tab !== "overview" && tab !== "preview" && tab !== "diff";
+    return (
+      tab === null
+      || tab === "terminal"
+      || (tab !== "overview" && tab !== "preview" && tab !== "chat" && tab !== "diff")
+    );
   }, [searchParams]);
   const [selectedBridgeId, setSelectedBridgeId] = useState(bridgeQueryId ?? "");
   const selectedBridgeIdValue = normalizeBridgeId(selectedBridgeId);
@@ -1923,13 +1927,13 @@ export default function DashboardClient({
     closeSidebarOnMobile();
   }, [closeSidebarOnMobile, navigateDashboard, preferences?.codingAgent, workspaceView]);
 
-  const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" }) => {
+  const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" | "terminal" }) => {
     const matchedSession = sessionsById.get(id) ?? null;
     navigateDashboard(
       {
         projectId: matchedSession?.projectId ?? selectedProjectId ?? null,
         sessionId: id,
-        tab: options?.tab ?? null,
+        tab: options?.tab ?? "terminal",
       },
       "push",
     );

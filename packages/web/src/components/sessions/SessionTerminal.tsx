@@ -14,9 +14,19 @@ import { RemoteSessionTerminal } from "@/components/sessions/RemoteSessionTermin
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
+import { calculateMobileTerminalViewportMetrics } from "./sessionTerminalUtils";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
+const TOKEN_REFRESH_LEAD_SECONDS = 10;
+
+function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined): number | null {
+  if (typeof expiresInSeconds !== "number" || !Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
+    return null;
+  }
+  const safeSeconds = Math.max(5, expiresInSeconds - TOKEN_REFRESH_LEAD_SECONDS);
+  return safeSeconds * 1000;
+}
 
 async function sendTerminalKeys(
   sessionId: string,
@@ -39,22 +49,11 @@ async function sendTerminalKeys(
   }
 }
 
-function normalizeTerminalUrl(url: string): string {
-  try {
-    const parsed = new URL(url, typeof window === "undefined" ? "http://127.0.0.1" : window.location.origin);
-    parsed.searchParams.delete("token");
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
 function terminalUrlChanged(current: string | null, next: string): boolean {
   if (!current) {
     return true;
   }
-  return normalizeTerminalUrl(current) !== normalizeTerminalUrl(next);
+  return current !== next;
 }
 
 function SessionTerminalView(props: SessionTerminalProps) {
@@ -71,6 +70,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const promptInputRef = useRef<HTMLInputElement>(null);
   const lastAppliedInsertNonceRef = useRef(0);
   const retryAttemptRef = useRef(0);
+  const terminalHostRef = useRef<HTMLDivElement>(null);
 
   const normalizedSessionStatus = useMemo(
     () => sessionState.trim().toLowerCase(),
@@ -122,6 +122,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
     let cancelled = false;
     let retryTimer: number | null = null;
+    let refreshTimer: number | null = null;
     const abortController = new AbortController();
     setResolvingConnection(true);
     setConnectionError(null);
@@ -141,8 +142,17 @@ function SessionTerminalView(props: SessionTerminalProps) {
           if (urlChanged) {
             setFrameLoaded(false);
             setTerminalUrl(connection.terminalUrl);
+          } else if (!terminalUrlRef.current) {
+            setTerminalUrl(connection.terminalUrl);
           }
           setConnectionError(null);
+
+          const delayMs = computeTokenRefreshDelayMs(connection.expiresInSeconds);
+          if (delayMs !== null) {
+            refreshTimer = window.setTimeout(() => {
+              setConnectionRefreshTick((current) => current + 1);
+            }, delayMs);
+          }
           return;
         }
 
@@ -185,6 +195,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
       abortController.abort();
       if (retryTimer !== null) {
         window.clearTimeout(retryTimer);
+      }
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
       }
     };
   }, [bridgeId, connectionRefreshTick, expectsLiveTerminal, sessionId]);
@@ -249,6 +262,70 @@ function SessionTerminalView(props: SessionTerminalProps) {
       setPromptSending(false);
     }
   }, [bridgeId, promptMessage, promptSending, sessionId]);
+
+  const applyKeyboardAwareTerminalHeight = useCallback(() => {
+    const host = terminalHostRef.current;
+    if (typeof window === "undefined" || !host) {
+      return;
+    }
+
+    const visualViewport = window.visualViewport;
+    if (!visualViewport) {
+      return;
+    }
+
+    const { usableHeight, keyboardVisible } = calculateMobileTerminalViewportMetrics(
+      window.innerHeight,
+      visualViewport.height,
+      visualViewport.offsetTop,
+      host.getBoundingClientRect().top,
+    );
+
+    if (!keyboardVisible) {
+      host.style.removeProperty("height");
+      return;
+    }
+
+    if (usableHeight <= 0) {
+      host.style.removeProperty("height");
+      return;
+    }
+
+    host.style.height = `${Math.max(0, Math.round(usableHeight))}px`;
+  }, []);
+
+  useEffect(() => {
+    const host = terminalHostRef.current;
+    if (!host) {
+      return;
+    }
+
+    const applyGeometry = () => {
+      applyKeyboardAwareTerminalHeight();
+    };
+
+    applyGeometry();
+
+    const observer = typeof ResizeObserver === "undefined"
+      ? null
+      : new ResizeObserver(() => {
+        applyGeometry();
+      });
+    const visualViewport = typeof window === "undefined" ? null : window.visualViewport;
+
+    observer?.observe(host);
+    window.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("resize", applyGeometry);
+    visualViewport?.addEventListener("scroll", applyGeometry);
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("resize", applyGeometry);
+      visualViewport?.removeEventListener("scroll", applyGeometry);
+      host.style.removeProperty("height");
+    };
+  }, [applyKeyboardAwareTerminalHeight, expectsLiveTerminal, terminalUrl]);
 
   useEffect(() => {
     if (process.env.NODE_ENV !== "development") return;
@@ -350,7 +427,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
         }
       >
         {expectsLiveTerminal && terminalUrl ? (
-          <div className="relative h-full w-full overflow-hidden rounded-[10px] bg-[#060404]">
+          <div
+            ref={terminalHostRef}
+            className="relative h-full w-full overflow-hidden rounded-[10px] bg-[#060404]"
+          >
             {!frameLoaded ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
                 <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#141010]/92 px-3 py-2 text-[12px] text-[#c9c0b7] backdrop-blur-sm">
@@ -368,6 +448,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
               onLoad={() => {
                 setFrameLoaded(true);
                 setConnectionError(null);
+                applyKeyboardAwareTerminalHeight();
               }}
             />
           </div>

@@ -13,6 +13,7 @@ import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildBridgeRepairHref } from "@/lib/bridgeOnboarding";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "@/components/sessions/terminal/terminalConstants";
 import {
+  calculateMobileTerminalViewportMetrics,
   isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
 } from "@/components/sessions/sessionTerminalUtils";
@@ -75,6 +76,33 @@ function encodeInputFrame(data: string): Uint8Array {
   frame[0] = CMD_OUTPUT;
   frame.set(payload, 1);
   return frame;
+}
+
+async function getPlainClipboardText(clipboardData?: DataTransfer | null): Promise<string | null> {
+  const directText = clipboardData?.getData("text/plain") ?? "";
+  if (directText.length > 0) {
+    return directText;
+  }
+
+  const htmlText = clipboardData?.getData("text/html") ?? "";
+  if (htmlText.length > 0) {
+    const document = new DOMParser().parseFromString(htmlText, "text/html");
+    const parsedText = document.body?.textContent ?? "";
+    if (parsedText.length > 0) {
+      return parsedText;
+    }
+  }
+
+  if (typeof navigator === "undefined" || !navigator.clipboard?.readText) {
+    return null;
+  }
+
+  try {
+    const text = await navigator.clipboard.readText();
+    return text.length > 0 ? text : null;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchClosedTerminalOutput(
@@ -255,6 +283,37 @@ export function RemoteSessionTerminal({
     terminal.options.lineHeight = viewport.lineHeight;
   }, []);
 
+  const applyKeyboardAwareTerminalHeight = useCallback(() => {
+    const host = terminalHostRef.current;
+    if (!host || typeof window === "undefined") {
+      return;
+    }
+
+    const visualViewport = window.visualViewport;
+    if (!visualViewport) {
+      return;
+    }
+
+    const { usableHeight, keyboardVisible } = calculateMobileTerminalViewportMetrics(
+      window.innerHeight,
+      visualViewport.height,
+      visualViewport.offsetTop,
+      host.getBoundingClientRect().top,
+    );
+
+    if (!keyboardVisible) {
+      host.style.removeProperty("height");
+      return;
+    }
+
+    if (usableHeight <= 0) {
+      host.style.removeProperty("height");
+      return;
+    }
+
+    host.style.height = `${Math.max(0, Math.round(usableHeight))}px`;
+  }, []);
+
   const fitTerminal = useCallback(() => {
     const terminal = terminalRef.current;
     const fitAddon = fitAddonRef.current;
@@ -402,12 +461,24 @@ export function RemoteSessionTerminal({
     };
 
     const handlePaste = async (event: ClipboardEvent) => {
-      if (!expectsRelayTerminal || !event.clipboardData) {
+      if (!expectsRelayTerminal) {
         return;
       }
 
+      const clipboardData = event.clipboardData;
       try {
-        const imageBlob = await extractImageFromClipboard(event.clipboardData);
+        const plainText = await getPlainClipboardText(clipboardData);
+        if (plainText) {
+          event.preventDefault();
+          sendTerminalFrame(encodeInputFrame(plainText));
+          return;
+        }
+
+        if (!clipboardData) {
+          return;
+        }
+
+        const imageBlob = await extractImageFromClipboard(clipboardData);
         if (imageBlob) {
           event.preventDefault();
           try {
@@ -428,24 +499,63 @@ export function RemoteSessionTerminal({
       }
     };
 
+    const handleShortcutPaste = async (event: KeyboardEvent) => {
+      if (!expectsRelayTerminal) {
+        return;
+      }
+      if (!event.metaKey && !event.ctrlKey) {
+        return;
+      }
+      if (event.key.toLowerCase() !== "v") {
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Element) || !host.contains(target)) {
+        return;
+      }
+
+      try {
+        const pasteText = await getPlainClipboardText();
+        if (!pasteText) {
+          return;
+        }
+        event.preventDefault();
+        sendTerminalFrame(encodeInputFrame(pasteText));
+      } catch {
+        // Ignore failed keyboard clipboard reads.
+      }
+    };
+
     host.addEventListener("click", focusTerminal);
-    host.addEventListener("paste", handlePaste);
+    host.addEventListener("paste", handlePaste, true);
+    document.addEventListener("keydown", handleShortcutPaste, true);
     terminal.focus();
     window.requestAnimationFrame(() => {
+      applyKeyboardAwareTerminalHeight();
       syncTerminalGeometry("resize", true);
     });
 
     return () => {
       host.removeEventListener("click", focusTerminal);
-      host.removeEventListener("paste", handlePaste);
+      host.removeEventListener("paste", handlePaste, true);
+      document.removeEventListener("keydown", handleShortcutPaste, true);
       scrollHost?.removeEventListener("scroll", syncFollowBottom);
       dataSubscription.dispose();
       cleanupMobileTouchScroll?.();
+      host.style.removeProperty("height");
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [expectsRelayTerminal, projectId, sendTerminalFrame, syncTerminalGeometry, bridgeId, sessionId]);
+  }, [
+    applyKeyboardAwareTerminalHeight,
+    expectsRelayTerminal,
+    projectId,
+    sendTerminalFrame,
+    syncTerminalGeometry,
+    bridgeId,
+    sessionId,
+  ]);
 
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
@@ -480,6 +590,7 @@ export function RemoteSessionTerminal({
     terminal.options.cursorBlink = expectsRelayTerminal && socketRef.current?.readyState === WebSocket.OPEN;
 
     const applyGeometry = () => {
+      applyKeyboardAwareTerminalHeight();
       syncTerminalGeometry("resize");
     };
 

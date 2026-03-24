@@ -80,7 +80,12 @@ function resolveBackendOrigin(): string {
 }
 
 type TerminalTokenResult =
-  | { interactive: true; ttydHttpUrl: string | null; ttydWsUrl: string | null }
+  | {
+    interactive: true;
+    ttydHttpUrl: string | null;
+    ttydWsUrl: string | null;
+    expiresInSeconds: number | null;
+  }
   | { interactive: false; ttydHttpUrl: null; ttydWsUrl: null; reason: string | null };
 
 function resolveProvidedTtydHttpUrl(
@@ -126,7 +131,13 @@ async function fetchTerminalToken(
     },
   );
   const data = (await res.json().catch(() => null)) as
-    | { required?: boolean; ttydHttpUrl?: string; ttydWsUrl?: string; error?: string }
+    | {
+      required?: boolean;
+      ttydHttpUrl?: string;
+      ttydWsUrl?: string;
+      expiresInSeconds?: number | string | null;
+      error?: string;
+    }
     | null;
   const ttydHttpUrl =
     typeof data?.ttydHttpUrl === "string" && data.ttydHttpUrl.trim().length > 0
@@ -136,6 +147,19 @@ async function fetchTerminalToken(
     typeof data?.ttydWsUrl === "string" && data.ttydWsUrl.trim().length > 0
       ? data.ttydWsUrl.trim()
       : null;
+  const expiresInSeconds = (() => {
+    const raw = data?.expiresInSeconds;
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      return Math.max(0, Math.floor(raw));
+    }
+    if (typeof raw === "string") {
+      const parsed = Number.parseInt(raw.trim(), 10);
+      if (Number.isFinite(parsed)) {
+        return Math.max(0, parsed);
+      }
+    }
+    return null;
+  })();
 
   if (res.status === 401 || res.status === 403) {
     return {
@@ -150,12 +174,13 @@ async function fetchTerminalToken(
     throw new Error(data?.error ?? `Failed to resolve terminal token: ${res.status}`);
   }
 
-  return {
-    interactive: true,
-    ttydHttpUrl,
-    ttydWsUrl,
-  };
-}
+    return {
+      interactive: true,
+      ttydHttpUrl,
+      ttydWsUrl,
+      expiresInSeconds,
+    };
+  }
 
 export async function resolveTerminalConnection(
   sessionId: string,
@@ -168,6 +193,7 @@ export async function resolveTerminalConnection(
       terminalUrl: null,
       interactive: false,
       reason: auth.reason,
+      expiresInSeconds: null,
     };
   }
 
@@ -188,5 +214,6 @@ export async function resolveTerminalConnection(
     terminalUrl,
     interactive: true,
     reason: null,
+    expiresInSeconds: auth.expiresInSeconds,
   };
 }
