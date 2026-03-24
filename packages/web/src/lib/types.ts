@@ -69,6 +69,8 @@ export interface DashboardSession {
   status: SessionStatus;
   activity: ActivityState | null;
   branch: string | null;
+  model?: string | null;
+  reasoningEffort?: string | null;
   issueId: string | null;
   summary: string | null;
   createdAt: string;
@@ -134,6 +136,8 @@ export interface SSESnapshotSession {
   projectId: string;
   issueId: string | null;
   branch: string | null;
+  model?: string | null;
+  reasoningEffort?: string | null;
   createdAt: string;
   lastActivityAt: string;
   metadata: Record<string, string>;

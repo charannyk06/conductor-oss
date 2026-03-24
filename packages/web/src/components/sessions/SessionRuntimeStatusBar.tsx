@@ -178,7 +178,9 @@ export function SessionRuntimeStatusBar({
   agents,
 }: SessionRuntimeStatusBarProps) {
   const normalizedAgentName = normalizeAgentName(agentName);
-  const resolvedModel = runtimeStatus?.model?.trim() || sessionModel?.trim() || "";
+  // Prefer the session record for the selected model so the sidebar reflects
+  // intentional model changes even if the CLI telemetry lags behind.
+  const resolvedModel = sessionModel?.trim() || runtimeStatus?.model?.trim() || "";
   const resolvedReasoning = runtimeStatus?.reasoningEffort?.trim()
     || sessionReasoningEffort?.trim()
     || "";
