@@ -279,9 +279,10 @@ fn parse_branch_from_status_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let lowered = trimmed.to_ascii_lowercase();
 
-    const PREFIXES: [&str; 3] = [
+    const PREFIXES: [&str; 4] = [
         "switched to a new branch ",
         "switched to branch ",
+        "now on branch ",
         "already on ",
     ];
     for prefix in PREFIXES {
@@ -352,10 +353,6 @@ fn is_valid_branch_name(name: &str) -> bool {
         return false;
     }
 
-    if name.contains('.') {
-        return false;
-    }
-
     true
 }
 
@@ -375,6 +372,33 @@ fn parse_branch_from_command_line(line: &str) -> Option<String> {
     }
 
     let action = tokens[1];
+    if action == "branch" {
+        let mut index = 2;
+        while index < tokens.len() {
+            match tokens[index] {
+                "-m" | "-M" | "--move" | "--move-force" => {
+                    index = index.saturating_add(1);
+                    if index >= tokens.len() {
+                        return None;
+                    }
+                    return extract_quoted_or_bare_token(tokens[index]);
+                }
+                t if t.starts_with("--move=") => {
+                    return extract_quoted_or_bare_token(&t[8..]);
+                }
+                "--" => return None,
+                t if t.starts_with('-') => {
+                    index = index.saturating_add(1);
+                    continue;
+                }
+                _ => {
+                    index = index.saturating_add(1);
+                }
+            }
+        }
+        return None;
+    }
+
     if action != "checkout" && action != "switch" {
         return None;
     }
@@ -2319,6 +2343,41 @@ mod tests {
         assert!(!resolve_skip_permissions(Some("ask"), &project));
         assert!(!resolve_skip_permissions(Some("plan"), &project));
         assert!(resolve_skip_permissions(Some("auto"), &project));
+    }
+
+    #[test]
+    fn parse_branch_from_output_handles_common_git_branch_transitions() {
+        assert_eq!(
+            parse_branch_from_output("Switched to a new branch 'feature/chat.v2'"),
+            Some("feature/chat.v2".to_string())
+        );
+        assert_eq!(
+            parse_branch_from_output("Now on branch release/1.0.0"),
+            Some("release/1.0.0".to_string())
+        );
+        assert_eq!(
+            parse_branch_from_output("git branch -m 'hotfix/1.0.1'"),
+            Some("hotfix/1.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn maybe_update_session_branch_from_output_updates_session_branch_in_place() {
+        let mut session = SessionRecord::new(
+            "session-1".to_string(),
+            "demo".to_string(),
+            Some("main".to_string()),
+            None,
+            None,
+            "codex".to_string(),
+            Some("gpt-5.4".to_string()),
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+
+        maybe_update_session_branch_from_output(&mut session, "git branch -m release/1.0.0");
+        assert_eq!(session.branch.as_deref(), Some("release/1.0.0"));
     }
 
     #[tokio::test]

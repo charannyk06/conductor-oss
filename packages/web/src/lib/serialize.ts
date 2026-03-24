@@ -53,6 +53,8 @@ export function sessionToDashboard(session: Session): DashboardSession {
     status: session.status,
     activity: session.activity,
     branch: session.branch,
+    model: session.model,
+    reasoningEffort: session.reasoning_effort,
     issueId: session.issueId,
     summary,
     createdAt: session.createdAt.toISOString(),

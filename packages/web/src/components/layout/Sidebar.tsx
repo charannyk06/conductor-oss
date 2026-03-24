@@ -12,6 +12,7 @@ import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { cn } from "@/lib/cn";
+import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 
 interface SidebarProps {
   sessions: DashboardSession[];
@@ -74,7 +75,15 @@ function getSessionLabel(session: DashboardSession): string {
 
 function getSessionSubtitle(session: DashboardSession): string {
   const branch = session.branch?.trim();
+  const model = session.model?.trim();
+  const agent = session.metadata["agent"]?.trim() ?? "";
+
+  if (branch && model) {
+    return `${branch} · ${formatCurrentModelLabel(agent, model)}`;
+  }
+
   if (branch) return branch;
+  if (model) return formatCurrentModelLabel(agent, model);
 
   const summary =
     session.summary?.trim() || session.metadata["summary"]?.trim();

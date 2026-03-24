@@ -17,8 +17,10 @@ import {
   isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
 } from "@/components/sessions/sessionTerminalUtils";
+import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import {
   extractImageFromClipboard,
+  extractFilesFromTransfer,
   uploadClipboardImage,
 } from "@/lib/clipboardImage";
 
@@ -76,24 +78,6 @@ function encodeInputFrame(data: string): Uint8Array {
   frame[0] = CMD_OUTPUT;
   frame.set(payload, 1);
   return frame;
-}
-
-async function getPlainClipboardText(clipboardData?: DataTransfer | null): Promise<string | null> {
-  const directText = clipboardData?.getData("text/plain") ?? "";
-  if (directText.length > 0) {
-    return directText;
-  }
-
-  if (typeof navigator === "undefined" || !navigator.clipboard?.readText) {
-    return null;
-  }
-
-  try {
-    const text = await navigator.clipboard.readText();
-    return text.length > 0 ? text : null;
-  } catch {
-    return null;
-  }
 }
 
 async function fetchClosedTerminalOutput(
@@ -457,68 +441,83 @@ export function RemoteSessionTerminal({
       }
 
       const clipboardData = event.clipboardData;
-      if (!clipboardData) {
+      const imageBlob = extractImageFromClipboard(clipboardData);
+      if (!imageBlob) {
         return;
       }
+
       event.preventDefault();
+      event.stopPropagation();
 
       try {
-        const plainText = await getPlainClipboardText(clipboardData);
-        if (plainText) {
-          sendTerminalFrame(encodeInputFrame(plainText));
-          return;
-        }
-
-        const imageBlob = await extractImageFromClipboard(clipboardData);
-        if (imageBlob) {
-          try {
-            const result = await uploadClipboardImage({
-              imageBlob,
-              projectId,
-              taskRef: sessionId,
-              bridgeId,
-            });
-            const imagePath = result.absolutePath || result.path;
-            sendTerminalFrame(encodeInputFrame(`\r\n[pasted image: ${imagePath}]\r\n`));
-          } catch {
-            // Image upload failed - silently ignore
-          }
-        }
-      } catch {
-        // Not an image paste or clipboard access denied - let xterm handle normally
+        const result = await uploadClipboardImage({
+          imageBlob,
+          projectId,
+          taskRef: sessionId,
+          bridgeId,
+        });
+        const imagePath = result.absolutePath || result.path;
+        sendTerminalFrame(encodeInputFrame(`\r\n[pasted image: ${imagePath}]\r\n`));
+        setQueuedInsertError(null);
+      } catch (error) {
+        setQueuedInsertError(
+          error instanceof Error ? error.message : "Failed to upload pasted image.",
+        );
       }
     };
 
-    const handleShortcutPaste = async (event: KeyboardEvent) => {
+    const handleDragOver = (event: DragEvent) => {
       if (!expectsRelayTerminal) {
         return;
       }
-      if (!event.metaKey && !event.ctrlKey) {
+
+      const files = extractFilesFromTransfer(event.dataTransfer);
+      if (files.length === 0) {
         return;
       }
-      if (event.key.toLowerCase() !== "v") {
-        return;
-      }
-      const target = event.target;
-      if (!(target instanceof Element) || !host.contains(target)) {
-        return;
-      }
+
       event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "copy";
+      }
+    };
+
+    const handleDrop = async (event: DragEvent) => {
+      if (!expectsRelayTerminal) {
+        return;
+      }
+
+      const files = extractFilesFromTransfer(event.dataTransfer);
+      if (files.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
 
       try {
-        const pasteText = await getPlainClipboardText();
-        if (!pasteText) {
-          return;
+        const uploadedPaths = await uploadProjectAttachments({
+          files,
+          projectId,
+          taskRef: sessionId,
+          bridgeId,
+        });
+
+        for (const path of uploadedPaths) {
+          sendTerminalFrame(encodeInputFrame(`\r\n[attached file: ${path}]\r\n`));
         }
-        sendTerminalFrame(encodeInputFrame(pasteText));
-      } catch {
-        // Ignore failed keyboard clipboard reads.
+        setQueuedInsertError(null);
+      } catch (error) {
+        setQueuedInsertError(
+          error instanceof Error ? error.message : "Failed to upload dropped files.",
+        );
       }
     };
 
     host.addEventListener("click", focusTerminal);
     host.addEventListener("paste", handlePaste, true);
-    document.addEventListener("keydown", handleShortcutPaste, true);
+    host.addEventListener("dragover", handleDragOver, true);
+    host.addEventListener("drop", handleDrop, true);
     terminal.focus();
     window.requestAnimationFrame(() => {
       applyKeyboardAwareTerminalHeight();
@@ -528,7 +527,8 @@ export function RemoteSessionTerminal({
     return () => {
       host.removeEventListener("click", focusTerminal);
       host.removeEventListener("paste", handlePaste, true);
-      document.removeEventListener("keydown", handleShortcutPaste, true);
+      host.removeEventListener("dragover", handleDragOver, true);
+      host.removeEventListener("drop", handleDrop, true);
       scrollHost?.removeEventListener("scroll", syncFollowBottom);
       dataSubscription.dispose();
       cleanupMobileTouchScroll?.();

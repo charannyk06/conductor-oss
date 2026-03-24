@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { getAttentionLevel, type DashboardSession } from "@/lib/types";
+import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 import type { ConfigProject } from "@/hooks/useConfig";
 
 interface WorkspaceOverviewProps {
@@ -87,6 +88,19 @@ function selectRecentSessions(sessions: DashboardSession[], limit: number): Dash
   }
 
   return recent;
+}
+
+function formatRecentSessionSubtitle(session: DashboardSession): string | null {
+  const branch = session.branch?.trim() ?? "";
+  const model = session.model?.trim() ?? "";
+  const agent = session.metadata["agent"]?.trim() ?? "";
+
+  if (branch && model) {
+    return `${branch} · ${formatCurrentModelLabel(agent, model)}`;
+  }
+  if (branch) return branch;
+  if (model) return formatCurrentModelLabel(agent, model);
+  return null;
 }
 
 export function WorkspaceOverview({
@@ -245,7 +259,10 @@ export function WorkspaceOverview({
                 <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
                   No sessions yet. Create or open a workspace to start work.
                 </div>
-              ) : recentSessions.map((session) => (
+              ) : recentSessions.map((session) => {
+                const subtitle = formatRecentSessionSubtitle(session);
+
+                return (
                 <button
                   key={session.id}
                   type="button"
@@ -261,7 +278,7 @@ export function WorkspaceOverview({
                     </div>
                     <p className="mt-1 truncate text-[12px] text-[var(--vk-text-muted)]">
                       {session.projectId}
-                      {session.branch ? ` · ${session.branch}` : ""}
+                      {subtitle ? ` · ${subtitle}` : ""}
                       {session.issueId ? ` · ${session.issueId}` : ""}
                     </p>
                   </div>
@@ -272,7 +289,8 @@ export function WorkspaceOverview({
                     <ArrowRight className="ml-auto mt-2 h-4 w-4 text-[var(--vk-text-muted)]" />
                   </div>
                 </button>
-              ))}
+                );
+              })}
             </CardContent>
           </Card>
         </div>

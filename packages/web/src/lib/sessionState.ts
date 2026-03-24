@@ -106,6 +106,8 @@ function mapSnapshotSession(session: SSESnapshotSession): DashboardSession {
     status: session.status,
     activity: session.activity,
     branch: session.branch,
+    model: session.model ?? null,
+    reasoningEffort: session.reasoningEffort ?? null,
     issueId: session.issueId,
     summary: session.summary ?? null,
     createdAt: session.createdAt,

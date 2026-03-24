@@ -62,20 +62,55 @@ export async function uploadClipboardImage(
   };
 }
 
-export async function extractImageFromClipboard(
-  clipboardData: DataTransfer,
-): Promise<Blob | null> {
-  if (!clipboardData.items) {
-    return null;
+function collectFilesFromTransferItems(transferItems?: DataTransferItemList | null): File[] {
+  if (!transferItems) {
+    return [];
   }
 
-  for (let i = 0; i < clipboardData.items.length; i++) {
-    const item = clipboardData.items[i];
-    if (item.type.startsWith("image/")) {
-      const blob = item.getAsFile();
-      if (blob) {
-        return blob;
+  const files: File[] = [];
+  for (const item of Array.from(transferItems)) {
+    if (item.kind !== "file") {
+      continue;
+    }
+    const file = item.getAsFile();
+    if (file) {
+      files.push(file);
+    }
+  }
+
+  return files;
+}
+
+export function extractFilesFromTransfer(
+  transfer?: DataTransfer | null,
+): File[] {
+  const directFiles = transfer?.files;
+  if (directFiles && directFiles.length > 0) {
+    return Array.from(directFiles);
+  }
+
+  return collectFilesFromTransferItems(transfer?.items ?? null);
+}
+
+export function extractImageFromClipboard(
+  clipboardData?: DataTransfer | null,
+): Blob | null {
+  if (clipboardData?.items) {
+    for (const item of Array.from(clipboardData.items)) {
+      if (item.kind !== "file" || !item.type.startsWith("image/")) {
+        continue;
       }
+      const file = item.getAsFile();
+      if (file) {
+        return file;
+      }
+    }
+  }
+
+  const files = extractFilesFromTransfer(clipboardData);
+  for (const file of files) {
+    if (file.type.startsWith("image/")) {
+      return file;
     }
   }
 
