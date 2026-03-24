@@ -78,6 +78,10 @@ function encodeInputFrame(data: string): Uint8Array {
   return frame;
 }
 
+function getSafePlainText(value: string) {
+  return value.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+}
+
 async function getPlainClipboardText(clipboardData?: DataTransfer | null): Promise<string | null> {
   const directText = clipboardData?.getData("text/plain") ?? "";
   if (directText.length > 0) {
@@ -86,8 +90,7 @@ async function getPlainClipboardText(clipboardData?: DataTransfer | null): Promi
 
   const htmlText = clipboardData?.getData("text/html") ?? "";
   if (htmlText.length > 0) {
-    const document = new DOMParser().parseFromString(htmlText, "text/html");
-    const parsedText = document.body?.textContent ?? "";
+    const parsedText = getSafePlainText(htmlText);
     if (parsedText.length > 0) {
       return parsedText;
     }

@@ -163,6 +163,8 @@ export function BridgeSessionTerminal({
     }
   };
 
+  const getSafePlainText = (value: string) => value.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+
   const getClipboardTextFromDataTransfer = async (clipboardData?: DataTransfer | null) => {
     const plainText = clipboardData?.getData("text/plain") ?? "";
     if (plainText.length > 0) {
@@ -171,8 +173,7 @@ export function BridgeSessionTerminal({
 
     const htmlText = clipboardData?.getData("text/html") ?? "";
     if (htmlText.length > 0) {
-      const document = new DOMParser().parseFromString(htmlText, "text/html");
-      const parsedText = document.body?.textContent ?? "";
+      const parsedText = getSafePlainText(htmlText);
       if (parsedText.length > 0) {
         return parsedText;
       }
