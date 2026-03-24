@@ -175,14 +175,12 @@ function SessionTerminalView(props: SessionTerminalProps) {
         setConnectionError(
           error instanceof Error ? error.message : "Failed to resolve ttyd terminal.",
         );
-        if (!hasTerminal) {
-          const attempt = retryAttemptRef.current;
-          const delay = Math.min(4000, 500 * 2 ** attempt);
-          retryAttemptRef.current = Math.min(attempt + 1, 3);
-          retryTimer = window.setTimeout(() => {
-            setConnectionRefreshTick((current) => current + 1);
-          }, delay);
-        }
+        const attempt = retryAttemptRef.current;
+        const delay = hasTerminal ? 5000 : Math.min(4000, 500 * 2 ** attempt);
+        retryAttemptRef.current = hasTerminal ? 0 : Math.min(attempt + 1, 3);
+        retryTimer = window.setTimeout(() => {
+          setConnectionRefreshTick((current) => current + 1);
+        }, delay);
       })
       .finally(() => {
         if (!cancelled) {

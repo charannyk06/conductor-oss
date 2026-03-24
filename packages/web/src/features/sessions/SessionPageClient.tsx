@@ -56,11 +56,7 @@ export default function SessionPageClient({
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
-    return (
-      tab === null
-      || tab === "terminal"
-      || (tab !== "overview" && tab !== "preview" && tab !== "skills" && tab !== "chat")
-    );
+    return tab === null || tab === "terminal";
   }, [searchParams]);
   const immersiveTerminalMode = terminalTabActive && compactTerminalChrome;
   const notificationProjectId = currentSession?.projectId ?? null;

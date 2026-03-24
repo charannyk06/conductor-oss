@@ -7,6 +7,7 @@ use conductor_core::{sync_project_local_config, sync_support_files_for_directory
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+use std::time::Duration;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
@@ -515,7 +516,7 @@ async fn init_repository(path: &Path, branch: &str) -> anyhow::Result<()> {
 
 async fn detect_local_branches(path: &Path) -> anyhow::Result<(Vec<String>, Option<String>)> {
     if path.join(".git").exists() {
-        match Command::new("git")
+        let command = Command::new("git")
             .args([
                 "-C",
                 path.to_string_lossy().as_ref(),
@@ -524,10 +525,10 @@ async fn detect_local_branches(path: &Path) -> anyhow::Result<(Vec<String>, Opti
                 "--prune",
                 "--",
             ])
-            .output()
-            .await
-        {
-            Ok(sync_output) => {
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output();
+        match tokio::time::timeout(Duration::from_secs(30), command).await {
+            Ok(Ok(sync_output)) => {
                 if !sync_output.status.success() {
                     tracing::warn!(
                         "Failed to sync remote refs for '{}': {}",
@@ -536,9 +537,16 @@ async fn detect_local_branches(path: &Path) -> anyhow::Result<(Vec<String>, Opti
                     );
                 }
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 tracing::warn!(
                     "Failed to run git remote update --prune for '{}': {}",
+                    path.display(),
+                    err
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "git remote update --prune timed out for '{}': {}",
                     path.display(),
                     err
                 );

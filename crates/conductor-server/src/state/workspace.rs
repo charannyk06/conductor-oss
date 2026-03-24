@@ -401,7 +401,9 @@ async fn resolve_branch_start_ref(repo_path: &Path, branch: &str) -> Option<Stri
 }
 
 async fn sync_remote_refs(repo_path: &Path) -> Result<()> {
-    let output = Command::new("git")
+    const SYNC_REMOTE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let command = Command::new("git")
         .args([
             "-C",
             repo_path.to_string_lossy().as_ref(),
@@ -410,8 +412,19 @@ async fn sync_remote_refs(repo_path: &Path) -> Result<()> {
             "--prune",
             "--",
         ])
-        .output()
-        .await?;
+        .env("GIT_TERMINAL_PROMPT", "0");
+
+    let output = match tokio::time::timeout(SYNC_REMOTE_TIMEOUT, command.output()).await {
+        Ok(output) => output?,
+        Err(err) => {
+            tracing::warn!(
+                repo_path = %repo_path.display(),
+                error = %err,
+                "Timed out while syncing remote refs"
+            );
+            return Ok(());
+        }
+    };
     if !output.status.success() {
         return Err(anyhow!(
             "git remote update --prune failed: {}",

@@ -457,21 +457,20 @@ export function RemoteSessionTerminal({
       }
 
       const clipboardData = event.clipboardData;
+      if (!clipboardData) {
+        return;
+      }
+      event.preventDefault();
+
       try {
         const plainText = await getPlainClipboardText(clipboardData);
         if (plainText) {
-          event.preventDefault();
           sendTerminalFrame(encodeInputFrame(plainText));
-          return;
-        }
-
-        if (!clipboardData) {
           return;
         }
 
         const imageBlob = await extractImageFromClipboard(clipboardData);
         if (imageBlob) {
-          event.preventDefault();
           try {
             const result = await uploadClipboardImage({
               imageBlob,
@@ -504,13 +503,13 @@ export function RemoteSessionTerminal({
       if (!(target instanceof Element) || !host.contains(target)) {
         return;
       }
+      event.preventDefault();
 
       try {
         const pasteText = await getPlainClipboardText();
         if (!pasteText) {
           return;
         }
-        event.preventDefault();
         sendTerminalFrame(encodeInputFrame(pasteText));
       } catch {
         // Ignore failed keyboard clipboard reads.

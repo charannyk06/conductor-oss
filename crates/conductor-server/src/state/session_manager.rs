@@ -270,7 +270,9 @@ fn extract_quoted_or_bare_token(value: &str) -> Option<String> {
 }
 
 fn parse_branch_from_output(line: &str) -> Option<String> {
-    parse_branch_from_status_line(line).or_else(|| parse_branch_from_command_line(line))
+    parse_branch_from_status_line(line)
+        .or_else(|| parse_branch_from_command_line(line))
+        .filter(is_valid_branch_name)
 }
 
 fn parse_branch_from_status_line(line: &str) -> Option<String> {
@@ -317,6 +319,44 @@ fn looks_like_commit_hash(value: &str) -> bool {
     (7..=40).contains(&value.len()) && value.chars().all(|char| char.is_ascii_hexdigit())
 }
 
+fn is_valid_branch_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+
+    if name == "." || name == "HEAD" || name.starts_with('-') {
+        return false;
+    }
+
+    if looks_like_commit_hash(name) {
+        return false;
+    }
+
+    if name.contains("..")
+        || name.contains("/.")
+        || name.contains(".lock")
+        || name.contains('@')
+        || name.contains('\\')
+        || name.chars().any(|char| char.is_whitespace())
+        || name.chars().any(|char| matches!(char, '~' | '^' | ':' | '?' | '*' | '['))
+    {
+        return false;
+    }
+
+    if !name
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '/' | '_' | '-' | '.' | '+'))
+    {
+        return false;
+    }
+
+    if name.contains('.') {
+        return false;
+    }
+
+    true
+}
+
 fn parse_branch_from_command_line(line: &str) -> Option<String> {
     let command = strip_prompt_prefix(line);
     let tokens = command
@@ -355,8 +395,7 @@ fn parse_branch_from_command_line(line: &str) -> Option<String> {
                 return extract_quoted_or_bare_token(&t[9..]);
             }
             "--" => {
-                index = index.saturating_add(1);
-                continue;
+                return None;
             }
             t if t.starts_with('-') => {
                 index = index.saturating_add(1);
@@ -364,7 +403,7 @@ fn parse_branch_from_command_line(line: &str) -> Option<String> {
             }
             _ => {
                 let candidate = extract_quoted_or_bare_token(token)?;
-                if looks_like_commit_hash(&candidate) || candidate == "." {
+                if !is_valid_branch_name(&candidate) {
                     return None;
                 }
                 return Some(candidate);

@@ -283,12 +283,11 @@ export function BridgeSessionTerminal({
         return;
       }
 
+      event.preventDefault();
       const pasteText = await getClipboardTextFromDataTransfer(event.clipboardData);
       if (!pasteText) {
         return;
       }
-
-      event.preventDefault();
       bridgeInput.sendTerminalInput(pasteText);
     };
 
@@ -307,13 +306,13 @@ export function BridgeSessionTerminal({
       if (!(target instanceof Element) || !host.contains(target)) {
         return;
       }
+      event.preventDefault();
 
       try {
         const pasteText = await getPlainClipboardText();
         if (!pasteText) {
           return;
         }
-        event.preventDefault();
         bridgeInput.sendTerminalInput(pasteText);
       } catch {
         // Ignore failed keyboard clipboard reads.
