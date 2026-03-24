@@ -277,7 +277,11 @@ fn parse_branch_from_status_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let lowered = trimmed.to_ascii_lowercase();
 
-    const PREFIXES: [&str; 3] = ["switched to a new branch ", "switched to branch ", "already on "];
+    const PREFIXES: [&str; 3] = [
+        "switched to a new branch ",
+        "switched to branch ",
+        "already on ",
+    ];
     for prefix in PREFIXES {
         if lowered.starts_with(prefix) {
             return extract_quoted_or_bare_token(&trimmed[prefix.len()..]);
@@ -350,7 +354,7 @@ fn parse_branch_from_command_line(line: &str) -> Option<String> {
             t if t.starts_with("--orphan=") => {
                 return extract_quoted_or_bare_token(&t[9..]);
             }
-            t if t == "--" => {
+            "--" => {
                 index = index.saturating_add(1);
                 continue;
             }
