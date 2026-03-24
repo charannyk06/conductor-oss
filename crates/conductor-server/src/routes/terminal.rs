@@ -403,6 +403,37 @@ fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
         }}
     }}
 
+    async function uploadDroppedFiles(files) {{
+        const formData = new FormData();
+        formData.append('projectId', PROJECT_ID);
+        formData.append('taskRef', SESSION_ID);
+        files.forEach((file, index) => {{
+            const fileName = file && file.name && file.name.trim().length > 0
+                ? file.name
+                : 'drop-' + TIMESTAMP + '-' + index + '.bin';
+            formData.append('files', file, fileName);
+        }});
+
+        try {{
+            const response = await fetch('/api/attachments', {{
+                method: 'POST',
+                body: formData,
+            }});
+            if (response.ok) {{
+                const data = await response.json();
+                const entries = Array.isArray(data.files) ? data.files : [];
+                for (const entry of entries) {{
+                    const path = entry.path || entry.absolutePath || data.path || data.absolutePath;
+                    if (path && window.term) {{
+                        window.term.write('\r\n[attached file: ' + path + ']\r\n');
+                    }}
+                }}
+            }}
+        }} catch (e) {{
+            // Silently ignore upload failures
+        }}
+    }}
+
     function extractImageFromClipboard(clipboardData) {{
         if (!clipboardData.items) return null;
         for (let i = 0; i < clipboardData.items.length; i++) {{
@@ -411,7 +442,31 @@ fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
                 return item.getAsFile();
             }}
         }}
+        if (!clipboardData.files || clipboardData.files.length === 0) return null;
+        for (let i = 0; i < clipboardData.files.length; i++) {{
+            const file = clipboardData.files[i];
+            if (file.type.startsWith('image/')) {{
+                return file;
+            }}
+        }}
         return null;
+    }}
+
+    function extractFilesFromTransfer(transfer) {{
+        if (transfer && transfer.files && transfer.files.length > 0) {{
+            return Array.from(transfer.files);
+        }}
+        if (!transfer || !transfer.items || transfer.items.length === 0) return [];
+        const files = [];
+        for (let i = 0; i < transfer.items.length; i++) {{
+            const item = transfer.items[i];
+            if (item.kind !== 'file') continue;
+            const file = item.getAsFile();
+            if (file) {{
+                files.push(file);
+            }}
+        }}
+        return files;
     }}
 
     document.addEventListener('paste', async function(event) {{
@@ -420,8 +475,26 @@ fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
         const imageBlob = extractImageFromClipboard(event.clipboardData);
         if (imageBlob) {{
             event.preventDefault();
+            event.stopPropagation();
             await uploadImage(imageBlob);
         }}
+    }}, true);
+
+    document.addEventListener('dragover', function(event) {{
+        const files = extractFilesFromTransfer(event.dataTransfer);
+        if (!files.length) return;
+        event.preventDefault();
+        if (event.dataTransfer) {{
+            event.dataTransfer.dropEffect = 'copy';
+        }}
+    }}, true);
+
+    document.addEventListener('drop', async function(event) {{
+        const files = extractFilesFromTransfer(event.dataTransfer);
+        if (!files.length) return;
+        event.preventDefault();
+        event.stopPropagation();
+        await uploadDroppedFiles(files);
     }}, true);
 }})(document);
 </script>"#,

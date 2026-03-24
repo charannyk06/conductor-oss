@@ -9,11 +9,17 @@ import { Button } from "@/components/ui/Button";
 import { useBridgeTunnel } from "@/hooks/useBridgeTunnel";
 import type { SessionTerminalProps } from "@/components/sessions/terminal/terminalTypes";
 import { attachMobileTouchScrollShim } from "@/components/sessions/terminal/mobileTouchScroll";
+import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import {
   calculateMobileTerminalViewportMetrics,
   isTerminalScrollHostAtBottom,
   resolveSessionTerminalViewportOptions,
 } from "@/components/sessions/sessionTerminalUtils";
+import {
+  extractFilesFromTransfer,
+  extractImageFromClipboard,
+  uploadClipboardImage,
+} from "@/lib/clipboardImage";
 
 export interface BridgeSessionTerminalProps extends SessionTerminalProps {
   scope?: string;
@@ -68,7 +74,9 @@ const TERMINAL_THEME = {
 } as const;
 
 export function BridgeSessionTerminal({
+  projectId,
   sessionId,
+  bridgeId,
   sessionState,
   pendingInsert,
   immersiveMobileMode = false,
@@ -89,6 +97,7 @@ export function BridgeSessionTerminal({
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const bridgeInputRef = useRef({ connected, readOnly, sendTerminalInput });
+  const attachmentContextRef = useRef({ projectId, sessionId, bridgeId });
   const lastAppliedInsertNonceRef = useRef(0);
   const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
   const followBottomRef = useRef(true);
@@ -96,6 +105,10 @@ export function BridgeSessionTerminal({
   const [loadingOutput, setLoadingOutput] = useState(true);
   const [requestError, setRequestError] = useState<string | null>(null);
   const sessionLabel = sessionState.trim().replace(/[_-]+/g, " ");
+
+  useEffect(() => {
+    attachmentContextRef.current = { projectId, sessionId, bridgeId };
+  }, [projectId, sessionId, bridgeId]);
 
   const clearScheduledLayoutSyncs = () => {
     for (const timer of scheduledLayoutSyncTimersRef.current) {
@@ -148,28 +161,6 @@ export function BridgeSessionTerminal({
     }
 
     host.style.height = `${Math.max(0, Math.round(usableHeight))}px`;
-  };
-
-  const getPlainClipboardText = async () => {
-    if (typeof navigator === "undefined" || !navigator.clipboard?.readText) {
-      return null;
-    }
-
-    try {
-      const text = await navigator.clipboard.readText();
-      return text.length > 0 ? text : null;
-    } catch {
-      return null;
-    }
-  };
-
-  const getClipboardTextFromDataTransfer = async (clipboardData?: DataTransfer | null) => {
-    const plainText = clipboardData?.getData("text/plain") ?? "";
-    if (plainText.length > 0) {
-      return plainText;
-    }
-
-    return await getPlainClipboardText();
   };
 
   const fitTerminal = () => {
@@ -283,39 +274,78 @@ export function BridgeSessionTerminal({
         return;
       }
 
-      event.preventDefault();
-      const pasteText = await getClipboardTextFromDataTransfer(event.clipboardData);
-      if (!pasteText) {
+      const imageBlob = extractImageFromClipboard(event.clipboardData);
+      if (!imageBlob) {
         return;
       }
-      bridgeInput.sendTerminalInput(pasteText);
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const { projectId: currentProjectId, sessionId: currentSessionId, bridgeId: currentBridgeId } =
+        attachmentContextRef.current;
+
+      try {
+        const result = await uploadClipboardImage({
+          imageBlob,
+          projectId: currentProjectId,
+          taskRef: currentSessionId,
+          bridgeId: currentBridgeId,
+        });
+        const imagePath = result.absolutePath || result.path;
+        bridgeInput.sendTerminalInput(`\r\n[pasted image: ${imagePath}]\r\n`);
+        setRequestError(null);
+      } catch (error) {
+        setRequestError(error instanceof Error ? error.message : "Failed to upload pasted image.");
+      }
     };
 
-    const handleShortcutPaste = async (event: KeyboardEvent) => {
+    const handleDragOver = (event: DragEvent) => {
       const bridgeInput = bridgeInputRef.current;
       if (bridgeInput.readOnly || !bridgeInput.connected) {
         return;
       }
-      if (!event.metaKey && !event.ctrlKey) {
+
+      const files = extractFilesFromTransfer(event.dataTransfer);
+      if (files.length === 0) {
         return;
       }
-      if (event.key.toLowerCase() !== "v") {
-        return;
-      }
-      const target = event.target;
-      if (!(target instanceof Element) || !host.contains(target)) {
-        return;
-      }
+
       event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = "copy";
+      }
+    };
+
+    const handleDrop = async (event: DragEvent) => {
+      const bridgeInput = bridgeInputRef.current;
+      if (bridgeInput.readOnly || !bridgeInput.connected) {
+        return;
+      }
+
+      const files = extractFilesFromTransfer(event.dataTransfer);
+      if (files.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
 
       try {
-        const pasteText = await getPlainClipboardText();
-        if (!pasteText) {
-          return;
+        const { projectId: currentProjectId, sessionId: currentSessionId, bridgeId: currentBridgeId } =
+          attachmentContextRef.current;
+        const uploadedPaths = await uploadProjectAttachments({
+          files,
+          projectId: currentProjectId,
+          taskRef: currentSessionId,
+          bridgeId: currentBridgeId,
+        });
+        for (const path of uploadedPaths) {
+          bridgeInput.sendTerminalInput(`\r\n[attached file: ${path}]\r\n`);
         }
-        bridgeInput.sendTerminalInput(pasteText);
-      } catch {
-        // Ignore failed keyboard clipboard reads.
+        setRequestError(null);
+      } catch (error) {
+        setRequestError(error instanceof Error ? error.message : "Failed to upload dropped files.");
       }
     };
 
@@ -325,7 +355,8 @@ export function BridgeSessionTerminal({
 
     host.addEventListener("click", focusTerminal);
     host.addEventListener("paste", handlePaste, true);
-    document.addEventListener("keydown", handleShortcutPaste, true);
+    host.addEventListener("dragover", handleDragOver, true);
+    host.addEventListener("drop", handleDrop, true);
     terminal.focus();
     window.requestAnimationFrame(() => {
       applyKeyboardAwareTerminalHeight();
@@ -335,7 +366,8 @@ export function BridgeSessionTerminal({
     return () => {
       host.removeEventListener("click", focusTerminal);
       host.removeEventListener("paste", handlePaste, true);
-      document.removeEventListener("keydown", handleShortcutPaste, true);
+      host.removeEventListener("dragover", handleDragOver, true);
+      host.removeEventListener("drop", handleDrop, true);
       scrollHost?.removeEventListener("scroll", syncFollowBottom);
       dataSubscription.dispose();
       cleanupMobileTouchScroll?.();
