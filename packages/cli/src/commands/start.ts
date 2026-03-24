@@ -974,7 +974,7 @@ export function registerStart(program: Command): void {
         } else if (explicitBackendUrl) {
           console.log(chalk.dim(`  Backend:   using existing Rust backend at ${explicitBackendUrl}`));
         } else {
-          console.log(chalk.yellow("  Backend:   not launched; frontend API requests will fail without CONDUCTOR_BACKEND_URL."));
+          console.log(chalk.yellow("  Backend:   not launched; frontend API requests will fail without CONDUCTOR_BACKEND_URL or NEXT_PUBLIC_CONDUCTOR_BACKEND_URL."));
         }
 
         // ---- Start web dashboard ----
@@ -1096,6 +1096,8 @@ export function registerStart(program: Command): void {
                   ? {
                       CONDUCTOR_BACKEND_URL: backendUrl,
                       CONDUCTOR_BACKEND_PORT: String(backendPort),
+                      NEXT_PUBLIC_CONDUCTOR_BACKEND_URL: backendUrl,
+                      NEXT_PUBLIC_CONDUCTOR_BACKEND_PORT: String(backendPort),
                     }
                   : {}),
                 ...(trustedHeaderAuth.enabled

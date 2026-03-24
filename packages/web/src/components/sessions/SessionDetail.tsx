@@ -6,8 +6,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Globe,
   LayoutDashboard,
+  Puzzle,
   PanelLeftOpen,
-  Sparkles,
   SquareTerminal,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
@@ -18,6 +18,7 @@ import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
 import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
 import type { TerminalInsertRequest } from "./terminalInsert";
+import { shouldAutoOpenPreviewTab } from "./sessionDetailBehavior";
 
 const SessionTerminal = dynamic(
   () => import("./SessionTerminal").then((mod) => mod.SessionTerminal),
@@ -58,6 +59,7 @@ interface SessionDetailProps {
   bridgeId?: string | null;
   immersiveMobileMode?: boolean;
   active?: boolean;
+  suppressPreviewAutoOpen?: boolean;
   onOpenSidebar?: () => void;
 }
 
@@ -121,6 +123,7 @@ export function SessionDetail({
   bridgeId = null,
   immersiveMobileMode = false,
   active = true,
+  suppressPreviewAutoOpen = false,
   onOpenSidebar,
 }: SessionDetailProps) {
   const pathname = usePathname();
@@ -162,12 +165,18 @@ export function SessionDetail({
     setPendingTerminalInsert(null);
   }, [sessionId]);
   const handlePreviewConnectionChange = useCallback((connected: boolean) => {
-    if (!connected || !active || activeTab !== "terminal" || autoPreviewOpenedRef.current) {
+    if (!shouldAutoOpenPreviewTab({
+      active,
+      activeTab,
+      alreadyOpened: autoPreviewOpenedRef.current,
+      connected,
+      suppressAutoOpen: suppressPreviewAutoOpen,
+    })) {
       return;
     }
     autoPreviewOpenedRef.current = true;
     handleTabChange("preview");
-  }, [active, activeTab, handleTabChange]);
+  }, [active, activeTab, handleTabChange, suppressPreviewAutoOpen]);
 
   if (loading) {
     return (
@@ -229,7 +238,7 @@ export function SessionDetail({
         Preview
       </TabsTrigger>
       <TabsTrigger value="skills" className={tabTriggerClass}>
-        <Sparkles className="h-3.5 w-3.5" />
+        <Puzzle className="h-3.5 w-3.5" />
         Skills
       </TabsTrigger>
     </TabsList>

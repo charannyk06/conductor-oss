@@ -19,6 +19,7 @@ import {
   Rocket,
   Search,
   Sparkles,
+  Puzzle,
   Table2,
   UsersRound,
   Video,
@@ -29,7 +30,12 @@ import {
 } from "lucide-react";
 import type { DashboardSession } from "@/lib/types";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import type { CustomInstalledSkill, InstalledSkillStatus, SkillCatalogEntry } from "@/lib/skills";
+import type {
+  CustomInstalledSkill,
+  InstalledSkillStatus,
+  SkillAgentCatalogEntry,
+  SkillCatalogEntry,
+} from "@/lib/skills";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
@@ -46,6 +52,7 @@ type ToastState = { kind: "success" | "error"; message: string } | null;
 
 type SkillCatalogResponse = {
   skills?: SkillCatalogEntry[];
+  agents?: SkillAgentCatalogEntry[];
 };
 
 type InstalledSkillsResponse = {
@@ -96,6 +103,13 @@ const CUSTOM_SKILL_ICON_POOL: LucideIcon[] = [
   UsersRound,
 ];
 
+const DEFAULT_GENERIC_AGENT: SkillAgentCatalogEntry = {
+  id: "generic-open-standard",
+  name: "Generic open-standard",
+  projectRoots: [".agents/skills"],
+  userRoots: ["~/.agents/skills"],
+};
+
 function detectSessionAgent(session: DashboardSession): string {
   return (
     session.metadata["agent"]?.trim() ||
@@ -143,12 +157,12 @@ function getSkillIcon(iconName: string | null | undefined): LucideIcon {
     return SKILL_ICON_BY_NAME[candidate];
   }
 
-  return Sparkles;
+  return Puzzle;
 }
 
 function getCustomSkillIcon(label: string): LucideIcon {
   if (label.trim().length === 0) {
-    return Sparkles;
+    return Puzzle;
   }
 
   let hash = 0;
@@ -163,16 +177,47 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
   const bridgeId = session.bridgeId ?? null;
   const agent = detectSessionAgent(session);
   const workspacePath = detectWorkspacePath(session);
-  const agentSupported = agent === "claude-code";
   const [query, setQuery] = useState("");
+  const [targetAgent, setTargetAgent] = useState(agent || DEFAULT_GENERIC_AGENT.id);
   const [scope, setScope] = useState<InstallScope>(workspacePath ? "workspace" : "user");
   const [catalog, setCatalog] = useState<SkillCatalogEntry[]>([]);
+  const [catalogAgents, setCatalogAgents] = useState<SkillAgentCatalogEntry[]>([]);
   const [installed, setInstalled] = useState<Record<string, InstalledSkillStatus>>({});
   const [activeSkillIds, setActiveSkillIds] = useState<string[]>([]);
   const [customSkills, setCustomSkills] = useState<CustomInstalledSkill[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionSkillId, setActionSkillId] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
+
+  const selectedAgent = useMemo(() => {
+    return (
+      catalogAgents.find((entry) => entry.id === targetAgent) ??
+      (targetAgent.trim().length > 0 && targetAgent !== DEFAULT_GENERIC_AGENT.id
+        ? {
+            id: targetAgent,
+            name: targetAgent,
+            projectRoots: DEFAULT_GENERIC_AGENT.projectRoots,
+            userRoots: DEFAULT_GENERIC_AGENT.userRoots,
+          }
+        : DEFAULT_GENERIC_AGENT)
+    );
+  }, [catalogAgents, targetAgent]);
+
+  const agentOptions = useMemo(() => {
+    const options = [...catalogAgents];
+    if (!options.some((entry) => entry.id === selectedAgent.id)) {
+      options.unshift(selectedAgent);
+    }
+    if (!options.some((entry) => entry.id === agent && agent.trim().length > 0)) {
+      options.unshift({
+        id: agent || DEFAULT_GENERIC_AGENT.id,
+        name: agent || DEFAULT_GENERIC_AGENT.name,
+        projectRoots: DEFAULT_GENERIC_AGENT.projectRoots,
+        userRoots: DEFAULT_GENERIC_AGENT.userRoots,
+      });
+    }
+    return options.filter((entry, index, array) => array.findIndex((candidate) => candidate.id === entry.id) === index);
+  }, [agent, catalogAgents, selectedAgent]);
 
   const refresh = useCallback(async (options: RefreshOptions = {}) => {
     const { clearToast = true } = options;
@@ -191,7 +236,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
         readJsonResponse<InstalledSkillsResponse>(
           fetch(
             withBridgeQuery(
-              `/api/skills/installed?agent=${encodeURIComponent(agent || "claude-code")}${workspacePath ? `&workspacePath=${encodeURIComponent(workspacePath)}` : ""}`,
+              `/api/skills/installed?agent=${encodeURIComponent(targetAgent)}${workspacePath ? `&workspacePath=${encodeURIComponent(workspacePath)}` : ""}`,
               bridgeId,
             ),
             { cache: "no-store" },
@@ -209,6 +254,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
 
       if (catalogResult.status === "fulfilled") {
         setCatalog(Array.isArray(catalogResult.value.skills) ? catalogResult.value.skills : []);
+        setCatalogAgents(Array.isArray(catalogResult.value.agents) ? catalogResult.value.agents : []);
       } else {
         errors.push(getErrorMessage(catalogResult.reason, "Failed to load skills catalog"));
       }
@@ -238,7 +284,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
     } finally {
       setLoading(false);
     }
-  }, [active, agent, bridgeId, sessionId, workspacePath]);
+  }, [active, bridgeId, sessionId, targetAgent, workspacePath]);
 
   useEffect(() => {
     void refresh();
@@ -273,7 +319,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
           ? { sessionId, skillId: skill.id }
           : {
               skillId: skill.id,
-              agent: agent || "claude-code",
+              agent: targetAgent,
               scope,
               workspacePath,
               sessionId,
@@ -300,7 +346,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
     } finally {
       setActionSkillId(null);
     }
-  }, [agent, bridgeId, refresh, scope, sessionId, workspacePath]);
+  }, [bridgeId, refresh, scope, sessionId, targetAgent, workspacePath]);
 
   const showInitialLoading = loading && catalog.length === 0;
   const showRefreshing = loading && catalog.length > 0;
@@ -316,7 +362,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
                 <div className="min-w-0 space-y-1.5">
                   <h2 className="text-[15px] font-semibold text-[var(--vk-text-normal)]">Skills</h2>
                   <p className="text-[13px] text-[var(--vk-text-muted)]">
-                    Install Claude-style skills from the curated catalog on the paired device, detect what is already installed, and mark a skill as active for this session.
+                    Install open-agent skills from the curated catalog, detect what is already installed for the selected agent, and mark a skill as active for this session.
                   </p>
                 </div>
                 <div className="flex min-w-0 flex-col gap-2 text-[12px] text-[var(--vk-text-muted)] lg:items-end">
@@ -328,6 +374,9 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
                   </div>
                   <div className="min-w-0">
                     Device: <span className="font-medium text-[var(--vk-text-normal)] break-words">{bridgeId ?? "local"}</span>
+                  </div>
+                  <div className="min-w-0 break-words">
+                    Target agent: <span className="font-medium text-[var(--vk-text-normal)] break-words">{selectedAgent.name}</span>
                   </div>
                   <div className="min-w-0 break-words">
                     Workspace: <span className="font-medium text-[var(--vk-text-normal)] break-words">{workspacePath ?? "Unavailable"}</span>
@@ -345,22 +394,36 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
                   />
                 </label>
                 <label className="flex w-full items-center justify-between gap-2 text-[12px] text-[var(--vk-text-muted)] lg:w-auto lg:justify-start">
+                  <span className="shrink-0">Target agent</span>
+                  <select
+                    value={targetAgent}
+                    onChange={(event) => setTargetAgent(event.target.value)}
+                    className="min-w-0 w-full rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)] lg:w-auto"
+                  >
+                    {agentOptions.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex w-full items-center justify-between gap-2 text-[12px] text-[var(--vk-text-muted)] lg:w-auto lg:justify-start">
                   <span className="shrink-0">Install scope</span>
                   <select
                     value={scope}
                     onChange={(event) => setScope(event.target.value as InstallScope)}
                     className="min-w-0 w-full rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[13px] text-[var(--vk-text-normal)] lg:w-auto"
                   >
-                    <option value="user">User, ~/.claude/skills</option>
-                    <option value="workspace" disabled={!workspacePath}>Workspace, .claude/skills</option>
+                    <option value="user">User</option>
+                    <option value="workspace" disabled={!workspacePath}>Workspace</option>
                   </select>
                 </label>
               </div>
-              {!agentSupported ? (
-                <div className="rounded-[14px] border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[12px] text-amber-100">
-                  This first release installs Claude Code skills only. Current session agent is <span className="font-semibold">{agent || "unknown"}</span>.
-                </div>
-              ) : null}
+              <div className="rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                Installs into the selected agent&apos;s official skill folders. User scope mirrors into{" "}
+                <span className="font-medium text-[var(--vk-text-normal)]">{selectedAgent.userRoots.join(" • ")}</span>; workspace scope mirrors into{" "}
+                <span className="font-medium text-[var(--vk-text-normal)]">{selectedAgent.projectRoots.join(" • ")}</span>.
+              </div>
               {toast ? (
                 <div className={`rounded-[14px] border px-3 py-2 text-[12px] ${toast.kind === "error" ? "border-red-400/35 bg-red-400/10 text-red-100" : "border-emerald-400/35 bg-emerald-400/10 text-emerald-100"}`}>
                   {toast.message}
@@ -391,8 +454,9 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
                     const isInstalled = Boolean(installState?.installedUser || installState?.installedWorkspace);
                     const isActive = activeSkillIds.includes(skill.id);
                     const working = actionSkillId === skill.id;
-                    const incompatible = !skill.compatibleAgents.includes(agent || "claude-code");
+                    const incompatible = false;
                     const SkillIcon = getSkillIcon(skill.icon);
+                    const supportsAllAgents = catalogAgents.length > 0 && skill.compatibleAgents.length >= catalogAgents.length;
                     return (
                       <Card key={skill.id} className="min-w-0 border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
                         <CardHeader className="flex flex-col items-stretch gap-3">
@@ -425,9 +489,13 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
                             </div>
                           </div>
                           <div className="flex flex-wrap gap-2 text-[12px] text-[var(--vk-text-muted)]">
-                            {skill.compatibleAgents.map((compatibleAgent) => (
-                              <Badge key={compatibleAgent} variant="outline">{compatibleAgent}</Badge>
-                            ))}
+                            {supportsAllAgents ? (
+                              <Badge variant="outline">Compatible with all supported agents</Badge>
+                            ) : (
+                              skill.compatibleAgents.map((compatibleAgent) => (
+                                <Badge key={compatibleAgent} variant="outline">{compatibleAgent}</Badge>
+                              ))
+                            )}
                           </div>
                         </CardHeader>
                         <CardContent className="space-y-3">
@@ -448,7 +516,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
                                 </Button>
                               )
                             ) : (
-                              <Button type="button" size="sm" disabled={working || incompatible || !agentSupported} onClick={() => void runAction(skill, "install")}>
+                              <Button type="button" size="sm" disabled={working || incompatible} onClick={() => void runAction(skill, "install")}>
                                 {working ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1 h-3.5 w-3.5" />} Install and use
                               </Button>
                             )}

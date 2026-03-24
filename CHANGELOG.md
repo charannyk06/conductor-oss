@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-agent skills tab** — the dashboard now installs official skill bundles for Claude Code, Codex, Gemini, Amp, Cursor CLI, OpenCode, Droid, Qwen Code, CCR, and GitHub Copilot, and the launcher forwards backend URL env vars into the web app automatically.
 - **Terminal validation coverage** — regression tests now cover terminal snapshot restore assembly, terminal route wiring, remote transport fallback gating, and frontend terminal helper behavior for mobile and remote flows.
 - **Terminal benchmark hooks** — terminal connection, snapshot, and resize endpoints now emit `Server-Timing` plus terminal-specific diagnostic headers for repeatable benchmark capture.
 - **Terminal rollout docs** — added Phase 2 rollout notes, a manual QA checklist, and a sign-off matrix for desktop, phone, and private-remote terminal validation.

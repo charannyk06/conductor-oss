@@ -16,7 +16,7 @@
 
 ---
 
-Conductor OSS is a local-first orchestration layer for AI coding agents. It turns Markdown kanban boards into dispatchable work, launches installed coding CLIs in isolated git worktrees, and gives you a browser dashboard for live terminal sessions, diffs, previews, and recovery workflows.
+Conductor OSS is a local-first orchestration layer for AI coding agents. It turns Markdown kanban boards into dispatchable work, launches installed coding CLIs in isolated git worktrees, and gives you a browser dashboard for live terminal sessions, diffs, previews, recovery workflows, and multi-agent skills management.
 
 By default, everything runs on your machine. Conductor keeps board state in Markdown, stores runtime metadata in SQLite, and leaves authentication and billing to the upstream agent CLIs.
 
@@ -52,6 +52,7 @@ Running the package with no arguments defaults to `start --open`.
 - Primary launcher URL: `http://127.0.0.1:4747`
 - Launcher-managed Rust backend: `http://127.0.0.1:4748` by default
 - The native Rust `conductor start` binary uses `4747` unless you override `--port`
+- When launched through `co start`, the dashboard inherits the Rust backend URL automatically so the web app can proxy skills, preview, and session routes without extra setup.
 
 ### Initialize an existing repo
 
@@ -82,11 +83,19 @@ Conductor ships adapters for the major coding CLIs it knows how to discover, lau
 | Gemini | `gemini` |
 | Qwen Code | `qwen` |
 | Amp | `amp` |
-| Cursor Agent | `cursor-agent` |
+| Cursor CLI | `cursor-agent` |
 | OpenCode | `opencode` |
 | Droid | `droid` |
 | GitHub Copilot | `gh copilot` / `copilot` |
 | CCR | `ccr` |
+
+## Skills
+
+The dashboard includes a Skills tab for each session. It can install curated official skill bundles for Claude Code, Codex, Gemini, Amp, Cursor CLI, OpenCode, Droid, Qwen Code, CCR, and GitHub Copilot.
+
+Skills are mapped to each agent's native folder layout, so user-scoped and workspace-scoped installs land in the right place automatically. The backend also detects custom skill folders already present on the machine and lets you activate or deactivate skills for the current session.
+
+If you run the dashboard outside `co start`, set `CONDUCTOR_BACKEND_URL` or `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` so the web app can reach the Rust backend.
 
 ## Native Terminal Experience
 

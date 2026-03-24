@@ -37,9 +37,19 @@ export function resolveRustBackendUrl(): string | null {
     return explicitBackendUrl;
   }
 
+  const publicBackendUrl = normalizeHttpUrl(process.env.NEXT_PUBLIC_CONDUCTOR_BACKEND_URL);
+  if (publicBackendUrl) {
+    return publicBackendUrl;
+  }
+
   const configuredPort = parseConfiguredPort(process.env.CONDUCTOR_BACKEND_PORT);
   if (configuredPort !== null) {
     return `http://127.0.0.1:${configuredPort}`;
+  }
+
+  const publicConfiguredPort = parseConfiguredPort(process.env.NEXT_PUBLIC_CONDUCTOR_BACKEND_PORT);
+  if (publicConfiguredPort !== null) {
+    return `http://127.0.0.1:${publicConfiguredPort}`;
   }
 
   if (process.env.NODE_ENV === "development") {

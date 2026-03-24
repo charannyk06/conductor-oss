@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -1135,6 +1136,7 @@ export default function DashboardClient({
   const [pendingWorkspaceSetup, setPendingWorkspaceSetup] = useState(false);
   const [mountedSessionIds, setMountedSessionIds] = useState<string[]>(() => selectedSessionId ? [selectedSessionId] : []);
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
+  const launchpadSessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1393,6 +1395,16 @@ export default function DashboardClient({
       const next = [selectedSessionId, ...current.filter((sessionId) => sessionId !== selectedSessionId)];
       return next.slice(0, SESSION_DETAIL_KEEPALIVE_LIMIT);
     });
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !launchpadSessionIdRef.current) {
+      return;
+    }
+    if (launchpadSessionIdRef.current === selectedSessionId) {
+      return;
+    }
+    launchpadSessionIdRef.current = null;
   }, [selectedSessionId]);
 
   useEffect(() => {
@@ -1783,6 +1795,8 @@ export default function DashboardClient({
 
       setPrompt("");
       syncSidebarForViewport();
+      // Mark this session as launchpad-created so preview auto-open does not steal focus.
+      launchpadSessionIdRef.current = data.session.id;
       await refreshSessions();
       navigateDashboard(
         {
@@ -2158,6 +2172,7 @@ export default function DashboardClient({
                   initialSession={initialSession}
                   bridgeId={effectiveBridgeId}
                   active={sessionActive}
+                  suppressPreviewAutoOpen={sessionActive && launchpadSessionIdRef.current === sessionId}
                   immersiveMobileMode={sessionActive && immersiveMobileMode}
                   onOpenSidebar={toggleSidebar}
                 />

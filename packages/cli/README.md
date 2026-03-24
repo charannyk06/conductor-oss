@@ -2,7 +2,7 @@
 
 `conductor-oss` is the published npm package for Conductor's CLI launcher.
 
-It starts the local dashboard and Rust backend, scaffolds `CONDUCTOR.md` and `conductor.yaml`, launches agent sessions, and exposes the user-facing `co` commands.
+It starts the local dashboard and Rust backend, scaffolds `CONDUCTOR.md` and `conductor.yaml`, launches agent sessions, exposes the user-facing `co` commands, and forwards the Rust backend URL into the dashboard process so the web app can reach its proxy routes without manual environment setup.
 
 ## Install
 
@@ -38,6 +38,7 @@ Launcher defaults:
 
 - Dashboard: `http://127.0.0.1:4747`
 - Rust backend: `http://127.0.0.1:4748`
+- The launcher exports `CONDUCTOR_BACKEND_URL` and `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` for the dashboard automatically.
 
 Source checkouts of the repo use different development ports:
 
@@ -84,13 +85,15 @@ Conductor currently includes adapters for:
 - Gemini
 - Qwen Code
 - Amp
-- Cursor Agent
+- Cursor CLI
 - OpenCode
 - Droid
 - GitHub Copilot
 - CCR
 
-The dashboard only offers agents it can discover on your machine.
+The dashboard only offers agents it can discover on your machine, and the Skills tab installs official skill bundles into the correct folder layout for each supported agent.
+
+If you run the dashboard by itself, set `CONDUCTOR_BACKEND_URL` or `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` so the web UI can talk to the Rust backend.
 
 ## Access Control and Bridge
 
