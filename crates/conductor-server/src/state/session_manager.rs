@@ -272,7 +272,7 @@ fn extract_quoted_or_bare_token(value: &str) -> Option<String> {
 fn parse_branch_from_output(line: &str) -> Option<String> {
     parse_branch_from_status_line(line)
         .or_else(|| parse_branch_from_command_line(line))
-        .filter(is_valid_branch_name)
+        .filter(|branch| is_valid_branch_name(branch))
 }
 
 fn parse_branch_from_status_line(line: &str) -> Option<String> {
