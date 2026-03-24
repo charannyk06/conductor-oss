@@ -78,22 +78,10 @@ function encodeInputFrame(data: string): Uint8Array {
   return frame;
 }
 
-function getSafePlainText(value: string) {
-  return value.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
-}
-
 async function getPlainClipboardText(clipboardData?: DataTransfer | null): Promise<string | null> {
   const directText = clipboardData?.getData("text/plain") ?? "";
   if (directText.length > 0) {
     return directText;
-  }
-
-  const htmlText = clipboardData?.getData("text/html") ?? "";
-  if (htmlText.length > 0) {
-    const parsedText = getSafePlainText(htmlText);
-    if (parsedText.length > 0) {
-      return parsedText;
-    }
   }
 
   if (typeof navigator === "undefined" || !navigator.clipboard?.readText) {

@@ -163,20 +163,10 @@ export function BridgeSessionTerminal({
     }
   };
 
-  const getSafePlainText = (value: string) => value.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
-
   const getClipboardTextFromDataTransfer = async (clipboardData?: DataTransfer | null) => {
     const plainText = clipboardData?.getData("text/plain") ?? "";
     if (plainText.length > 0) {
       return plainText;
-    }
-
-    const htmlText = clipboardData?.getData("text/html") ?? "";
-    if (htmlText.length > 0) {
-      const parsedText = getSafePlainText(htmlText);
-      if (parsedText.length > 0) {
-        return parsedText;
-      }
     }
 
     return await getPlainClipboardText();
