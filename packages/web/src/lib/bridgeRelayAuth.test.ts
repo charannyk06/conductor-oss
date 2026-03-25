@@ -78,14 +78,14 @@ test("appendLegacyBridgeRelayAuthHeaders includes the legacy local user header f
   assert.equal(headers.get("x-bridge-user-id"), "local-admin");
 });
 
-test("buildBridgeRelayWebSocketUrl keeps websocket auth material out of the url", () => {
+test("buildBridgeRelayWebSocketUrl includes the relay jwt in the websocket query string", () => {
   const previousRelayUrl = process.env.CONDUCTOR_BRIDGE_RELAY_URL;
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com/base/";
 
   try {
     assert.equal(
       buildBridgeRelayWebSocketUrl("/terminal/terminal-123/browser", "jwt-placeholder"),
-      "wss://relay.example.com/terminal/terminal-123/browser",
+      "wss://relay.example.com/terminal/terminal-123/browser?jwt=jwt-placeholder",
     );
   } finally {
     if (previousRelayUrl === undefined) {
