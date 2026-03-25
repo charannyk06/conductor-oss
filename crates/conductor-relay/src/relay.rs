@@ -716,7 +716,8 @@ async fn browser_terminal_ws(
     Query(query): Query<WsQuery>,
 ) -> Response {
     let requested_protocol = resolve_websocket_protocol(&headers);
-    let Some(jwt) = requested_protocol.clone().or_else(|| query.jwt.clone()) else {
+    let jwt = resolve_browser_terminal_jwt(query.jwt.as_deref(), requested_protocol.as_deref());
+    let Some(jwt) = jwt else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Missing browser relay token." })),
@@ -750,8 +751,8 @@ async fn browser_terminal_ws(
                 }
             };
 
-            if requested_protocol.is_some() {
-                ws.protocols([jwt]).on_upgrade(upgrade).into_response()
+            if let Some(protocol) = requested_protocol {
+                ws.protocols([protocol]).on_upgrade(upgrade).into_response()
             } else {
                 ws.on_upgrade(upgrade).into_response()
             }
@@ -2396,6 +2397,22 @@ fn resolve_websocket_protocol(headers: &HeaderMap) -> Option<String> {
         })
 }
 
+fn resolve_browser_terminal_jwt(
+    query_jwt: Option<&str>,
+    requested_protocol: Option<&str>,
+) -> Option<String> {
+    query_jwt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            requested_protocol
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
 fn resolve_dashboard_api_user_id(headers: &HeaderMap) -> Option<String> {
     let jwt = resolve_token(headers, None)?;
     decode_relay_user_id(&jwt, RELAY_JWT_SCOPE_DASHBOARD_API).ok()
@@ -2723,6 +2740,23 @@ mod tests {
             device_proxy_timeout_for_url("/api/sessions"),
             DEVICE_PROXY_TIMEOUT
         );
+    }
+
+    #[test]
+    fn resolve_browser_terminal_jwt_prefers_query_token_over_requested_protocol() {
+        assert_eq!(
+            resolve_browser_terminal_jwt(Some("jwt-from-query"), Some("ttyd")),
+            Some("jwt-from-query".to_string())
+        );
+        assert_eq!(
+            resolve_browser_terminal_jwt(None, Some("jwt-from-protocol")),
+            Some("jwt-from-protocol".to_string())
+        );
+        assert_eq!(
+            resolve_browser_terminal_jwt(Some("   "), Some("ttyd")),
+            Some("ttyd".to_string())
+        );
+        assert_eq!(resolve_browser_terminal_jwt(None, None), None);
     }
 
     #[tokio::test]
