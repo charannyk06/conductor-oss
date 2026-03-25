@@ -84,7 +84,7 @@ test("buildBridgeRelayWebSocketUrl keeps websocket auth material out of the url"
 
   try {
     assert.equal(
-      buildBridgeRelayWebSocketUrl("/terminal/terminal-123/browser"),
+      buildBridgeRelayWebSocketUrl("/terminal/terminal-123/browser", "jwt-placeholder"),
       "wss://relay.example.com/terminal/terminal-123/browser",
     );
   } finally {

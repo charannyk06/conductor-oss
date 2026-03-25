@@ -89,7 +89,7 @@ export async function buildBridgeRelayAuthHeaders(
   return appendLegacyBridgeRelayAuthHeaders(headers, access, userId);
 }
 
-export function buildBridgeRelayWebSocketUrl(pathname: string): string {
+export function buildBridgeRelayWebSocketUrl(pathname: string, _wsProtocol?: string): string {
   const relayUrl = new URL(requireBridgeRelayUrl());
   relayUrl.protocol = relayUrl.protocol === "https:" ? "wss:" : "ws:";
   relayUrl.pathname = pathname;
