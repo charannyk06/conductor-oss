@@ -955,9 +955,11 @@ export function RemoteSessionTerminal({
           >
             <input
               ref={promptInputRef}
+              type="text"
               value={promptMessage}
               onChange={(event) => setPromptMessage(event.target.value)}
               placeholder="Send a follow-up message…"
+              enterKeyHint="done"
               disabled={promptSending}
               className="h-8 min-w-0 flex-1 rounded-md border border-white/10 bg-[#0c0808] px-2.5 text-[12px] text-[#efe8e1] outline-none placeholder:text-[#7d746e] focus:border-white/20 disabled:opacity-50"
               onKeyDown={(event) => {

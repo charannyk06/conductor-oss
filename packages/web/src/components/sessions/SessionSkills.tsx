@@ -231,7 +231,7 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
     try {
       const [catalogResult, installedResult, activeResult] = await Promise.allSettled([
         readJsonResponse<SkillCatalogResponse>(
-          fetch("/api/skills/catalog", { cache: "no-store" }),
+          fetch(withBridgeQuery("/api/skills/catalog", bridgeId), { cache: "no-store" }),
         ),
         readJsonResponse<InstalledSkillsResponse>(
           fetch(
