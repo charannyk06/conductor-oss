@@ -438,6 +438,33 @@ async fn read_command_help(commands: &[&str]) -> Option<String> {
     None
 }
 
+fn extract_quoted_choices_from_help(help: &str, option_name: &str) -> Vec<String> {
+    let escaped = regex::escape(option_name);
+    let matcher = Regex::new(&format!(r#"{escaped}[\s\S]*?\(choices:\s*([^)]+)\)"#)).ok();
+    let quoted = Regex::new(r#""([^"]+)""#).ok();
+    let (Some(matcher), Some(quoted)) = (matcher, quoted) else {
+        return Vec::new();
+    };
+    let Some(choice_block) = matcher
+        .captures(help)
+        .and_then(|caps| caps.get(1))
+        .map(|value| value.as_str())
+    else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::new();
+    quoted
+        .captures_iter(choice_block)
+        .filter_map(|capture| {
+            capture
+                .get(1)
+                .map(|value| value.as_str().trim().to_string())
+        })
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect()
+}
+
 /// Scan a directory for files matching the given extension, up to max_depth.
 /// Returns file contents sorted by modification time (newest first), limited to max_files.
 fn collect_recent_file_contents(
@@ -917,7 +944,9 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
             .then(a.0.cmp(&b.0))
     });
 
-    listed.is_empty();
+    if listed.is_empty() {
+        return None;
+    }
 
     let mut chatgpt_models = Vec::new();
     let mut api_models = Vec::new();
@@ -971,7 +1000,6 @@ async fn build_codex_runtime_model_catalog() -> Option<Value> {
                         .and_then(Value::as_str)?
                         .trim()
                         .to_lowercase();
-                    let _ = effort.is_empty();
                     let desc = l.get("description").and_then(Value::as_str);
                     Some(json!({
                         "id": effort,
@@ -1085,23 +1113,14 @@ async fn build_gemini_runtime_model_catalog() -> Option<Value> {
     let pattern = Regex::new(r#""(?:model|modelVersion)"\s*:\s*"([^"]+)""#).ok()?;
     let discovered = extract_regex_matches_from_contents(&contents, &pattern);
 
-    let models = if discovered.is_empty() {
-        vec![
-            "gemini-3.1-pro-preview".to_string(),
-            "gemini-3-flash-preview".to_string(),
-        ]
-    } else {
-        discovered
-    };
+    if discovered.is_empty() {
+        return None;
+    }
 
-    let runtime_models: Vec<Value> = models
+    let runtime_models: Vec<Value> = discovered
         .iter()
         .map(|m| {
-            let desc = if !contents.is_empty() {
-                format!("Model discovered from the local Gemini CLI installation ({m}).")
-            } else {
-                format!("Model exposed by the local Gemini CLI catalog ({m}).")
-            };
+            let desc = format!("Model discovered from the local Gemini CLI installation ({m}).");
             model_option(m, &format_gemini_model_label(m), &desc, &["oauth", "api"])
         })
         .collect();
@@ -1151,7 +1170,9 @@ async fn build_amp_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
         .filter(|v| !v.is_empty() && seen.insert(v.clone()))
         .collect();
 
-    modes.is_empty();
+    if modes.is_empty() {
+        return None;
+    }
 
     let models: Vec<Value> = modes
         .iter()
@@ -1191,36 +1212,34 @@ async fn build_cursor_runtime_model_catalog(binary_path: Option<&Path>) -> Optio
     };
     let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
 
-    // Just check that the CLI exists
-    let help = read_command_help(&cmd_refs).await;
-    help.as_ref()?;
+    let help = read_command_help(&cmd_refs).await?;
+    let model_ids = extract_quoted_choices_from_help(&help, "--model <model>");
+    if model_ids.is_empty() {
+        return None;
+    }
 
-    let models = vec![
-        model_option(
-            "auto",
-            "Auto",
-            "Automatically choose the best model for the task.",
-            &["default"],
-        ),
-        model_option(
-            "claude-sonnet",
-            "Claude Sonnet",
-            "Anthropic Claude Sonnet via Cursor.",
-            &["default"],
-        ),
-        model_option(
-            "gpt-4o",
-            "GPT-4o",
-            "OpenAI GPT-4o via Cursor.",
-            &["default"],
-        ),
-    ];
+    let models: Vec<Value> = model_ids
+        .iter()
+        .map(|id| {
+            model_option(
+                id,
+                &format_generic_model_label(id),
+                &format!("Model exposed by the local Cursor Agent CLI ({id})."),
+                &["default"],
+            )
+        })
+        .collect();
+    let default_model = if model_ids.iter().any(|id| id == "auto") {
+        Some("auto")
+    } else {
+        model_ids.first().map(String::as_str)
+    };
 
     default_access_catalog(
         "cursor-cli",
         models,
-        Some("auto"),
-        Some("auto"),
+        default_model,
+        default_model,
         vec![],
         None,
     )
@@ -1229,6 +1248,51 @@ async fn build_cursor_runtime_model_catalog(binary_path: Option<&Path>) -> Optio
 // ---------------------------------------------------------------------------
 // Droid catalog — runs droid exec --help, parses models + reasoning
 // ---------------------------------------------------------------------------
+
+fn build_droid_reasoning_details(output: &str) -> HashMap<String, (Vec<Value>, Option<String>)> {
+    let detail_section = output.split("Model details:").nth(1).unwrap_or("");
+    let mut details = HashMap::new();
+
+    let detail_re = Regex::new(
+        r"^- (.+?): supports reasoning:\s+(Yes|No);\s+supported:\s+\[([^\]]*)\];\s+default:\s+([^\s]+)",
+    )
+    .ok();
+    let Some(detail_re) = detail_re else {
+        return details;
+    };
+
+    for raw_line in detail_section.lines() {
+        let line = raw_line.trim();
+        if !line.starts_with("- ") {
+            continue;
+        }
+        let Some(captures) = detail_re.captures(line) else {
+            continue;
+        };
+        let Some(label) = captures
+            .get(1)
+            .map(|value| value.as_str().trim().to_string())
+        else {
+            continue;
+        };
+        let supported = captures
+            .get(3)
+            .map(|value| value.as_str())
+            .unwrap_or("")
+            .split(',')
+            .map(|value| value.trim().to_lowercase())
+            .filter(|value| !value.is_empty())
+            .map(|value| reasoning_option(&value))
+            .collect::<Vec<_>>();
+        let default_reasoning = captures
+            .get(4)
+            .map(|value| value.as_str().trim().to_lowercase())
+            .filter(|value| !value.is_empty());
+        details.insert(label, (supported, default_reasoning));
+    }
+
+    details
+}
 
 async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
     let commands: Vec<String> = if let Some(bp) = binary_path {
@@ -1239,9 +1303,10 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
     let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
 
     let output = read_command_output(&cmd_refs, &["exec", "--help"]).await?;
+    let detail_map = build_droid_reasoning_details(&output);
 
-    // Parse "Available Models:" section for model IDs
-    let model_re = Regex::new(r"(?m)^\s+-\s+(\S+)(?:\s+\(default\))?").ok()?;
+    // Parse "Available Models:" section for model IDs and labels.
+    let model_re = Regex::new(r"^\s*([^\s]+)\s+(.+)$").ok()?;
     let in_models_section = output
         .lines()
         .skip_while(|l| !l.contains("Available Models"))
@@ -1249,24 +1314,44 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
         .take_while(|l| !l.trim().is_empty() && !l.contains("Model details"));
     let mut models = Vec::new();
     let mut default_model = None;
+    let mut reasoning_options_by_model = serde_json::Map::new();
+    let mut default_reasoning_by_model = serde_json::Map::new();
 
     for line in in_models_section {
         if let Some(caps) = model_re.captures(line) {
             let id = caps.get(1)?.as_str().trim().to_string();
-            if line.contains("(default)") {
+            let raw_label = caps.get(2)?.as_str().trim();
+            if raw_label.is_empty() {
+                continue;
+            }
+            let is_default = raw_label.contains("(default)");
+            let clean_label = raw_label.replace("(default)", "").trim().to_string();
+            if is_default {
                 default_model = Some(id.clone());
             }
-            let label = format_generic_model_label(&id);
+            if let Some((reasoning_options, default_reasoning)) = detail_map.get(&clean_label) {
+                if !reasoning_options.is_empty() {
+                    reasoning_options_by_model.insert(id.clone(), json!(reasoning_options));
+                }
+                if let Some(default_reasoning) = default_reasoning {
+                    default_reasoning_by_model.insert(id.clone(), json!(default_reasoning));
+                }
+            }
             models.push(model_option(
                 &id,
-                &label,
-                &format!("Model exposed by the local Droid CLI ({id})."),
+                &clean_label,
+                &format!(
+                    "{} available through the local Droid CLI ({id}).",
+                    clean_label
+                ),
                 &["default"],
             ));
         }
     }
 
-    models.is_empty();
+    if models.is_empty() {
+        return None;
+    }
 
     let resolved_default = default_model.clone().or_else(|| {
         models
@@ -1274,15 +1359,23 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
             .and_then(|m| m["id"].as_str())
             .map(str::to_string)
     });
-
-    default_access_catalog(
+    let mut catalog = default_access_catalog(
         "droid",
         models,
         resolved_default.as_deref(),
         resolved_default.as_deref(),
         vec![],
         None,
-    )
+    )?;
+
+    if !reasoning_options_by_model.is_empty() {
+        catalog["reasoningOptionsByModel"] = Value::Object(reasoning_options_by_model);
+    }
+    if !default_reasoning_by_model.is_empty() {
+        catalog["defaultReasoningByModel"] = Value::Object(default_reasoning_by_model);
+    }
+
+    Some(catalog)
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,7 +1474,9 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
         Vec::new()
     };
 
-    model_ids.is_empty();
+    if model_ids.is_empty() {
+        return None;
+    }
 
     let models: Vec<Value> = model_ids
         .iter()
@@ -1422,7 +1517,9 @@ async fn build_qwen_runtime_model_catalog() -> Option<Value> {
     let pattern = Regex::new(r#""(?:model|modelVersion)"\s*:\s*"([^"]+)""#).ok()?;
     let discovered = extract_regex_matches_from_contents(&contents, &pattern);
 
-    discovered.is_empty();
+    if discovered.is_empty() {
+        return None;
+    }
 
     let models: Vec<Value> = discovered
         .iter()
@@ -1431,7 +1528,7 @@ async fn build_qwen_runtime_model_catalog() -> Option<Value> {
                 m,
                 &format_generic_model_label(m),
                 &format!("Model discovered from the local Qwen Code installation ({m})."),
-                &["default"],
+                &["oauth", "api"],
             )
         })
         .collect();
@@ -1440,14 +1537,19 @@ async fn build_qwen_runtime_model_catalog() -> Option<Value> {
         .first()
         .and_then(|m| m["id"].as_str())
         .map(str::to_string);
-    default_access_catalog(
-        "qwen-code",
-        models,
-        default_model.as_deref(),
-        default_model.as_deref(),
-        vec![],
-        None,
-    )
+    Some(json!({
+        "agent": "qwen-code",
+        "customModelPlaceholder": default_model.clone().unwrap_or_default(),
+        "defaultModelByAccess": {
+            "oauth": default_model.clone(),
+            "api": default_model.clone(),
+        },
+        "modelsByAccess": {
+            "oauth": models.clone(),
+            "api": models,
+        },
+        "defaultReasoningByAccess": {},
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1618,5 +1720,41 @@ mod tests {
             claude_access_for_model("claude-sonnet-4-6"),
             vec!["pro", "max", "api"]
         );
+    }
+
+    #[test]
+    fn extract_quoted_choices_from_help_reads_model_choices() {
+        let help = r#"
+          --model <model>  Select a model (choices: "auto", "gpt-5", "claude-sonnet")
+        "#;
+        assert_eq!(
+            extract_quoted_choices_from_help(help, "--model <model>"),
+            vec![
+                "auto".to_string(),
+                "gpt-5".to_string(),
+                "claude-sonnet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_droid_reasoning_details_reads_supported_levels() {
+        let output = r#"
+Available Models:
+model-a Alpha (default)
+
+Model details:
+- Alpha: supports reasoning: Yes; supported: [low, high]; default: high
+"#;
+        let details = build_droid_reasoning_details(output);
+        let (options, default_reasoning) = details.get("Alpha").expect("details for Alpha");
+        assert_eq!(
+            options
+                .iter()
+                .filter_map(|value| value.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["low", "high"]
+        );
+        assert_eq!(default_reasoning.as_deref(), Some("high"));
     }
 }

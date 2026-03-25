@@ -14,11 +14,7 @@ import {
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { GitBranchIcon, LockIcon, MarkGithubIcon, RepoIcon } from "@primer/octicons-react";
 import {
-  getAvailableAgentModels,
-  getAvailableAgentReasoningEfforts,
   getAgentModelCatalog,
-  getDefaultAgentModel,
-  getDefaultAgentReasoningEffort,
   resolveAgentModelAccess,
   supportsAgentModelSelection,
   type AgentModelOption,
@@ -85,12 +81,19 @@ import {
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import {
-  getRuntimeCatalogDefaultModelForAccess,
-  getRuntimeCatalogDefaultReasoning,
-  getRuntimeCatalogModelsForAccess,
-  getRuntimeCatalogReasoningOptions,
   type RuntimeAgentModelCatalog,
 } from "@/lib/runtimeAgentModelsShared";
+import {
+  buildModelSelection,
+  emptyModelSelection,
+  getSelectableAgentModels,
+  getSelectableAgentReasoningOptions,
+  getSelectableDefaultReasoningEffort,
+  getSelectableModelPlaceholder,
+  resolveModelSelectionValue,
+  resolveReasoningSelectionValue,
+  type ModelSelectionState,
+} from "@/lib/agentModelSelection";
 
 const DEFAULT_AGENT = "claude-code";
 const SESSION_DETAIL_KEEPALIVE_LIMIT = 1;
@@ -438,12 +441,6 @@ type RepositorySettingsPayload = {
   pathHealth: RepositoryPathHealth;
 };
 
-type ModelSelectionState = {
-  catalogModel: string;
-  customModel: string;
-  reasoningEffort: string;
-};
-
 type AgentSetupState = {
   name: string;
   ready: boolean;
@@ -623,174 +620,6 @@ function normalizeAccessSettings(value: unknown, summary?: unknown): AccessSetti
         : null,
     },
   };
-}
-
-function emptyModelSelection(): ModelSelectionState {
-  return {
-    catalogModel: "",
-    customModel: "",
-    reasoningEffort: "",
-  };
-}
-
-function getRuntimeModelCatalog(
-  agent: string,
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
-): RuntimeAgentModelCatalog | null {
-  return runtimeModelCatalogs[normalizeAgentName(agent)] ?? null;
-}
-
-function getAllRuntimeCatalogModels(
-  runtimeCatalog: RuntimeAgentModelCatalog | null,
-): AgentModelOption[] {
-  if (!runtimeCatalog) return [];
-
-  const ordered: AgentModelOption[] = [];
-  const seen = new Set<string>();
-  for (const group of Object.values(runtimeCatalog.modelsByAccess)) {
-    if (!Array.isArray(group)) continue;
-    for (const model of group) {
-      if (!model?.id || seen.has(model.id)) continue;
-      seen.add(model.id);
-      ordered.push(model);
-    }
-  }
-  return ordered;
-}
-
-function getSelectableAgentModels(
-  agent: string,
-  modelAccess: ModelAccessPreferences,
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
-): AgentModelOption[] {
-  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
-  const access = resolveAgentModelAccess(agent, modelAccess);
-  const scopedModels = getRuntimeCatalogModelsForAccess(runtimeCatalog, access);
-  const staticModels = getAvailableAgentModels(agent, modelAccess);
-  const merged: AgentModelOption[] = [];
-  const seen = new Set<string>();
-
-  for (const model of [...scopedModels, ...staticModels, ...getAllRuntimeCatalogModels(runtimeCatalog)]) {
-    if (!model?.id || seen.has(model.id)) continue;
-    seen.add(model.id);
-    merged.push(model);
-  }
-
-  return merged;
-}
-
-function getSelectableAgentReasoningOptions(
-  agent: string,
-  modelAccess: ModelAccessPreferences,
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
-  model: string | null | undefined,
-): AgentReasoningOption[] {
-  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
-  const access = resolveAgentModelAccess(agent, modelAccess);
-  const runtimeOptions = getRuntimeCatalogReasoningOptions(runtimeCatalog, model, access);
-  const staticOptions = getAvailableAgentReasoningEfforts(agent, modelAccess);
-  const merged: AgentReasoningOption[] = [];
-  const seen = new Set<string>();
-
-  for (const option of [...runtimeOptions, ...staticOptions]) {
-    if (!option?.id || seen.has(option.id)) continue;
-    seen.add(option.id);
-    merged.push(option);
-  }
-
-  return merged;
-}
-
-function getSelectableDefaultAgentModel(
-  agent: string,
-  modelAccess: ModelAccessPreferences,
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
-): string {
-  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
-  const access = resolveAgentModelAccess(agent, modelAccess);
-  return getRuntimeCatalogDefaultModelForAccess(runtimeCatalog, access)
-    ?? getDefaultAgentModel(agent, modelAccess)
-    ?? getAllRuntimeCatalogModels(runtimeCatalog)[0]?.id
-    ?? "";
-}
-
-function getSelectableDefaultReasoningEffort(
-  agent: string,
-  modelAccess: ModelAccessPreferences,
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
-  model: string | null | undefined,
-): string {
-  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
-  const access = resolveAgentModelAccess(agent, modelAccess);
-  return getRuntimeCatalogDefaultReasoning(runtimeCatalog, model, access)
-    ?? getDefaultAgentReasoningEffort(agent, modelAccess)
-    ?? "";
-}
-
-function getSelectableModelPlaceholder(
-  agent: string,
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
-): string {
-  const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
-  if (runtimeCatalog?.customModelPlaceholder.trim()) {
-    return runtimeCatalog.customModelPlaceholder;
-  }
-  const label = getAgentModelCatalog(agent)?.label ?? "agent";
-  return `Enter exact ${label} model id`;
-}
-
-function buildModelSelection(
-  agent: string,
-  modelAccess: ModelAccessPreferences,
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
-  preferredModel?: string | null,
-  preferredReasoningEffort?: string | null,
-): ModelSelectionState {
-  const trimmedPreferred = preferredModel?.trim() ?? "";
-  const trimmedPreferredReasoning = preferredReasoningEffort?.trim().toLowerCase() ?? "";
-  const availableModels = getSelectableAgentModels(agent, modelAccess, runtimeModelCatalogs);
-  const defaultModel = getSelectableDefaultAgentModel(agent, modelAccess, runtimeModelCatalogs);
-  const resolveReasoningEffort = (resolvedModel: string | null | undefined): string => {
-    const options = getSelectableAgentReasoningOptions(agent, modelAccess, runtimeModelCatalogs, resolvedModel);
-    if (trimmedPreferredReasoning.length > 0 && options.some((option) => option.id === trimmedPreferredReasoning)) {
-      return trimmedPreferredReasoning;
-    }
-    return getSelectableDefaultReasoningEffort(agent, modelAccess, runtimeModelCatalogs, resolvedModel);
-  };
-
-  if (trimmedPreferred.length > 0) {
-    if (availableModels.some((model) => model.id === trimmedPreferred)) {
-      return {
-        catalogModel: trimmedPreferred,
-        customModel: "",
-        reasoningEffort: resolveReasoningEffort(trimmedPreferred),
-      };
-    }
-
-    return {
-      catalogModel: defaultModel,
-      customModel: trimmedPreferred,
-      reasoningEffort: resolveReasoningEffort(trimmedPreferred),
-    };
-  }
-
-  return {
-    catalogModel: defaultModel,
-    customModel: "",
-    reasoningEffort: resolveReasoningEffort(defaultModel),
-  };
-}
-
-function resolveModelSelectionValue(selection: ModelSelectionState): string | undefined {
-  const custom = selection.customModel.trim();
-  if (custom.length > 0) return custom;
-  const catalog = selection.catalogModel.trim();
-  return catalog.length > 0 ? catalog : undefined;
-}
-
-function resolveReasoningSelectionValue(selection: ModelSelectionState): string | undefined {
-  const reasoningEffort = selection.reasoningEffort.trim().toLowerCase();
-  return reasoningEffort.length > 0 ? reasoningEffort : undefined;
 }
 
 function getAgentModelAccessLabel(agent: string, modelAccess: ModelAccessPreferences): string | null {

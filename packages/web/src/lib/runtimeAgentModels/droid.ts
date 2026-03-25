@@ -95,7 +95,7 @@ export async function buildDroidRuntimeModelCatalog(): Promise<RuntimeAgentModel
   }
 
   return buildDefaultAccessRuntimeCatalog("droid", models, {
-    customModelPlaceholder: "claude-opus-4-6 or custom:your-model",
+    customModelPlaceholder: explicitDefaultModel ?? models[0]?.id ?? "",
     defaultModel: explicitDefaultModel ?? models[0]?.id ?? null,
     reasoningOptionsByModel,
     defaultReasoningByModel,

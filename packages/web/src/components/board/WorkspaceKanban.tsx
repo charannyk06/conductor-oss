@@ -30,6 +30,7 @@ import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { usePreferences } from "@/hooks/usePreferences";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
+import { buildSessionHref } from "@/lib/dashboardHref";
 
 type BoardRole =
   | "intake"
@@ -2707,11 +2708,13 @@ export function WorkspaceKanban({
                                       <button
                                         type="button"
                                         onClick={() =>
-                                          router.push(
-                                            `/sessions/${encodeURIComponent(
-                                              primaryLinkedSession.id
-                                            )}?tab=terminal`
-                                          )
+                                          router.push(buildSessionHref(
+                                            primaryLinkedSession.id,
+                                            {
+                                              bridgeId,
+                                              tab: "terminal",
+                                            }
+                                          ))
                                         }
                                         className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                         title={primaryLinkedSession.id}
@@ -2766,11 +2769,13 @@ export function WorkspaceKanban({
                                           key={session.id}
                                           type="button"
                                           onClick={() =>
-                                            router.push(
-                                              `/sessions/${encodeURIComponent(
-                                                session.id
-                                              )}?tab=terminal`
-                                            )
+                                            router.push(buildSessionHref(
+                                              session.id,
+                                              {
+                                                bridgeId,
+                                                tab: "terminal",
+                                              }
+                                            ))
                                           }
                                           className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                           title={session.id}
@@ -2811,11 +2816,13 @@ export function WorkspaceKanban({
                                       <button
                                         type="button"
                                         onClick={() =>
-                                          router.push(
-                                            `/sessions/${encodeURIComponent(
-                                              unresolvedPrimaryLink
-                                            )}?tab=terminal`
-                                          )
+                                          router.push(buildSessionHref(
+                                            unresolvedPrimaryLink,
+                                            {
+                                              bridgeId,
+                                              tab: "terminal",
+                                            }
+                                          ))
                                         }
                                         className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                         title={unresolvedPrimaryLink}
