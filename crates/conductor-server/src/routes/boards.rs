@@ -825,11 +825,32 @@ fn find_task_record<'a>(board: &'a ParsedBoard, task_id: &str) -> Option<&'a Boa
         .find(|task| task.id == task_id)
 }
 
-pub(crate) async fn resolve_board_task_identity(
+fn board_task_matches_link(task: &BoardTaskRecord, trimmed: &str, normalized: &str) -> bool {
+    task.id == trimmed
+        || task
+            .task_ref
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|task_ref| {
+                task_ref.eq_ignore_ascii_case(trimmed) || task_ref.eq_ignore_ascii_case(normalized)
+            })
+        || task
+            .issue_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|issue_id| {
+                let issue_id = issue_id.trim();
+                issue_id == normalized
+                    || issue_id == trimmed
+                    || issue_id.trim_start_matches('#') == normalized
+            })
+}
+
+pub(crate) async fn resolve_board_task_record(
     state: &Arc<AppState>,
     project_id: &str,
     task_link_key: &str,
-) -> Option<(String, Option<String>)> {
+) -> Option<BoardTaskRecord> {
     let trimmed = task_link_key.trim();
     if trimmed.is_empty() {
         return None;
@@ -845,28 +866,8 @@ pub(crate) async fn resolve_board_task_identity(
         .columns
         .iter()
         .flat_map(|column| column.tasks.iter())
-        .find(|task| {
-            task.id == trimmed
-                || task
-                    .task_ref
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|task_ref| {
-                        task_ref.eq_ignore_ascii_case(trimmed)
-                            || task_ref.eq_ignore_ascii_case(normalized)
-                    })
-                || task
-                    .issue_id
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|issue_id| {
-                        let issue_id = issue_id.trim();
-                        issue_id == normalized
-                            || issue_id == trimmed
-                            || issue_id.trim_start_matches('#') == normalized
-                    })
-        })
-        .map(|task| (task.id.clone(), task.task_ref.clone()))
+        .find(|task| board_task_matches_link(task, trimmed, normalized))
+        .cloned()
 }
 
 fn local_author_name() -> Option<String> {

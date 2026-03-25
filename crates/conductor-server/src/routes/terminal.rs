@@ -460,6 +460,115 @@ const TTYD_RESIZE_SHIM: &str = r#"
 </script>
 "#;
 
+const TTYD_AUTH_SYNC_SHIM_MARKER: &str = "conductor-ttyd-auth-sync-shim";
+const TTYD_AUTH_SYNC_SHIM: &str = r#"
+<!-- conductor-ttyd-auth-sync-shim -->
+<script>
+(() => {
+    if (window.__conductorTtydAuthSyncShimInstalled) return;
+    window.__conductorTtydAuthSyncShimInstalled = true;
+
+    const STORAGE_KEY = 'conductor.ttyd.token';
+    const MESSAGE_TYPE = 'conductor-ttyd-auth-token';
+
+    const readStoredToken = () => {
+        try {
+            return window.localStorage.getItem(STORAGE_KEY)?.trim() || '';
+        } catch {
+            return '';
+        }
+    };
+
+    let currentToken = '';
+    const setToken = (value) => {
+        const token = typeof value === 'string' ? value.trim() : '';
+        currentToken = token;
+
+        try {
+            if (token) {
+                window.localStorage.setItem(STORAGE_KEY, token);
+            } else {
+                window.localStorage.removeItem(STORAGE_KEY);
+            }
+        } catch {
+        }
+    };
+
+    const normalizeWebSocketUrl = (value) => {
+        const token = currentToken || readStoredToken();
+        if (!token) {
+            return value;
+        }
+
+        try {
+            const url = new URL(value, window.location.href);
+            if (url.pathname !== '/ws' && !url.pathname.endsWith('/ws')) {
+                return value;
+            }
+
+            url.searchParams.set('token', token);
+            return url.toString();
+        } catch {
+            return value;
+        }
+    };
+
+    const nativeWebSocket = window.WebSocket;
+    if (typeof nativeWebSocket === 'function' && !window.__conductorTtydWebSocketPatched) {
+        const patchedWebSocket = function(url, protocols) {
+            const normalizedUrl = normalizeWebSocketUrl(String(url));
+            if (arguments.length > 1) {
+                return new nativeWebSocket(normalizedUrl, protocols);
+            }
+            return new nativeWebSocket(normalizedUrl);
+        };
+
+        Object.setPrototypeOf(patchedWebSocket, nativeWebSocket);
+        patchedWebSocket.prototype = nativeWebSocket.prototype;
+        window.WebSocket = patchedWebSocket;
+        window.__conductorTtydWebSocketPatched = true;
+    }
+
+    const initialToken = (() => {
+        try {
+            return new URL(window.location.href).searchParams.get('token')?.trim() || '';
+        } catch {
+            return '';
+        }
+    })();
+
+    if (initialToken) {
+        setToken(initialToken);
+    } else {
+        const storedToken = readStoredToken();
+        if (storedToken) {
+            setToken(storedToken);
+        }
+    }
+
+    const handleMessage = (event) => {
+        if (event.source !== window.parent) {
+            return;
+        }
+
+        const data = event.data;
+        if (!data || typeof data !== 'object' || data.type !== MESSAGE_TYPE) {
+            return;
+        }
+
+        if (typeof data.token === 'string') {
+            setToken(data.token);
+        }
+    };
+
+    window.addEventListener('message', handleMessage);
+    window.addEventListener('beforeunload', () => {
+        window.removeEventListener('message', handleMessage);
+    }, { once: true });
+})();
+</script>
+"#;
+
 fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -719,6 +828,10 @@ fn inject_ttyd_html_fragment(html: &str, marker: &str, fragment: &str) -> String
 
 fn inject_ttyd_resize_shim(html: &str) -> String {
     inject_ttyd_html_fragment(html, TTYD_RESIZE_SHIM_MARKER, TTYD_RESIZE_SHIM)
+}
+
+fn inject_ttyd_auth_sync_shim(html: &str) -> String {
+    inject_ttyd_html_fragment(html, TTYD_AUTH_SYNC_SHIM_MARKER, TTYD_AUTH_SYNC_SHIM)
 }
 
 fn inject_ttyd_paste_shim(html: &str, project_id: &str, session_id: &str) -> String {
@@ -1052,6 +1165,7 @@ async fn terminal_ttyd_frontend(
         let mut html = String::from_utf8_lossy(&body).into_owned();
         html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
         html = inject_ttyd_resize_shim(&html);
+        html = inject_ttyd_auth_sync_shim(&html);
         if should_inject_ttyd_mobile_touch_shim(&session) {
             html = inject_ttyd_mobile_touch_shim(&html);
         }
@@ -1801,6 +1915,38 @@ mod tests {
             twice.matches(TTYD_RESIZE_SHIM_MARKER).count(),
             1,
             "resize shim should only be injected once"
+        );
+    }
+
+    #[test]
+    fn inject_ttyd_auth_sync_shim_inserts_before_body_close() {
+        let html = "<html><body><main>terminal</main></body></html>";
+        let injected = inject_ttyd_auth_sync_shim(html);
+
+        assert!(injected.contains(TTYD_AUTH_SYNC_SHIM_MARKER));
+        assert!(injected.contains("window.__conductorTtydAuthSyncShimInstalled"));
+        assert!(injected.contains("const STORAGE_KEY = 'conductor.ttyd.token';"));
+        assert!(injected.contains("const MESSAGE_TYPE = 'conductor-ttyd-auth-token';"));
+        assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
+        assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
+        assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));
+        assert!(injected.contains("url.searchParams.set('token', token);"));
+        assert!(injected.contains("window.addEventListener('message', handleMessage);"));
+        assert!(
+            injected.find(TTYD_AUTH_SYNC_SHIM_MARKER).unwrap() < injected.rfind("</body>").unwrap()
+        );
+    }
+
+    #[test]
+    fn inject_ttyd_auth_sync_shim_is_idempotent() {
+        let html = "<html><body><main>terminal</main></body></html>";
+        let once = inject_ttyd_auth_sync_shim(html);
+        let twice = inject_ttyd_auth_sync_shim(&once);
+
+        assert_eq!(
+            twice.matches(TTYD_AUTH_SYNC_SHIM_MARKER).count(),
+            1,
+            "auth sync shim should only be injected once"
         );
     }
 

@@ -1,7 +1,14 @@
 "use client";
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+} from "react";
 import { useRouter } from "next/navigation";
 import {
   Check,
@@ -269,7 +276,12 @@ function getMarkdownEditorLabel(editorId: string): string {
 }
 
 function getContextOpenLabel(editorId: string): string {
-  if (editorId === "obsidian" || editorId === "vscode" || editorId === "typora" || editorId === "logseq") {
+  if (
+    editorId === "obsidian" ||
+    editorId === "vscode" ||
+    editorId === "typora" ||
+    editorId === "logseq"
+  ) {
     return `Open in ${getMarkdownEditorLabel(editorId)}`;
   }
   return "Open file";
@@ -282,7 +294,10 @@ function normalizePathSegments(path: string): string[] {
     .filter(Boolean);
 }
 
-function compareContextNodes(left: ContextTreeNode, right: ContextTreeNode): number {
+function compareContextNodes(
+  left: ContextTreeNode,
+  right: ContextTreeNode
+): number {
   if (left.kind !== right.kind) {
     return left.kind === "folder" ? -1 : 1;
   }
@@ -324,7 +339,8 @@ function buildContextTree(files: ContextFile[]): ContextTreeNode[] {
     for (let index = 0; index < segments.length - 1; index += 1) {
       const segment = segments[index]!;
       const folderPath = parentPath ? `${parentPath}/${segment}` : segment;
-      const siblings = folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
+      const siblings =
+        folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
       folderChildren.set(parentPath, siblings);
       if (!siblings.has(folderPath)) {
         siblings.set(folderPath, ensureFolder(folderPath, segment));
@@ -335,7 +351,8 @@ function buildContextTree(files: ContextFile[]): ContextTreeNode[] {
       parentPath = folderPath;
     }
 
-    const siblings = folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
+    const siblings =
+      folderChildren.get(parentPath) ?? new Map<string, ContextTreeNode>();
     siblings.set(file.path, {
       kind: "file",
       name: file.name,
@@ -360,7 +377,10 @@ function buildContextTree(files: ContextFile[]): ContextTreeNode[] {
   return buildChildren("");
 }
 
-function collectContextFolderPaths(nodes: ContextTreeNode[], out = new Set<string>()): Set<string> {
+function collectContextFolderPaths(
+  nodes: ContextTreeNode[],
+  out = new Set<string>()
+): Set<string> {
   for (const node of nodes) {
     if (node.kind === "folder") {
       out.add(node.path);
@@ -590,7 +610,9 @@ function AgentSelectMenu({
                   {formatAgentLabel(option)}
                 </span>
                 <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
-                  {selected ? <Check className="h-4 w-4 text-[var(--vk-orange)]" /> : null}
+                  {selected ? (
+                    <Check className="h-4 w-4 text-[var(--vk-orange)]" />
+                  ) : null}
                 </span>
               </DropdownMenu.Item>
             );
@@ -982,14 +1004,19 @@ function moveTaskInBoard(
   let sourceTaskIndex = -1;
   let taskToMove: BoardTask | null = null;
 
-  for (let columnIndex = 0; columnIndex < nextColumns.length; columnIndex += 1) {
-    const taskIndex = nextColumns[columnIndex]?.tasks.findIndex(
-      (task) => task.id === taskId
-    ) ?? -1;
+  for (
+    let columnIndex = 0;
+    columnIndex < nextColumns.length;
+    columnIndex += 1
+  ) {
+    const taskIndex =
+      nextColumns[columnIndex]?.tasks.findIndex((task) => task.id === taskId) ??
+      -1;
     if (taskIndex >= 0) {
       sourceColumnIndex = columnIndex;
       sourceTaskIndex = taskIndex;
-      taskToMove = nextColumns[columnIndex]!.tasks.splice(taskIndex, 1)[0] ?? null;
+      taskToMove =
+        nextColumns[columnIndex]!.tasks.splice(taskIndex, 1)[0] ?? null;
       break;
     }
   }
@@ -1014,10 +1041,7 @@ function moveTaskInBoard(
   const insertAt = Math.max(0, Math.min(targetIndex, targetTasks.length));
   targetTasks.splice(insertAt, 0, taskToMove);
 
-  if (
-    sourceColumnIndex === targetColumnIndex &&
-    sourceTaskIndex === insertAt
-  ) {
+  if (sourceColumnIndex === targetColumnIndex && sourceTaskIndex === insertAt) {
     return board;
   }
 
@@ -1067,14 +1091,16 @@ export function WorkspaceKanban({
   const [selectedContextPaths, setSelectedContextPaths] = useState<string[]>(
     []
   );
-  const [expandedContextFolders, setExpandedContextFolders] = useState<string[]>(
-    []
-  );
+  const [expandedContextFolders, setExpandedContextFolders] = useState<
+    string[]
+  >([]);
   const [contextSearch, setContextSearch] = useState("");
   const [contextFiles, setContextFiles] = useState<ContextFile[]>([]);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
-  const [openingContextPath, setOpeningContextPath] = useState<string | null>(null);
+  const [openingContextPath, setOpeningContextPath] = useState<string | null>(
+    null
+  );
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -1117,7 +1143,8 @@ export function WorkspaceKanban({
   const latestBoardRef = useRef<BoardResponse | null>(null);
   const mutationQueueRef = useRef(Promise.resolve<BoardResponse | null>(null));
   const pendingMutationCountRef = useRef(0);
-  const preferredMarkdownEditor = preferences?.markdownEditor?.trim() || "obsidian";
+  const preferredMarkdownEditor =
+    preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
   const [pageVisible, setPageVisible] = useState(true);
 
@@ -1154,7 +1181,10 @@ export function WorkspaceKanban({
       setContextError(null);
       try {
         const res = await fetch(
-          withBridgeQuery(`/api/context-files?projectId=${encodeURIComponent(projectId)}`, bridgeId)
+          withBridgeQuery(
+            `/api/context-files?projectId=${encodeURIComponent(projectId)}`,
+            bridgeId
+          )
         );
         const payload = (await res.json().catch(() => null)) as
           | ContextFilesResponse
@@ -1221,7 +1251,10 @@ export function WorkspaceKanban({
       }
       try {
         const res = await fetch(
-          withBridgeQuery(`/api/boards?projectId=${encodeURIComponent(projectId)}`, bridgeId)
+          withBridgeQuery(
+            `/api/boards?projectId=${encodeURIComponent(projectId)}`,
+            bridgeId
+          )
         );
         const data = (await res.json().catch(() => null)) as
           | BoardResponse
@@ -1255,19 +1288,22 @@ export function WorkspaceKanban({
     [bridgeId, projectId]
   );
 
-  const scheduleBoardRefresh = useCallback((options?: { silent?: boolean }) => {
-    if (!projectId) {
-      return;
-    }
-    if (boardRefreshTimeoutRef.current !== null) {
-      window.clearTimeout(boardRefreshTimeoutRef.current);
-      boardRefreshTimeoutRef.current = null;
-    }
-    boardRefreshTimeoutRef.current = window.setTimeout(() => {
-      boardRefreshTimeoutRef.current = null;
-      void loadBoard(options);
-    }, BOARD_REFRESH_DEBOUNCE_MS);
-  }, [loadBoard, projectId]);
+  const scheduleBoardRefresh = useCallback(
+    (options?: { silent?: boolean }) => {
+      if (!projectId) {
+        return;
+      }
+      if (boardRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(boardRefreshTimeoutRef.current);
+        boardRefreshTimeoutRef.current = null;
+      }
+      boardRefreshTimeoutRef.current = window.setTimeout(() => {
+        boardRefreshTimeoutRef.current = null;
+        void loadBoard(options);
+      }, BOARD_REFRESH_DEBOUNCE_MS);
+    },
+    [loadBoard, projectId]
+  );
 
   useEffect(() => {
     void loadBoard({ silent: false });
@@ -1284,7 +1320,10 @@ export function WorkspaceKanban({
     setProjectSyncError(null);
     try {
       const res = await fetch(
-        withBridgeQuery(`/api/github/projects?projectId=${encodeURIComponent(projectId)}`, bridgeId)
+        withBridgeQuery(
+          `/api/github/projects?projectId=${encodeURIComponent(projectId)}`,
+          bridgeId
+        )
       );
       const payload = (await res.json().catch(() => null)) as
         | GitHubProjectsResponse
@@ -1415,7 +1454,9 @@ export function WorkspaceKanban({
               task.type ?? ""
             } ${task.priority ?? ""} ${task.issueId ?? ""} ${
               task.notes ?? ""
-            } ${task.briefPath ?? ""} ${task.attachments.join(" ")} ${commentText}`.toLowerCase();
+            } ${task.briefPath ?? ""} ${task.attachments.join(
+              " "
+            )} ${commentText}`.toLowerCase();
             return haystack.includes(query);
           }),
         };
@@ -1428,9 +1469,9 @@ export function WorkspaceKanban({
     const matchingFiles = !query
       ? contextFiles
       : contextFiles.filter((file) => {
-          const haystack = `${file.path} ${getContextFileDisplayPath(file)} ${file.name} ${
-            file.source ?? ""
-          }`.toLowerCase();
+          const haystack = `${file.path} ${getContextFileDisplayPath(file)} ${
+            file.name
+          } ${file.source ?? ""}`.toLowerCase();
           return haystack.includes(query);
         });
 
@@ -1476,7 +1517,12 @@ export function WorkspaceKanban({
         return file ? getContextFileDisplayPath(file) : path;
       })
     );
-  }, [contextFilesByPath, contextSearch, filteredContextTree, selectedContextPaths]);
+  }, [
+    contextFilesByPath,
+    contextSearch,
+    filteredContextTree,
+    selectedContextPaths,
+  ]);
   const effectiveExpandedContextFolders = useMemo(() => {
     const expanded = new Set(defaultExpandedContextFolders);
     for (const path of expandedContextFolders) {
@@ -1492,7 +1538,9 @@ export function WorkspaceKanban({
     expandedContextFolders,
   ]);
   const composerRoleLabel = useMemo(() => {
-    const matchingColumn = allColumns.find((column) => column.role === composerRole);
+    const matchingColumn = allColumns.find(
+      (column) => column.role === composerRole
+    );
     return matchingColumn?.heading || ROLE_LABEL[composerRole];
   }, [allColumns, composerRole]);
   const editLinkedSessionOptions = useMemo(() => {
@@ -1567,9 +1615,10 @@ export function WorkspaceKanban({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ projectId, path }),
         });
-        const payload = (await response.json().catch(() => null)) as
-          | { opened?: boolean; error?: string }
-          | null;
+        const payload = (await response.json().catch(() => null)) as {
+          opened?: boolean;
+          error?: string;
+        } | null;
         if (!response.ok) {
           throw new Error(
             payload?.error ?? `Failed to open context file: ${response.status}`
@@ -1580,9 +1629,7 @@ export function WorkspaceKanban({
           err instanceof Error ? err.message : "Failed to open context file"
         );
       } finally {
-        setOpeningContextPath((current) =>
-          current === path ? null : current
-        );
+        setOpeningContextPath((current) => (current === path ? null : current));
       }
     },
     [composerOpen, editingTask, projectId]
@@ -1658,14 +1705,20 @@ export function WorkspaceKanban({
       if (uploadFiles.length > 0 && createdTask) {
         const formData = new FormData();
         formData.append("projectId", projectId);
-        formData.append("taskRef", createdTask.taskRef?.trim() || createdTask.id);
+        formData.append(
+          "taskRef",
+          createdTask.taskRef?.trim() || createdTask.id
+        );
         for (const file of uploadFiles) {
           formData.append("files", file);
         }
-        const uploadRes = await fetch(withBridgeQuery("/api/attachments", bridgeId), {
-          method: "POST",
-          body: formData,
-        });
+        const uploadRes = await fetch(
+          withBridgeQuery("/api/attachments", bridgeId),
+          {
+            method: "POST",
+            body: formData,
+          }
+        );
         const uploadPayload = (await uploadRes.json().catch(() => null)) as {
           files?: Array<{ path?: string }>;
           error?: string;
@@ -1681,17 +1734,20 @@ export function WorkspaceKanban({
           .filter((value): value is string => Boolean(value));
 
         if (uploadedPaths.length > 0) {
-          const patchRes = await fetch(withBridgeQuery("/api/boards", bridgeId), {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              projectId,
-              taskId: createdTask.id,
-              attachments: [
-                ...new Set([...createdTask.attachments, ...uploadedPaths]),
-              ],
-            }),
-          });
+          const patchRes = await fetch(
+            withBridgeQuery("/api/boards", bridgeId),
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                projectId,
+                taskId: createdTask.id,
+                attachments: [
+                  ...new Set([...createdTask.attachments, ...uploadedPaths]),
+                ],
+              }),
+            }
+          );
           const patchPayload = (await patchRes.json().catch(() => null)) as
             | BoardResponse
             | { error?: string }
@@ -1807,14 +1863,17 @@ export function WorkspaceKanban({
     setProjectSyncSaving(true);
     setProjectSyncError(null);
     try {
-      const res = await fetch(withBridgeQuery("/api/github/projects", bridgeId), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId,
-          link: link?.id ? link : null,
-        }),
-      });
+      const res = await fetch(
+        withBridgeQuery("/api/github/projects", bridgeId),
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId,
+            link: link?.id ? link : null,
+          }),
+        }
+      );
       const payload = (await res.json().catch(() => null)) as {
         githubProject?: GitHubProjectLink | null;
         error?: string;
@@ -1848,11 +1907,14 @@ export function WorkspaceKanban({
     setProjectSyncSaving(true);
     setProjectSyncError(null);
     try {
-      const res = await fetch(withBridgeQuery("/api/github/projects/sync", bridgeId), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, direction }),
-      });
+      const res = await fetch(
+        withBridgeQuery("/api/github/projects/sync", bridgeId),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId, direction }),
+        }
+      );
       const payload = (await res.json().catch(() => null)) as {
         board?: BoardResponse;
         error?: string;
@@ -1945,15 +2007,18 @@ export function WorkspaceKanban({
     setCommentBusy(true);
     setCommentError(null);
     try {
-      const res = await fetch(withBridgeQuery("/api/boards/comments", bridgeId), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId,
-          taskId: activeEditingTask.task.id,
-          body: commentDraft.trim(),
-        }),
-      });
+      const res = await fetch(
+        withBridgeQuery("/api/boards/comments", bridgeId),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId,
+            taskId: activeEditingTask.task.id,
+            body: commentDraft.trim(),
+          }),
+        }
+      );
       const payload = (await res.json().catch(() => null)) as
         | BoardResponse
         | { error?: string }
@@ -1980,7 +2045,11 @@ export function WorkspaceKanban({
 
   function handleTaskDragStart(taskId: string, role: BoardRole) {
     setDraggingTask({ taskId, role });
-    const endIndex = getDropIndexForColumnEnd(latestBoardRef.current, { taskId, role }, role);
+    const endIndex = getDropIndexForColumnEnd(
+      latestBoardRef.current,
+      { taskId, role },
+      role
+    );
     setDropIndicator({ role, index: endIndex });
   }
 
@@ -1991,7 +2060,11 @@ export function WorkspaceKanban({
     if (!draggingTask) return;
     event.preventDefault();
     if (event.target !== event.currentTarget) return;
-    const endIndex = getDropIndexForColumnEnd(latestBoardRef.current, draggingTask, role);
+    const endIndex = getDropIndexForColumnEnd(
+      latestBoardRef.current,
+      draggingTask,
+      role
+    );
     setDropIndicator((current) =>
       current?.role === role && current.index === endIndex
         ? current
@@ -2023,9 +2096,14 @@ export function WorkspaceKanban({
 
   async function handleColumnDrop(role: BoardRole) {
     if (!draggingTask) return;
-    const sourceColumn = findColumnByRole(latestBoardRef.current, draggingTask.role);
+    const sourceColumn = findColumnByRole(
+      latestBoardRef.current,
+      draggingTask.role
+    );
     const sourceIndex =
-      sourceColumn?.tasks.findIndex((task) => task.id === draggingTask.taskId) ?? -1;
+      sourceColumn?.tasks.findIndex(
+        (task) => task.id === draggingTask.taskId
+      ) ?? -1;
     const fallbackIndex = getDropIndexForColumnEnd(
       latestBoardRef.current,
       draggingTask,
@@ -2034,8 +2112,7 @@ export function WorkspaceKanban({
     const targetIndex =
       dropIndicator?.role === role ? dropIndicator.index : fallbackIndex;
     const moveTargetChanged =
-      draggingTask.role !== role ||
-      targetIndex !== sourceIndex;
+      draggingTask.role !== role || targetIndex !== sourceIndex;
 
     try {
       if (moveTargetChanged) {
@@ -2347,7 +2424,7 @@ export function WorkspaceKanban({
         )}
       </header>
 
-      <div className="min-h-0 flex-1 flex-shrink-0 overflow-y-auto overscroll-contain p-4 touch-pan-y">
+      <div className="min-h-0 flex-1 flex-shrink-0 overflow-y-auto overscroll-contain p-4 touch-auto">
         {loading ? (
           <div className="flex h-full items-center justify-center text-[var(--vk-text-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -2358,9 +2435,7 @@ export function WorkspaceKanban({
             {error}
           </div>
         ) : (
-          <div
-            className="flex min-w-0 snap-x items-start gap-3 overflow-x-auto pb-3 touch-pan-x sm:snap-none"
-          >
+          <div className="flex min-w-0 snap-x items-start gap-3 overflow-x-auto pb-3 touch-auto sm:snap-none">
             {visibleColumns.map((column) => {
               const fullColumn = allColumns.find(
                 (candidate) => candidate.role === column.role
@@ -2371,409 +2446,441 @@ export function WorkspaceKanban({
                       (task) => task.id === draggingTask.taskId
                     ) ?? -1
                   : -1;
-              const fullTaskCount = fullColumn?.tasks.length ?? column.tasks.length;
+              const fullTaskCount =
+                fullColumn?.tasks.length ?? column.tasks.length;
               const effectiveTaskCount = Math.max(
                 fullTaskCount - (sourceIndex >= 0 ? 1 : 0),
                 0
               );
 
               return (
-              <article
-                key={column.role}
-                className={cn(
-                  "flex min-h-[560px] w-[85vw] shrink-0 snap-center flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)] sm:w-[320px] sm:snap-align-none",
-                  draggingTask && "snap-start"
-                )}
-              >
-                <header className="flex items-center gap-2 border-b border-[var(--vk-border)] px-3 py-3">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: ROLE_COLOR[column.role] }} />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[14px] font-medium text-[var(--vk-text-normal)]">
-                      {column.heading || ROLE_LABEL[column.role]}
-                    </p>
-                  </div>
-                  <span className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                    {column.tasks.length}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => openComposer(column.role)}
-                    className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] sm:h-7 sm:w-7"
-                    aria-label={`Add task to ${column.heading}`}
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                  </button>
-                </header>
-
-          <div
-            className={cn(
-              "flex-1 min-h-0 overflow-y-auto px-3 pb-3 pt-2 touch-pan-y overscroll-contain",
-              draggingTask?.role === column.role &&
-                "bg-[rgba(255,255,255,0.02)]"
-            )}
-                  onDragOver={(event) =>
-                    dragEnabled ? handleColumnDragOver(event, column.role) : undefined
-                  }
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (!dragEnabled) return;
-                    void handleColumnDrop(column.role);
-                  }}
-                >
-                  {dragEnabled &&
-                  dropIndicator?.role === column.role &&
-                  dropIndicator.index === 0 ? (
-                    <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
-                  ) : null}
-
-                  {column.tasks.length === 0 && (
-                    <div className="rounded-[10px] border border-dashed border-[var(--vk-border)] px-3 py-4 text-[13px] text-[var(--vk-text-muted)]">
-                      Drop a card here or create a new one.
-                    </div>
+                <article
+                  key={column.role}
+                  className={cn(
+                    "flex min-h-[560px] w-[85vw] shrink-0 snap-center flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)] sm:w-[320px] sm:snap-align-none",
+                    draggingTask && "snap-start"
                   )}
+                >
+                  <header className="flex items-center gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+                    <span
+                      className="h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: ROLE_COLOR[column.role] }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[14px] font-medium text-[var(--vk-text-normal)]">
+                        {column.heading || ROLE_LABEL[column.role]}
+                      </p>
+                    </div>
+                    <span className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                      {column.tasks.length}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => openComposer(column.role)}
+                      className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] sm:h-7 sm:w-7"
+                      aria-label={`Add task to ${column.heading}`}
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </header>
 
-                  <div className="space-y-2">
-                  {column.tasks.map((task) => {
-                    const { title: taskTitle, description: taskDescription } =
-                      splitTaskText(task.text);
-                    const fullTaskIndex =
-                      fullColumn?.tasks.findIndex((item) => item.id === task.id) ??
-                      0;
-                    const effectiveTaskIndex =
-                      sourceIndex >= 0
-                        ? task.id === draggingTask?.taskId
-                          ? null
-                          : fullTaskIndex > sourceIndex
-                          ? fullTaskIndex - 1
-                          : fullTaskIndex
-                        : fullTaskIndex;
-                    const taskLinkKey = getTaskLinkKey(task);
-                    const issueUrl = buildGitHubIssueUrl(
-                      board?.repository,
-                      task.issueId
-                    );
-                    const linkedSessions = projectSessions
-                      .filter((session) => sessionMatchesTask(session, task))
-                      .sort((left, right) =>
-                        compareProjectSessions(
-                          left,
-                          right,
-                          task.attemptRef ?? null
-                        )
-                      );
-                    const primaryLinkedSession = task.attemptRef
-                      ? linkedSessions.find(
-                          (session) => session.id === task.attemptRef
-                        ) ?? null
-                      : linkedSessions[0] ?? null;
-                    const unresolvedPrimaryLink =
-                      task.attemptRef &&
-                      !linkedSessions.some(
-                        (session) => session.id === task.attemptRef
-                      )
-                        ? task.attemptRef
-                        : null;
-                    return (
-                      <div key={`${column.role}-${task.id}`}>
-                        {dragEnabled &&
-                        dropIndicator?.role === column.role &&
-                        effectiveTaskIndex !== null &&
-                        dropIndicator.index === effectiveTaskIndex ? (
-                          <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
-                        ) : null}
-                        <div
-                          draggable={dragEnabled}
-                          onDragStart={() =>
-                            dragEnabled
-                              ? handleTaskDragStart(task.id, column.role)
-                              : undefined
-                          }
-                          onDragOver={(event) =>
-                            dragEnabled
-                              ? handleTaskDragOver(event, column.role, task.id)
-                              : undefined
-                          }
-                          onDragEnd={() => {
-                            setDraggingTask(null);
-                            setDropIndicator(null);
-                          }}
-                          className={cn(
-                            "rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]",
-                            draggingTask?.taskId === task.id && "opacity-60"
-                          )}
-                        >
-                        <div className="flex items-start gap-2">
-                          <p className="min-w-0 flex-1 font-mono text-[12px] text-[var(--vk-text-muted)]">
-                            {task.taskRef?.trim() ||
-                              (task.id.length > 12
-                                ? `TASK-${
-                                    task.id.split("-")[0]?.toUpperCase() ??
-                                    task.id.toUpperCase()
-                                  }`
-                                : task.id)}
-                          </p>
-                          <button
-                            type="button"
-                            onClick={() => openEditor(task, column.role)}
-                            className="inline-flex h-9 w-9 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-6 sm:w-6"
-                            aria-label="Edit task"
-                            title="Edit task"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                        <p className="pt-1 text-[15px] leading-[22px] text-[var(--vk-text-normal)]">
-                          {taskTitle}
-                        </p>
-                        {taskDescription && (
-                          <p className="pt-1 text-[13px] leading-[20px] text-[var(--vk-text-muted)]">
-                            {taskDescription}
-                          </p>
-                        )}
-                        {task.notes && (
-                          <p className="pt-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
-                            {task.notes}
-                          </p>
-                        )}
+                  <div
+                    className={cn(
+                      "flex-1 min-h-0 overflow-y-auto px-3 pb-3 pt-2 touch-auto overscroll-contain",
+                      draggingTask?.role === column.role &&
+                        "bg-[rgba(255,255,255,0.02)]"
+                    )}
+                    onDragOver={(event) =>
+                      dragEnabled
+                        ? handleColumnDragOver(event, column.role)
+                        : undefined
+                    }
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (!dragEnabled) return;
+                      void handleColumnDrop(column.role);
+                    }}
+                  >
+                    {dragEnabled &&
+                    dropIndicator?.role === column.role &&
+                    dropIndicator.index === 0 ? (
+                      <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                    ) : null}
 
-                        {task.commentCount > 0 && (
-                          <div className="mt-2 flex items-center gap-1 text-[11px] text-[var(--vk-text-muted)]">
-                            <MessageSquare className="h-3.5 w-3.5" />
-                            <span>
-                              {task.commentCount} comment
-                              {task.commentCount === 1 ? "" : "s"}
-                            </span>
-                          </div>
-                        )}
-
-                        {(task.issueId ||
-                          task.briefPath ||
-                          task.attachments.length > 0) && (
-                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                            {task.issueId ? (
-                              issueUrl ? (
-                                <a
-                                  href={issueUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="inline-flex h-5 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                                >
-                                  <span>Issue #{task.issueId}</span>
-                                  <ExternalLink className="h-3 w-3" />
-                                </a>
-                              ) : (
-                                <span className="inline-flex h-5 items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                                  Issue {task.issueId}
-                                </span>
-                              )
-                            ) : null}
-
-                            {task.briefPath ? (
-                              <ContextAttachmentChip
-                                attachment={task.briefPath}
-                                opening={openingContextPath === task.briefPath}
-                                onOpen={() =>
-                                  void openContextAttachment(task.briefPath as string)
-                                }
-                              />
-                            ) : null}
-
-                            {task.attachments.map((attachment) => (
-                              <ContextAttachmentChip
-                                key={`${task.id}-${attachment}`}
-                                attachment={attachment}
-                                opening={openingContextPath === attachment}
-                                onOpen={() => void openContextAttachment(attachment)}
-                              />
-                            ))}
-                          </div>
-                        )}
-
-                        {(linkedSessions.length > 0 ||
-                          unresolvedPrimaryLink) && (
-                          <div className="mt-3 rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                                Runs
-                              </span>
-                              <span className="text-[11px] text-[var(--vk-text-muted)]">
-                                {linkedSessions.length +
-                                  (unresolvedPrimaryLink ? 1 : 0)}
-                              </span>
-                            </div>
-
-                            <div className="mt-2 space-y-1.5">
-                              {primaryLinkedSession ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    router.push(
-                                      `/sessions/${encodeURIComponent(
-                                        primaryLinkedSession.id
-                                      )}?tab=terminal`
-                                    )
-                                  }
-                                  className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
-                                  title={primaryLinkedSession.id}
-                                >
-                                  <div className="flex min-w-0 items-center gap-2">
-                                    {getSessionAgent(primaryLinkedSession) ? (
-                                      <AgentTileIcon
-                                        seed={{
-                                          label: getSessionAgent(
-                                            primaryLinkedSession
-                                          ) as string,
-                                        }}
-                                        className="h-5 w-5"
-                                      />
-                                    ) : null}
-                                    <div className="min-w-0">
-                                      <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
-                                        {formatLinkedSessionLabel(
-                                          primaryLinkedSession
-                                        )}
-                                      </div>
-                                      <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
-                                        Primary run
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <div className="flex shrink-0 items-center gap-2">
-                                    <span
-                                      className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
-                                        primaryLinkedSession.status
-                                      )}`}
-                                    >
-                                      {formatSessionStatus(
-                                        primaryLinkedSession.status
-                                      )}
-                                    </span>
-                                    <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
-                                  </div>
-                                </button>
-                              ) : null}
-
-                              {linkedSessions
-                                .filter(
-                                  (session) =>
-                                    session.id !== primaryLinkedSession?.id
-                                )
-                                .map((session) => (
-                                  <button
-                                    key={session.id}
-                                    type="button"
-                                    onClick={() =>
-                                      router.push(
-                                        `/sessions/${encodeURIComponent(
-                                          session.id
-                                        )}?tab=terminal`
-                                      )
-                                    }
-                                    className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
-                                    title={session.id}
-                                  >
-                                    <div className="flex min-w-0 items-center gap-2">
-                                      {getSessionAgent(session) ? (
-                                        <AgentTileIcon
-                                          seed={{
-                                            label: getSessionAgent(
-                                              session
-                                            ) as string,
-                                          }}
-                                          className="h-5 w-5"
-                                        />
-                                      ) : null}
-                                      <span className="truncate text-[12px] text-[var(--vk-text-normal)]">
-                                        {formatLinkedSessionLabel(session)}
-                                      </span>
-                                    </div>
-                                    <div className="flex shrink-0 items-center gap-2">
-                                      <span
-                                        className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
-                                          session.status
-                                        )}`}
-                                      >
-                                        {formatSessionStatus(session.status)}
-                                      </span>
-                                      <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
-                                    </div>
-                                  </button>
-                                ))}
-
-                              {unresolvedPrimaryLink ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    router.push(
-                                      `/sessions/${encodeURIComponent(
-                                        unresolvedPrimaryLink
-                                      )}?tab=terminal`
-                                    )
-                                  }
-                                  className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
-                                  title={unresolvedPrimaryLink}
-                                >
-                                  <div className="min-w-0">
-                                    <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
-                                      {unresolvedPrimaryLink}
-                                    </div>
-                                    <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
-                                      Primary run
-                                    </div>
-                                  </div>
-                                  <ExternalLink className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
-                                </button>
-                              ) : null}
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="mt-2 flex items-center justify-between gap-2">
-                          <div className="flex min-w-0 items-center gap-1.5">
-                            {task.agent ? (
-                              <>
-                                <AgentTileIcon
-                                  seed={{ label: task.agent }}
-                                  className="h-6 w-6"
-                                />
-                                <span className="truncate text-[12px] text-[var(--vk-text-muted)]">
-                                  {formatAgentLabel(task.agent)}
-                                </span>
-                              </>
-                            ) : (
-                              <span className="text-[12px] text-[var(--vk-text-muted)]">
-                                No agent
-                              </span>
-                            )}
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-1">
-                            {task.type && (
-                              <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                                {task.type}
-                              </span>
-                            )}
-                            {task.priority && (
-                              <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                                {task.priority}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        </div>
+                    {column.tasks.length === 0 && (
+                      <div className="rounded-[10px] border border-dashed border-[var(--vk-border)] px-3 py-4 text-[13px] text-[var(--vk-text-muted)]">
+                        Drop a card here or create a new one.
                       </div>
-                    );
-                  })}
-                  </div>
+                    )}
 
-                  {dragEnabled &&
-                  dropIndicator?.role === column.role &&
-                  dropIndicator.index === effectiveTaskCount ? (
-                    <div className="mt-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
-                  ) : null}
-                </div>
-              </article>
-            );
+                    <div className="space-y-2">
+                      {column.tasks.map((task) => {
+                        const {
+                          title: taskTitle,
+                          description: taskDescription,
+                        } = splitTaskText(task.text);
+                        const fullTaskIndex =
+                          fullColumn?.tasks.findIndex(
+                            (item) => item.id === task.id
+                          ) ?? 0;
+                        const effectiveTaskIndex =
+                          sourceIndex >= 0
+                            ? task.id === draggingTask?.taskId
+                              ? null
+                              : fullTaskIndex > sourceIndex
+                              ? fullTaskIndex - 1
+                              : fullTaskIndex
+                            : fullTaskIndex;
+                        const taskLinkKey = getTaskLinkKey(task);
+                        const issueUrl = buildGitHubIssueUrl(
+                          board?.repository,
+                          task.issueId
+                        );
+                        const linkedSessions = projectSessions
+                          .filter((session) =>
+                            sessionMatchesTask(session, task)
+                          )
+                          .sort((left, right) =>
+                            compareProjectSessions(
+                              left,
+                              right,
+                              task.attemptRef ?? null
+                            )
+                          );
+                        const primaryLinkedSession = task.attemptRef
+                          ? linkedSessions.find(
+                              (session) => session.id === task.attemptRef
+                            ) ?? null
+                          : linkedSessions[0] ?? null;
+                        const unresolvedPrimaryLink =
+                          task.attemptRef &&
+                          !linkedSessions.some(
+                            (session) => session.id === task.attemptRef
+                          )
+                            ? task.attemptRef
+                            : null;
+                        return (
+                          <div key={`${column.role}-${task.id}`}>
+                            {dragEnabled &&
+                            dropIndicator?.role === column.role &&
+                            effectiveTaskIndex !== null &&
+                            dropIndicator.index === effectiveTaskIndex ? (
+                              <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                            ) : null}
+                            <div
+                              draggable={dragEnabled}
+                              onDragStart={() =>
+                                dragEnabled
+                                  ? handleTaskDragStart(task.id, column.role)
+                                  : undefined
+                              }
+                              onDragOver={(event) =>
+                                dragEnabled
+                                  ? handleTaskDragOver(
+                                      event,
+                                      column.role,
+                                      task.id
+                                    )
+                                  : undefined
+                              }
+                              onDragEnd={() => {
+                                setDraggingTask(null);
+                                setDropIndicator(null);
+                              }}
+                              className={cn(
+                                "rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]",
+                                draggingTask?.taskId === task.id && "opacity-60"
+                              )}
+                            >
+                              <div className="flex items-start gap-2">
+                                <p className="min-w-0 flex-1 font-mono text-[12px] text-[var(--vk-text-muted)]">
+                                  {task.taskRef?.trim() ||
+                                    (task.id.length > 12
+                                      ? `TASK-${
+                                          task.id
+                                            .split("-")[0]
+                                            ?.toUpperCase() ??
+                                          task.id.toUpperCase()
+                                        }`
+                                      : task.id)}
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() => openEditor(task, column.role)}
+                                  className="inline-flex h-9 w-9 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-6 sm:w-6"
+                                  aria-label="Edit task"
+                                  title="Edit task"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                              <p className="pt-1 text-[15px] leading-[22px] text-[var(--vk-text-normal)]">
+                                {taskTitle}
+                              </p>
+                              {taskDescription && (
+                                <p className="pt-1 text-[13px] leading-[20px] text-[var(--vk-text-muted)]">
+                                  {taskDescription}
+                                </p>
+                              )}
+                              {task.notes && (
+                                <p className="pt-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+                                  {task.notes}
+                                </p>
+                              )}
+
+                              {task.commentCount > 0 && (
+                                <div className="mt-2 flex items-center gap-1 text-[11px] text-[var(--vk-text-muted)]">
+                                  <MessageSquare className="h-3.5 w-3.5" />
+                                  <span>
+                                    {task.commentCount} comment
+                                    {task.commentCount === 1 ? "" : "s"}
+                                  </span>
+                                </div>
+                              )}
+
+                              {(task.issueId ||
+                                task.briefPath ||
+                                task.attachments.length > 0) && (
+                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                  {task.issueId ? (
+                                    issueUrl ? (
+                                      <a
+                                        href={issueUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex h-5 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                                      >
+                                        <span>Issue #{task.issueId}</span>
+                                        <ExternalLink className="h-3 w-3" />
+                                      </a>
+                                    ) : (
+                                      <span className="inline-flex h-5 items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                                        Issue {task.issueId}
+                                      </span>
+                                    )
+                                  ) : null}
+
+                                  {task.briefPath ? (
+                                    <ContextAttachmentChip
+                                      attachment={task.briefPath}
+                                      opening={
+                                        openingContextPath === task.briefPath
+                                      }
+                                      onOpen={() =>
+                                        void openContextAttachment(
+                                          task.briefPath as string
+                                        )
+                                      }
+                                    />
+                                  ) : null}
+
+                                  {task.attachments.map((attachment) => (
+                                    <ContextAttachmentChip
+                                      key={`${task.id}-${attachment}`}
+                                      attachment={attachment}
+                                      opening={
+                                        openingContextPath === attachment
+                                      }
+                                      onOpen={() =>
+                                        void openContextAttachment(attachment)
+                                      }
+                                    />
+                                  ))}
+                                </div>
+                              )}
+
+                              {(linkedSessions.length > 0 ||
+                                unresolvedPrimaryLink) && (
+                                <div className="mt-3 rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                                      Runs
+                                    </span>
+                                    <span className="text-[11px] text-[var(--vk-text-muted)]">
+                                      {linkedSessions.length +
+                                        (unresolvedPrimaryLink ? 1 : 0)}
+                                    </span>
+                                  </div>
+
+                                  <div className="mt-2 space-y-1.5">
+                                    {primaryLinkedSession ? (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          router.push(
+                                            `/sessions/${encodeURIComponent(
+                                              primaryLinkedSession.id
+                                            )}?tab=terminal`
+                                          )
+                                        }
+                                        className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                                        title={primaryLinkedSession.id}
+                                      >
+                                        <div className="flex min-w-0 items-center gap-2">
+                                          {getSessionAgent(
+                                            primaryLinkedSession
+                                          ) ? (
+                                            <AgentTileIcon
+                                              seed={{
+                                                label: getSessionAgent(
+                                                  primaryLinkedSession
+                                                ) as string,
+                                              }}
+                                              className="h-5 w-5"
+                                            />
+                                          ) : null}
+                                          <div className="min-w-0">
+                                            <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
+                                              {formatLinkedSessionLabel(
+                                                primaryLinkedSession
+                                              )}
+                                            </div>
+                                            <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
+                                              Primary run
+                                            </div>
+                                          </div>
+                                        </div>
+                                        <div className="flex shrink-0 items-center gap-2">
+                                          <span
+                                            className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
+                                              primaryLinkedSession.status
+                                            )}`}
+                                          >
+                                            {formatSessionStatus(
+                                              primaryLinkedSession.status
+                                            )}
+                                          </span>
+                                          <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
+                                        </div>
+                                      </button>
+                                    ) : null}
+
+                                    {linkedSessions
+                                      .filter(
+                                        (session) =>
+                                          session.id !==
+                                          primaryLinkedSession?.id
+                                      )
+                                      .map((session) => (
+                                        <button
+                                          key={session.id}
+                                          type="button"
+                                          onClick={() =>
+                                            router.push(
+                                              `/sessions/${encodeURIComponent(
+                                                session.id
+                                              )}?tab=terminal`
+                                            )
+                                          }
+                                          className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                                          title={session.id}
+                                        >
+                                          <div className="flex min-w-0 items-center gap-2">
+                                            {getSessionAgent(session) ? (
+                                              <AgentTileIcon
+                                                seed={{
+                                                  label: getSessionAgent(
+                                                    session
+                                                  ) as string,
+                                                }}
+                                                className="h-5 w-5"
+                                              />
+                                            ) : null}
+                                            <span className="truncate text-[12px] text-[var(--vk-text-normal)]">
+                                              {formatLinkedSessionLabel(
+                                                session
+                                              )}
+                                            </span>
+                                          </div>
+                                          <div className="flex shrink-0 items-center gap-2">
+                                            <span
+                                              className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
+                                                session.status
+                                              )}`}
+                                            >
+                                              {formatSessionStatus(
+                                                session.status
+                                              )}
+                                            </span>
+                                            <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
+                                          </div>
+                                        </button>
+                                      ))}
+
+                                    {unresolvedPrimaryLink ? (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          router.push(
+                                            `/sessions/${encodeURIComponent(
+                                              unresolvedPrimaryLink
+                                            )}?tab=terminal`
+                                          )
+                                        }
+                                        className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                                        title={unresolvedPrimaryLink}
+                                      >
+                                        <div className="min-w-0">
+                                          <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
+                                            {unresolvedPrimaryLink}
+                                          </div>
+                                          <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
+                                            Primary run
+                                          </div>
+                                        </div>
+                                        <ExternalLink className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              )}
+
+                              <div className="mt-2 flex items-center justify-between gap-2">
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  {task.agent ? (
+                                    <>
+                                      <AgentTileIcon
+                                        seed={{ label: task.agent }}
+                                        className="h-6 w-6"
+                                      />
+                                      <span className="truncate text-[12px] text-[var(--vk-text-muted)]">
+                                        {formatAgentLabel(task.agent)}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <span className="text-[12px] text-[var(--vk-text-muted)]">
+                                      No agent
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-1">
+                                  {task.type && (
+                                    <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                                      {task.type}
+                                    </span>
+                                  )}
+                                  {task.priority && (
+                                    <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                                      {task.priority}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {dragEnabled &&
+                    dropIndicator?.role === column.role &&
+                    dropIndicator.index === effectiveTaskCount ? (
+                      <div className="mt-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                    ) : null}
+                  </div>
+                </article>
+              );
             })}
           </div>
         )}
@@ -3091,7 +3198,8 @@ export function WorkspaceKanban({
                     Agent · {formatAgentLabel(agent)}
                   </span>
                   <span className="rounded-full border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[var(--vk-text-normal)]">
-                    {selectedContextPaths.length + uploadFiles.length} attachment
+                    {selectedContextPaths.length + uploadFiles.length}{" "}
+                    attachment
                     {selectedContextPaths.length + uploadFiles.length === 1
                       ? ""
                       : "s"}
@@ -3109,8 +3217,8 @@ export function WorkspaceKanban({
                         Task brief
                       </h3>
                       <p className="pt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
-                        Write the task the way you want it to appear on the board
-                        and in the agent prompt.
+                        Write the task the way you want it to appear on the
+                        board and in the agent prompt.
                       </p>
                     </div>
 
@@ -3125,7 +3233,8 @@ export function WorkspaceKanban({
                         className="h-11 w-full rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 text-[15px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                       />
                       <p className="mt-1.5 text-[11px] text-[var(--vk-text-muted)]">
-                        Keep it short and outcome-focused so the card stays scannable.
+                        Keep it short and outcome-focused so the card stays
+                        scannable.
                       </p>
                     </label>
 
@@ -3148,7 +3257,9 @@ export function WorkspaceKanban({
                       </span>
                       <textarea
                         value={contextNotes}
-                        onChange={(event) => setContextNotes(event.target.value)}
+                        onChange={(event) =>
+                          setContextNotes(event.target.value)
+                        }
                         rows={4}
                         placeholder="Add constraints, pitfalls, or review expectations the agent should keep in mind."
                         className="w-full rounded-[6px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.14)] px-3 py-2.5 text-[14px] leading-6 text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
@@ -3300,7 +3411,9 @@ export function WorkspaceKanban({
                       {selectedContextPaths.length} existing file
                       {selectedContextPaths.length === 1 ? "" : "s"} selected
                       {uploadFiles.length > 0
-                        ? ` · ${uploadFiles.length} upload${uploadFiles.length === 1 ? "" : "s"} ready`
+                        ? ` · ${uploadFiles.length} upload${
+                            uploadFiles.length === 1 ? "" : "s"
+                          } ready`
                         : ""}
                     </div>
 
@@ -3316,7 +3429,9 @@ export function WorkspaceKanban({
                               type="button"
                               onClick={() => toggleContextPath(file.path)}
                               className="inline-flex max-w-full items-center gap-1 rounded-[999px] border border-[var(--vk-border)] bg-[var(--vk-bg-hover)] px-2.5 py-1 text-[11px] text-[var(--vk-text-normal)]"
-                              title={`Remove ${getContextFileDisplayPath(file)}`}
+                              title={`Remove ${getContextFileDisplayPath(
+                                file
+                              )}`}
                             >
                               <span className="truncate max-w-[220px]">
                                 {file.name}
@@ -3364,7 +3479,9 @@ export function WorkspaceKanban({
                         <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
                         <input
                           value={contextSearch}
-                          onChange={(event) => setContextSearch(event.target.value)}
+                          onChange={(event) =>
+                            setContextSearch(event.target.value)
+                          }
                           placeholder="Search context files..."
                           className="ml-2 w-full bg-transparent text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
                         />
@@ -3426,26 +3543,26 @@ export function WorkspaceKanban({
                   : "Add a clear title to enable task creation."}
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setComposerOpen(false)}
-                disabled={submitting}
-                className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void handleCreateTask()}
-                disabled={!title.trim() || submitting}
-                className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
-              >
-                {submitting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  "Create Task"
-                )}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setComposerOpen(false)}
+                  disabled={submitting}
+                  className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCreateTask()}
+                  disabled={!title.trim() || submitting}
+                  className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                >
+                  {submitting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    "Create Task"
+                  )}
+                </button>
               </div>
             </footer>
           </div>

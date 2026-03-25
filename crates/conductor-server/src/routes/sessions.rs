@@ -7,6 +7,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,12 +15,13 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
-use crate::routes::boards::{resolve_board_task_identity, update_board_task_attempt_ref};
+use crate::routes::boards::{resolve_board_task_record, update_board_task_attempt_ref};
 use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
     build_normalized_chat_feed, trim_lines_tail, AppState, SessionRecord, SessionStatus,
     SpawnRequest,
 };
+use crate::task_context::compile_task_context;
 use uuid::Uuid;
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -107,6 +109,41 @@ fn created(value: Value) -> ApiResponse {
 
 fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
     (status, Json(json!({ "error": message.into() })))
+}
+
+fn append_prompt_section(prompt: &mut String, heading: &str, body: &str) {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    prompt.push_str("\n\n");
+    prompt.push_str(heading);
+    prompt.push('\n');
+    prompt.push_str(trimmed);
+    prompt.push('\n');
+}
+
+fn append_attachment_section(prompt: &mut String, heading: &str, attachments: &[String]) {
+    if attachments.is_empty() {
+        return;
+    }
+
+    prompt.push_str("\n\n");
+    prompt.push_str(heading);
+    prompt.push('\n');
+    for attachment in attachments {
+        prompt.push_str(&format!("- {attachment}\n"));
+    }
+}
+
+fn dedupe_attachment_paths(primary: Vec<String>, secondary: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    primary
+        .into_iter()
+        .chain(secondary)
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
 }
 
 fn task_id_for_session(session: &SessionRecord) -> String {
@@ -290,25 +327,78 @@ async fn spawn_session(
     Json(body): Json<SpawnBody>,
 ) -> ApiResponse {
     let project_id = body.project_id.clone();
-    let prompt = body.prompt.unwrap_or_default();
-
-    let linked_board_task = if let Some(task_link_key) = body
+    let issue_id = body
         .issue_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let user_prompt = body.prompt.unwrap_or_default();
+    let user_attachments = body
+        .attachments
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut prompt = user_prompt.clone();
+    let mut attachments = user_attachments;
+    let mut brief_path = None;
+    let mut task_id = None;
+    let mut task_ref = None;
+
+    if let Some(task_link_key) = issue_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
-        resolve_board_task_identity(&state, &project_id, task_link_key).await
-    } else {
-        None
-    };
+        if let Some(linked_task) =
+            resolve_board_task_record(&state, &project_id, task_link_key).await
+        {
+            let config = state.config.read().await.clone();
+            let Some(project) = config.projects.get(&project_id).cloned() else {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Unknown project: {project_id}"),
+                );
+            };
+            let context =
+                match compile_task_context(&state, &project_id, &project, &linked_task).await {
+                    Ok(context) => context,
+                    Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+                };
+
+            task_id = Some(linked_task.id.clone());
+            task_ref = linked_task.task_ref.clone();
+            brief_path = Some(context.repo_brief_path.clone());
+
+            let task_attachments = context.attachments;
+            let additional_attachments = attachments
+                .into_iter()
+                .filter(|value| !task_attachments.contains(value))
+                .collect::<Vec<_>>();
+            attachments = dedupe_attachment_paths(task_attachments, additional_attachments.clone());
+            prompt = context.prompt;
+            append_attachment_section(
+                &mut prompt,
+                "## Additional Launch Attachments",
+                &additional_attachments,
+            );
+            append_prompt_section(
+                &mut prompt,
+                "## Additional Launch Instructions",
+                &user_prompt,
+            );
+        }
+    }
 
     match state
         .spawn_session(SpawnRequest {
             project_id: project_id.clone(),
             bridge_id: body.bridge_id,
             prompt,
-            issue_id: body.issue_id,
+            issue_id,
             agent: body.agent,
             use_worktree: body.use_worktree,
             permission_mode: body.permission_mode,
@@ -316,26 +406,22 @@ async fn spawn_session(
             reasoning_effort: body.reasoning_effort,
             branch: body.branch,
             base_branch: body.base_branch,
-            task_id: linked_board_task
-                .as_ref()
-                .map(|(task_id, _)| task_id.clone()),
-            task_ref: linked_board_task
-                .as_ref()
-                .and_then(|(_, task_ref)| task_ref.clone()),
+            task_id,
+            task_ref,
             attempt_id: None,
             parent_task_id: None,
             retry_of_session_id: None,
             profile: None,
-            brief_path: None,
-            attachments: body.attachments.unwrap_or_default(),
+            brief_path,
+            attachments,
             source: "spawn".to_string(),
         })
         .await
     {
         Ok(session) => {
-            if let Some((task_id, _)) = linked_board_task {
+            if let Some(task_id) = session.metadata.get("taskId") {
                 let _ =
-                    update_board_task_attempt_ref(&state, &project_id, &task_id, &session.id, None)
+                    update_board_task_attempt_ref(&state, &project_id, task_id, &session.id, None)
                         .await;
             }
 

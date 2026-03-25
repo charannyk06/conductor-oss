@@ -10,16 +10,17 @@ import {
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { RemoteSessionTerminal } from "@/components/sessions/RemoteSessionTerminal";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
+import { extractTerminalAuthToken } from "./terminal/terminalToken";
 import { terminalUrlNeedsReload } from "./terminal/terminalUrl";
 import { calculateMobileTerminalViewportMetrics } from "./sessionTerminalUtils";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 const TOKEN_REFRESH_LEAD_SECONDS = 10;
+const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
 
 function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined): number | null {
   if (typeof expiresInSeconds !== "number" || !Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
@@ -48,6 +49,27 @@ async function sendTerminalKeys(
     const data = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(data?.error ?? `Failed to queue terminal input (${response.status})`);
   }
+}
+
+function postTerminalAuthToken(
+  iframe: HTMLIFrameElement | null | undefined,
+  token: string | null,
+): void {
+  if (!iframe || !token || iframe.contentWindow === null) {
+    return;
+  }
+
+  let targetOrigin = "*";
+  try {
+    targetOrigin = new URL(iframe.src).origin;
+  } catch {
+    // Fall back to wildcard postMessage delivery if the iframe src is not yet normalized.
+  }
+
+  iframe.contentWindow.postMessage(
+    { type: TTYD_AUTH_TOKEN_MESSAGE_TYPE, token },
+    targetOrigin,
+  );
 }
 
 function SessionTerminalView(props: SessionTerminalProps) {
@@ -91,6 +113,16 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [queuedInsertError, setQueuedInsertError] = useState<string | null>(null);
   const terminalUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
+
+  const syncTerminalAuthToken = useCallback(() => {
+    const token = extractTerminalAuthToken(terminalLinkUrl);
+    if (!token) {
+      return;
+    }
+
+    const iframe = terminalHostRef.current?.querySelector<HTMLIFrameElement>("iframe");
+    postTerminalAuthToken(iframe, token);
+  }, [terminalLinkUrl]);
 
   useEffect(() => {
     terminalUrlRef.current = terminalUrl;
@@ -235,6 +267,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
       cancelled = true;
     };
   }, [bridgeId, pendingInsert, sessionId]);
+
+  useEffect(() => {
+    if (!frameLoaded) {
+      return;
+    }
+
+    syncTerminalAuthToken();
+  }, [frameLoaded, syncTerminalAuthToken]);
 
   const handlePromptSend = useCallback(async () => {
     const message = promptMessage.trim();
@@ -459,6 +499,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 setFrameLoaded(true);
                 setConnectionError(null);
                 applyKeyboardAwareTerminalHeight();
+                syncTerminalAuthToken();
               }}
             />
           </div>
@@ -608,10 +649,6 @@ function sessionTerminalPropsEqual(
 }
 
 function SessionTerminalContainer(props: SessionTerminalProps) {
-  if (props.bridgeId?.trim()) {
-    return <RemoteSessionTerminal {...props} />;
-  }
-
   return <SessionTerminalView {...props} />;
 }
 

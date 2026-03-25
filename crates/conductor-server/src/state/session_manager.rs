@@ -1065,7 +1065,10 @@ impl AppState {
             }
         };
 
-        let prompt = if request.attachments.is_empty() {
+        let prompt = if request.task_id.is_some()
+            || request.brief_path.is_some()
+            || request.attachments.is_empty()
+        {
             request.prompt.clone()
         } else {
             format!(
