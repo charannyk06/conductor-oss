@@ -364,6 +364,102 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
 </script>
 "#;
 
+const TTYD_RESIZE_SHIM_MARKER: &str = "conductor-ttyd-resize-shim";
+const TTYD_RESIZE_SHIM: &str = r#"
+<!-- conductor-ttyd-resize-shim -->
+<script>
+(() => {
+    if (window.__conductorTtydResizeShimInstalled) return;
+    window.__conductorTtydResizeShimInstalled = true;
+
+    let lastWidth = -1;
+    let lastHeight = -1;
+    let lastDevicePixelRatio = -1;
+    const burstTimers = new Set();
+
+    const clearBurstTimers = () => {
+        for (const timer of burstTimers) {
+            window.clearTimeout(timer);
+        }
+        burstTimers.clear();
+    };
+
+    const dispatchResize = () => {
+        window.dispatchEvent(new Event('resize'));
+    };
+
+    const scheduleResizeBurst = () => {
+        clearBurstTimers();
+        if (typeof window.requestAnimationFrame === 'function') {
+            window.requestAnimationFrame(dispatchResize);
+        } else {
+            dispatchResize();
+        }
+
+        burstTimers.add(window.setTimeout(dispatchResize, 120));
+        burstTimers.add(window.setTimeout(dispatchResize, 360));
+    };
+
+    const syncViewportSize = () => {
+        const width = Math.max(0, Math.round(window.innerWidth || 0));
+        const height = Math.max(0, Math.round(window.innerHeight || 0));
+        const devicePixelRatio = window.devicePixelRatio || 1;
+
+        if (
+            width === lastWidth
+            && height === lastHeight
+            && devicePixelRatio === lastDevicePixelRatio
+        ) {
+            return;
+        }
+
+        lastWidth = width;
+        lastHeight = height;
+        lastDevicePixelRatio = devicePixelRatio;
+        scheduleResizeBurst();
+    };
+
+    const observeTarget = document.documentElement || document.body;
+    const observer = typeof ResizeObserver === 'function' && observeTarget
+        ? new ResizeObserver(syncViewportSize)
+        : null;
+
+    if (observer) {
+        observer.observe(observeTarget);
+        if (document.body && document.body !== observeTarget) {
+            observer.observe(document.body);
+        }
+    }
+
+    window.addEventListener('resize', syncViewportSize);
+    window.addEventListener('orientationchange', syncViewportSize);
+    window.addEventListener('pageshow', scheduleResizeBurst);
+    window.addEventListener('focus', scheduleResizeBurst);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+            scheduleResizeBurst();
+        }
+    });
+
+    if (document.fonts?.ready) {
+        void document.fonts.ready
+            .then(() => {
+                scheduleResizeBurst();
+            })
+            .catch(() => {});
+    }
+
+    syncViewportSize();
+    scheduleResizeBurst();
+
+    window.addEventListener('beforeunload', () => {
+        clearBurstTimers();
+        observer?.disconnect();
+    }, { once: true });
+})();
+</script>
+"#;
+
 fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -594,32 +690,40 @@ fn inject_ttyd_mobile_touch_shim(html: &str) -> String {
 
 const TTYD_PASTE_SHIM_MARKER: &str = "conductor-ttyd-paste-shim";
 
-fn inject_ttyd_paste_shim(html: &str, project_id: &str, session_id: &str) -> String {
-    let paste_shim = ttyd_paste_shim_script(project_id, session_id);
-    if html.contains(TTYD_PASTE_SHIM_MARKER) {
+fn inject_ttyd_html_fragment(html: &str, marker: &str, fragment: &str) -> String {
+    if html.contains(marker) {
         return html.to_string();
     }
 
     if let Some(index) = html.rfind("</body>") {
-        let mut output = String::with_capacity(html.len() + paste_shim.len());
+        let mut output = String::with_capacity(html.len() + fragment.len());
         output.push_str(&html[..index]);
-        output.push_str(&paste_shim);
+        output.push_str(fragment);
         output.push_str(&html[index..]);
         return output;
     }
 
     if let Some(index) = html.rfind("</html>") {
-        let mut output = String::with_capacity(html.len() + paste_shim.len());
+        let mut output = String::with_capacity(html.len() + fragment.len());
         output.push_str(&html[..index]);
-        output.push_str(&paste_shim);
+        output.push_str(fragment);
         output.push_str(&html[index..]);
         return output;
     }
 
-    let mut output = String::with_capacity(html.len() + paste_shim.len());
+    let mut output = String::with_capacity(html.len() + fragment.len());
     output.push_str(html);
-    output.push_str(&paste_shim);
+    output.push_str(fragment);
     output
+}
+
+fn inject_ttyd_resize_shim(html: &str) -> String {
+    inject_ttyd_html_fragment(html, TTYD_RESIZE_SHIM_MARKER, TTYD_RESIZE_SHIM)
+}
+
+fn inject_ttyd_paste_shim(html: &str, project_id: &str, session_id: &str) -> String {
+    let paste_shim = ttyd_paste_shim_script(project_id, session_id);
+    inject_ttyd_html_fragment(html, TTYD_PASTE_SHIM_MARKER, &paste_shim)
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -947,6 +1051,7 @@ async fn terminal_ttyd_frontend(
     let body = if content_type_is_html(&content_type) {
         let mut html = String::from_utf8_lossy(&body).into_owned();
         html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
+        html = inject_ttyd_resize_shim(&html);
         if should_inject_ttyd_mobile_touch_shim(&session) {
             html = inject_ttyd_mobile_touch_shim(&html);
         }
@@ -1661,6 +1766,41 @@ mod tests {
             twice.matches(TTYD_MOBILE_TOUCH_SHIM_MARKER).count(),
             1,
             "touch shim should only be injected once"
+        );
+    }
+
+    #[test]
+    fn inject_ttyd_resize_shim_inserts_before_body_close() {
+        let html = "<html><body><main>terminal</main></body></html>";
+        let injected = inject_ttyd_resize_shim(html);
+
+        assert!(injected.contains(TTYD_RESIZE_SHIM_MARKER));
+        assert!(injected.contains("window.__conductorTtydResizeShimInstalled"));
+        assert!(injected.contains("const scheduleResizeBurst = () => {"));
+        assert!(injected.contains("const syncViewportSize = () => {"));
+        assert!(injected.contains("new ResizeObserver(syncViewportSize)"));
+        assert!(injected.contains("window.addEventListener('pageshow', scheduleResizeBurst);"));
+        assert!(
+            injected.contains("window.addEventListener('orientationchange', syncViewportSize);")
+        );
+        assert!(injected.contains("document.addEventListener('visibilitychange', () => {"));
+        assert!(injected.contains("window.requestAnimationFrame(dispatchResize);"));
+        assert!(injected.contains("window.dispatchEvent(new Event('resize'));"));
+        assert!(
+            injected.find(TTYD_RESIZE_SHIM_MARKER).unwrap() < injected.rfind("</body>").unwrap()
+        );
+    }
+
+    #[test]
+    fn inject_ttyd_resize_shim_is_idempotent() {
+        let html = "<html><body><main>terminal</main></body></html>";
+        let once = inject_ttyd_resize_shim(html);
+        let twice = inject_ttyd_resize_shim(&once);
+
+        assert_eq!(
+            twice.matches(TTYD_RESIZE_SHIM_MARKER).count(),
+            1,
+            "resize shim should only be injected once"
         );
     }
 
