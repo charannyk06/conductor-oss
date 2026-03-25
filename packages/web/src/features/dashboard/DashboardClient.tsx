@@ -1102,10 +1102,14 @@ export default function DashboardClient({
     }),
     [bridgeInventoryStatus, connectedBridgeIds, effectiveBridgeId, requiresPairedDeviceScope],
   );
+  const scopeRequestsEnabled = useMemo(
+    () => !requiresPairedDeviceScope || Boolean(effectiveBridgeId),
+    [effectiveBridgeId, requiresPairedDeviceScope],
+  );
   const { projects, loading: configLoading, error: configError, refresh: refreshConfig } = useConfig(effectiveBridgeId, {
-    enabled: scopeReady,
+    enabled: scopeRequestsEnabled,
   });
-  const { agents } = useAgents(effectiveBridgeId, { enabled: scopeReady });
+  const { agents } = useAgents(effectiveBridgeId, { enabled: scopeRequestsEnabled });
   const {
     mobileSidebarOpen,
     desktopSidebarOpen,
@@ -1117,7 +1121,7 @@ export default function DashboardClient({
   const needsSessionsList = !selectedSessionId || sidebarVisible;
   const { sessions, loading: sessionsLoading, error: sessionsError, refresh: refreshSessions } = useSessions(
     selectedProjectId,
-    { enabled: needsSessionsList && scopeReady, bridgeId: effectiveBridgeId },
+    { enabled: needsSessionsList && scopeRequestsEnabled, bridgeId: effectiveBridgeId },
   );
 
   const [prompt, setPrompt] = useState("");
@@ -1253,7 +1257,7 @@ export default function DashboardClient({
   } = useSession(
     selectedSessionId,
     null,
-    { enabled: Boolean(selectedSessionId) && scopeReady, bridgeId: effectiveBridgeId },
+    { enabled: Boolean(selectedSessionId) && scopeRequestsEnabled, bridgeId: effectiveBridgeId },
   );
   const workspaceError = createError ?? configError ?? sessionsError ?? selectedSessionError ?? preferencesError;
   const sessionsByProjectId = useMemo(() => {
@@ -1587,7 +1591,7 @@ export default function DashboardClient({
   useEffect(() => {
     let cancelled = false;
     async function loadPreferences() {
-      if (!scopeReady) {
+      if (!scopeRequestsEnabled) {
         if (!cancelled) {
           setPreferences(null);
           setPreferencesError(null);
@@ -1624,7 +1628,7 @@ export default function DashboardClient({
     return () => {
       cancelled = true;
     };
-  }, [effectiveBridgeId, scopeReady]);
+  }, [effectiveBridgeId, scopeRequestsEnabled]);
 
   useEffect(() => {
     if (!preferences) return;
