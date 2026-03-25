@@ -11,8 +11,6 @@ import {
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import { RemoteSessionTerminal } from "./RemoteSessionTerminal";
-import { shouldUseRemoteSessionTerminal } from "./sessionTerminalRouting";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import { extractTerminalAuthToken } from "./terminal/terminalToken";
@@ -651,10 +649,6 @@ function sessionTerminalPropsEqual(
 }
 
 function SessionTerminalContainer(props: SessionTerminalProps) {
-  if (shouldUseRemoteSessionTerminal(props.bridgeId)) {
-    return <RemoteSessionTerminal {...props} />;
-  }
-
   return <SessionTerminalView {...props} />;
 }
 
