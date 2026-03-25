@@ -1,3 +1,4 @@
+use conductor_core::types::AgentKind;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -625,7 +626,10 @@ fn resolve_user_home_dir() -> Result<PathBuf, String> {
 }
 
 fn resolve_skill_agent_profile(agent: &str) -> Option<&'static SkillAgentCatalogEntry> {
-    SKILL_AGENT_CATALOG.iter().find(|entry| entry.id == agent)
+    let normalized = AgentKind::parse(agent).to_string();
+    SKILL_AGENT_CATALOG
+        .iter()
+        .find(|entry| entry.id == normalized)
 }
 
 fn catalog_map() -> HashMap<&'static str, &'static SkillCatalogEntry> {
