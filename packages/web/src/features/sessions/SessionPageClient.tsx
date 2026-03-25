@@ -14,8 +14,13 @@ import { useNotificationAlerts } from "@/hooks/useNotificationAlerts";
 import { usePreferences } from "@/hooks/usePreferences";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
-import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
-import { buildAllProjectsHref } from "@/lib/dashboardHref";
+import {
+  decodeBridgeSessionId,
+  encodeBridgeSessionId,
+  normalizeBridgeId,
+} from "@/lib/bridgeSessionIds";
+import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { buildAllProjectsHref, buildSessionHref } from "@/lib/dashboardHref";
 import type { DashboardSession } from "@/lib/types";
 
 export default function SessionPageClient({
@@ -30,12 +35,23 @@ export default function SessionPageClient({
     () => decodeBridgeSessionId(params.id)?.bridgeId ?? null,
     [params.id],
   );
-  const scopeReady = !requiresPairedDeviceScope || Boolean(routeBridgeId);
-  const { session: currentSession } = useSession(params.id, null, {
-    bridgeId: routeBridgeId,
+  const queryBridgeId = useMemo(
+    () => normalizeBridgeId(searchParams.get("bridge") ?? searchParams.get("bridgeId")),
+    [searchParams],
+  );
+  const requestedBridgeId = routeBridgeId ?? queryBridgeId;
+  const canonicalSessionId = useMemo(
+    () => requestedBridgeId && !routeBridgeId
+      ? encodeBridgeSessionId(requestedBridgeId, params.id)
+      : params.id,
+    [params.id, requestedBridgeId, routeBridgeId],
+  );
+  const scopeReady = !requiresPairedDeviceScope || Boolean(requestedBridgeId);
+  const { session: currentSession } = useSession(canonicalSessionId, null, {
+    bridgeId: requestedBridgeId,
     enabled: scopeReady,
   });
-  const effectiveBridgeId = currentSession?.bridgeId ?? routeBridgeId;
+  const effectiveBridgeId = currentSession?.bridgeId ?? requestedBridgeId;
   const { projects } = useConfig(effectiveBridgeId, { enabled: !requiresPairedDeviceScope || Boolean(effectiveBridgeId) });
   const { preferences, loading: preferencesLoading } = usePreferences(effectiveBridgeId, {
     enabled: !requiresPairedDeviceScope || Boolean(effectiveBridgeId),
@@ -85,6 +101,19 @@ export default function SessionPageClient({
   }, [effectiveBridgeId]);
 
   useEffect(() => {
+    if (canonicalSessionId === params.id) {
+      return;
+    }
+
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete("bridge");
+    nextParams.delete("bridgeId");
+    const nextQuery = nextParams.toString();
+    const nextUrl = `/sessions/${encodeURIComponent(canonicalSessionId)}${nextQuery.length > 0 ? `?${nextQuery}` : ""}`;
+    router.replace(nextUrl, { scroll: false });
+  }, [canonicalSessionId, params.id, router, searchParams]);
+
+  useEffect(() => {
     if (currentSession?.projectId) {
       setSelectedProjectId(currentSession.projectId);
       return;
@@ -117,7 +146,7 @@ export default function SessionPageClient({
   }, []);
 
   async function handleArchiveSession(sessionId: string) {
-    let res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    let res = await fetch(withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, effectiveBridgeId), {
       method: "POST",
     });
     let data = (await res.json().catch(() => null)) as
@@ -125,7 +154,7 @@ export default function SessionPageClient({
       | null;
 
     if (res.status === 404) {
-      res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, {
+      res = await fetch(withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, effectiveBridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "archive" }),
@@ -139,7 +168,7 @@ export default function SessionPageClient({
       throw new Error(data?.error ?? `Failed to archive session: ${res.status}`);
     }
 
-    if (sessionId === params.id) {
+    if (sessionId === canonicalSessionId) {
       router.replace(dashboardRootHref);
       return;
     }
@@ -173,11 +202,12 @@ export default function SessionPageClient({
             setSelectedProjectId(projectId);
           }}
           sessions={dashboardSessions}
-          selectedSessionId={params.id}
+          selectedSessionId={canonicalSessionId}
           onSelectSession={(sessionId, options) => {
-            const params = new URLSearchParams();
-            params.set("tab", options?.tab ?? "terminal");
-            router.push(`/sessions/${encodeURIComponent(sessionId)}?${params.toString()}`);
+            router.push(buildSessionHref(sessionId, {
+              bridgeId: effectiveBridgeId,
+              tab: options?.tab ?? "terminal",
+            }));
             closeSidebarOnMobile();
           }}
           onArchiveSession={handleArchiveSession}
@@ -195,8 +225,8 @@ export default function SessionPageClient({
       )}
       <div className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${immersiveTerminalMode ? "bg-[#060404]" : ""}`}>
         <SessionDetail
-          key={params.id}
-          sessionId={params.id}
+          key={canonicalSessionId}
+          sessionId={canonicalSessionId}
           initialSession={currentSession}
           bridgeId={effectiveBridgeId}
           immersiveMobileMode={immersiveTerminalMode}

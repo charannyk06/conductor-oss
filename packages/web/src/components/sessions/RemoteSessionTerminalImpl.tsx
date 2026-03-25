@@ -100,7 +100,7 @@ async function fetchClosedTerminalOutput(
 async function fetchRelayTerminalUrl(
   sessionId: string,
   bridgeId?: string | null,
-): Promise<string> {
+): Promise<{ wsUrl: string; wsProtocol: string }> {
   const response = await fetch(
     withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/relay`, bridgeId),
     {
@@ -108,11 +108,11 @@ async function fetchRelayTerminalUrl(
       cache: "no-store",
     },
   );
-  const payload = (await response.json().catch(() => null)) as { wsUrl?: string; error?: string } | null;
-  if (!response.ok || !payload?.wsUrl) {
+  const payload = (await response.json().catch(() => null)) as { wsUrl?: string; wsProtocol?: string; error?: string } | null;
+  if (!response.ok || !payload?.wsUrl || !payload.wsProtocol) {
     throw new Error(payload?.error ?? `Failed to attach relay terminal (${response.status})`);
   }
-  return payload.wsUrl;
+  return { wsUrl: payload.wsUrl, wsProtocol: payload.wsProtocol };
 }
 
 type RelayTerminalAvailability =
@@ -678,13 +678,13 @@ export function RemoteSessionTerminal({
           return;
         }
 
-        return fetchRelayTerminalUrl(sessionId, bridgeId).then((wsUrl) => {
+        return fetchRelayTerminalUrl(sessionId, bridgeId).then(({ wsUrl, wsProtocol }) => {
           if (cancelled) {
             return;
           }
 
           closeSocket();
-          const socket = new WebSocket(wsUrl);
+          const socket = new WebSocket(wsUrl, wsProtocol);
           socket.binaryType = "arraybuffer";
           socketRef.current = socket;
 

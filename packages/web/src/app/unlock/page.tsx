@@ -1,7 +1,7 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
-import { isLoopbackHost } from "@/lib/accessControl";
+import { allowsLocalUnauthenticatedAccess, isLoopbackHost } from "@/lib/accessControl";
 import { resolveRequestHostname } from "@/lib/clerkConfig";
 import { sanitizeRedirectTarget } from "@/lib/redirectTarget";
 
@@ -26,7 +26,7 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
   const headerStore = await headers();
   const requestHost = resolveRequestHostname(headerStore);
 
-  if (isLoopbackHost(requestHost)) {
+  if (isLoopbackHost(requestHost) && allowsLocalUnauthenticatedAccess()) {
     redirect(nextPath);
   }
 

@@ -125,6 +125,17 @@ test("resolveClerkConfiguration rejects live keys on unrelated preview hosts wit
   assert.equal(configuration.reason, "production-origin-mismatch");
 });
 
+test("resolveClerkConfiguration rejects live keys on loopback hosts without a proxy", () => {
+  process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuY29uZHVjdHJvc3MuY29tJA";
+  process.env.CLERK_SECRET_KEY = "sk_live_hosted";
+  delete process.env.NEXT_PUBLIC_CLERK_PROXY_URL;
+
+  const configuration = resolveClerkConfiguration("127.0.0.1", "http://127.0.0.1:3000");
+
+  assert.equal(configuration.enabled, false);
+  assert.equal(configuration.reason, "production-origin-mismatch");
+});
+
 test("resolveClerkConfiguration allows live keys on compatible hosted domains", () => {
   process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuY29uZHVjdHJvc3MuY29tJA";
   process.env.CLERK_SECRET_KEY = "sk_live_hosted";

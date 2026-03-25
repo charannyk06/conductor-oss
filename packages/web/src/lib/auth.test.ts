@@ -11,14 +11,19 @@ import {
   resolvePostSignInRedirectTarget,
 } from "./auth";
 
-const originalConfigPath = process.env.CO_CONFIG_PATH;
-const originalWorkspace = process.env.CONDUCTOR_WORKSPACE;
-const originalRequireAuth = process.env.CONDUCTOR_REQUIRE_AUTH;
+const env = process.env as Record<string, string | undefined>;
+const originalConfigPath = env.CO_CONFIG_PATH;
+const originalWorkspace = env.CONDUCTOR_WORKSPACE;
+const originalRequireAuth = env.CONDUCTOR_REQUIRE_AUTH;
+const originalAllowLocalUnauthenticated = env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED;
+const originalNodeEnv = env.NODE_ENV;
 
 function resetDashboardAuthEnv(): void {
-  process.env.CO_CONFIG_PATH = "/tmp/conductor-auth-test-config-does-not-exist.yaml";
-  process.env.CONDUCTOR_WORKSPACE = "";
-  process.env.CONDUCTOR_REQUIRE_AUTH = "";
+  env.CO_CONFIG_PATH = "/tmp/conductor-auth-test-config-does-not-exist.yaml";
+  env.CONDUCTOR_WORKSPACE = "";
+  env.CONDUCTOR_REQUIRE_AUTH = "";
+  env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED = "";
+  env.NODE_ENV = originalNodeEnv ?? "test";
 }
 
 test.afterEach(() => {
@@ -27,27 +32,39 @@ test.afterEach(() => {
 
 test.after(() => {
   if (originalConfigPath === undefined) {
-    delete process.env.CO_CONFIG_PATH;
+    delete env.CO_CONFIG_PATH;
   } else {
-    process.env.CO_CONFIG_PATH = originalConfigPath;
+    env.CO_CONFIG_PATH = originalConfigPath;
   }
 
   if (originalWorkspace === undefined) {
-    delete process.env.CONDUCTOR_WORKSPACE;
+    delete env.CONDUCTOR_WORKSPACE;
   } else {
-    process.env.CONDUCTOR_WORKSPACE = originalWorkspace;
+    env.CONDUCTOR_WORKSPACE = originalWorkspace;
   }
 
   if (originalRequireAuth === undefined) {
-    delete process.env.CONDUCTOR_REQUIRE_AUTH;
+    delete env.CONDUCTOR_REQUIRE_AUTH;
   } else {
-    process.env.CONDUCTOR_REQUIRE_AUTH = originalRequireAuth;
+    env.CONDUCTOR_REQUIRE_AUTH = originalRequireAuth;
+  }
+
+  if (originalAllowLocalUnauthenticated === undefined) {
+    delete env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED;
+  } else {
+    env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED = originalAllowLocalUnauthenticated;
+  }
+
+  if (originalNodeEnv === undefined) {
+    delete env.NODE_ENV;
+  } else {
+    env.NODE_ENV = originalNodeEnv;
   }
 });
 
 test("getDashboardAccess keeps loopback access available when remote auth is required", async () => {
   resetDashboardAuthEnv();
-  process.env.CONDUCTOR_REQUIRE_AUTH = "true";
+  env.CONDUCTOR_REQUIRE_AUTH = "true";
 
   const access = await getDashboardAccess(new Request("http://127.0.0.1:3000/api/access"));
 
@@ -59,7 +76,7 @@ test("getDashboardAccess keeps loopback access available when remote auth is req
 
 test("getDashboardAccess still denies non-local requests without remote identity", async () => {
   resetDashboardAuthEnv();
-  process.env.CONDUCTOR_REQUIRE_AUTH = "true";
+  env.CONDUCTOR_REQUIRE_AUTH = "true";
 
   const access = await getDashboardAccess(new Request("https://dashboard.example.com/api/access"));
 
@@ -67,9 +84,32 @@ test("getDashboardAccess still denies non-local requests without remote identity
   assert.equal(access.reason, "Authentication is required for non-local dashboard access");
 });
 
+test("getDashboardAccess denies loopback access in production unless explicitly enabled", async () => {
+  resetDashboardAuthEnv();
+  env.NODE_ENV = "production";
+
+  const access = await getDashboardAccess(new Request("http://127.0.0.1:3000/api/access"));
+
+  assert.equal(access.ok, false);
+  assert.equal(access.reason, "Authentication is required for non-local dashboard access");
+});
+
+test("getDashboardAccess can explicitly re-enable local unauthenticated access in production", async () => {
+  resetDashboardAuthEnv();
+  env.NODE_ENV = "production";
+  env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED = "true";
+
+  const access = await getDashboardAccess(new Request("http://127.0.0.1:3000/api/access"));
+
+  assert.equal(access.ok, true);
+  assert.equal(access.provider, "local");
+  assert.equal(access.role, "admin");
+  assert.equal(access.email, "local");
+});
+
 test("getDashboardAccess ignores spoofed forwarded loopback hosts for remote requests", async () => {
   resetDashboardAuthEnv();
-  process.env.CONDUCTOR_REQUIRE_AUTH = "true";
+  env.CONDUCTOR_REQUIRE_AUTH = "true";
 
   const access = await getDashboardAccess(new Request("https://dashboard.example.com/api/access", {
     headers: {

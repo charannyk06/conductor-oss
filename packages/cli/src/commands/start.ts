@@ -197,6 +197,22 @@ export function isLoopbackHost(hostname: string): boolean {
     || normalized === "[::1]";
 }
 
+export function resolveLocalDashboardAuthEnv(
+  bindHost: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const configured = env["CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED"]?.trim();
+  if (configured) {
+    return {};
+  }
+
+  if (!isLoopbackHost(bindHost)) {
+    return {};
+  }
+
+  return { CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED: "true" };
+}
+
 type TrustedHeaderAuth = {
   enabled: boolean;
   provider: "generic" | "cloudflare-access";
@@ -1082,6 +1098,7 @@ export function registerStart(program: Command): void {
               detached: false,
               env: {
                 ...process.env,
+                ...resolveLocalDashboardAuthEnv(bindHost, process.env),
                 PORT: String(dashboardPort),
                 HOSTNAME: bindHost,
                 CONDUCTOR_WORKSPACE: workspacePath,

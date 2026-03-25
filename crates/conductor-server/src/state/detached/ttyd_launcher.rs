@@ -620,6 +620,10 @@ async fn run_ttyd_session_owner(
     if !buf.trim().is_empty() {
         let _ = channels.output_tx.send(executor.parse_output(&buf)).await;
     }
+    let _ = channels
+        .output_tx
+        .send(ExecutorOutput::Completed { exit_code: 0 })
+        .await;
     Ok(())
 }
 
