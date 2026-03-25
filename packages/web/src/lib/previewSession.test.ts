@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { DashboardSession } from "./types";
-import { discoverPreviewCandidateUrls, loadPreviewSessionContext } from "./previewSession";
+import {
+  discoverPreviewCandidateUrls,
+  loadPreviewSessionContext,
+  selectPreviewAutoConnectCandidate,
+} from "./previewSession";
 
 function buildSession(metadata: Record<string, string>): DashboardSession {
   return {
@@ -138,4 +142,23 @@ test("loadPreviewSessionContext captures backend lookup failures without throwin
       process.env.CONDUCTOR_BACKEND_URL = previousBackendUrl;
     }
   }
+});
+
+test("selectPreviewAutoConnectCandidate prefers local loopback candidates and ignores remote urls", () => {
+  assert.equal(
+    selectPreviewAutoConnectCandidate([
+      "https://preview.example.com/",
+      "http://127.0.0.1:3000/",
+      "http://localhost:3001/",
+    ]),
+    "http://127.0.0.1:3000/",
+  );
+
+  assert.equal(
+    selectPreviewAutoConnectCandidate([
+      "https://preview.example.com/",
+      "https://deploy-preview.example.com/",
+    ]),
+    null,
+  );
 });

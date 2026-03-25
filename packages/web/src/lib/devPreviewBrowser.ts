@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import puppeteer, {
   type Browser,
+  type BrowserContext,
   type ConsoleMessage,
   type Frame,
   type HTTPRequest,
@@ -258,6 +259,7 @@ function sanitizeBridgePreviewRequestHeaders(
 
 type PreviewState = {
   sessionId: string;
+  context: BrowserContext | null;
   page: Page | null;
   activeFrameId: string | null;
   selectedElement: PreviewElementSelection | null;
@@ -318,6 +320,7 @@ class PreviewBrowserManager {
     if (!state) {
       state = {
         sessionId,
+        context: null,
         page: null,
         activeFrameId: null,
         selectedElement: null,
@@ -333,6 +336,15 @@ class PreviewBrowserManager {
       this.states.set(sessionId, state);
     }
     return state;
+  }
+
+  private async ensureContext(state: PreviewState, browser: Browser): Promise<BrowserContext> {
+    if (state.context && !state.context.closed) {
+      return state.context;
+    }
+
+    state.context = await browser.createBrowserContext();
+    return state.context;
   }
 
   private ensureFrameId(state: PreviewState, frame: Frame): string {
@@ -540,7 +552,8 @@ class PreviewBrowserManager {
       return { state, page: state.page };
     }
 
-    const page = await browser.newPage();
+    const context = await this.ensureContext(state, browser);
+    const page = await context.newPage();
     await page.setViewport(VIEWPORT);
     page.setDefaultNavigationTimeout(30_000);
     page.setDefaultTimeout(15_000);

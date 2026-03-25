@@ -1196,7 +1196,14 @@ async fn terminal_ttyd_frontend_token(
         .into_response();
     }
 
-    Json(json!({ "token": "" })).into_response()
+    let access = state.config.read().await.access.clone();
+    let token = if should_issue_terminal_token(&access) {
+        create_scoped_terminal_token(&id, TerminalTokenScope::Control).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    Json(json!({ "token": token })).into_response()
 }
 
 async fn terminal_snapshot(
@@ -2272,8 +2279,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ttyd_frontend_token_route_returns_empty_token_for_ttyd_sessions() {
+    async fn ttyd_frontend_token_route_returns_a_token_when_access_control_is_enabled() {
         let (state, root) = build_test_state().await;
+        state.config.write().await.access.require_auth = true;
         let mut session = SessionRecord::builder(
             "session-ttyd-frontend-token".to_string(),
             "demo".to_string(),
@@ -2304,7 +2312,8 @@ mod tests {
             .expect("frontend token body should read");
         let payload: Value =
             serde_json::from_slice(&body).expect("frontend token response should be valid json");
-        assert_eq!(payload["token"], Value::String(String::new()));
+        let token = payload["token"].as_str().expect("token should be present");
+        assert!(!token.is_empty());
 
         let _ = std::fs::remove_dir_all(root);
     }

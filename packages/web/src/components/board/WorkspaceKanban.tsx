@@ -2435,7 +2435,7 @@ export function WorkspaceKanban({
             {error}
           </div>
         ) : (
-          <div className="flex min-w-0 snap-x items-start gap-3 overflow-x-auto pb-3 touch-auto sm:snap-none">
+          <div className="flex min-w-0 flex-col gap-3 pb-3 sm:h-full sm:flex-row sm:items-stretch sm:overflow-x-auto sm:pb-3">
             {visibleColumns.map((column) => {
               const fullColumn = allColumns.find(
                 (candidate) => candidate.role === column.role
@@ -2457,7 +2457,7 @@ export function WorkspaceKanban({
                 <article
                   key={column.role}
                   className={cn(
-                    "flex min-h-[560px] w-[85vw] shrink-0 snap-center flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)] sm:w-[320px] sm:snap-align-none",
+                    "flex min-h-0 w-full shrink-0 flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)] sm:h-full sm:min-h-[560px] sm:w-[320px]",
                     draggingTask && "snap-start"
                   )}
                 >
@@ -2486,7 +2486,7 @@ export function WorkspaceKanban({
 
                   <div
                     className={cn(
-                      "flex-1 min-h-0 overflow-y-auto px-3 pb-3 pt-2 touch-auto overscroll-contain",
+                      "flex-1 min-h-0 px-3 pb-3 pt-2 sm:overflow-y-auto sm:overscroll-contain",
                       draggingTask?.role === column.role &&
                         "bg-[rgba(255,255,255,0.02)]"
                     )}

@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { ScrollArea } from "@/components/ui/ScrollArea";
 import { cn } from "@/lib/cn";
+import { selectPreviewAutoConnectCandidate } from "@/lib/previewSession";
 import type {
   PreviewCommandRequest,
   PreviewDomNode,
@@ -220,6 +221,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const previewSurfaceRef = useRef<HTMLDivElement | null>(null);
   const [pageVisible, setPageVisible] = useState(true);
   const shouldRunPreview = active && pageVisible;
+  const autoConnectCandidate = selectPreviewAutoConnectCandidate(status?.candidateUrls ?? []);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -248,14 +250,16 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     setStatus(payload as PreviewStatusResponse);
     setCommandError(null);
     setUrlInput((current) => {
-      if (current.trim().length > 0 && current !== status?.currentUrl) {
+      const nextStatus = payload as PreviewStatusResponse;
+      if (current.trim().length > 0 && current !== nextStatus.currentUrl) {
         return current;
       }
-      return (payload as PreviewStatusResponse).currentUrl
-        ?? (payload as PreviewStatusResponse).candidateUrls[0]
+      return nextStatus.currentUrl
+        ?? selectPreviewAutoConnectCandidate(nextStatus.candidateUrls)
+        ?? nextStatus.candidateUrls[0]
         ?? current;
     });
-  }, [sessionId, status?.currentUrl]);
+  }, [sessionId]);
 
   const runCommand = useCallback(async (command: PreviewCommandRequest): Promise<PreviewStatusResponse> => {
     setBusy(true);
@@ -385,7 +389,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
 
     setSelectionComposer(null);
 
-    const candidate = status?.candidateUrls[0];
+    const candidate = autoConnectCandidate;
     if (!candidate) return;
     const lastAttempt = autoConnectRef.current?.attemptedAt ?? Number.NaN;
     const lastCandidate = autoConnectRef.current?.candidate ?? null;
@@ -398,7 +402,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
       setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
     });
-  }, [runCommand, shouldRunPreview, status?.candidateUrls, status?.connected]);
+  }, [autoConnectCandidate, runCommand, shouldRunPreview, status?.connected]);
 
   useEffect(() => {
     onConnectionChange?.(Boolean(shouldRunPreview && status?.connected && status?.screenshotKey));
@@ -409,6 +413,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       ? `/api/sessions/${encodeURIComponent(sessionId)}/preview/screenshot?ts=${encodeURIComponent(status.screenshotKey)}`
       : null
   ), [sessionId, status?.connected, status?.screenshotKey]);
+  const preferredUrlInputCandidate = autoConnectCandidate ?? status?.candidateUrls[0] ?? null;
 
   const activeFrame = useMemo(
     () => status?.frames.find((frame) => frame.id === status.activeFrameId) ?? null,
@@ -794,7 +799,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
             <input
               value={urlInput}
               onChange={(event) => setUrlInput(event.target.value)}
-              placeholder={status?.candidateUrls[0] ?? "http://127.0.0.1:3000"}
+              placeholder={preferredUrlInputCandidate ?? "http://127.0.0.1:3000"}
               className="h-9 min-w-0 flex-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
             />
             <Button

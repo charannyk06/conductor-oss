@@ -199,7 +199,7 @@ function resolveCompatibleHostSuffix(frontendApiUrl: string | null): string | nu
 
 function requestHostMatchesFrontendApi(hostname: string | null | undefined, frontendApiUrl: string | null): boolean {
   const normalizedHostname = normalizeHostname(hostname);
-  if (!normalizedHostname || isLoopbackHost(normalizedHostname)) {
+  if (!normalizedHostname) {
     return true;
   }
 

@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use super::config::{access_control_enabled, resolve_access_identity, AccessRole};
+use super::config::{
+    access_control_enabled, proxy_request_authorized, resolve_access_identity, AccessRole,
+};
 use crate::state::AppState;
 
 const GLOBAL_RATE_LIMIT_REQUESTS: u64 = 2000;
@@ -76,12 +78,35 @@ fn extract_client_ip(request: &Request<Body>) -> String {
     "global".to_string()
 }
 
+fn extract_rate_limit_key(request: &Request<Body>) -> String {
+    let headers = request.headers();
+
+    if proxy_request_authorized(headers) {
+        let provider = headers
+            .get("x-conductor-access-provider")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "proxy".to_string());
+        let email = headers
+            .get("x-conductor-access-email")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        return format!("proxy:{provider}:{email}");
+    }
+
+    extract_client_ip(request)
+}
+
 pub async fn rate_limit_global(
     State(_state): State<Arc<AppState>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let client_ip = extract_client_ip(&request);
+    let client_ip = extract_rate_limit_key(&request);
 
     if !GLOBAL_RATE_LIMITER.check_rate_limit(&client_ip).await {
         return (
@@ -144,7 +169,7 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
     }
 
     if path.starts_with("/api/sessions/") && path.ends_with("/terminal/ttyd/token") {
-        return None;
+        return Some(AccessRole::Operator);
     }
 
     if path.starts_with("/api/access") {
@@ -250,8 +275,37 @@ mod tests {
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd/token"),
-            None
+            Some(AccessRole::Operator)
         );
+    }
+
+    #[test]
+    fn rate_limit_key_prefers_proxy_identity_when_available() {
+        let request = Request::builder()
+            .uri("/api/events")
+            .header("x-conductor-proxy-authorized", "true")
+            .header("x-conductor-access-provider", "clerk")
+            .header("x-conductor-access-email", "viewer@example.com")
+            .header("x-forwarded-for", "203.0.113.10")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(
+            extract_rate_limit_key(&request),
+            "proxy:clerk:viewer@example.com"
+        );
+    }
+
+    #[test]
+    fn rate_limit_key_falls_back_to_client_ip_for_untrusted_requests() {
+        let request = Request::builder()
+            .uri("/api/events")
+            .header("x-forwarded-for", "203.0.113.10, 198.51.100.7")
+            .header("x-real-ip", "198.51.100.8")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(extract_rate_limit_key(&request), "203.0.113.10");
     }
 
     #[tokio::test]
