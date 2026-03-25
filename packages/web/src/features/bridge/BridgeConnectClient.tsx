@@ -40,6 +40,7 @@ import {
   buildBridgeConnectCommand,
   buildBridgeInstallCommand,
   buildBridgeManualPairCommand,
+  buildBridgeRepairHref,
 } from "@/lib/bridgeOnboarding";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
@@ -269,6 +270,9 @@ export default function BridgeConnectClient({
   );
   const readyDashboardHref = readyDevice
     ? `/?bridge=${encodeURIComponent(readyDevice.device_id)}`
+    : null;
+  const selectedDeviceRecoveryHref = selectedDevice
+    ? buildBridgeRepairHref(selectedDevice.device_id)
     : null;
   const selectedDeviceActionRunning = Boolean(selectedDevice)
     && serviceAction.status === "running"
@@ -554,11 +558,13 @@ export default function BridgeConnectClient({
         deviceId: device.device_id,
         kind: "restart",
         status: "completed",
-        message,
+        message: `${message} Waiting for ${device.device_name} to reconnect.`,
       });
-      window.setTimeout(() => {
-        void refreshDevices();
-      }, 2_000);
+      [2_000, 5_000, 10_000, 20_000, 35_000].forEach((delay) => {
+        window.setTimeout(() => {
+          void refreshDevices();
+        }, delay);
+      });
     } catch (err) {
       setServiceAction({
         deviceId: device.device_id,
@@ -1163,8 +1169,48 @@ export default function BridgeConnectClient({
                         </Button>
                       </div>
                     ) : (
-                      <div className="text-sm text-[var(--vk-text-muted)]">
-                        This laptop is paired, but it is not online right now.
+                      <div className="w-full rounded-[16px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-4">
+                        <div className="text-sm font-medium text-[var(--vk-text-strong)]">
+                          {selectedDevice.device_name} is offline
+                        </div>
+                        <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
+                          Open the same laptop and run the reconnect command below. If Conductor Bridge is missing or broken on that machine, use the full setup command instead.
+                        </p>
+                        <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-[14px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-3 font-mono text-sm leading-6 text-[var(--vk-text-normal)]">
+                          {connectCommand}
+                        </pre>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            variant="primary"
+                            size="md"
+                            onClick={() => {
+                              void handleCopyCommand(connectCommand, "connect");
+                            }}
+                          >
+                            {copiedCommand === "connect" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                            {copiedCommand === "connect" ? "Reconnect command copied" : "Copy reconnect command"}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="md"
+                            onClick={() => {
+                              void handleCopyCommand(bootstrapConnectCommand, "setup");
+                            }}
+                          >
+                            {copiedCommand === "setup" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                            {copiedCommand === "setup" ? "Setup command copied" : "Copy full setup command"}
+                          </Button>
+                          {selectedDeviceRecoveryHref ? (
+                            <Button asChild variant="outline" size="md">
+                              <Link href={selectedDeviceRecoveryHref}>
+                                <Wrench className="h-4 w-4" />
+                                Reopen recovery steps
+                              </Link>
+                            </Button>
+                          ) : null}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1314,7 +1360,19 @@ export default function BridgeConnectClient({
                                 </Button>
                               </>
                             ) : (
-                              <span className="text-xs text-[var(--vk-text-muted)]">Offline</span>
+                              <>
+                                <span className="text-xs text-[var(--vk-text-muted)]">Offline</span>
+                                <Button asChild variant={isSelected ? "primary" : "outline"} size="md">
+                                  <Link
+                                    href={buildBridgeRepairHref(device.device_id)}
+                                    onClick={() => {
+                                      setSelectedDeviceId(device.device_id);
+                                    }}
+                                  >
+                                    Reconnect
+                                  </Link>
+                                </Button>
+                              </>
                             )}
                             <Button
                               type="button"
