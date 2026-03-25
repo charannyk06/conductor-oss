@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL}, HeaderMap, Method, StatusCode};
+use axum::http::{
+    header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL},
+    HeaderMap, Method, StatusCode,
+};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -133,7 +136,11 @@ struct RateBucket {
 
 impl RateBucket {
     fn new(now: Instant) -> Self {
-        Self::with_limits(now, DEFAULT_RATE_LIMIT_BURST as f64, DEFAULT_RATE_LIMIT_REFILL_PER_SECOND)
+        Self::with_limits(
+            now,
+            DEFAULT_RATE_LIMIT_BURST as f64,
+            DEFAULT_RATE_LIMIT_REFILL_PER_SECOND,
+        )
     }
 
     fn with_limits(now: Instant, capacity: f64, refill_per_second: f64) -> Self {
@@ -717,19 +724,21 @@ async fn browser_terminal_ws(
         .authorize_terminal_session_browser(&terminal_id, &user_id)
         .await
     {
-        Ok(()) => ws.protocols([jwt]).on_upgrade(move |socket| async move {
-            if let Err(err) = handle_terminal_connection(
-                state,
-                terminal_id,
-                TerminalPeerKind::Browser,
-                socket,
-            )
-            .await
-            {
-                warn!(error = %err, "browser terminal websocket closed");
-            }
-        })
-        .into_response(),
+        Ok(()) => ws
+            .protocols([jwt])
+            .on_upgrade(move |socket| async move {
+                if let Err(err) = handle_terminal_connection(
+                    state,
+                    terminal_id,
+                    TerminalPeerKind::Browser,
+                    socket,
+                )
+                .await
+                {
+                    warn!(error = %err, "browser terminal websocket closed");
+                }
+            })
+            .into_response(),
         Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
     }
 }

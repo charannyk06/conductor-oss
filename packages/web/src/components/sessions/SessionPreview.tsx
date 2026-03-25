@@ -30,7 +30,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { ScrollArea } from "@/components/ui/ScrollArea";
 import { cn } from "@/lib/cn";
-import { selectPreviewAutoConnectCandidate } from "@/lib/previewSession";
+import { selectPreviewAutoConnectCandidate } from "@/lib/previewAutoConnect";
 import type {
   PreviewCommandRequest,
   PreviewDomNode,

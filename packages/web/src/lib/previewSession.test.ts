@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { DashboardSession } from "./types";
+import { selectPreviewAutoConnectCandidate } from "./previewAutoConnect";
 import {
   discoverPreviewCandidateUrls,
   loadPreviewSessionContext,
-  selectPreviewAutoConnectCandidate,
 } from "./previewSession";
 
 function buildSession(metadata: Record<string, string>): DashboardSession {

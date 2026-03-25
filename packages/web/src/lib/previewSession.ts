@@ -117,10 +117,6 @@ export async function loadPreviewSessionContext(
   }
 }
 
-export function selectPreviewAutoConnectCandidate(candidateUrls: string[]): string | null {
-  return candidateUrls.find((candidate) => isLoopbackUrl(candidate)) ?? null;
-}
-
 function resolveBridgePreviewWarning(
   session: DashboardSession,
   candidateUrls: string[],
