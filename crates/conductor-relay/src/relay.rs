@@ -715,7 +715,8 @@ async fn browser_terminal_ws(
     headers: HeaderMap,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    let Some(jwt) = resolve_websocket_protocol(&headers).or_else(|| query.jwt.clone()) else {
+    let requested_protocol = resolve_websocket_protocol(&headers);
+    let Some(jwt) = requested_protocol.clone().or_else(|| query.jwt.clone()) else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Missing browser relay token." })),
@@ -735,9 +736,8 @@ async fn browser_terminal_ws(
         .authorize_terminal_session_browser(&terminal_id, &user_id)
         .await
     {
-        Ok(()) => ws
-            .protocols([jwt])
-            .on_upgrade(move |socket| async move {
+        Ok(()) => {
+            let upgrade = move |socket| async move {
                 if let Err(err) = handle_terminal_connection(
                     state,
                     terminal_id,
@@ -748,8 +748,14 @@ async fn browser_terminal_ws(
                 {
                     warn!(error = %err, "browser terminal websocket closed");
                 }
-            })
-            .into_response(),
+            };
+
+            if requested_protocol.is_some() {
+                ws.protocols([jwt]).on_upgrade(upgrade).into_response()
+            } else {
+                ws.on_upgrade(upgrade).into_response()
+            }
+        }
         Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
     }
 }
