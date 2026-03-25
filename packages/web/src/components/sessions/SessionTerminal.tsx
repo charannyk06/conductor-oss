@@ -14,6 +14,7 @@ import { RemoteSessionTerminal } from "@/components/sessions/RemoteSessionTermin
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
+import { terminalUrlNeedsReload } from "./terminal/terminalUrl";
 import { calculateMobileTerminalViewportMetrics } from "./sessionTerminalUtils";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
 
@@ -49,13 +50,6 @@ async function sendTerminalKeys(
   }
 }
 
-function terminalUrlChanged(current: string | null, next: string): boolean {
-  if (!current) {
-    return true;
-  }
-  return current !== next;
-}
-
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
@@ -85,6 +79,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
     !ttydBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
 
   const [terminalUrl, setTerminalUrl] = useState<string | null>(null);
+  const [terminalLinkUrl, setTerminalLinkUrl] = useState<string | null>(null);
+  const [terminalFrameReloadNonce, setTerminalFrameReloadNonce] = useState(0);
   const [resolvingConnection, setResolvingConnection] = useState(expectsLiveTerminal);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [frameLoaded, setFrameLoaded] = useState(false);
@@ -94,6 +90,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [promptError, setPromptError] = useState<string | null>(null);
   const [queuedInsertError, setQueuedInsertError] = useState<string | null>(null);
   const terminalUrlRef = useRef<string | null>(null);
+  const forceTerminalReloadRef = useRef(false);
 
   useEffect(() => {
     terminalUrlRef.current = terminalUrl;
@@ -103,6 +100,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
     lastAppliedInsertNonceRef.current = 0;
     retryAttemptRef.current = 0;
     setTerminalUrl(null);
+    setTerminalLinkUrl(null);
+    setTerminalFrameReloadNonce(0);
     setResolvingConnection(expectsLiveTerminal);
     setConnectionError(null);
     setFrameLoaded(false);
@@ -111,6 +110,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setPromptSending(false);
     setPromptError(null);
     setQueuedInsertError(null);
+    forceTerminalReloadRef.current = false;
   }, [expectsLiveTerminal, sessionId]);
 
   useEffect(() => {
@@ -135,15 +135,18 @@ function SessionTerminalView(props: SessionTerminalProps) {
         if (cancelled) return;
         retryAttemptRef.current = 0;
         if (connection.interactive && connection.terminalUrl) {
-          const urlChanged = terminalUrlChanged(
-            terminalUrlRef.current,
-            connection.terminalUrl,
-          );
-          if (urlChanged) {
+          const shouldReloadTerminal =
+            forceTerminalReloadRef.current ||
+            terminalUrlNeedsReload(terminalUrlRef.current, connection.terminalUrl);
+          forceTerminalReloadRef.current = false;
+
+          setTerminalLinkUrl(connection.terminalUrl);
+          if (shouldReloadTerminal || !terminalUrlRef.current) {
             setFrameLoaded(false);
             setTerminalUrl(connection.terminalUrl);
-          } else if (!terminalUrlRef.current) {
-            setTerminalUrl(connection.terminalUrl);
+            if (shouldReloadTerminal && terminalUrlRef.current) {
+              setTerminalFrameReloadNonce((current) => current + 1);
+            }
           }
           setConnectionError(null);
 
@@ -158,6 +161,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
         if (!terminalUrlRef.current) {
           setTerminalUrl(null);
+          setTerminalLinkUrl(null);
           setFrameLoaded(false);
         }
         setConnectionError(connection.reason ?? "Live ttyd terminal is unavailable.");
@@ -170,6 +174,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         const hasTerminal = !!terminalUrlRef.current;
         if (!hasTerminal) {
           setTerminalUrl(null);
+          setTerminalLinkUrl(null);
           setFrameLoaded(false);
         }
         setConnectionError(
@@ -336,11 +341,13 @@ function SessionTerminalView(props: SessionTerminalProps) {
         runtimeMode: normalizedRuntimeMode,
         ttydBacked,
         terminalUrl,
+        terminalLinkUrl,
         frameLoaded,
         resolvingConnection,
         connectionError,
         promptError,
         queuedInsertError,
+        terminalFrameReloadNonce,
       }),
     };
 
@@ -359,12 +366,15 @@ function SessionTerminalView(props: SessionTerminalProps) {
     resolvingConnection,
     sessionId,
     terminalUrl,
+    terminalLinkUrl,
     ttydBacked,
+    terminalFrameReloadNonce,
   ]);
 
   const handleRetry = useCallback(() => {
     setConnectionError(null);
     retryAttemptRef.current = 0;
+    forceTerminalReloadRef.current = true;
     setConnectionRefreshTick((current) => current + 1);
   }, []);
 
@@ -382,6 +392,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
       : showPromptBar
         ? "Send a follow-up below to relaunch the agent in a fresh ttyd terminal."
         : `Session status is \`${normalizedSessionStatus}\`. Interactive ttyd terminals only run while the agent is active.`);
+  const terminalHref = terminalLinkUrl ?? terminalUrl ?? undefined;
 
   return (
     <div
@@ -390,9 +401,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
         : "group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
     >
       <div className="absolute right-2 top-2 z-10 flex items-center gap-2 sm:right-3 sm:top-3">
-        {terminalUrl ? (
+        {terminalHref ? (
           <a
-            href={terminalUrl}
+            href={terminalHref}
             target="_blank"
             rel="noreferrer"
             className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm transition hover:bg-[#201818] sm:h-7 sm:w-7"
@@ -438,6 +449,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
               </div>
             ) : null}
             <iframe
+              key={`${sessionId}:${terminalFrameReloadNonce}`}
               title={`ttyd terminal for ${sessionId}`}
               src={terminalUrl}
               className="h-full w-full border-0 bg-[#060404]"
@@ -464,10 +476,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 <div className="min-w-0 flex-1">
                   <div className="text-[14px] font-medium">{emptyStateTitle}</div>
                   <div className="mt-1 text-[12px] leading-5 text-[#a79c94]">{emptyStateDescription}</div>
-                  {terminalUrl ? (
+                  {terminalHref ? (
                     <div className="mt-3">
                       <a
-                        href={terminalUrl}
+                        href={terminalHref}
                         target="_blank"
                         rel="noreferrer"
                         className="text-[12px] text-[#d7c6b7] underline underline-offset-4"
