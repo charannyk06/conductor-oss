@@ -21,7 +21,7 @@ export async function POST(
   request: NextRequest,
   context: RouteContext,
 ): Promise<Response> {
-  const denied = await guardApiAccess(request, "viewer");
+  const denied = await guardApiAccess(request, "operator");
   if (denied) {
     return denied;
   }

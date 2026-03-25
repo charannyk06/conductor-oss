@@ -261,6 +261,7 @@ type PreviewState = {
   sessionId: string;
   context: BrowserContext | null;
   page: Page | null;
+  destroying: boolean;
   activeFrameId: string | null;
   selectedElement: PreviewElementSelection | null;
   consoleLogs: PreviewLogEntry[];
@@ -322,6 +323,7 @@ class PreviewBrowserManager {
         sessionId,
         context: null,
         page: null,
+        destroying: false,
         activeFrameId: null,
         selectedElement: null,
         consoleLogs: [],
@@ -345,6 +347,32 @@ class PreviewBrowserManager {
 
     state.context = await browser.createBrowserContext();
     return state.context;
+  }
+
+  async destroySession(
+    sessionId: string,
+    options: { closePage?: boolean } = {},
+  ): Promise<void> {
+    const state = this.states.get(sessionId);
+    if (!state || state.destroying) {
+      return;
+    }
+
+    state.destroying = true;
+    const page = state.page;
+    const context = state.context;
+
+    try {
+      if (options.closePage !== false && page && !page.isClosed()) {
+        await page.close().catch(() => {});
+      }
+
+      if (context && !context.closed) {
+        await context.close().catch(() => {});
+      }
+    } finally {
+      this.states.delete(sessionId);
+    }
   }
 
   private ensureFrameId(state: PreviewState, frame: Frame): string {
@@ -510,9 +538,7 @@ class PreviewBrowserManager {
       }
     });
     page.on("close", () => {
-      state.page = null;
-      state.selectedElement = null;
-      state.activeFrameId = null;
+      void this.destroySession(state.sessionId, { closePage: false });
     });
   }
 
@@ -1016,9 +1042,9 @@ class PreviewBrowserManager {
   }
 
   async getStatus(sessionId: string, candidateUrls: string[]): Promise<PreviewStatusResponse> {
-    const state = this.getState(sessionId);
-    const page = state.page && !state.page.isClosed() ? state.page : null;
-    const frames = page ? this.collectFrames(state, page) : [];
+    const state = this.states.get(sessionId) ?? null;
+    const page = state?.page && !state.page.isClosed() ? state.page : null;
+    const frames = state && page ? this.collectFrames(state, page) : [];
 
     let title: string | null = null;
     if (page && page.url() !== "about:blank") {
@@ -1035,11 +1061,11 @@ class PreviewBrowserManager {
       currentUrl: page && page.url() !== "about:blank" ? page.url() : null,
       title,
       frames,
-      activeFrameId: state.activeFrameId,
-      selectedElement: state.selectedElement,
-      consoleLogs: state.consoleLogs,
-      networkLogs: state.networkLogs,
-      lastError: state.lastError,
+      activeFrameId: state?.activeFrameId ?? null,
+      selectedElement: state?.selectedElement ?? null,
+      consoleLogs: state?.consoleLogs ?? [],
+      networkLogs: state?.networkLogs ?? [],
+      lastError: state?.lastError ?? null,
       screenshotKey: `${Date.now()}`,
     };
   }

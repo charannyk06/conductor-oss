@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ConnectInfo;
 use axum::extract::{Path, Query, State};
 use axum::http::{
     header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL},
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -334,7 +336,6 @@ const RELAY_JWT_SCOPE_DASHBOARD_API: &str = "dashboard-api";
 const RELAY_JWT_SCOPE_TERMINAL_BROWSER: &str = "terminal-browser";
 const DEFAULT_RATE_LIMIT_BURST: usize = 120;
 const DEFAULT_RATE_LIMIT_REFILL_PER_SECOND: f64 = 2.0;
-const DEVICE_CLAIM_RATE_LIMIT_KEY: &str = "device-claims:create";
 const DEVICE_CLAIM_RATE_LIMIT_BURST: usize = 12;
 const DEVICE_CLAIM_RATE_LIMIT_REFILL_PER_SECOND: f64 = 0.1;
 const MAX_PENDING_PAIRING_CODES: usize = 256;
@@ -346,13 +347,21 @@ const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(45);
 const DEVICE_PICKER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BRIDGE_PROXY_META_KEY: &str = "$bridgeProxy";
 
+fn device_claim_rate_limit_key(remote_addr: SocketAddr) -> String {
+    format!("device-claims:create:{}", remote_addr.ip())
+}
+
 pub async fn serve() -> Result<()> {
     let bind_addr = env::var("RELAY_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
     let state = RelayState::default();
     let app = build_router(state);
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(%bind_addr, "relay listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -489,10 +498,12 @@ async fn create_pairing_code(
 }
 
 async fn create_device_claim(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<RelayState>,
     Json(body): Json<DeviceClaimCreateRequest>,
 ) -> Response {
-    match state.create_device_claim(body).await {
+    let rate_limit_key = device_claim_rate_limit_key(remote_addr);
+    match state.create_device_claim(body, &rate_limit_key).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
     }
@@ -1647,9 +1658,9 @@ impl RelayState {
         bucket.allow(now)
     }
 
-    async fn consume_device_claim_rate_limit(&self, now: Instant) -> bool {
+    async fn consume_device_claim_rate_limit(&self, rate_limit_key: &str, now: Instant) -> bool {
         self.consume_rate_limit_with_policy(
-            DEVICE_CLAIM_RATE_LIMIT_KEY,
+            rate_limit_key,
             now,
             DEVICE_CLAIM_RATE_LIMIT_BURST as f64,
             DEVICE_CLAIM_RATE_LIMIT_REFILL_PER_SECOND,
@@ -1742,6 +1753,7 @@ impl RelayState {
     async fn create_device_claim(
         &self,
         request: DeviceClaimCreateRequest,
+        rate_limit_key: &str,
     ) -> std::result::Result<DeviceClaimCreateResponse, (StatusCode, &'static str)> {
         if request.device_id.trim().is_empty()
             || request.hostname.trim().is_empty()
@@ -1752,7 +1764,10 @@ impl RelayState {
         }
 
         let now = Instant::now();
-        if !self.consume_device_claim_rate_limit(now).await {
+        if !self
+            .consume_device_claim_rate_limit(rate_limit_key, now)
+            .await
+        {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many device claim requests. Please try again later.",
@@ -2494,13 +2509,16 @@ mod tests {
     async fn device_claim_pairs_and_polls_once() {
         let state = RelayState::default();
         let created = state
-            .create_device_claim(DeviceClaimCreateRequest {
-                device_id: "device-123".to_string(),
-                hostname: "macbook-pro".to_string(),
-                os: "darwin".to_string(),
-                arch: "arm64".to_string(),
-                suggested_name: Some("My Laptop".to_string()),
-            })
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-123".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: Some("My Laptop".to_string()),
+                },
+                "device-claims:create:test-client",
+            )
             .await
             .expect("claim should be created");
 
@@ -2597,13 +2615,16 @@ mod tests {
         }
 
         let err = state
-            .create_device_claim(DeviceClaimCreateRequest {
-                device_id: "device-overflow".to_string(),
-                hostname: "macbook-pro".to_string(),
-                os: "darwin".to_string(),
-                arch: "arm64".to_string(),
-                suggested_name: None,
-            })
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-overflow".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: None,
+                },
+                "device-claims:create:test-client",
+            )
             .await
             .expect_err("device claim creation should be rate-limited when full");
 
@@ -2616,29 +2637,70 @@ mod tests {
 
         for index in 0..DEVICE_CLAIM_RATE_LIMIT_BURST {
             state
-                .create_device_claim(DeviceClaimCreateRequest {
-                    device_id: format!("device-{index}"),
-                    hostname: format!("host-{index}"),
-                    os: "darwin".to_string(),
-                    arch: "arm64".to_string(),
-                    suggested_name: None,
-                })
+                .create_device_claim(
+                    DeviceClaimCreateRequest {
+                        device_id: format!("device-{index}"),
+                        hostname: format!("host-{index}"),
+                        os: "darwin".to_string(),
+                        arch: "arm64".to_string(),
+                        suggested_name: None,
+                    },
+                    "device-claims:create:test-client",
+                )
                 .await
                 .expect("device claim should be created before the burst is exhausted");
         }
 
         let err = state
-            .create_device_claim(DeviceClaimCreateRequest {
-                device_id: "device-overflow".to_string(),
-                hostname: "macbook-pro".to_string(),
-                os: "darwin".to_string(),
-                arch: "arm64".to_string(),
-                suggested_name: None,
-            })
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-overflow".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: None,
+                },
+                "device-claims:create:test-client",
+            )
             .await
             .expect_err("device claim creation should be rate-limited before the queue fills");
 
         assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn create_device_claim_rate_limit_is_scoped_per_caller() {
+        let state = RelayState::default();
+
+        for index in 0..DEVICE_CLAIM_RATE_LIMIT_BURST {
+            state
+                .create_device_claim(
+                    DeviceClaimCreateRequest {
+                        device_id: format!("device-a-{index}"),
+                        hostname: format!("host-a-{index}"),
+                        os: "darwin".to_string(),
+                        arch: "arm64".to_string(),
+                        suggested_name: None,
+                    },
+                    "device-claims:create:caller-a",
+                )
+                .await
+                .expect("first caller should stay within its own bucket");
+        }
+
+        state
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-b-0".to_string(),
+                    hostname: "host-b-0".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: None,
+                },
+                "device-claims:create:caller-b",
+            )
+            .await
+            .expect("different callers should get independent rate-limit buckets");
     }
 
     #[test]
