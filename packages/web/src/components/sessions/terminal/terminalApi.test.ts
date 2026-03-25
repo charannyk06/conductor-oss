@@ -101,7 +101,7 @@ test("resolveTerminalConnection accepts direct ttyd URLs", async () => {
   assert.equal(connection.terminalUrl, "http://127.0.0.1:41000/");
 });
 
-test("resolveTerminalConnection prefers the runtime backend origin meta tag", async () => {
+test("resolveTerminalConnection keeps proxied ttyd routes on the dashboard origin even with backend metadata", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-1");
   setBackendOriginMeta("https://api.example.com/internal");
   setFetchResponse({
@@ -116,11 +116,11 @@ test("resolveTerminalConnection prefers the runtime backend origin meta tag", as
   assert.equal(connection.reason, null);
   assert.equal(
     connection.terminalUrl,
-    "https://api.example.com/api/sessions/session-1/terminal/ttyd?token=test-token",
+    "https://dashboard.example.com/api/sessions/session-1/terminal/ttyd?token=test-token",
   );
 });
 
-test("resolveTerminalConnection rewrites loopback backend meta to the current remote host", async () => {
+test("resolveTerminalConnection keeps proxied ttyd routes on the current host when backend metadata points to loopback", async () => {
   setWindowLocation("https://tailnet.example.ts.net/sessions/session-1");
   setBackendOriginMeta("http://127.0.0.1:4748");
   setFetchResponse({
@@ -135,11 +135,11 @@ test("resolveTerminalConnection rewrites loopback backend meta to the current re
   assert.equal(connection.reason, null);
   assert.equal(
     connection.terminalUrl,
-    "https://tailnet.example.ts.net:4748/api/sessions/session-1/terminal/ttyd?token=test-token",
+    "https://tailnet.example.ts.net/api/sessions/session-1/terminal/ttyd?token=test-token",
   );
 });
 
-test("resolveTerminalConnection resolves backend ttyd proxy paths against the backend origin", async () => {
+test("resolveTerminalConnection resolves proxy ttyd paths against the current dashboard origin", async () => {
   setWindowLocation("https://dashboard.example.com/sessions/session-2");
   setFetchResponse({
     required: true,
@@ -172,5 +172,24 @@ test("resolveTerminalConnection normalizes ws-only ttyd urls without adding a tr
   assert.equal(
     connection.terminalUrl,
     "https://dashboard.example.com/api/sessions/session-3/terminal/ttyd?token=test-token",
+  );
+});
+
+test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", async () => {
+  setWindowLocation("https://app.conductross.com/sessions/bridge-session");
+  setBackendOriginMeta("https://api.conductross.com");
+  setFetchResponse({
+    required: true,
+    ttydHttpUrl: "/api/sessions/session-bridge/terminal/ttyd?token=test-token",
+    ttydWsUrl: "/api/sessions/session-bridge/terminal/ttyd/ws?token=test-token",
+  });
+
+  const connection = await resolveTerminalConnection("bridge-session", { bridgeId: "bridge-prod" });
+
+  assert.equal(connection.interactive, true);
+  assert.equal(connection.reason, null);
+  assert.equal(
+    connection.terminalUrl,
+    "https://app.conductross.com/api/sessions/session-bridge/terminal/ttyd?token=test-token&bridgeId=bridge-prod",
   );
 });

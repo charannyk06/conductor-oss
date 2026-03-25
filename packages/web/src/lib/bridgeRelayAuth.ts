@@ -53,6 +53,7 @@ function requireBridgeRelaySecret(): string {
 export async function signBridgeRelayJwt(
   userId: string,
   scope: BridgeRelayJwtScope,
+  expiresIn: string = "5m",
 ): Promise<string> {
   const trimmedUserId = userId.trim();
   if (!trimmedUserId) {
@@ -69,7 +70,7 @@ export async function signBridgeRelayJwt(
     .setIssuer(RELAY_JWT_ISSUER)
     .setAudience(RELAY_JWT_AUDIENCE)
     .setIssuedAt()
-    .setExpirationTime("5m")
+    .setExpirationTime(expiresIn)
     .sign(new TextEncoder().encode(secret));
 }
 

@@ -209,8 +209,42 @@ fn normalize_relay_ws_url(relay: &str) -> Result<Url> {
 fn bridge_websocket_url(relay: &str, token: &str) -> Result<String> {
     let mut url = normalize_relay_ws_url(relay)?;
     url.set_path(&format!("/bridge/{CONTROL_SCOPE}"));
-    url.set_query(Some(&format!("token={token}")));
+    url.query_pairs_mut().clear().append_pair("token", token);
     Ok(url.to_string())
+}
+
+fn relay_terminal_bridge_websocket_url(
+    relay: &str,
+    terminal_id: &str,
+    token: &str,
+) -> Result<String> {
+    let mut url = normalize_relay_ws_url(relay)?;
+    url.set_path(&format!("/terminal/{terminal_id}/bridge"));
+    url.query_pairs_mut().clear().append_pair("token", token);
+    Ok(url.to_string())
+}
+
+fn resolve_backend_terminal_websocket_url(backend: &Url, candidate: &str) -> Result<Url> {
+    let mut url = if candidate.starts_with("ws://") || candidate.starts_with("wss://") {
+        Url::parse(candidate).context("invalid ttyd websocket URL")?
+    } else {
+        backend
+            .join(candidate)
+            .context("failed to resolve ttyd websocket URL")?
+    };
+
+    match url.scheme() {
+        "http" => {
+            let _ = url.set_scheme("ws");
+        }
+        "https" => {
+            let _ = url.set_scheme("wss");
+        }
+        "ws" | "wss" => {}
+        other => anyhow::bail!("unsupported ttyd websocket scheme: {other}"),
+    }
+
+    Ok(url)
 }
 
 async fn proxy_request(
@@ -280,6 +314,82 @@ fn extract_session_id(path: &str) -> Option<String> {
 
 fn session_output_path(session_id: &str) -> String {
     format!("/api/sessions/{session_id}/output?lines=500")
+}
+
+async fn fetch_local_ttyd_ws_url(
+    client: &reqwest::Client,
+    backend: &Url,
+    session_id: &str,
+) -> Result<Url> {
+    let path = format!("/api/sessions/{session_id}/terminal/token");
+    let response = proxy_request(client, backend, "GET", &path, None).await?;
+    if response.status != StatusCode::OK.as_u16() {
+        let message = response
+            .body
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("failed to resolve ttyd token");
+        anyhow::bail!("{message}");
+    }
+
+    let ttyd_ws_url = response
+        .body
+        .get("ttydWsUrl")
+        .and_then(Value::as_str)
+        .context("missing ttyd websocket URL")?;
+    resolve_backend_terminal_websocket_url(backend, ttyd_ws_url)
+}
+
+async fn run_terminal_proxy_session(
+    relay: String,
+    token: String,
+    client: reqwest::Client,
+    backend: Url,
+    terminal_id: String,
+    session_id: String,
+) -> Result<()> {
+    let relay_ws_url = relay_terminal_bridge_websocket_url(&relay, &terminal_id, &token)?;
+    let local_ttyd_ws_url = fetch_local_ttyd_ws_url(&client, &backend, &session_id).await?;
+
+    let (relay_ws, _) = connect_async(relay_ws_url.as_str()).await?;
+    let (local_ttyd_ws, _) = connect_async(local_ttyd_ws_url.as_str()).await?;
+    let (mut relay_write, mut relay_read) = relay_ws.split();
+    let (mut local_write, mut local_read) = local_ttyd_ws.split();
+
+    loop {
+        tokio::select! {
+            relay_message = relay_read.next() => {
+                match relay_message {
+                    Some(Ok(Message::Frame(_))) => {}
+                    Some(Ok(message)) => {
+                        let should_close = matches!(message, Message::Close(_));
+                        local_write.send(message).await?;
+                        if should_close {
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => return Err(err.into()),
+                    None => break,
+                }
+            }
+            local_message = local_read.next() => {
+                match local_message {
+                    Some(Ok(Message::Frame(_))) => {}
+                    Some(Ok(message)) => {
+                        let should_close = matches!(message, Message::Close(_));
+                        relay_write.send(message).await?;
+                        if should_close {
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => return Err(err.into()),
+                    None => break,
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn update_active_session(
@@ -504,8 +614,25 @@ async fn run_bridge_connection_once(
                                             .await;
                                         }
                                     }
-                                    BrowserToBridgeMessage::TerminalResize { .. }
-                                    | BrowserToBridgeMessage::TerminalProxyStart { .. } => {}
+                                    BrowserToBridgeMessage::TerminalResize { .. } => {}
+                                    BrowserToBridgeMessage::TerminalProxyStart { terminal_id, session_id } => {
+                                        let relay = relay.to_string();
+                                        let token = token.to_string();
+                                        let client = client.clone();
+                                        let backend = backend.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(err) = run_terminal_proxy_session(
+                                                relay,
+                                                token,
+                                                client,
+                                                backend,
+                                                terminal_id,
+                                                session_id,
+                                            ).await {
+                                                tracing::warn!(error = %err, "bridge ttyd proxy session closed");
+                                            }
+                                        });
+                                    }
                                 }
                             }
                             Err(err) => {

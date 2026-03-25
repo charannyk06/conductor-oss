@@ -12,6 +12,11 @@ const securityHeaders = [
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
 ];
 
+const embeddedTerminalHeaders = [
+  { key: "X-Frame-Options", value: "SAMEORIGIN" },
+  { key: "Content-Security-Policy", value: "frame-ancestors 'self'" },
+];
+
 const developmentWebpackConfig: Pick<NextConfig, "webpack"> = {
   webpack(config) {
     config.watchOptions = {
@@ -47,6 +52,10 @@ const nextConfig: NextConfig = {
       {
         source: "/(.*)",
         headers: securityHeaders,
+      },
+      {
+        source: "/api/sessions/:path*/terminal/ttyd",
+        headers: embeddedTerminalHeaders,
       },
     ];
   },

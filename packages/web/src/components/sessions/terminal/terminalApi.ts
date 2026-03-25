@@ -62,6 +62,15 @@ function normalizeTerminalPathname(pathname: string): string {
   return pathname;
 }
 
+function resolveDashboardOrigin(): string {
+  if (typeof window === "undefined") return "http://127.0.0.1:3000";
+  return window.location.origin;
+}
+
+function isDashboardTtydProxyPath(pathname: string): boolean {
+  return pathname.startsWith("/api/sessions/") && pathname.includes("/terminal/ttyd");
+}
+
 function resolveBackendOrigin(): string {
   const runtimeBackendUrl = readBackendOriginFromMeta();
   if (runtimeBackendUrl) return runtimeBackendUrl;
@@ -92,11 +101,22 @@ function resolveProvidedTtydHttpUrl(
   ttydHttpUrl: string | null,
   ttydWsUrl: string | null,
   backendOrigin: string,
+  dashboardOrigin: string,
 ): string | null {
   const candidate = ttydHttpUrl ?? ttydWsUrl;
   if (!candidate) return null;
   try {
-    const resolved = new URL(candidate, backendOrigin);
+    const candidatePathname = (() => {
+      try {
+        return new URL(candidate, dashboardOrigin).pathname;
+      } catch {
+        return null;
+      }
+    })();
+    const baseOrigin = candidatePathname && isDashboardTtydProxyPath(candidatePathname)
+      ? dashboardOrigin
+      : backendOrigin;
+    const resolved = new URL(candidate, baseOrigin);
 
     if (resolved.protocol === "ws:") resolved.protocol = "http:";
     if (resolved.protocol === "wss:") resolved.protocol = "https:";
@@ -111,6 +131,28 @@ function resolveProvidedTtydHttpUrl(
     return resolved.toString();
   } catch {
     return null;
+  }
+}
+
+function appendBridgeIdToTerminalUrl(
+  terminalUrl: string,
+  bridgeId?: string | null,
+): string {
+  const normalizedBridgeId = bridgeId?.trim();
+  if (!normalizedBridgeId) {
+    return terminalUrl;
+  }
+
+  try {
+    const resolved = new URL(terminalUrl);
+    if (!isDashboardTtydProxyPath(resolved.pathname)) {
+      return terminalUrl;
+    }
+
+    resolved.searchParams.set("bridgeId", normalizedBridgeId);
+    return resolved.toString();
+  } catch {
+    return terminalUrl;
   }
 }
 
@@ -174,19 +216,20 @@ async function fetchTerminalToken(
     throw new Error(data?.error ?? `Failed to resolve terminal token: ${res.status}`);
   }
 
-    return {
-      interactive: true,
-      ttydHttpUrl,
-      ttydWsUrl,
-      expiresInSeconds,
-    };
-  }
+  return {
+    interactive: true,
+    ttydHttpUrl,
+    ttydWsUrl,
+    expiresInSeconds,
+  };
+}
 
 export async function resolveTerminalConnection(
   sessionId: string,
   options?: ResolveTerminalConnectionOptions,
 ): Promise<TerminalConnectionInfo> {
-  const origin = resolveBackendOrigin();
+  const backendOrigin = resolveBackendOrigin();
+  const dashboardOrigin = resolveDashboardOrigin();
   const auth = await fetchTerminalToken(sessionId, options);
   if (!auth.interactive) {
     return {
@@ -197,12 +240,16 @@ export async function resolveTerminalConnection(
     };
   }
 
-  // Resolve the ttyd iframe URL against the backend origin so the ttyd
-  // JavaScript inside the iframe connects its WebSocket back to the same
-  // origin. This keeps the HTTP page and WebSocket endpoint aligned even
-  // when the dashboard is reached through a forwarded or protected URL.
-  const terminalUrl = resolveProvidedTtydHttpUrl(auth.ttydHttpUrl, auth.ttydWsUrl, origin);
-  if (!terminalUrl) {
+  // Keep dashboard proxy ttyd routes on the dashboard origin so hosted auth
+  // and bridge-aware Next.js proxying stay in the request path. Only direct
+  // backend ttyd URLs should resolve against the backend origin.
+  const resolvedTerminalUrl = resolveProvidedTtydHttpUrl(
+    auth.ttydHttpUrl,
+    auth.ttydWsUrl,
+    backendOrigin,
+    dashboardOrigin,
+  );
+  if (!resolvedTerminalUrl) {
     return {
       terminalUrl: null,
       interactive: false,
@@ -211,7 +258,7 @@ export async function resolveTerminalConnection(
   }
 
   return {
-    terminalUrl,
+    terminalUrl: appendBridgeIdToTerminalUrl(resolvedTerminalUrl, options?.bridgeId),
     interactive: true,
     reason: null,
     expiresInSeconds: auth.expiresInSeconds,

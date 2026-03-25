@@ -471,6 +471,14 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
     const STORAGE_KEY = 'conductor.ttyd.token';
     const MESSAGE_TYPE = 'conductor-ttyd-auth-token';
 
+    const readLocationBridgeId = () => {
+        try {
+            return new URL(window.location.href).searchParams.get('bridgeId')?.trim() || '';
+        } catch {
+            return '';
+        }
+    };
+
     const readStoredToken = () => {
         try {
             return window.localStorage.getItem(STORAGE_KEY)?.trim() || '';
@@ -496,7 +504,8 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
 
     const normalizeWebSocketUrl = (value) => {
         const token = currentToken || readStoredToken();
-        if (!token) {
+        const bridgeId = readLocationBridgeId();
+        if (!token && !bridgeId) {
             return value;
         }
 
@@ -506,7 +515,12 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
                 return value;
             }
 
-            url.searchParams.set('token', token);
+            if (token) {
+                url.searchParams.set('token', token);
+            }
+            if (bridgeId) {
+                url.searchParams.set('bridgeId', bridgeId);
+            }
             return url.toString();
         } catch {
             return value;
@@ -1934,10 +1948,12 @@ mod tests {
         assert!(injected.contains("window.__conductorTtydAuthSyncShimInstalled"));
         assert!(injected.contains("const STORAGE_KEY = 'conductor.ttyd.token';"));
         assert!(injected.contains("const MESSAGE_TYPE = 'conductor-ttyd-auth-token';"));
+        assert!(injected.contains("const readLocationBridgeId = () => {"));
         assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
         assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
         assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));
         assert!(injected.contains("url.searchParams.set('token', token);"));
+        assert!(injected.contains("url.searchParams.set('bridgeId', bridgeId);"));
         assert!(injected.contains("window.addEventListener('message', handleMessage);"));
         assert!(
             injected.find(TTYD_AUTH_SYNC_SHIM_MARKER).unwrap() < injected.rfind("</body>").unwrap()

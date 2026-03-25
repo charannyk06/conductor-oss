@@ -1,16 +1,66 @@
-/**
- * Proxy the ttyd HTTP frontend through the Next.js dashboard.
- *
- * The ttyd process binds to 127.0.0.1.
- * Routing through this Next.js route makes it accessible through the
- * authenticated dashboard surface instead of exposing ttyd directly.
- */
-import { guardedSessionProxyParamRoute } from "@/lib/proxyRoutes";
+import { guardApiAccess } from "@/lib/auth";
+import { guardAndProxy } from "@/lib/guardedRustProxy";
+import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
+import {
+  BRIDGE_TTYD_RELAY_WS_QUERY_PARAM,
+  createBridgeTtydRelayWebSocketUrl,
+  injectBridgeTtydRelayShim,
+  resolveBridgeSessionTarget,
+} from "@/lib/bridgeTtyd";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export const GET = guardedSessionProxyParamRoute(
-  ({ id }) => `/api/sessions/${encodeURIComponent(id ?? "")}/terminal/ttyd`,
-  { role: "viewer" },
-);
+type RouteContext = {
+  params: Promise<{ id: string }>;
+};
+
+export async function GET(
+  request: Request,
+  context: RouteContext,
+): Promise<Response> {
+  const { id } = await context.params;
+  const target = resolveBridgeSessionTarget(id, request);
+  if (!target) {
+    return guardAndProxy(
+      request,
+      `/api/sessions/${encodeURIComponent(id ?? "")}/terminal/ttyd`,
+      { role: "viewer" },
+    );
+  }
+
+  const denied = await guardApiAccess(request, "viewer");
+  if (denied) {
+    return denied;
+  }
+
+  const proxied = await proxyToBridgeDevice(
+    request,
+    target.bridgeId,
+    `/api/sessions/${encodeURIComponent(target.sessionId)}/terminal/ttyd`,
+    {
+      pathOverride: `/api/sessions/${encodeURIComponent(target.sessionId)}/terminal/ttyd`,
+    },
+  );
+
+  const contentType = proxied.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.startsWith("text/html")) {
+    return proxied;
+  }
+
+  let relayTtydWsUrl = new URL(request.url).searchParams.get(BRIDGE_TTYD_RELAY_WS_QUERY_PARAM)?.trim() ?? "";
+  if (!relayTtydWsUrl) {
+    relayTtydWsUrl = await createBridgeTtydRelayWebSocketUrl(
+      request,
+      target.bridgeId,
+      target.sessionId,
+    );
+  }
+
+  const html = await proxied.text();
+  return new Response(injectBridgeTtydRelayShim(html, relayTtydWsUrl), {
+    status: proxied.status,
+    statusText: proxied.statusText,
+    headers: new Headers(proxied.headers),
+  });
+}
