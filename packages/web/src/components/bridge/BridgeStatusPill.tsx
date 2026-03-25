@@ -19,7 +19,7 @@ import {
   requestBridgeRepair,
   requestBridgeServiceRestart,
 } from "@/lib/bridgeDeviceControl";
-import { buildBridgeInstallScriptUrl } from "@/lib/bridgeOnboarding";
+import { buildBridgeInstallScriptUrl, buildBridgeRepairHref } from "@/lib/bridgeOnboarding";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
@@ -207,6 +207,15 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
   const recentPairingDevice = recentPairingDeviceId
     ? devices.find((device) => device.device_id === recentPairingDeviceId) ?? null
     : null;
+  const deviceScreenHref = shouldLinkToDeviceScreen
+    ? selectedBridgeDevice?.device_id
+      ? buildBridgeRepairHref(selectedBridgeDevice.device_id)
+      : recentPairingDevice?.device_id
+        ? buildBridgeRepairHref(recentPairingDevice.device_id)
+        : devices[0]?.device_id
+          ? buildBridgeRepairHref(devices[0].device_id)
+          : BRIDGE_CONNECT_PATH
+    : BRIDGE_CONNECT_PATH;
   const connected = connectedDevices.length > 0;
   const title = !relayConfigured
     ? "Bridge relay URL is not configured"
@@ -316,33 +325,15 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
   if (shouldLinkToDeviceScreen) {
     return (
       <Link
-        href={BRIDGE_CONNECT_PATH}
+        href={deviceScreenHref}
         prefetch
         className="inline-flex"
-        title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
+        title={devices.length > 0 ? "Reconnect paired device" : "Pair a device"}
       >
         <StatusBadge
           connected={false}
           className={className}
-          title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
-          suffix={<ArrowUpRight className="h-3.5 w-3.5" />}
-        />
-      </Link>
-    );
-  }
-
-  if (shouldLinkToDeviceScreen) {
-    return (
-      <Link
-        href={BRIDGE_CONNECT_PATH}
-        prefetch
-        className="inline-flex"
-        title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
-      >
-        <StatusBadge
-          connected={false}
-          className={className}
-          title={devices.length > 0 ? "Open paired devices" : "Pair a device"}
+          title={devices.length > 0 ? "Reconnect paired device" : "Pair a device"}
           suffix={<ArrowUpRight className="h-3.5 w-3.5" />}
         />
       </Link>
