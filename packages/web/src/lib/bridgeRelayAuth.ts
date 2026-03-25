@@ -90,11 +90,15 @@ export async function buildBridgeRelayAuthHeaders(
   return appendLegacyBridgeRelayAuthHeaders(headers, access, userId);
 }
 
-export function buildBridgeRelayWebSocketUrl(pathname: string, _wsProtocol?: string): string {
+export function buildBridgeRelayWebSocketUrl(pathname: string, jwt?: string): string {
   const relayUrl = new URL(requireBridgeRelayUrl());
   relayUrl.protocol = relayUrl.protocol === "https:" ? "wss:" : "ws:";
   relayUrl.pathname = pathname;
   relayUrl.search = "";
   relayUrl.hash = "";
+  const trimmedJwt = jwt?.trim();
+  if (trimmedJwt) {
+    relayUrl.searchParams.set("jwt", trimmedJwt);
+  }
   return relayUrl.toString();
 }
