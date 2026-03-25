@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ConnectInfo;
 use axum::extract::{Path, Query, State};
-use axum::http::{header::AUTHORIZATION, HeaderMap, Method, StatusCode};
+use axum::http::{
+    header::{AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL},
+    HeaderMap, Method, StatusCode,
+};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
@@ -12,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -127,25 +132,34 @@ const TERMINAL_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(8);
 struct RateBucket {
     tokens: f64,
     last_refill: Instant,
+    capacity: f64,
+    refill_per_second: f64,
 }
 
 impl RateBucket {
     fn new(now: Instant) -> Self {
+        Self::with_limits(
+            now,
+            DEFAULT_RATE_LIMIT_BURST as f64,
+            DEFAULT_RATE_LIMIT_REFILL_PER_SECOND,
+        )
+    }
+
+    fn with_limits(now: Instant, capacity: f64, refill_per_second: f64) -> Self {
         Self {
-            tokens: 120.0,
+            tokens: capacity,
             last_refill: now,
+            capacity,
+            refill_per_second,
         }
     }
 
     fn allow(&mut self, now: Instant) -> bool {
-        const MAX_TOKENS: f64 = 120.0;
-        const REFILL_PER_SECOND: f64 = 2.0;
-
         let elapsed = now
             .saturating_duration_since(self.last_refill)
             .as_secs_f64();
         self.last_refill = now;
-        self.tokens = (self.tokens + elapsed * REFILL_PER_SECOND).min(MAX_TOKENS);
+        self.tokens = (self.tokens + elapsed * self.refill_per_second).min(self.capacity);
         if self.tokens < 1.0 {
             return false;
         }
@@ -320,11 +334,22 @@ const RELAY_JWT_ISSUER: &str = "conductor-dashboard";
 const RELAY_JWT_AUDIENCE: &str = "conductor-relay";
 const RELAY_JWT_SCOPE_DASHBOARD_API: &str = "dashboard-api";
 const RELAY_JWT_SCOPE_TERMINAL_BROWSER: &str = "terminal-browser";
+const DEFAULT_RATE_LIMIT_BURST: usize = 120;
+const DEFAULT_RATE_LIMIT_REFILL_PER_SECOND: f64 = 2.0;
+const DEVICE_CLAIM_RATE_LIMIT_BURST: usize = 12;
+const DEVICE_CLAIM_RATE_LIMIT_REFILL_PER_SECOND: f64 = 0.1;
+const MAX_PENDING_PAIRING_CODES: usize = 256;
+const MAX_PENDING_DEVICE_CLAIMS: usize = 1024;
+const PAIRING_CODE_LENGTH: usize = 10;
 const PAIRING_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const DEVICE_ACCESS_TOKEN_TTL_SECS: u64 = 3600;
 const DEVICE_PROXY_TIMEOUT: Duration = Duration::from_secs(45);
 const DEVICE_PICKER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BRIDGE_PROXY_META_KEY: &str = "$bridgeProxy";
+
+fn device_claim_rate_limit_key(remote_addr: SocketAddr) -> String {
+    format!("device-claims:create:{}", remote_addr.ip())
+}
 
 pub async fn serve() -> Result<()> {
     let bind_addr = env::var("RELAY_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
@@ -332,7 +357,11 @@ pub async fn serve() -> Result<()> {
     let app = build_router(state);
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(%bind_addr, "relay listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -452,25 +481,29 @@ async fn create_pairing_code(
             .into_response();
     };
 
-    let code = state
+    match state
         .create_pairing_code(user_id, body.suggested_name.unwrap_or_default())
-        .await;
-
-    (
-        StatusCode::CREATED,
-        Json(DeviceCodeCreateResponse {
-            code,
-            expires_in: PAIRING_CODE_TTL.as_secs(),
-        }),
-    )
-        .into_response()
+        .await
+    {
+        Ok(code) => (
+            StatusCode::CREATED,
+            Json(DeviceCodeCreateResponse {
+                code,
+                expires_in: PAIRING_CODE_TTL.as_secs(),
+            }),
+        )
+            .into_response(),
+        Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
+    }
 }
 
 async fn create_device_claim(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<RelayState>,
     Json(body): Json<DeviceClaimCreateRequest>,
 ) -> Response {
-    match state.create_device_claim(body).await {
+    let rate_limit_key = device_claim_rate_limit_key(remote_addr);
+    match state.create_device_claim(body, &rate_limit_key).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err((status, message)) => (status, Json(json!({ "error": message }))).into_response(),
     }
@@ -679,9 +712,10 @@ async fn browser_terminal_ws(
     ws: WebSocketUpgrade,
     State(state): State<RelayState>,
     Path(terminal_id): Path<String>,
+    headers: HeaderMap,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    let Some(jwt) = query.jwt.as_deref() else {
+    let Some(jwt) = resolve_websocket_protocol(&headers).or_else(|| query.jwt.clone()) else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Missing browser relay token." })),
@@ -689,7 +723,7 @@ async fn browser_terminal_ws(
             .into_response();
     };
 
-    let Some(user_id) = resolve_browser_ws_user_id(jwt) else {
+    let Some(user_id) = resolve_browser_ws_user_id(&jwt) else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "Invalid browser relay token." })),
@@ -702,6 +736,7 @@ async fn browser_terminal_ws(
         .await
     {
         Ok(()) => ws
+            .protocols([jwt])
             .on_upgrade(move |socket| async move {
                 if let Err(err) = handle_terminal_connection(
                     state,
@@ -1608,6 +1643,31 @@ impl RelayState {
         bucket.allow(now)
     }
 
+    async fn consume_rate_limit_with_policy(
+        &self,
+        key: &str,
+        now: Instant,
+        capacity: f64,
+        refill_per_second: f64,
+    ) -> bool {
+        let mut inner = self.inner.lock().await;
+        let bucket = inner
+            .rate_limits
+            .entry(key.to_string())
+            .or_insert_with(|| RateBucket::with_limits(now, capacity, refill_per_second));
+        bucket.allow(now)
+    }
+
+    async fn consume_device_claim_rate_limit(&self, rate_limit_key: &str, now: Instant) -> bool {
+        self.consume_rate_limit_with_policy(
+            rate_limit_key,
+            now,
+            DEVICE_CLAIM_RATE_LIMIT_BURST as f64,
+            DEVICE_CLAIM_RATE_LIMIT_REFILL_PER_SECOND,
+        )
+        .await
+    }
+
     async fn disconnect_bridge_for_user(
         &self,
         user_id: &str,
@@ -1662,10 +1722,21 @@ impl RelayState {
         (bridge_txs, browser_txs, pending_api_requests, removed)
     }
 
-    async fn create_pairing_code(&self, user_id: String, _suggested_name: String) -> String {
+    async fn create_pairing_code(
+        &self,
+        user_id: String,
+        _suggested_name: String,
+    ) -> std::result::Result<String, (StatusCode, &'static str)> {
         let mut inner = self.inner.lock().await;
         inner.prune_pairing_codes();
         inner.prune_device_claims();
+
+        if inner.pairing_codes.len() >= MAX_PENDING_PAIRING_CODES {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many pending pairing codes.",
+            ));
+        }
 
         let code = generate_pairing_code();
         let now = Instant::now();
@@ -1676,12 +1747,13 @@ impl RelayState {
                 expires_at: now + PAIRING_CODE_TTL,
             },
         );
-        code
+        Ok(code)
     }
 
     async fn create_device_claim(
         &self,
         request: DeviceClaimCreateRequest,
+        rate_limit_key: &str,
     ) -> std::result::Result<DeviceClaimCreateResponse, (StatusCode, &'static str)> {
         if request.device_id.trim().is_empty()
             || request.hostname.trim().is_empty()
@@ -1691,12 +1763,29 @@ impl RelayState {
             return Err((StatusCode::BAD_REQUEST, "Missing required claim fields."));
         }
 
+        let now = Instant::now();
+        if !self
+            .consume_device_claim_rate_limit(rate_limit_key, now)
+            .await
+        {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many device claim requests. Please try again later.",
+            ));
+        }
+
         let claim_token = generate_claim_token();
         let poll_token = generate_claim_token();
-        let expires_at = Instant::now() + PAIRING_CODE_TTL;
+        let expires_at = now + PAIRING_CODE_TTL;
 
         let mut inner = self.inner.lock().await;
         inner.prune_device_claims();
+        if inner.device_claims.len() >= MAX_PENDING_DEVICE_CLAIMS {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many pending device claims.",
+            ));
+        }
         inner.device_claims.insert(
             claim_token.clone(),
             PendingDeviceClaim {
@@ -2288,6 +2377,19 @@ fn resolve_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<Strin
         .map(ToOwned::to_owned)
 }
 
+fn resolve_websocket_protocol(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
 fn resolve_dashboard_api_user_id(headers: &HeaderMap) -> Option<String> {
     let jwt = resolve_token(headers, None)?;
     decode_relay_user_id(&jwt, RELAY_JWT_SCOPE_DASHBOARD_API).ok()
@@ -2383,7 +2485,7 @@ fn issue_device_pairing(
 fn generate_pairing_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let bytes = Uuid::new_v4().into_bytes();
-    (0..6)
+    (0..PAIRING_CODE_LENGTH)
         .map(|index| {
             let position = bytes[index] as usize % ALPHABET.len();
             ALPHABET[position] as char
@@ -2407,13 +2509,16 @@ mod tests {
     async fn device_claim_pairs_and_polls_once() {
         let state = RelayState::default();
         let created = state
-            .create_device_claim(DeviceClaimCreateRequest {
-                device_id: "device-123".to_string(),
-                hostname: "macbook-pro".to_string(),
-                os: "darwin".to_string(),
-                arch: "arm64".to_string(),
-                suggested_name: Some("My Laptop".to_string()),
-            })
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-123".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: Some("My Laptop".to_string()),
+                },
+                "device-claims:create:test-client",
+            )
             .await
             .expect("claim should be created");
 
@@ -2448,6 +2553,154 @@ mod tests {
 
         let missing = state.poll_device_claim(&created.poll_token).await;
         assert!(matches!(missing, Err((StatusCode::NOT_FOUND, _))));
+    }
+
+    #[test]
+    fn generate_pairing_code_uses_the_expected_length_and_charset() {
+        let code = generate_pairing_code();
+        const ALPHABET: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+        assert_eq!(code.len(), PAIRING_CODE_LENGTH);
+        assert!(code.chars().all(|ch| ALPHABET.contains(ch)));
+    }
+
+    #[tokio::test]
+    async fn create_pairing_code_rejects_when_the_queue_is_full() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            let expires_at = Instant::now() + PAIRING_CODE_TTL;
+
+            for index in 0..MAX_PENDING_PAIRING_CODES {
+                inner.pairing_codes.insert(
+                    format!("PAIR{index:06}"),
+                    PendingPairing {
+                        owner_user_id: format!("user-{index}"),
+                        expires_at,
+                    },
+                );
+            }
+        }
+
+        let err = state
+            .create_pairing_code("user@example.com".to_string(), "My Laptop".to_string())
+            .await
+            .expect_err("pairing code creation should be rate-limited when full");
+
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn create_device_claim_rejects_when_the_queue_is_full() {
+        let state = RelayState::default();
+        {
+            let mut inner = state.inner.lock().await;
+            let expires_at = Instant::now() + PAIRING_CODE_TTL;
+
+            for index in 0..MAX_PENDING_DEVICE_CLAIMS {
+                inner.device_claims.insert(
+                    format!("claim-{index:06}"),
+                    PendingDeviceClaim {
+                        poll_token: format!("poll-{index:06}"),
+                        device_id: format!("device-{index}"),
+                        hostname: format!("host-{index}"),
+                        os: "darwin".to_string(),
+                        arch: "arm64".to_string(),
+                        suggested_name: None,
+                        expires_at,
+                        paired_response: None,
+                    },
+                );
+            }
+        }
+
+        let err = state
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-overflow".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: None,
+                },
+                "device-claims:create:test-client",
+            )
+            .await
+            .expect_err("device claim creation should be rate-limited when full");
+
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn create_device_claim_is_rate_limited_before_the_queue_fills() {
+        let state = RelayState::default();
+
+        for index in 0..DEVICE_CLAIM_RATE_LIMIT_BURST {
+            state
+                .create_device_claim(
+                    DeviceClaimCreateRequest {
+                        device_id: format!("device-{index}"),
+                        hostname: format!("host-{index}"),
+                        os: "darwin".to_string(),
+                        arch: "arm64".to_string(),
+                        suggested_name: None,
+                    },
+                    "device-claims:create:test-client",
+                )
+                .await
+                .expect("device claim should be created before the burst is exhausted");
+        }
+
+        let err = state
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-overflow".to_string(),
+                    hostname: "macbook-pro".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: None,
+                },
+                "device-claims:create:test-client",
+            )
+            .await
+            .expect_err("device claim creation should be rate-limited before the queue fills");
+
+        assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn create_device_claim_rate_limit_is_scoped_per_caller() {
+        let state = RelayState::default();
+
+        for index in 0..DEVICE_CLAIM_RATE_LIMIT_BURST {
+            state
+                .create_device_claim(
+                    DeviceClaimCreateRequest {
+                        device_id: format!("device-a-{index}"),
+                        hostname: format!("host-a-{index}"),
+                        os: "darwin".to_string(),
+                        arch: "arm64".to_string(),
+                        suggested_name: None,
+                    },
+                    "device-claims:create:caller-a",
+                )
+                .await
+                .expect("first caller should stay within its own bucket");
+        }
+
+        state
+            .create_device_claim(
+                DeviceClaimCreateRequest {
+                    device_id: "device-b-0".to_string(),
+                    hostname: "host-b-0".to_string(),
+                    os: "darwin".to_string(),
+                    arch: "arm64".to_string(),
+                    suggested_name: None,
+                },
+                "device-claims:create:caller-b",
+            )
+            .await
+            .expect("different callers should get independent rate-limit buckets");
     }
 
     #[test]

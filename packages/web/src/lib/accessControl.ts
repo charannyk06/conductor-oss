@@ -42,9 +42,20 @@ export function isLoopbackHost(hostname: string | null | undefined): boolean {
   const normalized = (hostname ?? "").trim().toLowerCase();
   return normalized === "localhost"
     || normalized === "127.0.0.1"
-    || normalized === "0.0.0.0"
     || normalized === "::1"
     || normalized === "[::1]";
+}
+
+export function allowsLocalUnauthenticatedAccess(): boolean {
+  const configured = (process.env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED ?? "").trim().toLowerCase();
+  if (configured === "true" || configured === "1" || configured === "yes") {
+    return true;
+  }
+  if (configured === "false" || configured === "0" || configured === "no") {
+    return false;
+  }
+
+  return process.env.NODE_ENV !== "production";
 }
 
 export function roleMeetsRequirement(

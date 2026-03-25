@@ -42,5 +42,6 @@ test("roleMeetsRequirement enforces the viewer/operator/admin hierarchy", () => 
 test("isLoopbackHost recognizes local dashboard hosts", () => {
   assert.equal(isLoopbackHost("localhost"), true);
   assert.equal(isLoopbackHost("127.0.0.1"), true);
+  assert.equal(isLoopbackHost("0.0.0.0"), false);
   assert.equal(isLoopbackHost("app.example.com"), false);
 });

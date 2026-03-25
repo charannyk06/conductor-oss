@@ -4,7 +4,12 @@ import { parse as parseYaml } from "yaml";
 import type { DashboardAccessConfig, DashboardRole } from "@conductor-oss/core/types";
 import { headers } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
-import { resolveRoleForEmail, roleMeetsRequirement, isLoopbackHost } from "@/lib/accessControl";
+import {
+  allowsLocalUnauthenticatedAccess,
+  isLoopbackHost,
+  resolveRoleForEmail,
+  roleMeetsRequirement,
+} from "@/lib/accessControl";
 import {
   getDefaultPostSignInRedirectTarget,
   buildHostedSignInPath,
@@ -197,10 +202,6 @@ function isApproved(user: ClerkUser): boolean {
   return raw.conductorApproved === true;
 }
 
-function envRequiresAuth(): boolean {
-  return (process.env.CONDUCTOR_REQUIRE_AUTH ?? "").trim().toLowerCase() === "true";
-}
-
 function legacyRoleEnvFallback(): {
   allowedEmails: string[];
   allowedDomains: string[];
@@ -211,11 +212,6 @@ function legacyRoleEnvFallback(): {
     allowedDomains: parseCsv(process.env.CONDUCTOR_ALLOWED_DOMAINS),
     adminEmails: parseCsv(process.env.CONDUCTOR_ADMIN_EMAILS),
   };
-}
-
-function hasLegacyAllowListConfigured(): boolean {
-  const { allowedEmails, allowedDomains, adminEmails } = legacyRoleEnvFallback();
-  return allowedEmails.length > 0 || allowedDomains.length > 0 || adminEmails.length > 0;
 }
 
 function passesLegacyEmailRestrictions(email: string): boolean {
@@ -527,17 +523,13 @@ export async function getDashboardAccess(request?: Request): Promise<DashboardAc
   const clerkAccess = await resolveClerkAccess(access, host);
   if (clerkAccess) return clerkAccess;
 
-  const requireAuth = access?.requireAuth === true || envRequiresAuth() || hasLegacyAllowListConfigured();
-
-  if (!loopbackRequest) {
+  if (!loopbackRequest || !allowsLocalUnauthenticatedAccess()) {
     return {
       ok: false,
       authenticated: false,
       reason: "Authentication is required for non-local dashboard access",
     };
   }
-
-  if (requireAuth) return localAccess;
 
   return localAccess;
 }

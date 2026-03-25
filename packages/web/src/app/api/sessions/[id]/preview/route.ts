@@ -4,6 +4,7 @@ import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
 import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { loadPreviewSessionContext } from "@/lib/previewSession";
+import { TERMINAL_STATUSES } from "@/lib/types";
 import type { PreviewCommandRequest, PreviewStatusResponse } from "@/lib/previewTypes";
 
 export const runtime = "nodejs";
@@ -40,6 +41,15 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
   }
 
   const manager = getPreviewBrowserManager();
+  if (previewContext.session && TERMINAL_STATUSES.has(previewContext.session.status)) {
+    await manager.destroySession(id);
+    const status = withLookupError(
+      await manager.getStatus(id, previewContext.candidateUrls),
+      previewContext.error,
+    );
+    return NextResponse.json(status, { headers: { "Cache-Control": "no-store" } });
+  }
+
   await manager.configureBridgePreview(
     id,
     previewContext.bridgePreview,

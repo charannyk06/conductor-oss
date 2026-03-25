@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
-import { getDashboardAccess, guardApiAccess } from "@/lib/auth";
+import { NextRequest, NextResponse } from "next/server";
+import { getDashboardAccess, guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import {
   buildBridgeRelayAuthHeaders,
   buildBridgeRelayWebSocketUrl,
@@ -18,12 +18,17 @@ type RouteContext = {
 };
 
 export async function POST(
-  request: Request,
+  request: NextRequest,
   context: RouteContext,
 ): Promise<Response> {
-  const denied = await guardApiAccess(request, "viewer");
+  const denied = await guardApiAccess(request, "operator");
   if (denied) {
     return denied;
+  }
+
+  const deniedAction = guardApiActionAccess(request);
+  if (deniedAction) {
+    return deniedAction;
   }
 
   const { id } = await context.params;
@@ -78,8 +83,8 @@ export async function POST(
     return NextResponse.json({
       wsUrl: buildBridgeRelayWebSocketUrl(
         `/terminal/${encodeURIComponent(payload.terminal_id)}/browser`,
-        jwt,
       ),
+      wsProtocol: jwt,
     });
   } catch (error) {
     return NextResponse.json(

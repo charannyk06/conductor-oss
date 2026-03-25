@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendLegacyBridgeRelayAuthHeaders, resolveBridgeRelayUserId } from "./bridgeRelayAuth";
+import {
+  appendLegacyBridgeRelayAuthHeaders,
+  buildBridgeRelayWebSocketUrl,
+  resolveBridgeRelayUserId,
+} from "./bridgeRelayAuth";
 
 test("resolveBridgeRelayUserId prefers the normalized dashboard email", () => {
   assert.equal(
@@ -72,4 +76,22 @@ test("appendLegacyBridgeRelayAuthHeaders includes the legacy local user header f
   assert.equal(headers.get("x-conductor-proxy-authorized"), "true");
   assert.equal(headers.get("x-conductor-access-email"), null);
   assert.equal(headers.get("x-bridge-user-id"), "local-admin");
+});
+
+test("buildBridgeRelayWebSocketUrl keeps websocket auth material out of the url", () => {
+  const previousRelayUrl = process.env.CONDUCTOR_BRIDGE_RELAY_URL;
+  process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com/base/";
+
+  try {
+    assert.equal(
+      buildBridgeRelayWebSocketUrl("/terminal/terminal-123/browser", "jwt-placeholder"),
+      "wss://relay.example.com/terminal/terminal-123/browser",
+    );
+  } finally {
+    if (previousRelayUrl === undefined) {
+      delete process.env.CONDUCTOR_BRIDGE_RELAY_URL;
+    } else {
+      process.env.CONDUCTOR_BRIDGE_RELAY_URL = previousRelayUrl;
+    }
+  }
 });
