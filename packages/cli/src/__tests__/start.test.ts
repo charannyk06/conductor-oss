@@ -3,12 +3,30 @@ import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { isLoopbackHost, quoteWindowsCliArg, resolveRustBackendLaunch } from "../commands/start.js";
+import {
+  isLoopbackHost,
+  quoteWindowsCliArg,
+  resolveLocalDashboardAuthEnv,
+  resolveRustBackendLaunch,
+} from "../commands/start.js";
 
 test("isLoopbackHost recognizes local-only bind hosts", () => {
   assert.equal(isLoopbackHost("127.0.0.1"), true);
   assert.equal(isLoopbackHost("localhost"), true);
   assert.equal(isLoopbackHost("0.0.0.0"), false);
+});
+
+test("resolveLocalDashboardAuthEnv enables loopback packaged dashboards unless overridden", () => {
+  assert.deepEqual(resolveLocalDashboardAuthEnv("127.0.0.1", {}), {
+    CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED: "true",
+  });
+  assert.deepEqual(resolveLocalDashboardAuthEnv("localhost", {}), {
+    CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED: "true",
+  });
+  assert.deepEqual(resolveLocalDashboardAuthEnv("0.0.0.0", {}), {});
+  assert.deepEqual(resolveLocalDashboardAuthEnv("127.0.0.1", {
+    CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED: "false",
+  }), {});
 });
 
 test("resolveRustBackendLaunch prefers the newest repo-local Rust binary over bundled fallbacks", () => {
