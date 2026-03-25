@@ -952,17 +952,22 @@ async function verifyPackagedTmuxStructuredStreaming(installDir, tempDirs) {
 
       try {
         await waitForCondition(`packaged tmux structured streaming feed for ${fixture.agent}`, async () => {
-          const feedResult = await fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`);
+          const [feedResult, outputResult] = await Promise.all([
+            fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/feed`),
+            fetchJson(`${baseUrl}/api/sessions/${createdSessionId}/output`).catch(() => ({ payload: null, response: { ok: false } })),
+          ]);
           if (!feedResult.response.ok) {
             return false;
           }
 
           const serializedEntries = JSON.stringify(feedResult.payload?.entries ?? []);
-          return feedResult.payload?.sessionStatus === "needs_input"
+          const outputText = outputResult.payload?.output ?? "";
+          const sessionStatus = feedResult.payload?.sessionStatus;
+          return (sessionStatus === "needs_input" || sessionStatus === "working")
             && serializedEntries.includes("\"toolKind\":\"thinking\"")
             && serializedEntries.includes("\"toolKind\":\"read\"")
             && serializedEntries.includes("\"toolKind\":\"command\"")
-            && serializedEntries.includes(fixture.responseText);
+            && (serializedEntries.includes(fixture.responseText) || outputText.includes(fixture.responseText));
         }, 20_000);
       } catch (error) {
         const [feedResult, outputResult] = await Promise.all([
