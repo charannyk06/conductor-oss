@@ -11,6 +11,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/health", get(health_check))
         .route("/api/health/sessions", get(session_health))
+        .route("/metrics", get(prometheus_metrics))
 }
 
 async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
@@ -118,4 +119,87 @@ async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json
         StatusCode::OK,
         Json(json!({ "metrics": metrics, "summary": summary })),
     )
+}
+
+/// Prometheus metrics endpoint
+/// Returns metrics in Prometheus text format for scraping.
+async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> (StatusCode, String) {
+    let executors = state.executors.read().await;
+    let sessions = state.sessions.read().await;
+    
+    let total_sessions = sessions.len();
+    let queued = sessions
+        .values()
+        .filter(|s| s.status == SessionStatus::Queued)
+        .count();
+    let spawning = sessions
+        .values()
+        .filter(|s| s.status == SessionStatus::Spawning)
+        .count();
+    let working = sessions
+        .values()
+        .filter(|s| s.status == SessionStatus::Working)
+        .count();
+    let completed = sessions
+        .values()
+        .filter(|s| matches!(s.status, SessionStatus::Completed | SessionStatus::Done | SessionStatus::Archived))
+        .count();
+    let errored = sessions
+        .values()
+        .filter(|s| s.status == SessionStatus::Errored)
+        .count();
+    let stuck = sessions
+        .values()
+        .filter(|s| s.status == SessionStatus::Stuck)
+        .count();
+    
+    let metrics = format!(
+        "# HELP conductor_sessions_total Total number of sessions
+# TYPE conductor_sessions_total gauge
+conductor_sessions_total {{}} {}
+
+# HELP conductor_sessions_queued Number of queued sessions
+# TYPE conductor_sessions_queued gauge
+conductor_sessions_queued {{}} {}
+
+# HELP conductor_sessions_spawning Number of sessions being spawned
+# TYPE conductor_sessions_spawning gauge
+conductor_sessions_spawning {{}} {}
+
+# HELP conductor_sessions_working Number of active sessions
+# TYPE conductor_sessions_working gauge
+conductor_sessions_working {{}} {}
+
+# HELP conductor_sessions_complete Number of completed sessions
+# TYPE conductor_sessions_complete gauge
+conductor_sessions_complete {{}} {}
+
+# HELP conductor_sessions_errored Number of errored sessions
+# TYPE conductor_sessions_errored gauge
+conductor_sessions_errored {{}} {}
+
+# HELP conductor_sessions_stuck Number of stuck sessions
+# TYPE conductor_sessions_stuck gauge
+conductor_sessions_stuck {{}} {}
+
+# HELP conductor_executors_available Number of available agent executors
+# TYPE conductor_executors_available gauge
+conductor_executors_available {{}} {}
+
+# HELP conductor_uptime_seconds Server uptime in seconds
+# TYPE conductor_uptime_seconds gauge
+conductor_uptime_seconds {{}} {}
+",
+        total_sessions,
+        queued,
+        spawning,
+        working,
+        completed,
+        errored,
+        stuck,
+        executors.len(),
+        (chrono::Utc::now() - state.started_at).num_seconds().max(0),
+    );
+    
+    (StatusCode::OK, metrics)
 }
