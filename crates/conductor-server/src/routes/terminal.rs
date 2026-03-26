@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -995,13 +995,31 @@ fn ttyd_frontend_proxy_ws_path(session_id: &str, token: Option<&str>) -> String 
     }
 }
 
+fn client_requests_tty_subprotocol(headers: &HeaderMap) -> bool {
+    headers
+        .get(SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|protocol| protocol.eq_ignore_ascii_case("tty"))
+        })
+        .unwrap_or(false)
+}
+
 async fn terminal_ttyd_frontend_websocket(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<TerminalQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let ws = ws.protocols(["tty"]);
+    let ws = if client_requests_tty_subprotocol(&headers) {
+        ws.protocols(["tty"])
+    } else {
+        ws
+    };
     let Some(session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
@@ -1838,6 +1856,21 @@ mod tests {
         assert!(!terminal_snapshot_live_requested(Some("0")));
         assert!(!terminal_snapshot_live_requested(Some("false")));
         assert!(!terminal_snapshot_live_requested(None));
+    }
+
+    #[test]
+    fn client_requests_tty_subprotocol_detects_tty_and_ignores_missing_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("tty, binary"),
+        );
+        assert!(client_requests_tty_subprotocol(&headers));
+
+        let mut non_tty_headers = HeaderMap::new();
+        non_tty_headers.insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("binary"));
+        assert!(!client_requests_tty_subprotocol(&non_tty_headers));
+        assert!(!client_requests_tty_subprotocol(&HeaderMap::new()));
     }
 
     #[test]
