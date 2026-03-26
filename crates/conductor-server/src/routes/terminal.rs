@@ -1581,8 +1581,8 @@ async fn handle_ttyd_frontend_socket(
                             continue;
                         }
                         if let Some(snapshot) = state.current_terminal_restore_snapshot(&session_id).await {
-                            let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
-                            last_sequence_sent = snapshot.sequence;
+                            let bytes =
+                                render_restore_snapshot_bytes(&snapshot, &mut last_sequence_sent);
                             if !bytes.is_empty()
                                 && client_socket.send(Message::Binary(ttyd_protocol::encode_output(&bytes).into())).await.is_err()
                             {
@@ -1595,6 +1595,14 @@ async fn handle_ttyd_frontend_socket(
             }
         }
     }
+}
+
+fn render_restore_snapshot_bytes(
+    snapshot: &TerminalRestoreSnapshot,
+    last_sequence_sent: &mut u64,
+) -> Vec<u8> {
+    *last_sequence_sent = snapshot.sequence;
+    snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1621,9 +1629,8 @@ async fn handle_ttyd_frontend_client_message(
                 ))
                 .await?;
             if let Some(snapshot) = snapshot.as_ref() {
-                let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
+                let bytes = render_restore_snapshot_bytes(snapshot, last_sequence_sent);
                 if !bytes.is_empty() {
-                    *last_sequence_sent = snapshot.sequence;
                     client_socket
                         .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
                         .await?;
@@ -1648,9 +1655,8 @@ async fn handle_ttyd_frontend_client_message(
             if *paused {
                 *paused = false;
                 if let Some(snapshot) = state.current_terminal_restore_snapshot(session_id).await {
-                    let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
+                    let bytes = render_restore_snapshot_bytes(&snapshot, last_sequence_sent);
                     if !bytes.is_empty() {
-                        *last_sequence_sent = snapshot.sequence;
                         client_socket
                             .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
                             .await?;
@@ -1803,6 +1809,7 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::TERMINAL_RESTORE_SNAPSHOT_VERSION;
     use axum::body::{to_bytes, Body};
     use axum::extract::{Path, State};
     use axum::http::Request;
@@ -1896,6 +1903,26 @@ mod tests {
         non_tty_headers.insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("binary"));
         assert!(!client_requests_tty_subprotocol(&non_tty_headers));
         assert!(!client_requests_tty_subprotocol(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn render_restore_snapshot_bytes_advances_sequence_even_for_empty_render() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: TERMINAL_RESTORE_SNAPSHOT_VERSION,
+            sequence: 42,
+            cols: 120,
+            rows: 32,
+            has_output: true,
+            modes: Default::default(),
+            history: Vec::new(),
+            screen: Vec::new(),
+        };
+        let mut last_sequence_sent = 7;
+
+        let bytes = render_restore_snapshot_bytes(&snapshot, &mut last_sequence_sent);
+
+        assert_eq!(last_sequence_sent, 42);
+        assert!(bytes.is_empty());
     }
 
     #[test]

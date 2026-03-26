@@ -1,4 +1,5 @@
 use axum::body::Body;
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::State;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::Next;
@@ -63,8 +64,8 @@ static GLOBAL_RATE_LIMITER: std::sync::LazyLock<GlobalRateLimiter, fn() -> Globa
 fn extract_peer_ip(request: &Request<Body>) -> String {
     request
         .extensions()
-        .get::<SocketAddr>()
-        .map(|addr| addr.ip().to_string())
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0.ip().to_string())
         .unwrap_or_else(|| "global".to_string())
 }
 
@@ -296,7 +297,7 @@ mod tests {
             .unwrap();
         request
             .extensions_mut()
-            .insert(SocketAddr::from(([198, 51, 100, 8], 4242)));
+            .insert(ConnectInfo(SocketAddr::from(([198, 51, 100, 8], 4242))));
 
         assert_eq!(extract_rate_limit_key(&request), "198.51.100.8");
     }
