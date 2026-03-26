@@ -2,6 +2,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
+use conductor_db::repo::ErrorRepo;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -11,8 +12,7 @@ use crate::state::AppState;
 type ApiResponse = (StatusCode, Json<Value>);
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/errors/health", get(error_tracking_health))
+    Router::new().route("/api/errors/health", get(error_tracking_health))
 }
 
 fn ok(value: Value) -> ApiResponse {
@@ -24,30 +24,46 @@ fn error(status: StatusCode, message: impl Into<String>) -> ApiResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ErrorQuery {
     category: Option<String>,
+    limit: Option<i64>,
 }
 
 /// Error tracking health endpoint
-/// Returns status of error tracking system.
-/// Future: Will integrate with database errors table for full aggregation.
 async fn error_tracking_health(
-    State(_state): State<Arc<AppState>>,
-    Query(_query): Query<ErrorQuery>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ErrorQuery>,
 ) -> ApiResponse {
-    // Placeholder for full error aggregation
-    // Once error logging is integrated with sessions and terminal I/O,
-    // this will return aggregated error statistics from the errors table.
-    
+    let category = query
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let pool = state.db.pool();
+
+    let summary = match ErrorRepo::summary(pool, category).await {
+        Ok(summary) => summary,
+        Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    let recent = match ErrorRepo::recent(pool, category, limit).await {
+        Ok(rows) => rows,
+        Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+
     ok(json!({
         "status": "enabled",
-        "message": "Error tracking infrastructure initialized. Errors are being logged to structured output.",
+        "message": "Error tracking is active and backed by SQLite.",
         "features": {
             "structured_logging": true,
             "error_aggregation": true,
             "database_tracking": true,
         },
-        "note": "Full error aggregation API will be implemented as error logging is integrated into critical paths."
+        "category": category,
+        "limit": limit,
+        "summary": summary,
+        "recent": recent,
     }))
 }
 
@@ -59,8 +75,8 @@ mod tests {
     fn error_query_parsing_works() {
         let query = ErrorQuery {
             category: Some("spawn_error".to_string()),
+            limit: Some(1),
         };
         assert_eq!(query.category, Some("spawn_error".to_string()));
     }
 }
-

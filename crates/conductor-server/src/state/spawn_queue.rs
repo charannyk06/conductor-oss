@@ -5,6 +5,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::{ConversationEntry, SessionRecord, SessionStatus, SpawnRequest};
+use crate::error_logger::{categories, ErrorContext};
 use crate::state::AppState;
 
 const MAX_GLOBAL_CONCURRENT_LAUNCHES: usize = 25;
@@ -141,6 +142,14 @@ impl AppState {
 
             if let Err(err) = self.mark_queued_session_launching(&session_id).await {
                 tracing::warn!(session_id, error = %err, "Failed to mark queued session as launching");
+                self.record_error(
+                    ErrorContext::new(categories::SPAWN_ERROR)
+                        .warning()
+                        .with_session(session_id.clone())
+                        .with_context("operation", "mark_queued_session_launching"),
+                    err.to_string(),
+                )
+                .await;
                 continue;
             }
 
@@ -151,6 +160,14 @@ impl AppState {
                 Ok(_) => {}
                 Err(err) => {
                     tracing::warn!(session_id, error = %err, "Queued session launch failed");
+                    self.record_error(
+                        ErrorContext::new(categories::SPAWN_ERROR)
+                            .critical()
+                            .with_session(session_id.clone())
+                            .with_context("operation", "spawn_session_now"),
+                        err.to_string(),
+                    )
+                    .await;
                     let _ = self
                         .mark_queued_session_failed(&session_id, &err.to_string())
                         .await;

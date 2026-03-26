@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
+use crate::error_logger::{categories, ErrorContext};
 use crate::routes::boards::{resolve_board_task_record, update_board_task_attempt_ref};
 use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
@@ -327,12 +328,14 @@ async fn spawn_session(
     Json(body): Json<SpawnBody>,
 ) -> ApiResponse {
     let project_id = body.project_id.clone();
+    let agent = body.agent.clone();
     let issue_id = body
         .issue_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string());
+    let issue_id_for_log = issue_id.clone();
     let user_prompt = body.prompt.unwrap_or_default();
     let user_attachments = body
         .attachments
@@ -428,7 +431,24 @@ async fn spawn_session(
             let session_value = state.serialize_dashboard_session(&session).await;
             created(json!({ "session": session_value }))
         }
-        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+        Err(err) => {
+            let mut ctx = ErrorContext::new(categories::SPAWN_ERROR)
+                .warning()
+                .with_project(project_id.clone())
+                .with_context("operation", "spawn_session_route");
+            if let Some(agent) = agent
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                ctx = ctx.with_context("agent", agent.to_string());
+            }
+            if let Some(issue_id) = issue_id_for_log.as_deref() {
+                ctx = ctx.with_context("issueId", issue_id);
+            }
+            state.record_error(ctx, err.to_string()).await;
+            error(StatusCode::BAD_REQUEST, err.to_string())
+        }
     }
 }
 
