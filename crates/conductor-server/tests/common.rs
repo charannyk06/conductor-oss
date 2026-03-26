@@ -280,6 +280,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(routes::app_update::router())
         .merge(routes::config::router())
+        .merge(routes::errors::router())
         .merge(routes::events::router())
         .merge(routes::health::router())
         .merge(routes::sessions::router())

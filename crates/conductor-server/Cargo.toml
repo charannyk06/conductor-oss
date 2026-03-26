@@ -41,6 +41,7 @@ which = "7"
 [dev-dependencies]
 tower = "0.5"
 rand = "0.8"
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

@@ -23,6 +23,7 @@ use super::types::{
 };
 use super::workspace::{is_process_alive, terminate_process};
 use super::{AppState, DETACHED_PID_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY};
+use crate::error_logger::{categories, ErrorContext};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
 
 const PARSER_STATE_KEY: &str = "parserState";
@@ -854,9 +855,20 @@ impl AppState {
         if let Some(timeout_duration) = config.timeout {
             let state = Arc::clone(self);
             let session_id = session_id.clone();
+            let timeout_secs = timeout_duration.as_secs();
             tokio::spawn(async move {
                 tokio::time::sleep(timeout_duration).await;
-                tracing::warn!(session_id = %session_id, "Session timed out after {}s", timeout_duration.as_secs());
+                tracing::warn!(session_id = %session_id, "Session timed out after {}s", timeout_secs);
+                state
+                    .record_error(
+                        ErrorContext::new(categories::SESSION_ERROR)
+                            .warning()
+                            .with_session(session_id.clone())
+                            .with_context("operation", "session_timeout")
+                            .with_context("timeoutSeconds", timeout_secs.to_string()),
+                        format!("Session timed out after {timeout_secs}s"),
+                    )
+                    .await;
                 let _ = state.kill_session(&session_id).await;
             });
         }

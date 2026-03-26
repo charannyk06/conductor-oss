@@ -1,3 +1,4 @@
+pub mod error_logger;
 pub mod mcp;
 pub mod notifier;
 pub mod routes;
@@ -45,6 +46,7 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     let app = Router::new()
         .merge(routes::app_update::router())
         .merge(routes::config::router())
+        .merge(routes::errors::router())
         .merge(routes::events::router())
         .merge(routes::health::router())
         .merge(routes::sessions::router())

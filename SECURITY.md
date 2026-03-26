@@ -84,6 +84,18 @@ Conductor is designed to be **local-first and low-attack-surface**:
 - The optional MCP server runs over **stdio** — it has no network listener
 - There is no port binding and no HTTP surface for the MCP server
 
+### Known CVEs
+
+The following CVEs are currently ignored in the dependency audit (`.github/workflows/security.yml`):
+
+| CVE | Dependency | Reason | Action |
+|-----|-----------|--------|--------|
+| RUSTSEC-2023-0071 | rsa (RSA crypto) | No fixed version available; low risk for Conductor's use case | Monitoring for upstream fix |
+| RUSTSEC-2024-0384 | instant | Low severity, active upstream development, acceptable transitive risk | Monitoring for upstream fix |
+| RUSTSEC-2026-0008 | git2 | Low severity, non-blocking for CLI operations | Monitoring for upstream fix |
+
+**Dependency Audit CI** runs on every PR and weekly. As fixes become available, dependencies are automatically upgraded. See `.github/workflows/security.yml` for current audit configuration.
+
 ---
 
 ## Security Best Practices for Users

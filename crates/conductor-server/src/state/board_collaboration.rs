@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::AppState;
+use crate::error_logger::{categories, ErrorContext};
 
 const MAX_BOARD_ACTIVITY: usize = 50;
 const MAX_TASK_COMMENTS: usize = 100;
@@ -94,6 +95,28 @@ impl AppState {
         Ok(())
     }
 
+    async fn record_board_collaboration_error(
+        &self,
+        project_id: &str,
+        operation: &str,
+        err: &anyhow::Error,
+    ) {
+        self.record_error(
+            ErrorContext::new(categories::IO_ERROR)
+                .warning()
+                .with_project(project_id)
+                .with_context("operation", operation)
+                .with_context(
+                    "path",
+                    self.board_collaboration_path()
+                        .to_string_lossy()
+                        .to_string(),
+                ),
+            err.to_string(),
+        )
+        .await;
+    }
+
     pub async fn push_board_activity(
         &self,
         project_id: &str,
@@ -125,6 +148,8 @@ impl AppState {
 
         if let Err(err) = self.persist_board_collaboration_snapshot(&snapshot).await {
             tracing::warn!(error = %err, "failed to persist board activity");
+            self.record_board_collaboration_error(project_id, "persist_board_activity", &err)
+                .await;
         }
     }
 
@@ -177,6 +202,8 @@ impl AppState {
 
         if let Err(err) = self.persist_board_collaboration_snapshot(&snapshot).await {
             tracing::warn!(error = %err, "failed to persist board comment");
+            self.record_board_collaboration_error(project_id, "persist_board_comment", &err)
+                .await;
         }
 
         record
@@ -230,6 +257,8 @@ impl AppState {
 
         if let Err(err) = self.persist_board_collaboration_snapshot(&snapshot).await {
             tracing::warn!(error = %err, "failed to persist webhook delivery");
+            self.record_board_collaboration_error(project_id, "persist_webhook_delivery", &err)
+                .await;
         }
     }
 

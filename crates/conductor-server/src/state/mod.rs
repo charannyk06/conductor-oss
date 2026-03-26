@@ -218,6 +218,22 @@ impl AppState {
         Ok(access)
     }
 
+    pub async fn record_error(
+        &self,
+        ctx: crate::error_logger::ErrorContext,
+        message: impl Into<String>,
+    ) {
+        let message = message.into();
+        crate::error_logger::log_error(&ctx, &message);
+        if let Err(err) = crate::error_logger::persist_error(&self.db, &ctx, &message).await {
+            tracing::warn!(
+                category = %ctx.category,
+                error = %err,
+                "failed to persist error record"
+            );
+        }
+    }
+
     async fn refresh_dashboard_snapshot_cache(&self) -> (Vec<Value>, Vec<String>) {
         let sessions = self.sessions.read().await;
         let mut list: Vec<SessionRecord> = sessions

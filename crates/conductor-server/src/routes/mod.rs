@@ -5,6 +5,7 @@ pub mod attachments;
 pub mod boards;
 pub mod config;
 pub mod context_files;
+pub mod errors;
 pub mod events;
 pub mod filesystem;
 pub mod github;
