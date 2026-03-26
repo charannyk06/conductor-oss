@@ -19,6 +19,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         ("002_session_logs", MIGRATION_002_SESSION_LOGS),
         ("003_board_snapshots", MIGRATION_003_BOARD_SNAPSHOTS),
         ("004_indexes", MIGRATION_004_INDEXES),
+        ("005_error_tracking", MIGRATION_005_ERROR_TRACKING),
     ];
 
     for (name, sql) in migrations {
@@ -174,4 +175,25 @@ const MIGRATION_004_INDEXES: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_sessions_project_state ON sessions(project_id, state);
 CREATE INDEX IF NOT EXISTS idx_sessions_pid ON sessions(pid);
 CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity_at);
+"#;
+
+const MIGRATION_005_ERROR_TRACKING: &str = r#"
+-- Error tracking and aggregation
+CREATE TABLE IF NOT EXISTS errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    error_type TEXT NOT NULL,
+    category TEXT NOT NULL,
+    message TEXT NOT NULL,
+    context TEXT,
+    session_id TEXT REFERENCES sessions(id),
+    project_id TEXT,
+    stack_trace TEXT,
+    severity TEXT DEFAULT 'error',
+    resolved_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_errors_category ON errors(category);
+CREATE INDEX IF NOT EXISTS idx_errors_severity ON errors(severity);
+CREATE INDEX IF NOT EXISTS idx_errors_session ON errors(session_id);
+CREATE INDEX IF NOT EXISTS idx_errors_created ON errors(created_at);
 "#;
