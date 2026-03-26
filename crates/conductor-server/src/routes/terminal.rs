@@ -1473,6 +1473,7 @@ async fn handle_ttyd_frontend_socket(
     let snapshot = state.current_terminal_restore_snapshot(&session_id).await;
     let mut last_sequence_sent = 0_u64;
     let mut client_ready = false;
+    let mut paused = false;
 
     loop {
         tokio::select! {
@@ -1487,6 +1488,7 @@ async fn handle_ttyd_frontend_socket(
                             &snapshot,
                             &mut client_ready,
                             &mut last_sequence_sent,
+                            &mut paused,
                             ttyd_protocol::ClientMessage::from_websocket_frame(&data),
                         )
                         .await
@@ -1504,6 +1506,7 @@ async fn handle_ttyd_frontend_socket(
                             &snapshot,
                             &mut client_ready,
                             &mut last_sequence_sent,
+                            &mut paused,
                             ttyd_protocol::ClientMessage::from_websocket_frame(text.as_bytes()),
                         )
                         .await
@@ -1532,6 +1535,9 @@ async fn handle_ttyd_frontend_socket(
             event = terminal_rx.recv(), if client_ready => {
                 match event {
                     Ok(crate::state::TerminalStreamEvent::Stream(chunk)) => {
+                        if paused {
+                            continue;
+                        }
                         if chunk.sequence <= last_sequence_sent {
                             continue;
                         }
@@ -1553,6 +1559,9 @@ async fn handle_ttyd_frontend_socket(
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if paused {
+                            continue;
+                        }
                         if let Some(snapshot) = state.current_terminal_restore_snapshot(&session_id).await {
                             let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
                             last_sequence_sent = snapshot.sequence;
@@ -1579,6 +1588,7 @@ async fn handle_ttyd_frontend_client_message(
     snapshot: &Option<TerminalRestoreSnapshot>,
     client_ready: &mut bool,
     last_sequence_sent: &mut u64,
+    paused: &mut bool,
     message: Option<ttyd_protocol::ClientMessage>,
 ) -> Result<()> {
     match message {
@@ -1613,9 +1623,24 @@ async fn handle_ttyd_frontend_client_message(
         Some(ttyd_protocol::ClientMessage::Resize { columns, rows }) => {
             let _ = state.resize_live_terminal(session_id, columns, rows).await;
         }
-        Some(ttyd_protocol::ClientMessage::Pause)
-        | Some(ttyd_protocol::ClientMessage::Resume)
-        | None => {}
+        Some(ttyd_protocol::ClientMessage::Pause) => {
+            *paused = true;
+        }
+        Some(ttyd_protocol::ClientMessage::Resume) => {
+            if *paused {
+                *paused = false;
+                if let Some(snapshot) = state.current_terminal_restore_snapshot(session_id).await {
+                    let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
+                    if !bytes.is_empty() {
+                        *last_sequence_sent = snapshot.sequence;
+                        client_socket
+                            .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
+                            .await?;
+                    }
+                }
+            }
+        }
+        None => {}
     }
 
     Ok(())

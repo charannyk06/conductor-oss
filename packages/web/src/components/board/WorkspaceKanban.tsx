@@ -2146,7 +2146,7 @@ export function WorkspaceKanban({
   }
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden sm:overflow-hidden">
+    <section className="flex h-full min-h-0 flex-col overflow-hidden sm:overflow-hidden">
       <header className="border-b border-[var(--vk-border)] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2">
           <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] p-px">
@@ -2425,7 +2425,7 @@ export function WorkspaceKanban({
         )}
       </header>
 
-      <div className="min-h-0 flex-1 flex-shrink-0 overflow-y-auto overscroll-contain p-4 touch-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 touch-pan-y sm:touch-auto">
         {loading ? (
           <div className="flex h-full items-center justify-center text-[var(--vk-text-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />

@@ -130,6 +130,10 @@ Set CONDUCTOR_UNSAFE_ALLOW_REMOTE_BACKEND=true only if you are intentionally exp
     }
     let addr = SocketAddr::new(host, config.effective_port());
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

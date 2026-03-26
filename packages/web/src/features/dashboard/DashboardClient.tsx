@@ -1921,7 +1921,7 @@ export default function DashboardClient({
     if (!selectedProject) return workspaceMainPanel;
 
     return (
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
         <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/70 px-3 py-3 sm:px-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
