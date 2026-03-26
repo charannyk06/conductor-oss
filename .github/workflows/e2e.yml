@@ -1,0 +1,100 @@
+name: E2E Integration Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  e2e-tests:
+    name: E2E Tests (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group:
+          - spawn
+          - terminal-io
+          - state
+          - cleanup
+          - error-recovery
+          - concurrency
+          - timeout
+          - filesystem
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      - name: Build E2E test binary
+        run: cargo test --test e2e_integration_tests --no-run
+        working-directory: crates/conductor-server
+
+      - name: Run spawn tests
+        if: matrix.group == 'spawn'
+        run: cargo test --test e2e_integration_tests test_spawn 2>&1
+        working-directory: crates/conductor-server
+
+      - name: Run terminal I/O tests
+        if: matrix.group == 'terminal-io'
+        run: cargo test --test e2e_integration_tests test_terminal 2>&1
+        working-directory: crates/conductor-server
+
+      - name: Run state tests
+        if: matrix.group == 'state'
+        run: cargo test --test e2e_integration_tests test_session 2>&1
+        working-directory: crates/conductor-server
+
+      - name: Run cleanup tests
+        if: matrix.group == 'cleanup'
+        run: cargo test --test e2e_integration_tests test_cleanup 2>&1
+        working-directory: crates/conductor-server
+
+      - name: Run error recovery tests
+        if: matrix.group == 'error-recovery'
+        run: cargo test --test e2e_integration_tests test_error 2>&1
+        working-directory: crates/conductor-server
+
+      - name: Run concurrency tests
+        if: matrix.group == 'concurrency'
+        run: cargo test --test e2e_integration_tests test_concurrent 2>&1
+        working-directory: crates/conductor-server
+
+      - name: Run timeout tests
+        if: matrix.group == 'timeout'
+        run: cargo test --test e2e_integration_tests test_timeout 2>&1
+        working-directory: crates/conductor-server
+
+      - name: Run filesystem tests
+        if: matrix.group == 'filesystem'
+        run: cargo test --test e2e_integration_tests test_filesystem 2>&1
+        working-directory: crates/conductor-server
+
+  e2e-summary:
+    name: E2E Tests Summary
+    needs: e2e-tests
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.e2e-tests.result }}" == "success" ]; then
+            echo "✅ All E2E test groups passed"
+            exit 0
+          else
+            echo "❌ Some E2E test groups failed"
+            exit 1
+          fi
