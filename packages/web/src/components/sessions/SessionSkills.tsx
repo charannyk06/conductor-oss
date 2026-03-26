@@ -475,6 +475,12 @@ export function SessionSkills({ session, sessionId, active }: SessionSkillsProps
                                   {incompatible ? <Badge variant="outline">Unsupported</Badge> : null}
                                 </div>
                                 <p className="text-[13px] text-[var(--vk-text-muted)]">{skill.summary}</p>
+                                {skill.note ? (
+                                  <div className="rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
+                                    <Badge variant="info" className="mr-2 align-middle">Note</Badge>
+                                    <span className="align-middle">{skill.note}</span>
+                                  </div>
+                                ) : null}
                               </div>
                             </div>
                             <div className="flex w-full flex-wrap items-center gap-2 xl:w-auto xl:justify-end">

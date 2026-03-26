@@ -1,9 +1,11 @@
 use axum::body::Body;
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::State;
 use axum::http::{Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -59,23 +61,12 @@ static GLOBAL_RATE_LIMITER: std::sync::LazyLock<GlobalRateLimiter, fn() -> Globa
         entries: RwLock::new(HashMap::new()),
     });
 
-fn extract_client_ip(request: &Request<Body>) -> String {
-    if let Some(forwarded) = request.headers().get("x-forwarded-for") {
-        if let Ok(forwarded_str) = forwarded.to_str() {
-            return forwarded_str
-                .split(',')
-                .next()
-                .unwrap_or("unknown")
-                .trim()
-                .to_string();
-        }
-    }
-    if let Some(real_ip) = request.headers().get("x-real-ip") {
-        if let Ok(ip_str) = real_ip.to_str() {
-            return ip_str.trim().to_string();
-        }
-    }
-    "global".to_string()
+fn extract_peer_ip(request: &Request<Body>) -> String {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|connect_info| connect_info.0.ip().to_string())
+        .unwrap_or_else(|| "global".to_string())
 }
 
 fn extract_rate_limit_key(request: &Request<Body>) -> String {
@@ -98,7 +89,7 @@ fn extract_rate_limit_key(request: &Request<Body>) -> String {
         return format!("proxy:{provider}:{email}");
     }
 
-    extract_client_ip(request)
+    extract_peer_ip(request)
 }
 
 pub async fn rate_limit_global(
@@ -297,15 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_key_falls_back_to_client_ip_for_untrusted_requests() {
-        let request = Request::builder()
+    fn rate_limit_key_uses_peer_ip_for_untrusted_requests() {
+        let mut request = Request::builder()
             .uri("/api/events")
             .header("x-forwarded-for", "203.0.113.10, 198.51.100.7")
             .header("x-real-ip", "198.51.100.8")
             .body(Body::empty())
             .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([198, 51, 100, 8], 4242))));
 
-        assert_eq!(extract_rate_limit_key(&request), "203.0.113.10");
+        assert_eq!(extract_rate_limit_key(&request), "198.51.100.8");
     }
 
     #[tokio::test]

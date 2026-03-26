@@ -130,6 +130,7 @@ struct SkillCatalogEntry {
     id: &'static str,
     name: &'static str,
     summary: &'static str,
+    note: Option<&'static str>,
     category: &'static str,
     verified: bool,
     compatible_agents: &'static [&'static str],
@@ -145,6 +146,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "pdf",
         name: "PDF Processing",
         summary: "Read PDFs, extract tables, fill forms, and merge or split files.",
+        note: None,
         category: "document",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -158,6 +160,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "docx",
         name: "DOCX",
         summary: "Create and edit Word docs with formatting, comments, and tracked changes.",
+        note: None,
         category: "document",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -171,6 +174,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "pptx",
         name: "PPTX",
         summary: "Generate slide decks with layouts, charts, and speaker notes.",
+        note: None,
         category: "document",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -184,6 +188,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "xlsx",
         name: "XLSX",
         summary: "Spreadsheet formulas, analysis, and charts from natural language.",
+        note: None,
         category: "document",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -197,6 +202,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "doc-coauthoring",
         name: "Doc Co-Authoring",
         summary: "Collaborative writing workflow for back-and-forth drafting.",
+        note: None,
         category: "document",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -210,6 +216,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "frontend-design",
         name: "Frontend Design",
         summary: "Higher-quality UI design systems, typography, and layout instincts.",
+        note: None,
         category: "design",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -223,6 +230,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "canvas-design",
         name: "Canvas Design",
         summary: "Generate posters, social graphics, and covers from prompts.",
+        note: None,
         category: "design",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -236,6 +244,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "algorithmic-art",
         name: "Algorithmic Art",
         summary: "Fractal, geometric, and p5.js driven generative art workflows.",
+        note: None,
         category: "design",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -249,6 +258,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "theme-factory",
         name: "Theme Factory",
         summary: "Batch generate cohesive color themes from one prompt.",
+        note: None,
         category: "design",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -262,6 +272,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "web-artifacts-builder",
         name: "Web Artifacts Builder",
         summary: "Generate dashboards, calculators, and other web artifacts quickly.",
+        note: None,
         category: "design",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -275,6 +286,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "superpowers",
         name: "Superpowers",
         summary: "Battle-tested TDD, debugging, and plan-to-execute skill collection.",
+        note: None,
         category: "engineering",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -288,6 +300,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "systematic-debugging",
         name: "Systematic Debugging",
         summary: "Root-cause-first debugging workflow from the Superpowers ecosystem.",
+        note: None,
         category: "engineering",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -301,6 +314,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "file-search",
         name: "File Search",
         summary: "Ripgrep and tree navigation patterns for codebase search.",
+        note: None,
         category: "engineering",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -311,9 +325,24 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         docs_url: "https://github.com/massgen/massgen",
     },
     SkillCatalogEntry {
+        id: "chrome-cdp",
+        name: "Chrome CDP",
+        summary: "Control your live Chrome session and inspect authenticated tabs over CDP.",
+        note: Some("Enable Chrome remote debugging first at chrome://inspect/#remote-debugging. Node.js 22+ is required."),
+        category: "engineering",
+        verified: false,
+        compatible_agents: ALL_SKILL_AGENTS,
+        icon: "Globe",
+        repo_url: "https://github.com/pasky/chrome-cdp-skill.git",
+        source_subpath: Some("skills/chrome-cdp"),
+        package_kind: "directory",
+        docs_url: "https://github.com/pasky/chrome-cdp-skill/tree/main/skills/chrome-cdp",
+    },
+    SkillCatalogEntry {
         id: "context-optimization",
         name: "Context Optimization",
         summary: "Token-budget and context compression patterns for agent workflows.",
+        note: None,
         category: "engineering",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -327,6 +356,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "skill-creator",
         name: "Skill Creator",
         summary: "Describe a workflow and generate a SKILL.md package structure.",
+        note: None,
         category: "engineering",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -340,6 +370,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "remotion-best-practices",
         name: "Remotion Best Practices",
         summary: "Video-generation workflows, composition structure, and render guidance.",
+        note: None,
         category: "engineering",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -353,6 +384,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "marketing-skills",
         name: "Marketing Skills",
         summary: "CRO, copywriting, SEO, email, and growth workflow collection.",
+        note: None,
         category: "marketing",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -366,6 +398,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "claude-seo",
         name: "Claude SEO",
         summary: "Site audits, schema validation, and SEO-focused workflows.",
+        note: None,
         category: "marketing",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -379,6 +412,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "brand-guidelines",
         name: "Brand Guidelines",
         summary: "Encode brand rules so they apply consistently in future work.",
+        note: None,
         category: "marketing",
         verified: true,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -392,6 +426,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "notebooklm-integration",
         name: "NotebookLM Integration",
         summary: "NotebookLM bridge workflows for summaries, mind maps, and flashcards.",
+        note: None,
         category: "knowledge",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -405,6 +440,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "obsidian-skills",
         name: "Obsidian Skills",
         summary: "Vault-native note workflows, tagging, and linking patterns.",
+        note: None,
         category: "knowledge",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -418,6 +454,7 @@ static SKILL_CATALOG: &[SkillCatalogEntry] = &[
         id: "excel-mcp-server",
         name: "Excel MCP Server",
         summary: "Excel automation and MCP style spreadsheet workflows.",
+        note: None,
         category: "knowledge",
         verified: false,
         compatible_agents: ALL_SKILL_AGENTS,
@@ -907,5 +944,31 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn chrome_cdp_skill_is_catalogued_for_every_supported_agent() {
+        let entry = SKILL_CATALOG
+            .iter()
+            .find(|entry| entry.id == "chrome-cdp")
+            .expect("chrome-cdp skill should be present");
+
+        assert_eq!(entry.category, "engineering");
+        assert!(!entry.verified);
+        assert_eq!(
+            entry.repo_url,
+            "https://github.com/pasky/chrome-cdp-skill.git"
+        );
+        assert_eq!(entry.source_subpath, Some("skills/chrome-cdp"));
+        assert_eq!(entry.package_kind, "directory");
+        assert_eq!(
+            entry.docs_url,
+            "https://github.com/pasky/chrome-cdp-skill/tree/main/skills/chrome-cdp"
+        );
+        assert_eq!(entry.compatible_agents, ALL_SKILL_AGENTS);
+        assert_eq!(
+            entry.note,
+            Some("Enable Chrome remote debugging first at chrome://inspect/#remote-debugging. Node.js 22+ is required.")
+        );
     }
 }

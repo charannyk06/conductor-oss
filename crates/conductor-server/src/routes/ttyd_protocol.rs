@@ -165,8 +165,8 @@ impl ClientMessage {
     }
 }
 
-// NOTE: Flow control config lives in the browser terminal facade.
-// Server-side PAUSE/RESUME support is not yet implemented — see TODO in terminal.rs.
+// NOTE: Flow control is coordinated by the browser terminal facade and
+// terminal.rs resyncs the stream when PAUSE/RESUME is received.
 
 #[cfg(test)]
 mod tests {

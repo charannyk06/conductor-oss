@@ -2,6 +2,7 @@ export interface SkillCatalogEntry {
   id: string;
   name: string;
   summary: string;
+  note?: string | null;
   category: string;
   verified: boolean;
   compatibleAgents: string[];

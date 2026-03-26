@@ -1491,6 +1491,7 @@ async fn handle_ttyd_frontend_socket(
     let snapshot = state.current_terminal_restore_snapshot(&session_id).await;
     let mut last_sequence_sent = 0_u64;
     let mut client_ready = false;
+    let mut paused = false;
 
     loop {
         tokio::select! {
@@ -1505,6 +1506,7 @@ async fn handle_ttyd_frontend_socket(
                             &snapshot,
                             &mut client_ready,
                             &mut last_sequence_sent,
+                            &mut paused,
                             ttyd_protocol::ClientMessage::from_websocket_frame(&data),
                         )
                         .await
@@ -1522,6 +1524,7 @@ async fn handle_ttyd_frontend_socket(
                             &snapshot,
                             &mut client_ready,
                             &mut last_sequence_sent,
+                            &mut paused,
                             ttyd_protocol::ClientMessage::from_websocket_frame(text.as_bytes()),
                         )
                         .await
@@ -1550,6 +1553,9 @@ async fn handle_ttyd_frontend_socket(
             event = terminal_rx.recv(), if client_ready => {
                 match event {
                     Ok(crate::state::TerminalStreamEvent::Stream(chunk)) => {
+                        if paused {
+                            continue;
+                        }
                         if chunk.sequence <= last_sequence_sent {
                             continue;
                         }
@@ -1571,9 +1577,12 @@ async fn handle_ttyd_frontend_socket(
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if paused {
+                            continue;
+                        }
                         if let Some(snapshot) = state.current_terminal_restore_snapshot(&session_id).await {
-                            let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
-                            last_sequence_sent = snapshot.sequence;
+                            let bytes =
+                                render_restore_snapshot_bytes(&snapshot, &mut last_sequence_sent);
                             if !bytes.is_empty()
                                 && client_socket.send(Message::Binary(ttyd_protocol::encode_output(&bytes).into())).await.is_err()
                             {
@@ -1588,6 +1597,14 @@ async fn handle_ttyd_frontend_socket(
     }
 }
 
+fn render_restore_snapshot_bytes(
+    snapshot: &TerminalRestoreSnapshot,
+    last_sequence_sent: &mut u64,
+) -> Vec<u8> {
+    *last_sequence_sent = snapshot.sequence;
+    snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_ttyd_frontend_client_message(
     state: &Arc<AppState>,
@@ -1597,6 +1614,7 @@ async fn handle_ttyd_frontend_client_message(
     snapshot: &Option<TerminalRestoreSnapshot>,
     client_ready: &mut bool,
     last_sequence_sent: &mut u64,
+    paused: &mut bool,
     message: Option<ttyd_protocol::ClientMessage>,
 ) -> Result<()> {
     match message {
@@ -1611,9 +1629,8 @@ async fn handle_ttyd_frontend_client_message(
                 ))
                 .await?;
             if let Some(snapshot) = snapshot.as_ref() {
-                let bytes = snapshot.render_restore_bytes(TERMINAL_SNAPSHOT_MAX_BYTES);
+                let bytes = render_restore_snapshot_bytes(snapshot, last_sequence_sent);
                 if !bytes.is_empty() {
-                    *last_sequence_sent = snapshot.sequence;
                     client_socket
                         .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
                         .await?;
@@ -1631,9 +1648,23 @@ async fn handle_ttyd_frontend_client_message(
         Some(ttyd_protocol::ClientMessage::Resize { columns, rows }) => {
             let _ = state.resize_live_terminal(session_id, columns, rows).await;
         }
-        Some(ttyd_protocol::ClientMessage::Pause)
-        | Some(ttyd_protocol::ClientMessage::Resume)
-        | None => {}
+        Some(ttyd_protocol::ClientMessage::Pause) => {
+            *paused = true;
+        }
+        Some(ttyd_protocol::ClientMessage::Resume) => {
+            if *paused {
+                *paused = false;
+                if let Some(snapshot) = state.current_terminal_restore_snapshot(session_id).await {
+                    let bytes = render_restore_snapshot_bytes(&snapshot, last_sequence_sent);
+                    if !bytes.is_empty() {
+                        client_socket
+                            .send(Message::Binary(ttyd_protocol::encode_output(&bytes).into()))
+                            .await?;
+                    }
+                }
+            }
+        }
+        None => {}
     }
 
     Ok(())
@@ -1778,6 +1809,7 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::TERMINAL_RESTORE_SNAPSHOT_VERSION;
     use axum::body::{to_bytes, Body};
     use axum::extract::{Path, State};
     use axum::http::Request;
@@ -1871,6 +1903,26 @@ mod tests {
         non_tty_headers.insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("binary"));
         assert!(!client_requests_tty_subprotocol(&non_tty_headers));
         assert!(!client_requests_tty_subprotocol(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn render_restore_snapshot_bytes_advances_sequence_even_for_empty_render() {
+        let snapshot = TerminalRestoreSnapshot {
+            version: TERMINAL_RESTORE_SNAPSHOT_VERSION,
+            sequence: 42,
+            cols: 120,
+            rows: 32,
+            has_output: true,
+            modes: Default::default(),
+            history: Vec::new(),
+            screen: Vec::new(),
+        };
+        let mut last_sequence_sent = 7;
+
+        let bytes = render_restore_snapshot_bytes(&snapshot, &mut last_sequence_sent);
+
+        assert_eq!(last_sequence_sent, 42);
+        assert!(bytes.is_empty());
     }
 
     #[test]
