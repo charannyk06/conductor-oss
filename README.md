@@ -178,6 +178,8 @@ Conductor is local-first, but the current codebase includes several access-contr
 - **Optional Clerk integration** for hosted sign-in flows in the web app
 - **Bridge and relay components** for paired-device flows and relay-backed terminals
 
+Relay deployment matters separately from web deployment. See `docs/relay-deployment.md` for the production rollout workflow and required secrets.
+
 What is no longer supported:
 
 - Public share-link remote control without an identity layer

@@ -15,7 +15,14 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{header::SEC_WEBSOCKET_PROTOCOL, HeaderValue, Request},
+        Message,
+    },
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -340,6 +347,17 @@ async fn fetch_local_ttyd_ws_url(
     resolve_backend_terminal_websocket_url(backend, ttyd_ws_url)
 }
 
+fn ttyd_frontend_websocket_request(url: &Url) -> Result<Request<()>> {
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .context("failed to build local ttyd websocket request")?;
+    request
+        .headers_mut()
+        .insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("tty"));
+    Ok(request)
+}
+
 async fn run_terminal_proxy_session(
     relay: String,
     token: String,
@@ -350,9 +368,10 @@ async fn run_terminal_proxy_session(
 ) -> Result<()> {
     let relay_ws_url = relay_terminal_bridge_websocket_url(&relay, &terminal_id, &token)?;
     let local_ttyd_ws_url = fetch_local_ttyd_ws_url(&client, &backend, &session_id).await?;
+    let local_ttyd_ws_request = ttyd_frontend_websocket_request(&local_ttyd_ws_url)?;
 
     let (relay_ws, _) = connect_async(relay_ws_url.as_str()).await?;
-    let (local_ttyd_ws, _) = connect_async(local_ttyd_ws_url.as_str()).await?;
+    let (local_ttyd_ws, _) = connect_async(local_ttyd_ws_request).await?;
     let (mut relay_write, mut relay_read) = relay_ws.split();
     let (mut local_write, mut local_read) = local_ttyd_ws.split();
 
@@ -390,6 +409,26 @@ async fn run_terminal_proxy_session(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttyd_frontend_websocket_request_adds_tty_subprotocol() {
+        let url =
+            Url::parse("ws://127.0.0.1:4749/api/sessions/session-1/terminal/ttyd/ws?token=test")
+                .expect("valid url");
+        let request = ttyd_frontend_websocket_request(&url).expect("request should build");
+        assert_eq!(
+            request
+                .headers()
+                .get(SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok()),
+            Some("tty")
+        );
+    }
 }
 
 async fn update_active_session(

@@ -6,8 +6,10 @@ cd "$(dirname "$0")/.."
 RELAY_TAG="conductor-relay:latest"
 RELAY_PORT="${RELAY_PORT:-8080}"
 
+RELAY_DOCKERFILE="${RELAY_DOCKERFILE:-crates/conductor-relay/Dockerfile}"
+
 echo "Building Conductor Relay..."
-if docker build -f Dockerfile.relay -t "$RELAY_TAG" . > /dev/null 2>&1; then
+if docker build -f "$RELAY_DOCKERFILE" -t "$RELAY_TAG" . > /dev/null 2>&1; then
     echo "Relay image up to date."
 else
     echo "Docker build failed. Make sure Docker is running."
