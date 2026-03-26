@@ -1037,16 +1037,13 @@ mod tests {
             .expect("chrome-cdp skill should be present");
 
         assert!(entry.installed_user);
-        assert!(entry.install_paths.iter().any(|path| {
-            path.ends_with(
-                ".claude/skills/chrome-cdp-skill/skills/chrome-cdp",
-            )
-        }));
-        assert!(
-            !custom_skills
-                .iter()
-                .any(|skill| skill["id"] == "chrome-cdp-skill")
-        );
+        assert!(entry
+            .install_paths
+            .iter()
+            .any(|path| { path.ends_with(".claude/skills/chrome-cdp-skill/skills/chrome-cdp",) }));
+        assert!(!custom_skills
+            .iter()
+            .any(|skill| skill["id"] == "chrome-cdp-skill"));
 
         match previous_home {
             Some(value) => std::env::set_var("HOME", value),
@@ -1070,8 +1067,8 @@ mod tests {
         fs::write(skill_root.join("SKILL.md"), "# Chrome CDP\n").expect("write skill manifest");
         std::env::set_var("HOME", &home);
 
-        let install_roots = resolve_install_targets(CLAUDE_AGENT, "user", None)
-            .expect("resolve install targets");
+        let install_roots =
+            resolve_install_targets(CLAUDE_AGENT, "user", None).expect("resolve install targets");
         let removed_paths = remove_skill_installations(&install_roots, "chrome-cdp")
             .expect("remove skill installations");
 
