@@ -676,6 +676,73 @@ fn catalog_map() -> HashMap<&'static str, &'static SkillCatalogEntry> {
         .collect()
 }
 
+fn skill_manifest_exists(path: &Path) -> bool {
+    path.join("SKILL.md").is_file() || path.join("skill.md").is_file()
+}
+
+fn discover_skill_packages(root: &Path) -> Result<Vec<(String, PathBuf)>, std::io::Error> {
+    let mut discovered = Vec::new();
+    if !root.exists() {
+        return Ok(discovered);
+    }
+
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        if skill_manifest_exists(&path) {
+            if let Some(name) = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            {
+                discovered.push((name, path));
+            }
+            continue;
+        }
+
+        let nested_skills_root = path.join("skills");
+        if !nested_skills_root.is_dir() {
+            continue;
+        }
+
+        for nested_entry in fs::read_dir(nested_skills_root)? {
+            let nested_entry = nested_entry?;
+            let nested_path = nested_entry.path();
+            if !nested_path.is_dir() || !skill_manifest_exists(&nested_path) {
+                continue;
+            }
+
+            if let Some(name) = nested_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            {
+                discovered.push((name, nested_path));
+            }
+        }
+    }
+
+    Ok(discovered)
+}
+
+fn collect_skill_packages(
+    roots: &[PathBuf],
+) -> Result<HashMap<String, Vec<PathBuf>>, std::io::Error> {
+    let mut collected: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for root in roots {
+        for (skill_id, path) in discover_skill_packages(root)? {
+            collected.entry(skill_id).or_default().push(path);
+        }
+    }
+
+    Ok(collected)
+}
+
 fn resolve_skill_root_specs(agent: &str) -> (&'static [&'static str], &'static [&'static str]) {
     resolve_skill_agent_profile(agent)
         .map(|profile| (profile.project_roots, profile.user_roots))
@@ -747,26 +814,24 @@ fn scan_skill_installs(
         .transpose()?
         .unwrap_or_default();
     let catalog_by_id = catalog_map();
+    let user_detected = collect_skill_packages(&user_dirs)?;
+    let workspace_detected = collect_skill_packages(&workspace_dirs)?;
     let mut custom_sources: HashMap<String, String> = HashMap::new();
     let mut results = Vec::with_capacity(SKILL_CATALOG.len());
 
     for entry in SKILL_CATALOG {
-        let user_paths = user_dirs
-            .iter()
-            .map(|path| path.join(entry.id))
+        let user_paths = user_detected.get(entry.id).cloned().unwrap_or_default();
+        let workspace_paths = workspace_detected
+            .get(entry.id)
+            .cloned()
+            .unwrap_or_default();
+        let installed_user = !user_paths.is_empty();
+        let installed_workspace = !workspace_paths.is_empty();
+        let install_paths = user_paths
+            .into_iter()
+            .chain(workspace_paths.into_iter())
+            .map(|path| path.to_string_lossy().to_string())
             .collect::<Vec<_>>();
-        let workspace_paths = workspace_dirs
-            .iter()
-            .map(|path| path.join(entry.id))
-            .collect::<Vec<_>>();
-        let installed_user = user_paths.iter().any(|path| path.exists());
-        let installed_workspace = workspace_paths.iter().any(|path| path.exists());
-        let mut install_paths = Vec::new();
-        for path in user_paths.into_iter().chain(workspace_paths.into_iter()) {
-            if path.exists() {
-                install_paths.push(path.to_string_lossy().to_string());
-            }
-        }
         results.push(InstalledSkillStatus {
             skill_id: entry.id.to_string(),
             installed_user,
@@ -775,19 +840,14 @@ fn scan_skill_installs(
         });
     }
 
-    for dir in user_dirs.iter().chain(workspace_dirs.iter()) {
-        if !dir.exists() {
-            continue;
-        }
-        for entry in fs::read_dir(dir)?.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
+    for detected in [&user_detected, &workspace_detected] {
+        for (name, paths) in detected {
+            if catalog_by_id.contains_key(name.as_str()) {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !catalog_by_id.contains_key(name.as_str()) {
+            if let Some(path) = paths.first() {
                 custom_sources
-                    .entry(name)
+                    .entry(name.clone())
                     .or_insert_with(|| path.to_string_lossy().to_string());
             }
         }
@@ -851,9 +911,17 @@ fn remove_skill_installations(
     skill_id: &str,
 ) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut removed_paths = Vec::new();
+    let mut seen = HashSet::new();
     for install_root in install_roots {
+        for (name, skill_dir) in discover_skill_packages(install_root)? {
+            if name != skill_id || !seen.insert(skill_dir.clone()) {
+                continue;
+            }
+            fs::remove_dir_all(&skill_dir)?;
+            removed_paths.push(skill_dir);
+        }
         let skill_dir = install_root.join(skill_id);
-        if skill_dir.exists() {
+        if skill_dir.exists() && seen.insert(skill_dir.clone()) {
             fs::remove_dir_all(&skill_dir)?;
             removed_paths.push(skill_dir);
         }
@@ -938,6 +1006,77 @@ mod tests {
 
         assert_eq!(rendered.len(), 1);
         assert!(rendered[0].ends_with(".agents/skills"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn nested_skill_package_installations_are_detected() {
+        let _guard = TEST_ENV_LOCK.blocking_lock();
+        let previous_home = std::env::var_os("HOME");
+        let home = make_temp_dir("conductor-skills-home");
+        let skill_manifest = home
+            .join(".claude")
+            .join("skills")
+            .join("chrome-cdp-skill")
+            .join("skills")
+            .join("chrome-cdp");
+        fs::create_dir_all(&skill_manifest).expect("create nested skill package");
+        fs::write(skill_manifest.join("SKILL.md"), "# Chrome CDP\n").expect("write skill manifest");
+        std::env::set_var("HOME", &home);
+
+        let (skills, custom_skills) =
+            scan_skill_installs(CLAUDE_AGENT, None).expect("scan skill installs");
+        let entry = skills
+            .iter()
+            .find(|entry| entry.skill_id == "chrome-cdp")
+            .expect("chrome-cdp skill should be present");
+
+        assert!(entry.installed_user);
+        assert!(entry.install_paths.iter().any(|path| {
+            path.ends_with(
+                ".claude/skills/chrome-cdp-skill/skills/chrome-cdp",
+            )
+        }));
+        assert!(
+            !custom_skills
+                .iter()
+                .any(|skill| skill["id"] == "chrome-cdp-skill")
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn nested_skill_package_installations_are_removed() {
+        let _guard = TEST_ENV_LOCK.blocking_lock();
+        let previous_home = std::env::var_os("HOME");
+        let home = make_temp_dir("conductor-skills-home");
+        let skill_root = home
+            .join(".claude")
+            .join("skills")
+            .join("chrome-cdp-skill")
+            .join("skills")
+            .join("chrome-cdp");
+        fs::create_dir_all(&skill_root).expect("create nested skill package");
+        fs::write(skill_root.join("SKILL.md"), "# Chrome CDP\n").expect("write skill manifest");
+        std::env::set_var("HOME", &home);
+
+        let install_roots = resolve_install_targets(CLAUDE_AGENT, "user", None)
+            .expect("resolve install targets");
+        let removed_paths = remove_skill_installations(&install_roots, "chrome-cdp")
+            .expect("remove skill installations");
+
+        assert!(removed_paths.iter().any(|path| path == &skill_root));
+        assert!(!skill_root.exists());
 
         match previous_home {
             Some(value) => std::env::set_var("HOME", value),
