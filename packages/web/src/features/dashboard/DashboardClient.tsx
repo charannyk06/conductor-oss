@@ -80,6 +80,7 @@ import {
   resolveSelectedBridgeId,
 } from "@/lib/bridgeScope";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
+import { buildDashboardSessionSelection } from "@/lib/dashboardSessionSelection";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
 import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import {
@@ -104,6 +105,7 @@ const MIN_DISPATCHER_PANEL_WIDTH = 320;
 const MAX_DISPATCHER_PANEL_WIDTH = 720;
 const DISPATCHER_PANEL_WIDTH_STORAGE_KEY = "conductor-board-dispatcher-panel-width";
 type DashboardWorkspaceView = "direct" | "board";
+type BoardMobilePane = "board" | "chat";
 
 function normalizeDashboardQueryValue(value: string | null): string | null {
   const trimmed = value?.trim();
@@ -990,10 +992,13 @@ export default function DashboardClient({
   const [pendingWorkspaceSetup, setPendingWorkspaceSetup] = useState(false);
   const [mountedSessionIds, setMountedSessionIds] = useState<string[]>(() => selectedSessionId ? [selectedSessionId] : []);
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
+  const [wideBoardViewport, setWideBoardViewport] = useState(false);
+  const [boardMobilePane, setBoardMobilePane] = useState<BoardMobilePane>(() => selectedSessionId ? "chat" : "board");
   const [dispatcherCollapsed, setDispatcherCollapsed] = useState(false);
   const [dispatcherPanelWidth, setDispatcherPanelWidth] = useState(DEFAULT_DISPATCHER_PANEL_WIDTH);
   const [dispatcherPanelResizing, setDispatcherPanelResizing] = useState(false);
   const launchpadSessionIdRef = useRef<string | null>(null);
+  const previousBoardProjectIdRef = useRef<string | null>(selectedProjectId);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1016,6 +1021,48 @@ export default function DashboardClient({
       mediaQuery?.removeEventListener?.("change", syncCompactTerminalChrome);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = typeof window.matchMedia === "function"
+      ? window.matchMedia("(min-width: 1280px)")
+      : null;
+    const syncWideBoardViewport = () => {
+      setWideBoardViewport(mediaQuery?.matches ?? window.innerWidth >= 1280);
+    };
+
+    syncWideBoardViewport();
+    window.addEventListener("resize", syncWideBoardViewport);
+    mediaQuery?.addEventListener?.("change", syncWideBoardViewport);
+
+    return () => {
+      window.removeEventListener("resize", syncWideBoardViewport);
+      mediaQuery?.removeEventListener?.("change", syncWideBoardViewport);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (workspaceView !== "board" || selectedProjectId === null) {
+      previousBoardProjectIdRef.current = selectedProjectId;
+      setBoardMobilePane("board");
+      return;
+    }
+
+    const projectChanged = previousBoardProjectIdRef.current !== selectedProjectId;
+    previousBoardProjectIdRef.current = selectedProjectId;
+
+    if (selectedSessionId) {
+      setBoardMobilePane("chat");
+      return;
+    }
+
+    if (projectChanged) {
+      setBoardMobilePane("board");
+    }
+  }, [selectedProjectId, selectedSessionId, workspaceView]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1866,22 +1913,24 @@ export default function DashboardClient({
       "push",
     );
     setSelectedAgent(preferences?.codingAgent || DEFAULT_AGENT);
+    setBoardMobilePane("board");
     closeSidebarOnMobile();
   }, [closeSidebarOnMobile, navigateDashboard, preferences?.codingAgent, workspaceView]);
 
   const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" | "dispatcher" | "terminal" }) => {
     const matchedSession = sessionsById.get(id) ?? null;
-    const nextTab = options?.tab ?? getDefaultSessionPrimaryTab(matchedSession);
     navigateDashboard(
-      {
-        projectId: matchedSession?.projectId ?? selectedProjectId ?? null,
-        sessionId: id,
-        tab: nextTab,
-      },
+      buildDashboardSessionSelection(
+        id,
+        matchedSession,
+        selectedProjectId ?? null,
+        workspaceView,
+        options?.tab,
+      ),
       "push",
     );
     closeSidebarOnMobile();
-  }, [closeSidebarOnMobile, navigateDashboard, selectedProjectId, sessionsById]);
+  }, [closeSidebarOnMobile, navigateDashboard, selectedProjectId, sessionsById, workspaceView]);
 
   const handleOpenPreferences = useCallback(() => {
     if (requiresPairedDeviceScope && !effectiveBridgeId) {
@@ -2059,62 +2108,99 @@ export default function DashboardClient({
         "--dispatcher-panel-width": `${dispatcherPanelWidth}px`,
       } as CSSProperties;
       const boardPaneExpandedClass = "flex-1 min-h-[min(360px,50dvh)] xl:w-[var(--dispatcher-panel-width)] xl:flex-none xl:min-h-0";
+      const boardSinglePane = !wideBoardViewport;
+      const showBoardPane = !boardSinglePane || boardMobilePane === "board";
+      const showChatPane = !boardSinglePane || boardMobilePane === "chat";
+      const dispatcherCollapsedOnWide = wideBoardViewport && dispatcherCollapsed && selectedSessionId === null;
+      const chatPaneLabel = selectedSessionId ? "Chat" : "Dispatcher";
       const showBoardSidePaneResizeHandle = selectedSessionId !== null || !dispatcherCollapsed;
 
       return (
         <div
           style={boardPaneStyle}
-          className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden xl:flex-row"
+          className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden"
         >
-          <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
-            {workspaceMainPanel}
-          </div>
-          {showBoardSidePaneResizeHandle ? (
-            <div
-              className="absolute bottom-0 right-[var(--dispatcher-panel-width)] top-0 z-20 hidden w-2 translate-x-1/2 cursor-col-resize xl:block"
-              onMouseDown={(event) => {
-                event.preventDefault();
-                setDispatcherPanelResizing(true);
-              }}
-              aria-hidden="true"
-            >
-              <div className="mx-auto h-full w-px bg-transparent transition-colors hover:bg-[var(--vk-border)]" />
+          {boardSinglePane ? (
+            <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 xl:hidden">
+              <div className="inline-flex w-full rounded-[6px] border border-[var(--vk-border)] p-1">
+                <button
+                  type="button"
+                  onClick={() => setBoardMobilePane("board")}
+                  aria-pressed={boardMobilePane === "board"}
+                  className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
+                    boardMobilePane === "board"
+                      ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                      : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                  }`}
+                >
+                  <FolderKanban className="h-3.5 w-3.5 shrink-0" />
+                  <span>Board</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBoardMobilePane("chat")}
+                  aria-pressed={boardMobilePane === "chat"}
+                  className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
+                    boardMobilePane === "chat"
+                      ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                      : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                  }`}
+                >
+                  <Bot className="h-3.5 w-3.5 shrink-0" />
+                  <span>{chatPaneLabel}</span>
+                </button>
+              </div>
             </div>
           ) : null}
-          <div className={`flex flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0 ${
-            selectedSessionId
-              ? boardPaneExpandedClass
-              : dispatcherCollapsed
-                ? "h-[33px] max-h-[33px] shrink-0 xl:h-auto xl:max-h-none xl:w-[56px] xl:min-h-0"
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row">
+            <div className={`${showBoardPane ? "block" : "hidden"} min-h-0 min-w-0 flex-1 overflow-hidden xl:block`}>
+              {workspaceMainPanel}
+            </div>
+            {showBoardSidePaneResizeHandle ? (
+              <div
+                className="absolute bottom-0 right-[var(--dispatcher-panel-width)] top-0 z-20 hidden w-2 translate-x-1/2 cursor-col-resize xl:block"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  setDispatcherPanelResizing(true);
+                }}
+                aria-hidden="true"
+              >
+                <div className="mx-auto h-full w-px bg-transparent transition-colors hover:bg-[var(--vk-border)]" />
+              </div>
+            ) : null}
+            <div className={`${showChatPane ? "flex" : "hidden xl:flex"} ${
+              dispatcherCollapsedOnWide
+                ? "flex-1 min-h-0 xl:h-auto xl:max-h-none xl:w-[56px] xl:flex-none xl:min-h-0"
                 : boardPaneExpandedClass
-          }`}>
-            {selectedSessionId ? (
-              dockedBoardSession ? (
-                <SessionDetail
-                  key={selectedSessionId}
-                  sessionId={selectedSessionId}
-                  initialSession={dockedBoardSession}
-                  bridgeId={effectiveBridgeId}
-                  active
-                  suppressPreviewAutoOpen={launchpadSessionIdRef.current === selectedSessionId}
-                  immersiveMobileMode={immersiveMobileMode}
-                />
+            } flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0`}>
+              {selectedSessionId ? (
+                dockedBoardSession ? (
+                  <SessionDetail
+                    key={selectedSessionId}
+                    sessionId={selectedSessionId}
+                    initialSession={dockedBoardSession}
+                    bridgeId={effectiveBridgeId}
+                    active
+                    suppressPreviewAutoOpen={launchpadSessionIdRef.current === selectedSessionId}
+                    immersiveMobileMode={immersiveMobileMode}
+                  />
+                ) : (
+                  <div className="flex h-full items-center justify-center bg-[var(--vk-bg-panel)] text-[13px] text-[var(--vk-text-muted)]">
+                    Loading session workspace...
+                  </div>
+                )
               ) : (
-                <div className="flex h-full items-center justify-center bg-[var(--vk-bg-panel)] text-[13px] text-[var(--vk-text-muted)]">
-                  Loading session workspace...
-                </div>
-              )
-            ) : (
-              <ProjectDispatcherPanel
-                projectId={selectedProject.id}
-                bridgeId={effectiveBridgeId}
-                defaultAgent={resolvedCodingAgent}
-                modelAccess={resolvedPreferences.modelAccess}
-                runtimeModelCatalogs={runtimeModelCatalogs}
-                collapsed={dispatcherCollapsed}
-                onToggleCollapsed={handleToggleDispatcherCollapsed}
-              />
-            )}
+                <ProjectDispatcherPanel
+                  projectId={selectedProject.id}
+                  bridgeId={effectiveBridgeId}
+                  defaultAgent={resolvedCodingAgent}
+                  modelAccess={resolvedPreferences.modelAccess}
+                  runtimeModelCatalogs={runtimeModelCatalogs}
+                  collapsed={dispatcherCollapsedOnWide}
+                  onToggleCollapsed={handleToggleDispatcherCollapsed}
+                />
+              )}
+            </div>
           </div>
         </div>
       );
@@ -2162,6 +2248,7 @@ export default function DashboardClient({
       </div>
     );
   }, [
+    boardMobilePane,
     dispatcherCollapsed,
     dispatcherPanelWidth,
     dockedBoardSession,
@@ -2172,6 +2259,7 @@ export default function DashboardClient({
     selectedProject,
     selectedProjectSessions,
     selectedSessionId,
+    wideBoardViewport,
     workspaceMainPanel,
     workspaceView,
   ]);

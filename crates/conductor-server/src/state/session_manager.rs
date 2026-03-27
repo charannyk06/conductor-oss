@@ -23,9 +23,11 @@ use super::types::{
 };
 use super::workspace::{is_process_alive, terminate_process};
 use super::{
-    dispatcher_preferred_implementation_agent, dispatcher_preferred_implementation_model,
-    dispatcher_preferred_implementation_reasoning_effort, AppState, DETACHED_PID_METADATA_KEY,
-    TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
+    deserialize_mcp_servers, dispatcher_preferred_implementation_agent,
+    dispatcher_preferred_implementation_model,
+    dispatcher_preferred_implementation_reasoning_effort, AppState,
+    ACP_SESSION_MCP_SERVERS_METADATA_KEY, DETACHED_PID_METADATA_KEY, TTYD_PID_METADATA_KEY,
+    TTYD_WS_URL_METADATA_KEY,
 };
 use crate::acp_prompt::{
     acp_dispatcher_preference_note, acp_dispatcher_turn_prefix, matches_acp_approve_command,
@@ -1240,6 +1242,18 @@ impl AppState {
             spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
         let spawn_env = build_runtime_env(executor.binary_path(), &spawn_env);
+        let extra_args = if executor.kind() == AgentKind::Codex {
+            self.codex_mcp_extra_args(
+                &config,
+                &project,
+                &session_id,
+                &request.project_id,
+                request.session_kind.as_deref(),
+                &std::collections::BTreeMap::new(),
+            )
+        } else {
+            Vec::new()
+        };
 
         let runtime_launch = match self
             .spawn_with_runtime(
@@ -1252,7 +1266,7 @@ impl AppState {
                     model: request.model.clone(),
                     reasoning_effort: request.reasoning_effort.clone(),
                     skip_permissions,
-                    extra_args: Vec::new(),
+                    extra_args,
                     env: spawn_env,
                     branch: branch.clone(),
                     timeout: project
@@ -2114,6 +2128,28 @@ impl AppState {
             resume_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
         let resume_env = build_runtime_env(executor.binary_path(), &resume_env);
+        let session_mcp_servers = deserialize_mcp_servers(
+            session_snapshot
+                .metadata
+                .get(ACP_SESSION_MCP_SERVERS_METADATA_KEY)
+                .map(String::as_str),
+        )
+        .unwrap_or_default();
+        let extra_args = if executor.kind() == AgentKind::Codex {
+            self.codex_mcp_extra_args(
+                &self.config.read().await.clone(),
+                &project,
+                session_id,
+                &session_snapshot.project_id,
+                session_snapshot
+                    .metadata
+                    .get("sessionKind")
+                    .map(String::as_str),
+                &session_mcp_servers,
+            )
+        } else {
+            Vec::new()
+        };
 
         let handle = executor.clone();
         let runtime_launch = self
@@ -2131,7 +2167,7 @@ impl AppState {
                     model: effective_model.clone(),
                     reasoning_effort: effective_reasoning_effort.clone(),
                     skip_permissions,
-                    extra_args: Vec::new(),
+                    extra_args,
                     env: resume_env,
                     branch: session_snapshot.branch.clone(),
                     timeout: project

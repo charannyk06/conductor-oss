@@ -519,6 +519,15 @@ pub async fn handle_jsonrpc_request(
         "tools/list" => JsonRpcPayload::Result(json!({
             "tools": tool_definitions(),
         })),
+        "resources/list" => JsonRpcPayload::Result(json!({
+            "resources": []
+        })),
+        "resources/templates/list" => JsonRpcPayload::Result(json!({
+            "resourceTemplates": []
+        })),
+        "prompts/list" => JsonRpcPayload::Result(json!({
+            "prompts": []
+        })),
         "tools/call" => match request.params {
             Some(params) => JsonRpcPayload::Result(handle_tool_call(backend, params).await?),
             None => JsonRpcPayload::Error(JsonRpcError {
@@ -1382,6 +1391,27 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Phase 2 heartbeat integration"));
+    }
+
+    #[tokio::test]
+    async fn resources_list_returns_empty_payload() {
+        let response = handle_jsonrpc_request(
+            &MockBackend,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(5)),
+                method: "resources/list".to_string(),
+                params: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let JsonRpcPayload::Result(result) = response.payload else {
+            panic!("expected resources/list result payload");
+        };
+        assert_eq!(result["resources"], json!([]));
     }
 
     #[tokio::test]

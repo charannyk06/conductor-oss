@@ -4,6 +4,7 @@ mod board_collaboration;
 mod bridge_registry;
 mod detached;
 mod helpers;
+mod mcp_config;
 mod runtime_status;
 mod session_manager;
 mod session_store;
@@ -32,6 +33,10 @@ pub(crate) use helpers::session_to_dashboard_value_with_bridge;
 pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
+pub(crate) use mcp_config::{
+    build_codex_mcp_config_args, deserialize_mcp_servers, merge_mcp_servers, parse_acp_mcp_servers,
+    serialize_mcp_servers, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
+};
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
 pub(crate) use session_manager::OutputConsumerConfig;
 pub use types::{
@@ -44,7 +49,9 @@ pub use workspace::{expand_path, resolve_workspace_path};
 use anyhow::Result;
 use board_collaboration::BoardCollaborationStore;
 use chrono::{DateTime, Utc};
-use conductor_core::config::{ConductorConfig, DashboardAccessConfig, PreferencesConfig};
+use conductor_core::config::{
+    ConductorConfig, DashboardAccessConfig, McpServerConfig, PreferencesConfig, ProjectConfig,
+};
 use conductor_core::support::{startup_config_sync, sync_workspace_support_files};
 use conductor_core::types::AgentKind;
 use conductor_db::Database;
@@ -221,6 +228,66 @@ impl AppState {
         let _ = startup_config_sync(&config, &self.workspace_path, false)?;
         let _ = sync_workspace_support_files(&config, &self.workspace_path)?;
         Ok(())
+    }
+
+    pub(crate) fn internal_conductor_mcp_server(
+        &self,
+        session_id: &str,
+        project_id: &str,
+    ) -> Option<(String, McpServerConfig)> {
+        let command = std::env::current_exe().ok()?;
+        let command = command.to_string_lossy().to_string();
+        if command.trim().is_empty() {
+            return None;
+        }
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("CONDUCTOR_SESSION_ID".to_string(), session_id.to_string());
+        env.insert("CONDUCTOR_PROJECT_ID".to_string(), project_id.to_string());
+        env.insert(
+            "CONDUCTOR_SESSION_KIND".to_string(),
+            "project_dispatcher".to_string(),
+        );
+
+        Some((
+            "conductor".to_string(),
+            McpServerConfig {
+                command,
+                args: vec![
+                    "--workspace".to_string(),
+                    self.workspace_path.to_string_lossy().to_string(),
+                    "--config".to_string(),
+                    self.config_path.to_string_lossy().to_string(),
+                    "mcp-server".to_string(),
+                ],
+                env,
+                cwd: Some(self.workspace_path.to_string_lossy().to_string()),
+                enabled: true,
+            },
+        ))
+    }
+
+    pub(crate) fn codex_mcp_extra_args(
+        &self,
+        config: &ConductorConfig,
+        project: &ProjectConfig,
+        session_id: &str,
+        project_id: &str,
+        session_kind: Option<&str>,
+        session_mcp_servers: &std::collections::BTreeMap<String, McpServerConfig>,
+    ) -> Vec<String> {
+        let internal = if session_kind == Some("project_dispatcher") {
+            self.internal_conductor_mcp_server(session_id, project_id)
+        } else {
+            None
+        };
+        let merged = merge_mcp_servers(
+            &config.defaults.mcp_servers,
+            &project.mcp_servers,
+            session_mcp_servers,
+            internal,
+        );
+        build_codex_mcp_config_args(&merged)
     }
 
     pub async fn update_preferences(
@@ -1103,4 +1170,86 @@ impl AppState {
 
 fn terminal_restore_snapshot_is_valid(snapshot: &TerminalRestoreSnapshot) -> bool {
     snapshot.screen.is_empty() || snapshot.screen.first() == Some(&0x1b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use conductor_core::config::{DefaultsConfig, McpServerConfig};
+    use conductor_db::Database;
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    fn contains_arg(args: &[String], needle: &str) -> bool {
+        args.iter().any(|arg| arg.contains(needle))
+    }
+
+    #[tokio::test]
+    async fn codex_mcp_extra_args_inject_conductor_only_for_dispatcher_sessions() {
+        let root = std::env::temp_dir().join(format!("conductor-state-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test root should exist");
+
+        let default_server = McpServerConfig {
+            command: "npx".to_string(),
+            args: vec!["@acme/default".to_string()],
+            ..McpServerConfig::default()
+        };
+        let project_server = McpServerConfig {
+            command: "npx".to_string(),
+            args: vec!["@acme/project".to_string()],
+            ..McpServerConfig::default()
+        };
+        let project = ProjectConfig {
+            path: root.to_string_lossy().to_string(),
+            mcp_servers: BTreeMap::from([("project".to_string(), project_server)]),
+            ..ProjectConfig::default()
+        };
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            defaults: DefaultsConfig {
+                mcp_servers: BTreeMap::from([("default".to_string(), default_server)]),
+            },
+            projects: BTreeMap::from([("demo".to_string(), project.clone())]),
+            ..ConductorConfig::default()
+        };
+        let config_path = root.join("conductor.yaml");
+        let db = Database::in_memory()
+            .await
+            .expect("in-memory db should open");
+        let state = AppState::new(config_path, config.clone(), db).await;
+
+        let dispatcher_args = state.codex_mcp_extra_args(
+            &config,
+            &project,
+            "session-1",
+            "demo",
+            Some("project_dispatcher"),
+            &BTreeMap::new(),
+        );
+        assert!(
+            contains_arg(&dispatcher_args, "mcp_servers.default.command"),
+            "default MCP servers should be forwarded"
+        );
+        assert!(
+            contains_arg(&dispatcher_args, "mcp_servers.project.command"),
+            "project MCP servers should be forwarded"
+        );
+        assert!(
+            contains_arg(&dispatcher_args, "mcp_servers.conductor.command"),
+            "dispatcher sessions should receive the internal conductor MCP server"
+        );
+
+        let normal_args = state.codex_mcp_extra_args(
+            &config,
+            &project,
+            "session-2",
+            "demo",
+            None,
+            &BTreeMap::new(),
+        );
+        assert!(
+            !contains_arg(&normal_args, "mcp_servers.conductor.command"),
+            "non-dispatcher sessions should not receive the internal conductor MCP server"
+        );
+    }
 }
