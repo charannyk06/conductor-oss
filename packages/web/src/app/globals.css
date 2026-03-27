@@ -2,8 +2,8 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-ibm-plex-sans);
+  --font-mono: var(--font-ibm-plex-mono);
   --radius-xs: 3px;
   --radius-sm: 3px;
   --radius-md: 4px;
@@ -13,17 +13,18 @@
 :root {
   color-scheme: dark;
 
-  --vk-bg-outer: #09090b;
-  --vk-bg-main: #18181b;
-  --vk-bg-panel: #111113;
-  --vk-bg-hover: #27272a;
-  --vk-bg-active: #3f3f46;
+  --vk-bg-outer: #1a1a1a;
+  --vk-bg-main: #212121;
+  --vk-bg-panel: #1c1c1c;
+  --vk-bg-hover: #292929;
+  --vk-bg-active: #343434;
 
-  --vk-border: #3f3f46;
-  --vk-text-strong: #fafafa;
-  --vk-text-normal: #d4d4d8;
-  --vk-text-muted: #a1a1aa;
-  --vk-orange: #a1a1aa;
+  --vk-border: #333333;
+  --vk-text-strong: #f2f0ed;
+  --vk-text-normal: #c4c4c4;
+  --vk-text-muted: #8f8f8f;
+  --vk-orange: #5b7c99;
+  --vk-accent: #5b7c99;
   --vk-green: #54b04f;
   --vk-red: #d25151;
 
@@ -40,11 +41,11 @@
   --text-strong: var(--vk-text-strong);
   --text-normal: var(--vk-text-normal);
   --text-muted: var(--vk-text-muted);
-  --text-faint: #71717a;
+  --text-faint: #6f6f6f;
   --text-inverse: #111111;
 
   --accent: var(--vk-orange);
-  --accent-hover: #d4d4d8;
+  --accent-hover: #7092b0;
   --accent-soft: color-mix(in srgb, var(--vk-orange) 18%, transparent);
 
   --status-working: #6ca8ff;
@@ -104,9 +105,9 @@ body {
 
 body {
   font-family: var(--font-sans), system-ui, sans-serif;
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.4;
-  background: linear-gradient(90deg, #09090b 0%, #18181b 100%);
+  background: var(--vk-bg-main);
   color: var(--text-strong);
 }
 
@@ -141,12 +142,12 @@ a:hover {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: #3c3c3c;
   border-radius: 999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: #4c4c4c;
 }
 
 .surface-card {

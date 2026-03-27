@@ -91,7 +91,7 @@ function ProfileAvatar({ profile }: { profile: DashboardProfile | null }) {
   }
 
   return (
-    <div className="flex h-20 w-20 items-center justify-center rounded-full border border-[var(--vk-border)] bg-[rgba(234,122,42,0.12)] text-[26px] font-semibold text-[var(--vk-orange)]">
+    <div className="flex h-20 w-20 items-center justify-center rounded-full border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-accent)_14%,transparent)] text-[26px] font-semibold text-[var(--vk-accent)]">
       {initials || "U"}
     </div>
   );

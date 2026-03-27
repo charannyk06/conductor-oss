@@ -66,6 +66,7 @@ fn build_project_dispatcher_prompt(
             "- Prefer meaningful parent tasks plus internal checklists over noisy child-task spam\n",
             "- Keep track of context, heartbeat-style follow-ups, blockers, and next actions inside this ongoing session\n",
             "- Create or update board tasks so dedicated coding sessions can be launched separately\n",
+            "- Use native Conductor MCP tools when available to inspect the board, create tasks, update task state, and inspect task attempt lifecycles\n",
             "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n\n",
             "Project context:\n",
             "- Repo path: `{}`\n",
@@ -75,6 +76,7 @@ fn build_project_dispatcher_prompt(
             "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
             "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
             "- Keep the conversation stateful and use the board as the shared execution surface\n",
+            "- If you defer work, create an explicit follow-up task instead of burying it in chat, such as a Phase 2 heartbeat or memory integration item\n",
             "- If you create tasks, reference the exact task refs or titles you created so the user can launch coding sessions from them\n"
         ),
         project_id,

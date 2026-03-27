@@ -19,7 +19,7 @@ interface SidebarProps {
   selectedId: string | null;
   onSelect: (
     id: string,
-    options?: { tab?: "overview" | "preview" | "diff" | "terminal" },
+    options?: { tab?: "overview" | "preview" | "diff" | "chat" | "terminal" },
   ) => void;
   onArchive?: (id: string) => Promise<void> | void;
   onCreateWorkspace?: () => void;
@@ -383,7 +383,7 @@ export function Sidebar({
                     "group flex w-full items-start gap-3 rounded-[8px] border px-3 py-3 text-left transition-colors",
                     "[content-visibility:auto] [contain-intrinsic-size:92px]",
                     isSelected
-                      ? "border-[rgba(234,122,42,0.28)] bg-[rgba(255,255,255,0.08)]"
+                      ? "border-[color:color-mix(in_srgb,var(--vk-accent)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-accent)_10%,var(--vk-bg-hover))]"
                       : "border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] hover:bg-[var(--vk-bg-hover)]"
                   )}
                 >

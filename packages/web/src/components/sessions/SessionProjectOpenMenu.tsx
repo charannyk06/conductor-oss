@@ -5,6 +5,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronDown, ExternalLink, Loader2, Settings2 } from "lucide-react";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { usePreferences } from "@/hooks/usePreferences";
+import { cn } from "@/lib/cn";
 
 const CODE_EDITOR_ICON_CLASS = "block h-5 w-5 shrink-0 object-contain";
 
@@ -56,9 +57,16 @@ function CodeEditorIcon({ editorId, label }: { editorId: string; label: string }
 interface SessionProjectOpenMenuProps {
   projectId: string | null;
   bridgeId?: string | null;
+  label?: string;
+  triggerClassName?: string;
 }
 
-export function SessionProjectOpenMenu({ projectId, bridgeId }: SessionProjectOpenMenuProps) {
+export function SessionProjectOpenMenu({
+  projectId,
+  bridgeId,
+  label = "Open",
+  triggerClassName,
+}: SessionProjectOpenMenuProps) {
   const { preferences } = usePreferences(bridgeId);
   const [openingEditorId, setOpeningEditorId] = useState<string | null>(null);
   const resolvedCurrentEditor = useMemo(
@@ -97,17 +105,20 @@ export function SessionProjectOpenMenu({ projectId, bridgeId }: SessionProjectOp
         <button
           type="button"
           disabled={!projectId || openingEditorId !== null}
-          className="inline-flex h-9 items-center gap-2 rounded-[6px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-60"
+          className={cn(
+            "inline-flex h-9 items-center gap-2 rounded-[6px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[var(--vk-text-normal)] transition hover:bg-[rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-60",
+            triggerClassName,
+          )}
           aria-label="Open project in code editor"
           title={projectId ? `Open project in ${resolvedCurrentEditor.label}` : "No project selected"}
         >
           {openingEditorId ? (
-            <Loader2 className="h-4 w-4 animate-spin text-[var(--vk-text-muted)]" />
+            <Loader2 className="h-4 w-4 animate-spin text-current" />
           ) : (
-            <ExternalLink className="h-4 w-4 text-[var(--vk-text-muted)]" />
+            <ExternalLink className="h-4 w-4 text-current" />
           )}
-          <span className="hidden font-medium sm:inline">Open</span>
-          <ChevronDown className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
+          <span className="hidden font-medium sm:inline">{label}</span>
+          <ChevronDown className="h-3.5 w-3.5 text-current" />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>

@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { JetBrains_Mono, Orbitron, Tomorrow } from "next/font/google";
-import { GeistSans } from "geist/font/sans";
+import { IBM_Plex_Mono, IBM_Plex_Sans, Orbitron, Tomorrow } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
 import { Analytics } from "@vercel/analytics/next";
 import { headers } from "next/headers";
@@ -24,14 +23,21 @@ const orbitron = Orbitron({
   weight: ["500", "700"],
 });
 
-const jetbrainsMono = JetBrains_Mono({
+const ibmPlexSans = IBM_Plex_Sans({
   subsets: ["latin"],
-  variable: "--font-mono",
+  variable: "--font-ibm-plex-sans",
+  display: "swap",
+  weight: ["400", "500", "600"],
+});
+
+const ibmPlexMono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  variable: "--font-ibm-plex-mono",
   display: "swap",
   weight: ["400", "500"],
 });
 
-const rootClass = `${GeistSans.variable} ${tomorrow.variable} ${orbitron.variable} ${jetbrainsMono.variable}`;
+const rootClass = `${ibmPlexSans.variable} ${tomorrow.variable} ${orbitron.variable} ${ibmPlexMono.variable}`;
 const isVercelDeployment = process.env.VERCEL === "1" || process.env.VERCEL === "true";
 
 export const metadata: Metadata = {

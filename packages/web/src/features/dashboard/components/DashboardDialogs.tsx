@@ -2544,7 +2544,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     disabled={isBusy}
                     className={`flex min-h-[44px] shrink-0 items-center gap-3 rounded-[3px] px-3 py-2 text-left text-[14px] leading-[21px] transition-colors sm:min-h-0 sm:w-full ${
                       selected
-                        ? "bg-[rgba(234,122,42,0.1)] text-[var(--vk-orange)]"
+                        ? "bg-[color:color-mix(in_srgb,var(--vk-accent)_12%,transparent)] text-[var(--vk-accent)]"
                         : "text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
                     } disabled:opacity-50`}
                   >
@@ -2587,7 +2587,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
               {isPreferenceFormTab ? (
                 <div className="space-y-5">
                   {isOnboarding && (
-                    <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.08)] px-4 py-3">
+                    <section className="rounded-[6px] border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-accent)_10%,transparent)] px-4 py-3">
                       <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
                         Conductor is already running locally. Finish setup here in the dashboard, then you can start using
                         chat and boards immediately.
@@ -3296,7 +3296,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                 </div>
               ) : isOrganizationTab ? (
                 <div className="space-y-5">
-                  <section className="rounded-[6px] border border-[var(--vk-border)] bg-[rgba(234,122,42,0.06)] px-4 py-3">
+                  <section className="rounded-[6px] border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-accent)_8%,transparent)] px-4 py-3">
                     <h4 className="text-[15px] font-medium text-[var(--vk-text-strong)]">Access Control</h4>
                     <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
                       The dashboard stays bound to localhost by default. If you need access beyond the local machine,

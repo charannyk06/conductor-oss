@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Bot, Loader2, Sparkles } from "lucide-react";
+import { Bot, ChevronLeft, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { SessionChatDock } from "@/components/sessions/SessionChatDock";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
@@ -22,6 +22,8 @@ type ProjectDispatcherPanelProps = {
   bridgeId?: string | null;
   defaultAgent: string;
   projectSessions: DashboardSession[];
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 };
 
 export function ProjectDispatcherPanel({
@@ -29,6 +31,8 @@ export function ProjectDispatcherPanel({
   bridgeId,
   defaultAgent,
   projectSessions,
+  collapsed = false,
+  onToggleCollapsed,
 }: ProjectDispatcherPanelProps) {
   const existingSession = useMemo(
     () => projectSessions.filter(isProjectDispatcherSession).sort(compareSessionsByActivity)[0] ?? null,
@@ -47,6 +51,24 @@ export function ProjectDispatcherPanel({
   }, [existingSession, projectId]);
 
   const dispatcherSession = existingSession ?? localSession;
+
+  if (collapsed) {
+    return (
+      <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-panel)]">
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          className="flex h-[33px] w-full items-center gap-2 border-b border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:h-full xl:flex-col xl:justify-start xl:px-0 xl:py-3"
+          aria-label="Expand dispatcher chat"
+          title="Expand dispatcher chat"
+        >
+          <Bot className="h-4 w-4 shrink-0" />
+          <span className="truncate xl:hidden">Dispatcher</span>
+          <ChevronLeft className="ml-auto h-4 w-4 shrink-0 xl:ml-0" />
+        </button>
+      </section>
+    );
+  }
 
   const handleCreate = async () => {
     setCreating(true);
@@ -82,9 +104,19 @@ export function ProjectDispatcherPanel({
   if (!dispatcherSession) {
     return (
       <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
-        <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/70 px-3 py-3 sm:px-4">
-          <p className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">Dispatcher Chat</p>
-          <p className="mt-1 text-[14px] text-[var(--vk-text-strong)]">Separate orchestrator session for {projectId}</p>
+        <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/70 px-3 text-[12px] text-[var(--vk-text-muted)]">
+          <span className="min-w-0 flex-1 truncate">Dispatcher</span>
+          {onToggleCollapsed ? (
+            <button
+              type="button"
+              onClick={onToggleCollapsed}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+              aria-label="Collapse dispatcher chat"
+              title="Collapse dispatcher chat"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+          ) : null}
         </div>
         <div className="flex flex-1 items-center justify-center p-6">
           <div className="w-full max-w-[640px] rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 text-center shadow-[0_16px_48px_rgba(0,0,0,0.18)]">
@@ -123,16 +155,11 @@ export function ProjectDispatcherPanel({
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
-      <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)]/70 px-3 py-3 sm:px-4">
-        <p className="text-[11px] uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">Dispatcher Chat</p>
-        <p className="mt-1 text-[14px] text-[var(--vk-text-strong)]">
-          Separate orchestration session with long-lived memory for {projectId}
-        </p>
-      </div>
       <div className="min-h-0 flex-1 overflow-hidden">
         <SessionChatDock
           session={dispatcherSession}
           bridgeId={bridgeId}
+          onToggleCollapse={onToggleCollapsed}
           className="w-full border-l-0 border-t-0 xl:w-full"
         />
       </div>

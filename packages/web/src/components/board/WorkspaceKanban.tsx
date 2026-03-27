@@ -181,7 +181,7 @@ interface WorkspaceKanbanProps {
   headerAccessory?: ReactNode;
   showAgenticPanel?: boolean;
   onOpenSession?: (sessionId: string, options?: {
-    tab?: "overview" | "preview" | "diff" | "terminal";
+    tab?: "overview" | "preview" | "diff" | "chat" | "terminal";
   }) => void;
 }
 
@@ -1337,7 +1337,7 @@ export function WorkspaceKanban({
   const openSessionView = useCallback(
     (sessionId: string, tab: "chat" | "terminal" = "terminal") => {
       if (onOpenSession) {
-        onOpenSession(sessionId, { tab: tab === "chat" ? "terminal" : tab });
+        onOpenSession(sessionId, { tab });
         return;
       }
       router.push(buildSessionHref(sessionId, { bridgeId, tab }));

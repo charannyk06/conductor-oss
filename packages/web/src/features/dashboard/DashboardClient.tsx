@@ -80,6 +80,7 @@ import {
 } from "@/lib/bridgeScope";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { normalizeModelAccessPreferences } from "@/lib/modelAccess";
+import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import {
   type RuntimeAgentModelCatalog,
 } from "@/lib/runtimeAgentModelsShared";
@@ -909,14 +910,6 @@ export default function DashboardClient({
     () => normalizeDashboardQueryValue(searchParams.get("bridge")),
     [searchParams],
   );
-  const terminalTabActive = useMemo(() => {
-    const tab = searchParams.get("tab");
-    return (
-      tab === null
-      || tab === "terminal"
-      || (tab !== "overview" && tab !== "preview" && tab !== "chat" && tab !== "diff")
-    );
-  }, [searchParams]);
   const [selectedBridgeId, setSelectedBridgeId] = useState(bridgeQueryId ?? "");
   const selectedBridgeIdValue = normalizeBridgeId(selectedBridgeId);
   const selectedSessionBridgeId = useMemo(
@@ -992,6 +985,7 @@ export default function DashboardClient({
   const [pendingWorkspaceSetup, setPendingWorkspaceSetup] = useState(false);
   const [mountedSessionIds, setMountedSessionIds] = useState<string[]>(() => selectedSessionId ? [selectedSessionId] : []);
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
+  const [dispatcherCollapsed, setDispatcherCollapsed] = useState(false);
   const launchpadSessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1094,8 +1088,6 @@ export default function DashboardClient({
   useEffect(() => {
     setSelectedBridgeId(bridgeQueryId ?? "");
   }, [bridgeQueryId]);
-
-  const immersiveMobileMode = Boolean(selectedSessionId) && terminalTabActive && compactTerminalChrome;
 
   const dashboardSessions = sessions as unknown as DashboardSession[];
   const sessionsById = useMemo(
@@ -1287,6 +1279,17 @@ export default function DashboardClient({
     () => selectedSession ?? (selectedSessionId ? sessionsById.get(selectedSessionId) ?? null : null),
     [selectedSession, selectedSessionId, sessionsById],
   );
+  const terminalTabActive = useMemo(() => {
+    const tab = searchParams.get("tab");
+    if (tab === "overview" || tab === "preview" || tab === "diff" || tab === "chat") {
+      return false;
+    }
+    if (tab === "terminal") {
+      return true;
+    }
+    return getDefaultSessionPrimaryTab(dockedBoardSession) === "terminal";
+  }, [dockedBoardSession, searchParams]);
+  const immersiveMobileMode = Boolean(selectedSessionId) && terminalTabActive && compactTerminalChrome;
   const topBarTitle = useMemo(() => {
     if (selectedSession) {
       return [selectedSession.projectId, selectedSession.branch].filter(Boolean).join(" \u00b7 ");
@@ -1801,13 +1804,14 @@ export default function DashboardClient({
     closeSidebarOnMobile();
   }, [closeSidebarOnMobile, navigateDashboard, preferences?.codingAgent, workspaceView]);
 
-  const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" | "terminal" }) => {
+  const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" | "chat" | "terminal" }) => {
     const matchedSession = sessionsById.get(id) ?? null;
+    const nextTab = options?.tab ?? getDefaultSessionPrimaryTab(matchedSession);
     navigateDashboard(
       {
         projectId: matchedSession?.projectId ?? selectedProjectId ?? null,
         sessionId: id,
-        tab: options?.tab ?? "terminal",
+        tab: nextTab,
       },
       "push",
     );
@@ -1832,6 +1836,10 @@ export default function DashboardClient({
     setPreferencesDialogOpen(false);
     setPreferencesError(null);
   }, [onboardingRequired, preferencesSaving]);
+
+  const handleToggleDispatcherCollapsed = useCallback(() => {
+    setDispatcherCollapsed((current) => !current);
+  }, []);
 
   const handleUnlinkProject = useCallback(async (projectId: string) => {
     const encodedProjectId = encodeURIComponent(projectId);
@@ -1989,7 +1997,13 @@ export default function DashboardClient({
           <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
             {workspaceMainPanel}
           </div>
-          <div className="min-h-[360px] border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:min-h-0 xl:w-[405px] xl:border-l xl:border-t-0">
+          <div className={`border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0 ${
+            selectedSessionId
+              ? "min-h-[360px] xl:min-h-0 xl:w-[405px]"
+              : dispatcherCollapsed
+                ? "min-h-[33px] xl:min-h-0 xl:w-[56px]"
+                : "min-h-[360px] xl:min-h-0 xl:w-[405px]"
+          }`}>
             {selectedSessionId ? (
               dockedBoardSession ? (
                 <SessionChatDock
@@ -2008,6 +2022,8 @@ export default function DashboardClient({
                 bridgeId={effectiveBridgeId}
                 defaultAgent={resolvedCodingAgent}
                 projectSessions={selectedProjectSessions}
+                collapsed={dispatcherCollapsed}
+                onToggleCollapsed={handleToggleDispatcherCollapsed}
               />
             )}
           </div>
@@ -2056,7 +2072,19 @@ export default function DashboardClient({
         </div>
       </div>
     );
-  }, [dockedBoardSession, effectiveBridgeId, navigateDashboard, selectedProject, selectedSessionId, workspaceMainPanel, workspaceView]);
+  }, [
+    dispatcherCollapsed,
+    dockedBoardSession,
+    effectiveBridgeId,
+    handleToggleDispatcherCollapsed,
+    navigateDashboard,
+    resolvedCodingAgent,
+    selectedProject,
+    selectedProjectSessions,
+    selectedSessionId,
+    workspaceMainPanel,
+    workspaceView,
+  ]);
 
   const workspaceContent = useMemo(() => {
     if (bridgeScopePending) {

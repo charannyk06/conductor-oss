@@ -1,19 +1,29 @@
 "use client";
 
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
+  BrainCircuit,
   Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
-  Eye,
+  FileText,
+  FolderOpen,
+  GitBranch,
+  Globe,
+  ListTodo,
   Loader2,
+  PencilLine,
+  Search,
   Send,
   Sparkles,
-  SquareTerminal,
-  UserRound,
+  TerminalSquare,
   Wrench,
   X,
 } from "lucide-react";
@@ -22,9 +32,10 @@ import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildSessionHref } from "@/lib/dashboardHref";
+import { getKnownAgent, KNOWN_AGENTS } from "@/lib/knownAgents";
+import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import type { DashboardSession } from "@/lib/types";
 import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
-import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
 
 type FeedEntryKind = "assistant" | "status" | "system" | "tool" | "user";
 
@@ -80,7 +91,44 @@ type SessionChatDockProps = {
   session: DashboardSession;
   bridgeId?: string | null;
   onClose?: () => void;
+  onToggleCollapse?: () => void;
   className?: string;
+  hideOpenSessionAction?: boolean;
+};
+
+type RepositoryPathHealth = {
+  exists: boolean;
+  isGitRepository: boolean;
+  suggestedPath: string | null;
+};
+
+type RepositorySettingsPayload = {
+  id: string;
+  displayName: string;
+  repo: string;
+  path: string;
+  agent: string;
+  agentPermissions: string;
+  agentModel: string;
+  agentReasoningEffort: string;
+  workspaceMode: string;
+  runtimeMode: string;
+  scmMode: string;
+  defaultWorkingDirectory: string;
+  defaultBranch: string;
+  devServerScript: string;
+  devServerCwd: string;
+  devServerUrl: string;
+  devServerPort: string;
+  devServerHost: string;
+  devServerPath: string;
+  devServerHttps: boolean;
+  setupScript: string;
+  runSetupInParallel: boolean;
+  cleanupScript: string;
+  archiveScript: string;
+  copyFiles: string;
+  pathHealth: RepositoryPathHealth;
 };
 
 const EMPTY_FEED_PAYLOAD: SessionFeedPayload = {
@@ -103,6 +151,14 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+      .map((item) => readString(item))
+      .filter((item): item is string => item !== null)
+    : [];
 }
 
 function normalizeFeedEntry(value: unknown): SessionFeedEntry | null {
@@ -193,6 +249,50 @@ function normalizeFeedDelta(value: unknown): FeedDeltaEvent | null {
   return null;
 }
 
+function normalizeRepositorySettings(value: unknown): RepositorySettingsPayload | null {
+  const record = asRecord(value);
+  const id = readString(record.id);
+  const repo = readString(record.repo);
+  const path = readString(record.path);
+  if (!id || !repo || !path) {
+    return null;
+  }
+
+  const pathHealthRecord = asRecord(record.pathHealth);
+  return {
+    id,
+    displayName: readString(record.displayName) ?? id,
+    repo,
+    path,
+    agent: readString(record.agent) ?? "codex",
+    agentPermissions: readString(record.agentPermissions) ?? "skip",
+    agentModel: readString(record.agentModel) ?? "",
+    agentReasoningEffort: readString(record.agentReasoningEffort) ?? "",
+    workspaceMode: readString(record.workspaceMode) ?? "local",
+    runtimeMode: readString(record.runtimeMode) ?? "ttyd",
+    scmMode: readString(record.scmMode) ?? "git",
+    defaultWorkingDirectory: readString(record.defaultWorkingDirectory) ?? "",
+    defaultBranch: readString(record.defaultBranch) ?? "main",
+    devServerScript: readString(record.devServerScript) ?? "",
+    devServerCwd: readString(record.devServerCwd) ?? "",
+    devServerUrl: readString(record.devServerUrl) ?? "",
+    devServerPort: readString(record.devServerPort) ?? "",
+    devServerHost: readString(record.devServerHost) ?? "",
+    devServerPath: readString(record.devServerPath) ?? "",
+    devServerHttps: record.devServerHttps === true,
+    setupScript: readString(record.setupScript) ?? "",
+    runSetupInParallel: record.runSetupInParallel === true,
+    cleanupScript: readString(record.cleanupScript) ?? "",
+    archiveScript: readString(record.archiveScript) ?? "",
+    copyFiles: readString(record.copyFiles) ?? "",
+    pathHealth: {
+      exists: pathHealthRecord.exists === true,
+      isGitRepository: pathHealthRecord.isGitRepository === true,
+      suggestedPath: readString(pathHealthRecord.suggestedPath),
+    },
+  };
+}
+
 function formatEntryTime(value: string | null): string | null {
   if (!value) {
     return null;
@@ -217,35 +317,19 @@ function formatEntryTime(value: string | null): string | null {
   }).format(timestamp);
 }
 
-function resolveToolStatusTone(status: string | null): string {
-  switch (status) {
-    case "success":
-    case "done":
-    case "completed":
-      return "bg-[#54b04f]";
-    case "error":
-    case "failed":
-      return "bg-[#d25151]";
-    case "running":
-    case "working":
-    case "pending":
-      return "bg-[#d08c1d]";
-    default:
-      return "bg-[#6f6f6f]";
+function truncateInline(value: string, maxLength = 84): string {
+  const collapsed = value.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= maxLength) {
+    return collapsed;
   }
-}
-
-function resolveEntryLabel(entry: SessionFeedEntry, session: DashboardSession): string {
-  if (entry.kind === "assistant" && entry.source === "runtime") {
-    return "Thinking";
-  }
-  if (entry.kind === "assistant") {
-    return session.metadata.agent?.trim() || "Assistant";
-  }
-  return entry.label || "Session";
+  return `${collapsed.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
 function formatAgentName(value: string): string {
+  const known = getKnownAgent(value);
+  if (known?.label) {
+    return known.label;
+  }
   return value
     .split(/[-_\s]+/g)
     .filter(Boolean)
@@ -253,21 +337,59 @@ function formatAgentName(value: string): string {
     .join(" ");
 }
 
+function formatModelChip(agentName: string, modelValue: string | null): string | null {
+  const trimmed = modelValue?.trim() ?? "";
+  if (!trimmed) {
+    return null;
+  }
+
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("claude-")) {
+    const match = lower.match(/^claude-(sonnet|opus|haiku)-(\d+)-(\d+)/);
+    if (match) {
+      return `Claude ${match[1][0]?.toUpperCase()}${match[1].slice(1)} ${match[2]}.${match[3]}`;
+    }
+  }
+  if (lower.startsWith("gpt-")) {
+    return trimmed.toUpperCase().replace(/-/g, " ");
+  }
+  if (lower === "opus" || lower === "sonnet" || lower === "haiku") {
+    return `${formatAgentName(agentName)} ${trimmed[0]?.toUpperCase()}${trimmed.slice(1)}`;
+  }
+  return trimmed;
+}
+
 function MarkdownMessage({ text }: { text: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
+        h1: ({ children }) => (
+          <h1 className="mb-5 text-[36px] font-semibold tracking-[-0.03em] text-[var(--vk-text-strong)] last:mb-0">
+            {children}
+          </h1>
+        ),
+        h2: ({ children }) => (
+          <h2 className="mb-4 mt-8 text-[20px] font-semibold tracking-[-0.02em] text-[var(--vk-text-strong)] first:mt-0 last:mb-0">
+            {children}
+          </h2>
+        ),
+        h3: ({ children }) => (
+          <h3 className="mb-3 mt-6 text-[16px] font-semibold text-[var(--vk-text-normal)] first:mt-0 last:mb-0">
+            {children}
+          </h3>
+        ),
         p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
+        hr: () => <hr className="my-8 border-0 border-t border-[var(--vk-border)]" />,
         pre: ({ children }) => (
-          <pre className="mb-3 overflow-x-auto rounded-[3px] border border-[var(--vk-border)] bg-[#191919] p-3 text-[12px] text-[var(--vk-text-normal)] last:mb-0">
+          <pre className="mb-4 overflow-x-auto rounded-[10px] border border-[var(--vk-border)] bg-[#151413] p-3 text-[12px] text-[var(--vk-text-normal)] last:mb-0">
             {children}
           </pre>
         ),
         code: ({ children, className }) => (
           <code
             className={cn(
-              "rounded-[3px] bg-[#191919] px-1.5 py-0.5 font-mono text-[12px] text-[var(--vk-text-normal)]",
+              "rounded-[6px] bg-[#171615] px-1.5 py-0.5 font-mono text-[12px] text-[var(--vk-text-normal)]",
               className,
             )}
           >
@@ -277,11 +399,114 @@ function MarkdownMessage({ text }: { text: string }) {
         ul: ({ children }) => <ul className="mb-3 list-disc pl-5 last:mb-0">{children}</ul>,
         ol: ({ children }) => <ol className="mb-3 list-decimal pl-5 last:mb-0">{children}</ol>,
         li: ({ children }) => <li className="mb-1 last:mb-0">{children}</li>,
+        table: ({ children }) => (
+          <div className="mb-4 overflow-x-auto rounded-[12px] border border-[var(--vk-border)]">
+            <table className="min-w-full border-collapse text-left text-[13px]">{children}</table>
+          </div>
+        ),
+        thead: ({ children }) => <thead className="bg-[rgba(255,255,255,0.03)]">{children}</thead>,
+        tbody: ({ children }) => <tbody>{children}</tbody>,
+        tr: ({ children }) => <tr className="border-b border-[var(--vk-border)] last:border-b-0">{children}</tr>,
+        th: ({ children }) => (
+          <th className="px-4 py-3 text-[12px] font-medium text-[var(--vk-text-normal)]">{children}</th>
+        ),
+        td: ({ children }) => (
+          <td className="px-4 py-3 align-top text-[13px] text-[var(--vk-text-muted)]">{children}</td>
+        ),
       }}
     >
       {text}
     </ReactMarkdown>
   );
+}
+
+function AttachmentCard({
+  label,
+  tone = "neutral",
+}: {
+  label: string;
+  tone?: "neutral" | "prompt";
+}) {
+  return (
+    <div
+      className={cn(
+        "mb-3 flex items-center gap-3 rounded-[10px] border px-3 py-2",
+        tone === "prompt"
+          ? "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.05)] text-[#f4ede7]"
+          : "border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[var(--vk-text-normal)]",
+      )}
+    >
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] bg-[rgba(0,0,0,0.22)]">
+        <FileText className="h-4 w-4" />
+      </div>
+      <div className="min-w-0">
+        <p className="truncate text-[13px] font-medium">{label}</p>
+        <p className="truncate text-[11px] text-[var(--vk-text-muted)]">Attached context</p>
+      </div>
+    </div>
+  );
+}
+
+function ToolGlyph({
+  toolKind,
+  toolTitle,
+  className = "h-4 w-4",
+}: {
+  toolKind: string | null;
+  toolTitle: string;
+  className?: string;
+}) {
+  const normalizedTitle = toolTitle.trim().toLowerCase();
+  const normalizedKind = toolKind?.trim().toLowerCase() ?? "";
+
+  if (normalizedKind === "thinking" || normalizedTitle === "thinking") {
+    return <BrainCircuit className={className} />;
+  }
+  if (
+    normalizedKind === "read" ||
+    normalizedTitle.startsWith("read ") ||
+    normalizedTitle.includes("review request")
+  ) {
+    return <FileText className={className} />;
+  }
+  if (
+    normalizedKind === "write" ||
+    normalizedKind === "edit" ||
+    normalizedKind === "multiedit" ||
+    normalizedTitle.startsWith("write") ||
+    normalizedTitle.startsWith("edit")
+  ) {
+    return <PencilLine className={className} />;
+  }
+  if (normalizedKind === "grep" || normalizedKind === "search" || normalizedKind === "find") {
+    return <Search className={className} />;
+  }
+  if (normalizedKind === "ls" || normalizedKind === "glob" || normalizedKind === "open") {
+    return <FolderOpen className={className} />;
+  }
+  if (normalizedKind === "websearch" || normalizedKind === "webfetch") {
+    return <Globe className={className} />;
+  }
+  if (normalizedKind === "task" || normalizedKind === "todowrite") {
+    return <ListTodo className={className} />;
+  }
+  if (
+    normalizedTitle.includes("diff") ||
+    normalizedTitle.includes("workspace diff") ||
+    normalizedTitle.includes("git diff")
+  ) {
+    return <GitBranch className={className} />;
+  }
+  if (
+    normalizedKind === "bash" ||
+    normalizedKind === "command" ||
+    normalizedTitle.startsWith("get diff") ||
+    normalizedTitle.startsWith("run ")
+  ) {
+    return <TerminalSquare className={className} />;
+  }
+
+  return <Wrench className={className} />;
 }
 
 function SessionFeedMessage({
@@ -291,77 +516,209 @@ function SessionFeedMessage({
   entry: SessionFeedEntry;
   session: DashboardSession;
 }) {
-  const toolStatus = readString(entry.metadata.toolStatus)?.toLowerCase() ?? null;
   const timestamp = formatEntryTime(entry.createdAt);
-  const label = resolveEntryLabel(entry, session);
+  const label = entry.kind === "assistant"
+    ? (entry.source === "runtime" ? "Thinking" : formatAgentName(session.metadata.agent?.trim() || "assistant"))
+    : entry.label || "Session";
   const attachments = entry.attachments
     .map((attachment) => {
       const record = asRecord(attachment);
       return readString(record.name) ?? readString(record.path) ?? (typeof attachment === "string" ? attachment : null);
     })
     .filter((value): value is string => Boolean(value));
+  const toolTitle = readString(entry.metadata.toolTitle) ?? entry.text;
+  const toolKind = readString(entry.metadata.toolKind)?.toLowerCase() ?? null;
+  const toolContent = readStringArray(entry.metadata.toolContent);
+  const toolPrimary = toolContent[0] ?? null;
+  const toolSecondary = toolContent[1] ?? null;
+  const isRuntimeThinking = entry.kind === "assistant" && entry.source === "runtime";
+  const isSessionStatus = entry.kind === "status" && entry.source === "session-status";
 
   if (entry.kind === "tool") {
-    const title = readString(entry.metadata.toolTitle) ?? entry.text;
     return (
-      <div className="flex items-start gap-2 text-[13px] text-[var(--vk-text-muted)]">
-        <div className="relative mt-[3px] flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#232323] text-[var(--vk-text-muted)]">
-          <Wrench className="h-3.5 w-3.5" />
-          <span className={cn("absolute -bottom-[2px] -left-[2px] h-[6px] w-[6px] rounded-full", resolveToolStatusTone(toolStatus))} />
+      <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
+        <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
+          <ToolGlyph toolKind={toolKind} toolTitle={toolTitle} className="h-4 w-4" />
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-            <span>Tool</span>
-            {timestamp ? <span className="normal-case tracking-normal text-[10px]">{timestamp}</span> : null}
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-[var(--vk-text-normal)]">{toolTitle || "Tool call"}</span>
+            {toolPrimary ? (
+              <span
+                className="max-w-full truncate rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
+                title={toolPrimary}
+              >
+                {truncateInline(toolPrimary, 72)}
+              </span>
+            ) : null}
+            {timestamp ? (
+              <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
+            ) : null}
           </div>
-          <p className="mt-1 truncate text-[13px] leading-[21px] text-[var(--vk-text-muted)]" title={title}>
-            {title}
-          </p>
+          {toolSecondary ? (
+            <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">{truncateInline(toolSecondary, 140)}</p>
+          ) : null}
         </div>
       </div>
     );
   }
 
-  const Icon = entry.kind === "user"
-    ? UserRound
-    : entry.kind === "assistant"
-      ? Bot
-      : entry.kind === "status"
-        ? Sparkles
-        : AlertCircle;
-  const cardClassName = entry.kind === "user"
-    ? "border border-[var(--vk-border)] bg-[#1f1f1f] px-3 py-3"
-    : entry.kind === "status" || entry.kind === "system"
-      ? "border border-[var(--vk-border)] bg-[#1a1a1a] px-3 py-2.5"
-      : "bg-transparent px-0 py-0";
-
-  return (
-    <div className="flex items-start gap-2.5">
-      <div className="mt-[3px] flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#232323] text-[var(--vk-text-muted)]">
-        <Icon className="h-3.5 w-3.5" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-          <span>{label}</span>
-          {timestamp ? <span className="normal-case tracking-normal text-[10px]">{timestamp}</span> : null}
+  if (isRuntimeThinking) {
+    return (
+      <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
+        <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
+          <BrainCircuit className="h-4 w-4" />
         </div>
-        <div className={cn("rounded-[3px] text-[14px] leading-[21px] text-[var(--vk-text-normal)]", cardClassName)}>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-[var(--vk-text-normal)]">Thinking</span>
+            {entry.text.trim().length > 0 ? (
+              <span
+                className="max-w-full truncate rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
+                title={entry.text}
+              >
+                {truncateInline(entry.text, 96)}
+              </span>
+            ) : null}
+            {timestamp ? (
+              <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isSessionStatus) {
+    return (
+      <div className="space-y-2">
+        <div className="rounded-[22px] border border-[rgba(113,84,68,0.45)] bg-[rgba(54,40,34,0.9)] px-4 py-3 text-[15px] leading-7 text-[#efe4dc] shadow-[0_8px_18px_rgba(0,0,0,0.14)]">
           <MarkdownMessage text={entry.text} />
         </div>
-        {attachments.length > 0 ? (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {attachments.map((attachment) => (
-              <span
-                key={`${entry.id}-${attachment}`}
-                className="inline-flex items-center rounded-[999px] border border-[var(--vk-border)] bg-[#232323] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]"
-              >
-                {attachment}
-              </span>
-            ))}
+        {timestamp ? <div className="text-right text-[11px] text-[var(--vk-text-muted)]">{timestamp}</div> : null}
+      </div>
+    );
+  }
+
+  if (entry.kind === "user") {
+    return (
+      <div className="ml-auto max-w-[88%]">
+        <div className="rounded-[14px] border border-[rgba(124,94,78,0.45)] bg-[rgba(52,39,35,0.92)] px-4 py-3 text-[#f1e7e0] shadow-[0_10px_24px_rgba(0,0,0,0.18)]">
+          {attachments.map((attachment) => (
+            <AttachmentCard key={`${entry.id}-${attachment}`} label={attachment} tone="prompt" />
+          ))}
+          <div className="text-[15px] leading-7 text-[#f4ede7]">
+            <MarkdownMessage text={entry.text} />
           </div>
-        ) : null}
+        </div>
+        {timestamp ? <div className="mt-1 text-right text-[11px] text-[var(--vk-text-muted)]">{timestamp}</div> : null}
+      </div>
+    );
+  }
+
+  if (entry.kind === "assistant") {
+    return (
+      <div className="space-y-2">
+        <div className="text-[15px] leading-8 text-[var(--vk-text-normal)]">
+          {attachments.map((attachment) => (
+            <AttachmentCard key={`${entry.id}-${attachment}`} label={attachment} />
+          ))}
+          <MarkdownMessage text={entry.text} />
+        </div>
+        {timestamp ? <div className="text-[11px] text-[var(--vk-text-muted)]">{timestamp}</div> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 text-[12px] text-[var(--vk-text-muted)]">
+        {entry.kind === "status" ? <Sparkles className="h-3.5 w-3.5" /> : <AlertCircle className="h-3.5 w-3.5" />}
+        <span>{label}</span>
+        {timestamp ? <span className="ml-auto text-[11px]">{timestamp}</span> : null}
+      </div>
+      <div
+        className={cn(
+          "rounded-[12px] border px-4 py-3 text-[15px] leading-7",
+          "border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] text-[var(--vk-text-muted)]",
+        )}
+      >
+        {attachments.map((attachment) => (
+          <AttachmentCard key={`${entry.id}-${attachment}`} label={attachment} />
+        ))}
+        <MarkdownMessage text={entry.text} />
       </div>
     </div>
+  );
+}
+
+function ProjectAgentSelect({
+  project,
+  disabled = false,
+  saving = false,
+  onChange,
+}: {
+  project: RepositorySettingsPayload | null;
+  disabled?: boolean;
+  saving?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const activeAgent = project?.agent?.trim() || "codex";
+
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          type="button"
+          disabled={disabled || !project}
+          className="inline-flex h-10 min-w-[220px] max-w-full items-center justify-between gap-3 rounded-[8px] border border-[var(--vk-accent)] bg-[color:color-mix(in_srgb,var(--vk-accent)_88%,black_12%)] px-3 text-left text-[13px] text-white shadow-[0_10px_24px_rgba(0,0,0,0.18)] transition hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+          aria-label="Select coding agent"
+          title={project ? `Coding agent: ${formatAgentName(activeAgent)}` : "Project agent unavailable"}
+        >
+          <span className="flex min-w-0 items-center gap-2">
+            <AgentTileIcon
+              seed={{ label: activeAgent }}
+              className="h-5 w-5 border-none bg-transparent"
+            />
+            <span className="truncate">
+              {saving ? "Saving agent…" : `Coding Agent · ${formatAgentName(activeAgent)}`}
+            </span>
+          </span>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronDown className="h-4 w-4 shrink-0" />}
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="start"
+          sideOffset={8}
+          className="z-50 min-w-[250px] max-w-[calc(100vw-2rem)] rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
+        >
+          <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+            Coding agent
+          </p>
+          {KNOWN_AGENTS.map((agent) => {
+            const selected = agent.name === activeAgent;
+            return (
+              <DropdownMenu.Item
+                key={agent.name}
+                onSelect={() => onChange(agent.name)}
+                className="flex min-h-[46px] cursor-default items-center gap-3 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)]"
+              >
+                <AgentTileIcon
+                  seed={{ label: agent.name }}
+                  className="h-5 w-5 border-none bg-transparent"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[13px] font-medium">{agent.label}</p>
+                  <p className="truncate text-[11px] text-[rgba(255,255,255,0.6)]">{agent.description}</p>
+                </div>
+                {selected ? <Check className="h-4 w-4 text-white" /> : null}
+              </DropdownMenu.Item>
+            );
+          })}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
   );
 }
 
@@ -369,36 +726,75 @@ export function SessionChatDock({
   session,
   bridgeId = null,
   onClose,
+  onToggleCollapse,
   className,
+  hideOpenSessionAction = false,
 }: SessionChatDockProps) {
   const router = useRouter();
   const [payload, setPayload] = useState<SessionFeedPayload>(EMPTY_FEED_PAYLOAD);
   const [loading, setLoading] = useState(true);
   const [loadingError, setLoadingError] = useState<string | null>(null);
-  const [setupScript, setSetupScript] = useState<string | null>(null);
-  const [setupLoading, setSetupLoading] = useState(true);
   const [composerValue, setComposerValue] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [repository, setRepository] = useState<RepositorySettingsPayload | null>(null);
+  const [repositoryLoading, setRepositoryLoading] = useState(true);
+  const [repositoryError, setRepositoryError] = useState<string | null>(null);
+  const [savingAgent, setSavingAgent] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
 
   const sessionLabel = useMemo(() => {
     if (session.metadata.sessionKind === "project_dispatcher") {
-      return `${session.projectId} / dispatcher`;
+      return `ACP / ${session.projectId}`;
     }
     const primary = session.issueId?.trim() || session.projectId;
     const secondary = session.branch?.trim() || session.id.slice(0, 8);
     return `${primary} / ${secondary}`;
   }, [session.branch, session.id, session.issueId, session.metadata.sessionKind, session.projectId]);
   const agentLabel = useMemo(
-    () => formatAgentName(session.metadata.agent?.trim() || "agent"),
-    [session.metadata.agent],
+    () => formatAgentName(repository?.agent?.trim() || session.metadata.agent?.trim() || "agent"),
+    [repository?.agent, session.metadata.agent],
   );
   const statusLabel = useMemo(
     () => payload.sessionStatus?.trim() || session.status,
     [payload.sessionStatus, session.status],
   );
+  const toolCount = useMemo(
+    () => payload.entries.filter((entry) => entry.kind === "tool").length,
+    [payload.entries],
+  );
+  const messageCount = useMemo(
+    () => payload.entries.filter((entry) => entry.kind !== "tool").length,
+    [payload.entries],
+  );
   const canContinue = session.status !== "archived";
+  const fullSessionTab = getDefaultSessionPrimaryTab(session);
+
+  const loadRepository = useCallback(async () => {
+    setRepositoryLoading(true);
+    setRepositoryError(null);
+    try {
+      const response = await fetch(withBridgeQuery("/api/repositories", bridgeId), { cache: "no-store" });
+      const body = asRecord(await response.json().catch(() => null));
+      if (!response.ok) {
+        throw new Error(readString(body.error) ?? `Failed to load project settings (${response.status})`);
+      }
+      const nextRepository = Array.isArray(body.repositories)
+        ? body.repositories
+          .map(normalizeRepositorySettings)
+          .find((item): item is RepositorySettingsPayload => item !== null && item.id === session.projectId) ?? null
+        : null;
+      setRepository(nextRepository);
+      if (!nextRepository) {
+        setRepositoryError("Project settings were not found for this session.");
+      }
+    } catch (error) {
+      setRepository(null);
+      setRepositoryError(error instanceof Error ? error.message : "Failed to load project settings");
+    } finally {
+      setRepositoryLoading(false);
+    }
+  }, [bridgeId, session.projectId]);
 
   const loadFeed = useCallback(async () => {
     setLoading(true);
@@ -426,32 +822,8 @@ export function SessionChatDock({
   }, [loadFeed]);
 
   useEffect(() => {
-    setSetupLoading(true);
-    setSetupScript(null);
-    let cancelled = false;
-
-    void fetch(
-      withBridgeQuery(`/api/repositories/${encodeURIComponent(session.projectId)}`, bridgeId),
-      { cache: "no-store" },
-    )
-      .then((response) => response.json().catch(() => null).then((body) => ({ ok: response.ok, body })))
-      .then(({ ok, body }) => {
-        if (cancelled || !ok) {
-          return;
-        }
-        const record = asRecord(body);
-        setSetupScript(readString(record.setupScript));
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setSetupLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [bridgeId, session.projectId]);
+    void loadRepository();
+  }, [loadRepository]);
 
   useEffect(() => {
     const nextUrl = withBridgeQuery(`/api/sessions/${encodeURIComponent(session.id)}/feed/stream?limit=120`, bridgeId);
@@ -543,6 +915,41 @@ export function SessionChatDock({
     }
   }, [bridgeId, composerValue, sending, session.id]);
 
+  const handleAgentChange = useCallback(async (nextAgent: string) => {
+    if (!repository || savingAgent || nextAgent === repository.agent) {
+      return;
+    }
+
+    setSavingAgent(true);
+    setRepositoryError(null);
+    try {
+      const response = await fetch(withBridgeQuery("/api/repositories", bridgeId), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...repository,
+          agent: nextAgent,
+        }),
+      });
+      const body = asRecord(await response.json().catch(() => null));
+      if (!response.ok) {
+        throw new Error(readString(body.error) ?? `Failed to update coding agent (${response.status})`);
+      }
+      const updated = normalizeRepositorySettings(body.repository);
+      if (updated) {
+        setRepository(updated);
+      } else {
+        setRepository((current) => current ? { ...current, agent: nextAgent } : current);
+      }
+    } catch (error) {
+      setRepositoryError(error instanceof Error ? error.message : "Failed to update coding agent");
+    } finally {
+      setSavingAgent(false);
+    }
+  }, [bridgeId, repository, savingAgent]);
+
   return (
     <aside className={cn(
       "flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:w-[405px] xl:border-l xl:border-t-0",
@@ -550,14 +957,27 @@ export function SessionChatDock({
     )}>
       <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-muted)]">
         <span className="min-w-0 flex-1 truncate">{sessionLabel}</span>
-        <button
-          type="button"
-          onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: "terminal" }))}
-          className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-          aria-label="Open full session"
-        >
-          <ExternalLink className="h-3.5 w-3.5" />
-        </button>
+        {onToggleCollapse ? (
+          <button
+            type="button"
+            onClick={onToggleCollapse}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            aria-label="Collapse dispatcher chat"
+            title="Collapse dispatcher chat"
+          >
+            <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+        {!hideOpenSessionAction ? (
+          <button
+            type="button"
+            onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: fullSessionTab === "terminal" ? "terminal" : null }))}
+            className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            aria-label="Open full session"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
         {onClose ? (
           <button
             type="button"
@@ -570,47 +990,9 @@ export function SessionChatDock({
         ) : null}
       </div>
 
-      <div className="border-b border-[var(--vk-border)] px-3 py-3">
-        <div className="rounded-[3px] border border-[var(--vk-border)] bg-[#202020] px-3 py-3">
-          <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>Setup Script</span>
-          </div>
-          {setupLoading ? (
-            <div className="mt-2 flex items-center gap-2 text-[12px] text-[var(--vk-text-muted)]">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>Loading workspace setup…</span>
-            </div>
-          ) : setupScript ? (
-            <pre className="mt-2 overflow-x-auto rounded-[3px] border border-[var(--vk-border)] bg-[#1a1a1a] p-3 font-mono text-[12px] leading-5 text-[var(--vk-text-normal)]">
-              {setupScript}
-            </pre>
-          ) : (
-            <p className="mt-2 text-[13px] leading-[20px] text-[var(--vk-text-muted)]">
-              No setup script configured. Setup scripts run before the coding agent starts.
-            </p>
-          )}
-          {payload.parserState ? (
-            <div className="mt-3 rounded-[3px] border border-[var(--vk-border)] bg-[#1a1a1a] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
-              <div className="font-medium uppercase tracking-[0.08em] text-[10px] text-[var(--vk-text-muted)]">
-                {payload.parserState.kind}
-              </div>
-              {payload.parserState.message ? (
-                <p className="mt-1 leading-[18px]">{payload.parserState.message}</p>
-              ) : null}
-              {payload.parserState.command ? (
-                <p className="mt-1 truncate font-mono text-[11px] text-[var(--vk-text-normal)]" title={payload.parserState.command}>
-                  {payload.parserState.command}
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      </div>
-
       <div
         ref={feedRef}
-        className="min-h-0 flex-1 overflow-y-auto px-3 py-3"
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
       >
         {loading ? (
           <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
@@ -623,14 +1005,38 @@ export function SessionChatDock({
           </div>
         ) : (
           <div className="space-y-5">
-            {payload.truncated ? (
-              <div className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                Showing the latest {payload.windowLimit} entries
-              </div>
-            ) : null}
+            <div className="flex flex-wrap items-center gap-2 text-[12px] text-[var(--vk-text-muted)]">
+              <span className="inline-flex items-center gap-2">
+                <Wrench className="h-3.5 w-3.5" />
+                <span>{toolCount} tool calls, {messageCount} messages</span>
+              </span>
+              {payload.parserState ? (
+                <>
+                  <span className="text-[var(--vk-text-dim)]">•</span>
+                  <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
+                    <BrainCircuit className="h-3 w-3" />
+                    <span>{payload.parserState.kind}</span>
+                  </span>
+                  {payload.parserState.command ? (
+                    <span
+                      className="max-w-full truncate rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
+                      title={payload.parserState.command}
+                    >
+                      {truncateInline(payload.parserState.command, 72)}
+                    </span>
+                  ) : null}
+                </>
+              ) : null}
+              {payload.truncated ? (
+                <>
+                  <span className="text-[var(--vk-text-dim)]">•</span>
+                  <span>Showing latest {payload.windowLimit}</span>
+                </>
+              ) : null}
+            </div>
 
             {payload.entries.length === 0 ? (
-              <div className="rounded-[3px] border border-[var(--vk-border)] bg-[#1f1f1f] px-3 py-3 text-[13px] text-[var(--vk-text-muted)]">
+              <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
                 No session feed entries yet.
               </div>
             ) : (
@@ -642,45 +1048,31 @@ export function SessionChatDock({
         )}
       </div>
 
-      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-3">
-        <div className="mb-3 flex items-center gap-2">
-          <SessionProjectOpenMenu
-            projectId={session.projectId}
-            bridgeId={bridgeId}
-            label="Open Workspace"
-            triggerClassName="h-[30px] rounded-[3px] border-[var(--vk-accent)] bg-[var(--vk-accent)] px-3 text-[13px] text-white hover:bg-[var(--accent-hover)] hover:text-white"
+      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-4">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <ProjectAgentSelect
+            project={repository}
+            disabled={repositoryLoading}
+            saving={savingAgent}
+            onChange={(value) => void handleAgentChange(value)}
           />
-          <button
-            type="button"
-            onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: "terminal" }))}
-            className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-            aria-label="Open terminal view"
-            title="Open terminal"
-          >
-            <SquareTerminal className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: "preview" }))}
-            className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-            aria-label="Open preview view"
-            title="Open preview"
-          >
-            <Eye className="h-4 w-4" />
-          </button>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto inline-flex items-center gap-2 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-[11px] text-[var(--vk-text-muted)]">
             <AgentTileIcon
               seed={{ label: agentLabel }}
-              className="h-6 w-6 border-none bg-transparent"
+              className="h-4 w-4 border-none bg-transparent"
             />
-            <div className="flex flex-col items-end text-right">
-              <span className="text-[12px] text-[var(--vk-text-normal)]">{agentLabel}</span>
-              <span className="text-[10px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                {statusLabel}
-              </span>
-            </div>
+            <span>{agentLabel}</span>
+            <span className="text-[var(--vk-text-dim)]">•</span>
+            <span>{statusLabel}</span>
           </div>
         </div>
+
+        {repositoryError ? (
+          <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+            <span>{repositoryError}</span>
+          </div>
+        ) : null}
 
         {sendError ? (
           <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">

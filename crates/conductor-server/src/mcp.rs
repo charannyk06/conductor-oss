@@ -6,6 +6,12 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::state::{AppState, SessionRecord, SpawnRequest};
+use crate::routes::boards::{
+    build_task_text, default_heading_for_role, insert_task_into_board, load_board_response,
+    next_human_task_ref, normalize_role, parse_board, resolve_board_path_for_project,
+    resolve_board_task_record, split_task_text, write_parsed_board, BoardTaskRecord, ParsedBoard,
+    ParsedBoardColumn,
+};
 
 const MCP_SERVER_NAME: &str = "conductor";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -14,6 +20,10 @@ const TOOL_DISPATCH: &str = "conductor_dispatch";
 const TOOL_LIST_SESSIONS: &str = "conductor_list_sessions";
 const TOOL_SESSION_STATUS: &str = "conductor_session_status";
 const TOOL_LIST_PROJECTS: &str = "conductor_list_projects";
+const TOOL_GET_BOARD: &str = "conductor_get_board";
+const TOOL_CREATE_BOARD_TASK: &str = "conductor_create_board_task";
+const TOOL_UPDATE_BOARD_TASK: &str = "conductor_update_board_task";
+const TOOL_TASK_GRAPH: &str = "conductor_task_graph";
 
 #[async_trait]
 pub trait McpBackend: Send + Sync {
@@ -21,6 +31,10 @@ pub trait McpBackend: Send + Sync {
     async fn list_sessions(&self, args: ListSessionsArgs) -> Result<Vec<McpSessionSummary>>;
     async fn session_status(&self, session_id: &str) -> Result<Option<McpSessionSummary>>;
     async fn list_projects(&self) -> Result<Vec<McpProjectSummary>>;
+    async fn get_board(&self, args: GetBoardArgs) -> Result<Value>;
+    async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value>;
+    async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value>;
+    async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value>;
 }
 
 #[derive(Clone)]
@@ -32,15 +46,10 @@ impl AppStateMcpBackend {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
     }
-}
 
-#[async_trait]
-impl McpBackend for AppStateMcpBackend {
-    async fn dispatch(&self, args: DispatchArgs) -> Result<McpSessionSummary> {
+    async fn resolve_project_id(&self, requested: Option<&str>) -> Result<String> {
         let config = self.state.config.read().await.clone();
-        let project_id = match args
-            .project
-            .as_deref()
+        match requested
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
@@ -54,15 +63,22 @@ impl McpBackend for AppStateMcpBackend {
                         .join(", ");
                     bail!("Unknown project \"{project}\". Available: {available}");
                 }
-                project.to_string()
+                Ok(project.to_string())
             }
             None => config
                 .projects
                 .keys()
                 .next()
                 .cloned()
-                .ok_or_else(|| anyhow!("No projects configured in conductor.yaml"))?,
-        };
+                .ok_or_else(|| anyhow!("No projects configured in conductor.yaml")),
+        }
+    }
+}
+
+#[async_trait]
+impl McpBackend for AppStateMcpBackend {
+    async fn dispatch(&self, args: DispatchArgs) -> Result<McpSessionSummary> {
+        let project_id = self.resolve_project_id(args.project.as_deref()).await?;
 
         let session = self
             .state
@@ -145,6 +161,178 @@ impl McpBackend for AppStateMcpBackend {
                 runtime: project.runtime,
             })
             .collect())
+    }
+
+    async fn get_board(&self, args: GetBoardArgs) -> Result<Value> {
+        let project_id = self.resolve_project_id(args.project.as_deref()).await?;
+        load_board_response(&self.state, &project_id)
+            .await
+            .map_err(|(_, message)| anyhow!(message))
+    }
+
+    async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value> {
+        let project_id = self.resolve_project_id(args.project.as_deref()).await?;
+        let title = args
+            .title
+            .trim()
+            .to_string();
+        if title.is_empty() {
+            bail!("title is required");
+        }
+
+        let board_path = resolve_board_path_for_project(&self.state, &project_id).await?;
+        let board = parse_board(&board_path, &project_id);
+        let role = normalize_role(args.role.as_deref().unwrap_or("intake"));
+        let task = BoardTaskRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: build_task_text(&title, args.description.as_deref()),
+            checked: args.checked.unwrap_or(false),
+            agent: trimmed_option(args.agent),
+            project: Some(project_id.clone()),
+            task_type: trimmed_option(args.task_type),
+            priority: trimmed_option(args.priority),
+            task_ref: Some(next_human_task_ref(&board, &project_id)),
+            attempt_ref: trimmed_option(args.attempt_ref),
+            issue_id: trimmed_option(args.issue_id),
+            github_item_id: trimmed_option(args.github_item_id),
+            attachments: sanitize_string_list(args.attachments.unwrap_or_default()),
+            notes: trimmed_option(args.context_notes),
+        };
+
+        insert_task_into_board(&board_path, role, &task, &project_id)?;
+        self.state
+            .push_board_activity(&project_id, "mcp", "created task", task.text.clone())
+            .await;
+        self.state.publish_snapshot().await;
+
+        let mut payload = load_board_response(&self.state, &project_id)
+            .await
+            .map_err(|(_, message)| anyhow!(message))?;
+        payload["createdTaskId"] = Value::String(task.id.clone());
+        payload["task"] = board_task_value(&task, role);
+        Ok(payload)
+    }
+
+    async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value> {
+        let project_id = self.resolve_project_id(args.project.as_deref()).await?;
+        let task_lookup = args
+            .task
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("task is required"))?;
+        let existing = resolve_board_task_record(&self.state, &project_id, task_lookup)
+            .await
+            .ok_or_else(|| anyhow!("Board task \"{task_lookup}\" not found in project \"{project_id}\""))?;
+        let board_path = resolve_board_path_for_project(&self.state, &project_id).await?;
+        let mut board = parse_board(&board_path, &project_id);
+
+        let mut located: Option<(usize, usize, BoardTaskRecord)> = None;
+        for (column_index, column) in board.columns.iter_mut().enumerate() {
+            if let Some(task_index) = column.tasks.iter().position(|task| task.id == existing.id) {
+                let task = column.tasks.remove(task_index);
+                located = Some((column_index, task_index, task));
+                break;
+            }
+        }
+
+        let Some((source_column_index, source_task_index, mut task)) = located else {
+            bail!("Board task \"{}\" could not be updated because it disappeared from the board", existing.id);
+        };
+
+        let source_role = board.columns[source_column_index].role.clone();
+        apply_board_task_update(&mut task, &args, &project_id);
+        let target_role = args
+            .role
+            .as_deref()
+            .map(normalize_role)
+            .unwrap_or(source_role.as_str())
+            .to_string();
+        insert_board_task_at_position(
+            &mut board,
+            task.clone(),
+            &source_role,
+            source_task_index,
+            &target_role,
+            args.target_index,
+        );
+        write_parsed_board(&board_path, &board, &project_id)?;
+        self.state
+            .push_board_activity(&project_id, "mcp", "updated task", task.text.clone())
+            .await;
+        self.state.publish_snapshot().await;
+
+        let mut payload = load_board_response(&self.state, &project_id)
+            .await
+            .map_err(|(_, message)| anyhow!(message))?;
+        payload["updatedTaskId"] = Value::String(task.id.clone());
+        payload["task"] = board_task_value(&task, &target_role);
+        Ok(payload)
+    }
+
+    async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value> {
+        let project_id = self.resolve_project_id(args.project.as_deref()).await?;
+        let task_lookup = args
+            .task
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("task is required"))?;
+        let board_task = resolve_board_task_record(&self.state, &project_id, task_lookup)
+            .await
+            .ok_or_else(|| anyhow!("Board task \"{task_lookup}\" not found in project \"{project_id}\""))?;
+        let board_payload = load_board_response(&self.state, &project_id)
+            .await
+            .map_err(|(_, message)| anyhow!(message))?;
+        let task_role = find_board_task_role(&board_payload, &board_task.id);
+        let sessions = self.state.all_sessions().await;
+        let mut attempts = sessions
+            .iter()
+            .filter(|session| session.metadata.get("taskId").map(String::as_str) == Some(board_task.id.as_str()))
+            .map(|session| {
+                json!({
+                    "attemptId": session.metadata.get("attemptId").cloned().unwrap_or_else(|| format!("a-{}", session.id)),
+                    "sessionId": session.id,
+                    "status": session.status,
+                    "activity": session.activity,
+                    "agent": session.agent,
+                    "model": session.model,
+                    "branch": session.branch,
+                    "summary": session.summary.clone().or_else(|| session.metadata.get("summary").cloned()),
+                    "createdAt": session.created_at,
+                    "lastActivityAt": session.last_activity_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        attempts.sort_by(|left, right| left["createdAt"].as_str().cmp(&right["createdAt"].as_str()));
+
+        let mut children = sessions
+            .iter()
+            .filter(|session| session.metadata.get("parentTaskId").map(String::as_str) == Some(board_task.id.as_str()))
+            .filter_map(|session| session.metadata.get("taskId").cloned())
+            .collect::<Vec<_>>();
+        children.sort();
+        children.dedup();
+
+        let (title, description) = split_task_text(&board_task.text);
+        Ok(json!({
+            "projectId": project_id,
+            "task": {
+                "id": board_task.id,
+                "title": title,
+                "description": description,
+                "role": task_role,
+                "taskRef": board_task.task_ref,
+                "attemptRef": board_task.attempt_ref,
+                "issueId": board_task.issue_id,
+                "priority": board_task.priority,
+                "agent": board_task.agent,
+                "attachments": board_task.attachments,
+                "notes": board_task.notes,
+            },
+            "childrenTaskIds": children,
+            "attempts": attempts,
+        }))
     }
 }
 
@@ -313,6 +501,34 @@ async fn handle_tool_call(backend: &dyn McpBackend, params: Value) -> Result<Val
             Ok(projects) => Ok(tool_success(json!(projects))),
             Err(err) => Ok(tool_error(err.to_string())),
         },
+        TOOL_GET_BOARD => match serde_json::from_value::<GetBoardArgs>(arguments) {
+            Ok(args) => match backend.get_board(args).await {
+                Ok(board) => Ok(tool_success(board)),
+                Err(err) => Ok(tool_error(err.to_string())),
+            },
+            Err(err) => Ok(tool_error(format!("Invalid get_board arguments: {err}"))),
+        },
+        TOOL_CREATE_BOARD_TASK => match serde_json::from_value::<CreateBoardTaskArgs>(arguments) {
+            Ok(args) => match backend.create_board_task(args).await {
+                Ok(payload) => Ok(tool_success(payload)),
+                Err(err) => Ok(tool_error(err.to_string())),
+            },
+            Err(err) => Ok(tool_error(format!("Invalid create_board_task arguments: {err}"))),
+        },
+        TOOL_UPDATE_BOARD_TASK => match serde_json::from_value::<UpdateBoardTaskArgs>(arguments) {
+            Ok(args) => match backend.update_board_task(args).await {
+                Ok(payload) => Ok(tool_success(payload)),
+                Err(err) => Ok(tool_error(err.to_string())),
+            },
+            Err(err) => Ok(tool_error(format!("Invalid update_board_task arguments: {err}"))),
+        },
+        TOOL_TASK_GRAPH => match serde_json::from_value::<TaskGraphArgs>(arguments) {
+            Ok(args) => match backend.task_graph(args).await {
+                Ok(payload) => Ok(tool_success(payload)),
+                Err(err) => Ok(tool_error(err.to_string())),
+            },
+            Err(err) => Ok(tool_error(format!("Invalid task_graph arguments: {err}"))),
+        },
         other => Ok(tool_error(format!("Unknown tool: {other}"))),
     }
 }
@@ -387,6 +603,76 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {}
             }),
         },
+        ToolDefinition {
+            name: TOOL_GET_BOARD.to_string(),
+            description: "Get the current Conductor board snapshot for a project, including lifecycle columns and tasks".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project ID; defaults to the first configured project" }
+                }
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_CREATE_BOARD_TASK.to_string(),
+            description: "Create a new task directly on the Conductor board for a project".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project ID; defaults to the first configured project" },
+                    "title": { "type": "string", "description": "Task title" },
+                    "description": { "type": "string", "description": "Optional task description" },
+                    "context_notes": { "type": "string", "description": "Optional orchestration notes for the task" },
+                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional attachment paths" },
+                    "agent": { "type": "string", "description": "Preferred coding agent" },
+                    "role": { "type": "string", "description": "Board lifecycle column (intake, ready, dispatching, inProgress, needsInput, blocked, errored, review, merge, done, cancelled)" },
+                    "task_type": { "type": "string", "description": "Task type label such as feature, fix, review, chore, docs" },
+                    "priority": { "type": "string", "description": "Priority label" },
+                    "issue_id": { "type": "string", "description": "Optional linked issue identifier" },
+                    "attempt_ref": { "type": "string", "description": "Optional linked session or attempt reference" },
+                    "checked": { "type": "boolean", "description": "Optional checkbox state" }
+                },
+                "required": ["title"]
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_UPDATE_BOARD_TASK.to_string(),
+            description: "Update an existing Conductor board task by task ID, task ref, or linked issue ID".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project ID; defaults to the first configured project" },
+                    "task": { "type": "string", "description": "Board task ID, taskRef, or linked issue ID" },
+                    "role": { "type": "string", "description": "Optional target lifecycle column" },
+                    "target_index": { "type": "integer", "description": "Optional insertion index in the target column" },
+                    "title": { "type": "string", "description": "Optional replacement title" },
+                    "description": { "type": "string", "description": "Optional replacement description" },
+                    "context_notes": { "type": "string", "description": "Optional replacement notes" },
+                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement attachment paths" },
+                    "agent": { "type": "string", "description": "Optional preferred coding agent" },
+                    "task_type": { "type": "string", "description": "Optional task type label" },
+                    "priority": { "type": "string", "description": "Optional priority label" },
+                    "task_ref": { "type": "string", "description": "Optional replacement human task ref" },
+                    "attempt_ref": { "type": "string", "description": "Optional linked session or attempt ref" },
+                    "issue_id": { "type": "string", "description": "Optional linked issue ID" },
+                    "github_item_id": { "type": "string", "description": "Optional linked GitHub item ID" },
+                    "checked": { "type": "boolean", "description": "Optional checkbox state" }
+                },
+                "required": ["task"]
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_TASK_GRAPH.to_string(),
+            description: "Inspect a board task's lifecycle, including linked attempts and child tasks".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project ID; defaults to the first configured project" },
+                    "task": { "type": "string", "description": "Board task ID, taskRef, or linked issue ID" }
+                },
+                "required": ["task"]
+            }),
+        },
     ]
 }
 
@@ -408,9 +694,212 @@ pub struct ListSessionsArgs {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GetBoardArgs {
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateBoardTaskArgs {
+    pub project: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub context_notes: Option<String>,
+    pub attachments: Option<Vec<String>>,
+    pub agent: Option<String>,
+    pub role: Option<String>,
+    #[serde(alias = "type")]
+    pub task_type: Option<String>,
+    pub priority: Option<String>,
+    pub issue_id: Option<String>,
+    pub attempt_ref: Option<String>,
+    pub github_item_id: Option<String>,
+    pub checked: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateBoardTaskArgs {
+    pub project: Option<String>,
+    pub task: Option<String>,
+    pub role: Option<String>,
+    pub target_index: Option<usize>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub context_notes: Option<String>,
+    pub attachments: Option<Vec<String>>,
+    pub agent: Option<String>,
+    #[serde(alias = "type")]
+    pub task_type: Option<String>,
+    pub priority: Option<String>,
+    pub task_ref: Option<String>,
+    pub attempt_ref: Option<String>,
+    pub issue_id: Option<String>,
+    pub github_item_id: Option<String>,
+    pub checked: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskGraphArgs {
+    pub project: Option<String>,
+    pub task: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStatusArgs {
     pub session_id: String,
+}
+
+fn trimmed_option(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+fn sanitize_string_list(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn insert_board_task_at_position(
+    board: &mut ParsedBoard,
+    task: BoardTaskRecord,
+    source_role: &str,
+    source_task_index: usize,
+    target_role: &str,
+    target_index: Option<usize>,
+) {
+    if source_role == target_role {
+        if let Some(source_column) = board
+            .columns
+            .iter_mut()
+            .find(|column| column.role == source_role)
+        {
+            let insert_at = target_index
+                .unwrap_or(source_task_index)
+                .min(source_column.tasks.len());
+            source_column.tasks.insert(insert_at, task);
+        } else {
+            board.columns.push(ParsedBoardColumn {
+                role: target_role.to_string(),
+                heading: default_heading_for_role(target_role).to_string(),
+                tasks: vec![task],
+            });
+        }
+        return;
+    }
+
+    if let Some(target_column) = board
+        .columns
+        .iter_mut()
+        .find(|column| column.role == target_role)
+    {
+        let insert_at = target_index.unwrap_or(0).min(target_column.tasks.len());
+        target_column.tasks.insert(insert_at, task);
+    } else {
+        board.columns.push(ParsedBoardColumn {
+            role: target_role.to_string(),
+            heading: default_heading_for_role(target_role).to_string(),
+            tasks: vec![task],
+        });
+    }
+}
+
+fn apply_board_task_update(task: &mut BoardTaskRecord, args: &UpdateBoardTaskArgs, project_id: &str) {
+    let (mut title, mut description) = split_task_text(&task.text);
+
+    if let Some(next_title) = args.title.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        title = next_title.to_string();
+    }
+    if let Some(next_description) = args.description.as_ref() {
+        let trimmed = next_description.trim();
+        description = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+
+    task.text = build_task_text(&title, description.as_deref());
+    if let Some(value) = args.agent.as_ref() {
+        task.agent = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.task_type.as_ref() {
+        task.task_type = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.priority.as_ref() {
+        task.priority = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.task_ref.as_ref() {
+        task.task_ref = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.attempt_ref.as_ref() {
+        task.attempt_ref = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.issue_id.as_ref() {
+        task.issue_id = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.github_item_id.as_ref() {
+        task.github_item_id = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.context_notes.as_ref() {
+        task.notes = trimmed_option(Some(value.clone()));
+    }
+    if let Some(checked) = args.checked {
+        task.checked = checked;
+    }
+    if let Some(attachments) = args.attachments.as_ref() {
+        task.attachments = sanitize_string_list(attachments.clone());
+    }
+    if task
+        .project
+        .as_ref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        task.project = Some(project_id.to_string());
+    }
+}
+
+fn board_task_value(task: &BoardTaskRecord, role: &str) -> Value {
+    let (title, description) = split_task_text(&task.text);
+    json!({
+        "id": task.id,
+        "role": role,
+        "title": title,
+        "description": description,
+        "text": task.text,
+        "checked": task.checked,
+        "agent": task.agent,
+        "project": task.project,
+        "type": task.task_type,
+        "priority": task.priority,
+        "taskRef": task.task_ref,
+        "attemptRef": task.attempt_ref,
+        "issueId": task.issue_id,
+        "githubItemId": task.github_item_id,
+        "attachments": task.attachments,
+        "notes": task.notes,
+    })
+}
+
+fn find_board_task_role(board_payload: &Value, task_id: &str) -> Option<String> {
+    board_payload
+        .get("columns")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|column| {
+            let role = column.get("role").and_then(Value::as_str)?;
+            let tasks = column.get("tasks").and_then(Value::as_array)?;
+            tasks.iter()
+                .any(|task| task.get("id").and_then(Value::as_str) == Some(task_id))
+                .then(|| role.to_string())
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -572,10 +1061,44 @@ mod tests {
                 runtime: Some("ttyd".to_string()),
             }])
         }
+
+        async fn get_board(&self, args: GetBoardArgs) -> Result<Value> {
+            Ok(json!({
+                "projectId": args.project.unwrap_or_else(|| "demo".to_string()),
+                "columns": [],
+            }))
+        }
+
+        async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value> {
+            Ok(json!({
+                "createdTaskId": "task-1",
+                "task": {
+                    "title": args.title,
+                }
+            }))
+        }
+
+        async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value> {
+            Ok(json!({
+                "updatedTaskId": "task-1",
+                "task": {
+                    "task": args.task,
+                }
+            }))
+        }
+
+        async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value> {
+            Ok(json!({
+                "task": {
+                    "id": args.task.unwrap_or_else(|| "task-1".to_string()),
+                },
+                "attempts": [],
+            }))
+        }
     }
 
     #[tokio::test]
-    async fn tools_list_exposes_four_tools() {
+    async fn tools_list_exposes_eight_tools() {
         let response = handle_jsonrpc_request(
             &MockBackend,
             JsonRpcRequest {
@@ -592,7 +1115,7 @@ mod tests {
         let JsonRpcPayload::Result(result) = response.payload else {
             panic!("expected tools/list result payload");
         };
-        assert_eq!(result["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 8);
     }
 
     #[tokio::test]
@@ -648,6 +1171,37 @@ mod tests {
             panic!("expected tools/call result payload");
         };
         assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn tools_call_create_board_task_returns_task_payload() {
+        let response = handle_jsonrpc_request(
+            &MockBackend,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(4)),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": TOOL_CREATE_BOARD_TASK,
+                    "arguments": {
+                        "project": "demo",
+                        "title": "Phase 2 heartbeat integration"
+                    }
+                })),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let JsonRpcPayload::Result(result) = response.payload else {
+            panic!("expected tools/call result payload");
+        };
+        assert_eq!(result["isError"], false);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Phase 2 heartbeat integration"));
     }
 
     #[tokio::test]
