@@ -5,6 +5,7 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use conductor_core::support::resolve_project_path;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -16,7 +17,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
 use crate::error_logger::{categories, ErrorContext};
-use crate::routes::boards::{resolve_board_task_record, update_board_task_attempt_ref};
+use crate::routes::boards::{
+    resolve_board_path_for_project, resolve_board_task_record, update_board_task_attempt_ref,
+};
 use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
     build_normalized_chat_feed, trim_lines_tail, AppState, SessionRecord, SessionStatus,
@@ -34,9 +37,62 @@ const SPAWN_RATE_WINDOW_SECS: u64 = 60;
 const DEFAULT_FEED_WINDOW_LIMIT: usize = 120;
 const MAX_FEED_WINDOW_LIMIT: usize = 240;
 const BOARD_PLANNING_SESSION_KIND: &str = "board_planning";
+const PROJECT_DISPATCHER_SESSION_KIND: &str = "project_dispatcher";
 
 static SPAWN_RATE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SPAWN_RATE_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+
+fn display_workspace_path(workspace_root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(workspace_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn build_project_dispatcher_prompt(
+    project_id: &str,
+    repo_display: &str,
+    board_display: &str,
+    default_branch: &str,
+    user_prompt: &str,
+) -> String {
+    let mut prompt = format!(
+        concat!(
+            "You are the Conductor dispatcher for project `{}`.\n\n",
+            "This is a long-lived orchestration chat, not a coding run. You are the master puppeteer for the project.\n\n",
+            "Core responsibilities:\n",
+            "- Maintain and refine the board at `{}`\n",
+            "- Turn rough requests into a few high-signal tasks\n",
+            "- Prefer meaningful parent tasks plus internal checklists over noisy child-task spam\n",
+            "- Keep track of context, heartbeat-style follow-ups, blockers, and next actions inside this ongoing session\n",
+            "- Create or update board tasks so dedicated coding sessions can be launched separately\n",
+            "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n\n",
+            "Project context:\n",
+            "- Repo path: `{}`\n",
+            "- Board path: `{}`\n",
+            "- Default branch: `{}`\n\n",
+            "Operating rules:\n",
+            "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
+            "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
+            "- Keep the conversation stateful and use the board as the shared execution surface\n",
+            "- If you create tasks, reference the exact task refs or titles you created so the user can launch coding sessions from them\n"
+        ),
+        project_id,
+        board_display,
+        repo_display,
+        board_display,
+        default_branch,
+    );
+
+    let trimmed = user_prompt.trim();
+    if !trimmed.is_empty() {
+        prompt.push_str("\n## User request\n");
+        prompt.push_str(trimmed);
+        prompt.push('\n');
+    }
+
+    prompt
+}
 
 fn spawn_rate_check() -> bool {
     let now = std::time::SystemTime::now()
@@ -341,8 +397,9 @@ async fn spawn_session(
     let user_prompt = body.prompt.unwrap_or_default();
     let session_kind = body.session_kind.clone();
     let is_board_planning = session_kind.as_deref() == Some(BOARD_PLANNING_SESSION_KIND);
+    let is_project_dispatcher = session_kind.as_deref() == Some(PROJECT_DISPATCHER_SESSION_KIND);
     let permission_mode = body.permission_mode.clone().or_else(|| {
-        if is_board_planning {
+        if is_board_planning || is_project_dispatcher {
             Some("plan".to_string())
         } else {
             None
@@ -362,7 +419,32 @@ async fn spawn_session(
     let mut task_id = None;
     let mut task_ref = None;
 
-    if let Some(task_link_key) = issue_id
+    if is_project_dispatcher {
+        let config = state.config.read().await.clone();
+        let Some(project) = config.projects.get(&project_id).cloned() else {
+            return error(
+                StatusCode::BAD_REQUEST,
+                format!("Unknown project: {project_id}"),
+            );
+        };
+        let repo_path = resolve_project_path(&state.workspace_path, &project.path);
+        let board_path = match resolve_board_path_for_project(&state, &project_id).await {
+            Ok(path) => path,
+            Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+        };
+        let repo_display = display_workspace_path(&state.workspace_path, &repo_path);
+        let board_display = display_workspace_path(&state.workspace_path, &board_path);
+        if !attachments.contains(&board_display) {
+            attachments.push(board_display.clone());
+        }
+        prompt = build_project_dispatcher_prompt(
+            &project_id,
+            &repo_display,
+            &board_display,
+            &project.default_branch,
+            &user_prompt,
+        );
+    } else if let Some(task_link_key) = issue_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -445,7 +527,7 @@ async fn spawn_session(
         .await
     {
         Ok(session) => {
-            if !is_board_planning {
+            if !is_board_planning && !is_project_dispatcher {
                 if let Some(task_id) = session.metadata.get("taskId") {
                     let _ = update_board_task_attempt_ref(
                         &state,
@@ -968,9 +1050,10 @@ async fn retry_session(
         .await
     {
         Ok(session) => {
-            let is_board_planning = source.metadata.get("sessionKind").map(String::as_str)
-                == Some(BOARD_PLANNING_SESSION_KIND);
-            if !is_board_planning {
+            let session_kind = source.metadata.get("sessionKind").map(String::as_str);
+            let is_board_planning = session_kind == Some(BOARD_PLANNING_SESSION_KIND);
+            let is_project_dispatcher = session_kind == Some(PROJECT_DISPATCHER_SESSION_KIND);
+            if !is_board_planning && !is_project_dispatcher {
                 if let Some(task_id) = source.metadata.get("taskId") {
                     let _ = update_board_task_attempt_ref(
                         &state,

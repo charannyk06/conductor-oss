@@ -1256,6 +1256,11 @@ impl AppState {
             record.metadata.insert("profile".to_string(), profile);
         }
         if let Some(session_kind) = request.session_kind.clone() {
+            if session_kind == "project_dispatcher" {
+                record
+                    .metadata
+                    .insert("role".to_string(), "orchestrator".to_string());
+            }
             record
                 .metadata
                 .insert("sessionKind".to_string(), session_kind);

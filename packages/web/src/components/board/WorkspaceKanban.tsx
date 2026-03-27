@@ -3,6 +3,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import {
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -176,6 +177,12 @@ interface WorkspaceKanbanProps {
   agentOptions: string[];
   modelAccess: ModelAccessPreferences | null;
   projectSessions: ProjectSession[];
+  projectLabel?: string | null;
+  headerAccessory?: ReactNode;
+  showAgenticPanel?: boolean;
+  onOpenSession?: (sessionId: string, options?: {
+    tab?: "overview" | "preview" | "diff" | "terminal";
+  }) => void;
 }
 
 type BoardViewFilter = "active" | "all" | "backlog" | "cancelled";
@@ -1081,6 +1088,10 @@ export function WorkspaceKanban({
   agentOptions,
   modelAccess,
   projectSessions,
+  projectLabel,
+  headerAccessory,
+  showAgenticPanel = true,
+  onOpenSession,
 }: WorkspaceKanbanProps) {
   const router = useRouter();
   const { preferences } = usePreferences(bridgeId);
@@ -1325,9 +1336,13 @@ export function WorkspaceKanban({
 
   const openSessionView = useCallback(
     (sessionId: string, tab: "chat" | "terminal" = "terminal") => {
+      if (onOpenSession) {
+        onOpenSession(sessionId, { tab: tab === "chat" ? "terminal" : tab });
+        return;
+      }
       router.push(buildSessionHref(sessionId, { bridgeId, tab }));
     },
-    [bridgeId, router]
+    [bridgeId, onOpenSession, router]
   );
 
   const launchTaskSession = useCallback(
@@ -2245,9 +2260,22 @@ export function WorkspaceKanban({
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden sm:overflow-hidden">
-      <header className="border-b border-[var(--vk-border)] px-4 py-3">
+      <header className="border-b border-[var(--vk-border)] px-4 py-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="truncate text-[24px] font-medium leading-[32px] text-[var(--vk-text-normal)]">
+              {projectLabel?.trim() || projectId}
+            </h1>
+          </div>
+          {headerAccessory ? (
+            <div className="flex shrink-0 items-center gap-2">
+              {headerAccessory}
+            </div>
+          ) : null}
+        </div>
+
         <div className="flex flex-wrap items-center gap-2">
-          <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] p-px">
+          <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
             {(
               [
                 ["active", "Active"],
@@ -2261,9 +2289,9 @@ export function WorkspaceKanban({
                 type="button"
                 onClick={() => setViewFilter(value)}
                 className={cn(
-                  "px-3 py-1 text-[13px]",
+                  "px-3 py-[5px] text-[13px]",
                   viewFilter === value
-                    ? "rounded-[2px] bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                    ? "rounded-[2px] bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
                     : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                 )}
               >
@@ -2273,12 +2301,12 @@ export function WorkspaceKanban({
           </div>
 
           <div className="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:min-w-[220px] sm:flex-nowrap sm:flex-none">
-            <label className="flex h-[38px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:h-[31px] sm:min-w-[200px] sm:w-[240px] sm:flex-none">
+            <label className="flex h-[31px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:min-w-[200px] sm:w-[240px] sm:flex-none">
               <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search tasks..."
+                placeholder="Search issues..."
                 className="ml-2 w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
               />
             </label>
@@ -2286,7 +2314,7 @@ export function WorkspaceKanban({
             <button
               type="button"
               onClick={() => openComposer("intake")}
-              className="inline-flex h-[38px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[14px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px] sm:w-auto"
+              className="inline-flex h-[31px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-orange)] px-3 text-[14px] text-white hover:bg-[var(--accent-hover)] sm:w-auto"
             >
               <span>New Issue</span>
               <Plus className="h-3.5 w-3.5" />
@@ -2484,43 +2512,6 @@ export function WorkspaceKanban({
           </div>
         )}
 
-        {(board?.recentActions?.length ?? 0) > 0 && (
-          <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-3">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <h3 className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                Recent activity
-              </h3>
-              <span className="text-[11px] text-[var(--vk-text-muted)]">
-                {(board?.recentActions ?? []).length}
-              </span>
-            </div>
-
-            <div className="space-y-2">
-              {(board?.recentActions ?? []).slice(0, 6).map((activity) => (
-                <div
-                  key={activity.id}
-                  className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]"
-                >
-                  <span className="rounded-[3px] bg-[color:#292929] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
-                    {activity.source}
-                  </span>
-                  <span className="text-[var(--vk-text-normal)]">
-                    {activity.action}
-                  </span>
-                  <span
-                    className="min-w-0 flex-1 truncate text-[var(--vk-text-muted)]"
-                    title={activity.detail}
-                  >
-                    {activity.detail}
-                  </span>
-                  <span className="text-[11px] text-[var(--vk-text-muted)]">
-                    {formatActivityTime(activity.timestamp)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 touch-pan-y sm:touch-auto">
@@ -2536,7 +2527,7 @@ export function WorkspaceKanban({
         ) : (
           <div className="flex h-full min-h-0 flex-col gap-4 xl:flex-row">
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y sm:touch-auto">
-              <div className="flex min-w-0 flex-col gap-3 pb-3 sm:h-full sm:flex-row sm:items-stretch sm:overflow-x-auto sm:pb-3">
+              <div className="flex min-w-0 flex-col gap-3 pb-3 sm:h-full sm:flex-row sm:items-stretch sm:overflow-x-auto sm:gap-0 sm:pb-3">
             {visibleColumns.map((column) => {
               const fullColumn = allColumns.find(
                 (candidate) => candidate.role === column.role
@@ -2558,7 +2549,7 @@ export function WorkspaceKanban({
                 <article
                   key={column.role}
                   className={cn(
-                    "flex min-h-0 w-full shrink-0 flex-col rounded-[14px] border border-[var(--vk-border)] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.02))] shadow-[0_18px_40px_rgba(0,0,0,0.24)] sm:h-full sm:min-h-[560px] sm:w-[320px]",
+                    "flex min-h-0 w-full shrink-0 flex-col border border-[var(--vk-border)] bg-[var(--vk-bg-main)] shadow-none sm:h-full sm:min-h-[560px] sm:w-[320px] sm:border-l-0 first:sm:border-l",
                     draggingTask && "snap-start"
                   )}
                 >
@@ -2820,15 +2811,7 @@ export function WorkspaceKanban({
                                     {primaryLinkedSession ? (
                                       <button
                                         type="button"
-                                        onClick={() =>
-                                          router.push(buildSessionHref(
-                                            primaryLinkedSession.id,
-                                            {
-                                              bridgeId,
-                                              tab: "terminal",
-                                            }
-                                          ))
-                                        }
+                                        onClick={() => openSessionView(primaryLinkedSession.id, "terminal")}
                                         className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                         title={primaryLinkedSession.id}
                                       >
@@ -2881,15 +2864,7 @@ export function WorkspaceKanban({
                                         <button
                                           key={session.id}
                                           type="button"
-                                          onClick={() =>
-                                            router.push(buildSessionHref(
-                                              session.id,
-                                              {
-                                                bridgeId,
-                                                tab: "terminal",
-                                              }
-                                            ))
-                                          }
+                                          onClick={() => openSessionView(session.id, "terminal")}
                                           className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                           title={session.id}
                                         >
@@ -2928,15 +2903,7 @@ export function WorkspaceKanban({
                                     {unresolvedPrimaryLink ? (
                                       <button
                                         type="button"
-                                        onClick={() =>
-                                          router.push(buildSessionHref(
-                                            unresolvedPrimaryLink,
-                                            {
-                                              bridgeId,
-                                              tab: "terminal",
-                                            }
-                                          ))
-                                        }
+                                        onClick={() => openSessionView(unresolvedPrimaryLink, "terminal")}
                                         className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                         title={unresolvedPrimaryLink}
                                       >
@@ -3014,17 +2981,19 @@ export function WorkspaceKanban({
             })}
               </div>
             </div>
-            <div className="w-full shrink-0 xl:min-h-0 xl:w-[380px]">
-              <BoardAgenticPanel
-                task={selectedAgenticTask}
-                projectId={projectId}
-                bridgeId={bridgeId}
-                defaultAgent={defaultAgent}
-                modelAccess={modelAccess}
-                onLaunchTask={launchTaskSession}
-                onOpenSession={openSessionView}
-              />
-            </div>
+            {showAgenticPanel ? (
+              <div className="w-full shrink-0 xl:min-h-0 xl:w-[380px]">
+                <BoardAgenticPanel
+                  task={selectedAgenticTask}
+                  projectId={projectId}
+                  bridgeId={bridgeId}
+                  defaultAgent={defaultAgent}
+                  modelAccess={modelAccess}
+                  onLaunchTask={launchTaskSession}
+                  onOpenSession={openSessionView}
+                />
+              </div>
+            ) : null}
           </div>
         )}
       </div>

@@ -97,7 +97,7 @@ import {
 
 const DEFAULT_AGENT = "claude-code";
 const SESSION_DETAIL_KEEPALIVE_LIMIT = 1;
-type DashboardWorkspaceView = "chat" | "board";
+type DashboardWorkspaceView = "direct" | "chat" | "board";
 
 function normalizeDashboardQueryValue(value: string | null): string | null {
   const trimmed = value?.trim();
@@ -105,7 +105,9 @@ function normalizeDashboardQueryValue(value: string | null): string | null {
 }
 
 function resolveDashboardWorkspaceView(value: string | null): DashboardWorkspaceView {
-  return value === "board" ? "board" : "chat";
+  if (value === "board") return "board";
+  if (value === "chat") return "chat";
+  return "direct";
 }
 
 const SessionDetail = dynamic(
@@ -147,6 +149,28 @@ const WorkspaceKanban = dynamic(
     loading: () => (
       <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
         Loading board...
+      </div>
+    ),
+  },
+);
+
+const SessionChatDock = dynamic(
+  () => import("@/components/sessions/SessionChatDock").then((mod) => mod.SessionChatDock),
+  {
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading session activity...
+      </div>
+    ),
+  },
+);
+
+const ProjectDispatcherPanel = dynamic(
+  () => import("@/components/dispatcher/ProjectDispatcherPanel").then((mod) => mod.ProjectDispatcherPanel),
+  {
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading dispatcher chat...
       </div>
     ),
   },
@@ -1132,6 +1156,8 @@ export default function DashboardClient({
     if ("workspaceView" in updates) {
       if (updates.workspaceView === "board") {
         params.set("view", "board");
+      } else if (updates.workspaceView === "chat") {
+        params.set("view", "chat");
       } else {
         params.delete("view");
       }
@@ -1260,6 +1286,10 @@ export default function DashboardClient({
     () => (selectedProjectId ? sessionsByProjectId.get(selectedProjectId) ?? [] : []),
     [selectedProjectId, sessionsByProjectId],
   );
+  const dockedBoardSession = useMemo(
+    () => selectedSession ?? (selectedSessionId ? sessionsById.get(selectedSessionId) ?? null : null),
+    [selectedSession, selectedSessionId, sessionsById],
+  );
   const topBarTitle = useMemo(() => {
     if (selectedSession) {
       return [selectedSession.projectId, selectedSession.branch].filter(Boolean).join(" \u00b7 ");
@@ -1294,7 +1324,7 @@ export default function DashboardClient({
   const scopeBadgeClassName = activeBridge
     ? "border-[rgba(24,197,143,0.35)] bg-[rgba(24,197,143,0.12)] text-[var(--vk-green)]"
     : bridgeScopePending
-      ? "border-[rgba(255,180,92,0.28)] bg-[rgba(255,180,92,0.10)] text-[var(--vk-orange)]"
+      ? "border-[color:color-mix(in_srgb,var(--vk-accent)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-accent)_12%,transparent)] text-[var(--vk-accent)]"
     : requiresPairedDeviceScope
       ? "border-[rgba(255,143,122,0.24)] bg-[rgba(255,143,122,0.08)] text-[var(--vk-red)]"
       : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-muted)]";
@@ -1732,7 +1762,7 @@ export default function DashboardClient({
         {
           projectId: createdProjectId,
           sessionId: null,
-          workspaceView: "chat",
+          workspaceView: "direct",
           tab: null,
           bridgeId: effectiveBridgeId ?? null,
         },
@@ -1854,6 +1884,44 @@ export default function DashboardClient({
   ]);
 
   const workspaceMainPanel = useMemo(() => {
+    const projectViewToggle = selectedProject ? (
+      <div className="inline-flex w-fit rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
+        <button
+          type="button"
+          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
+          className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
+            workspaceView === "direct"
+              ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          Direct launch
+        </button>
+        <button
+          type="button"
+          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "chat" }, "replace")}
+          className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
+            workspaceView === "chat"
+              ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          Dispatcher chat
+        </button>
+        <button
+          type="button"
+          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
+          className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
+            workspaceView === "board"
+              ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          Board view
+        </button>
+      </div>
+    ) : null;
+
     if (workspaceView === "board") {
       return (
         <WorkspaceKanban
@@ -1862,6 +1930,21 @@ export default function DashboardClient({
           defaultAgent={resolvedCodingAgent}
           agentOptions={agentOptions}
           modelAccess={resolvedPreferences.modelAccess}
+          projectSessions={selectedProjectSessions}
+          projectLabel={selectedProject?.id ?? selectedProjectId}
+          headerAccessory={projectViewToggle}
+          showAgenticPanel={false}
+          onOpenSession={handleSelectSession}
+        />
+      );
+    }
+
+    if (workspaceView === "chat" && selectedProjectId) {
+      return (
+        <ProjectDispatcherPanel
+          projectId={selectedProjectId}
+          bridgeId={effectiveBridgeId}
+          defaultAgent={resolvedCodingAgent}
           projectSessions={selectedProjectSessions}
         />
       );
@@ -1906,6 +1989,9 @@ export default function DashboardClient({
     openWorkspaceDialog,
     projects,
     selectedProjectSessions,
+    selectedProject,
+    selectedSessionId,
+    handleSelectSession,
     prompt,
     resolvedCodingAgent,
     resolvedPreferences.modelAccess,
@@ -1916,10 +2002,36 @@ export default function DashboardClient({
     setPrompt,
     workspaceError,
     workspaceView,
+    navigateDashboard,
   ]);
 
   const projectWorkspaceContent = useMemo(() => {
     if (!selectedProject) return workspaceMainPanel;
+
+    if (workspaceView === "board") {
+      return (
+        <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden xl:flex-row">
+          <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+            {workspaceMainPanel}
+          </div>
+          {selectedSessionId ? (
+            <div className="min-h-[360px] xl:min-h-0 xl:w-[405px]">
+              {dockedBoardSession ? (
+                <SessionChatDock
+                  session={dockedBoardSession}
+                  bridgeId={effectiveBridgeId}
+                  onClose={() => navigateDashboard({ sessionId: null, tab: null }, "replace")}
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center bg-[var(--vk-bg-panel)] text-[13px] text-[var(--vk-text-muted)]">
+                  Loading session activity...
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      );
+    }
 
     return (
       <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -1937,6 +2049,17 @@ export default function DashboardClient({
             <div className="inline-flex w-fit rounded-[6px] border border-[var(--vk-border)] p-1">
               <button
                 type="button"
+                onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
+                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
+                  workspaceView === "direct"
+                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                }`}
+              >
+                Direct launch
+              </button>
+              <button
+                type="button"
                 onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "chat" }, "replace")}
                 className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
                   workspaceView === "chat"
@@ -1944,16 +2067,12 @@ export default function DashboardClient({
                     : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
                 }`}
               >
-                CLI launchpad
+                Dispatcher chat
               </button>
               <button
                 type="button"
                 onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
-                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
-                  workspaceView === "board"
-                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                }`}
+                className="min-h-[32px] rounded-[4px] px-3 text-[13px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
               >
                 Board view
               </button>
@@ -1966,14 +2085,14 @@ export default function DashboardClient({
         </div>
       </div>
     );
-  }, [navigateDashboard, selectedProject, workspaceMainPanel, workspaceView]);
+  }, [dockedBoardSession, effectiveBridgeId, navigateDashboard, selectedProject, selectedSessionId, workspaceMainPanel, workspaceView]);
 
   const workspaceContent = useMemo(() => {
     if (bridgeScopePending) {
       return (
         <div className="flex h-full min-h-0 flex-1 items-center justify-center bg-[var(--vk-bg-main)] px-4">
           <div className="w-full max-w-md rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-5 py-5 text-center shadow-[0_18px_50px_rgba(0,0,0,0.18)]">
-            <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-[rgba(255,180,92,0.28)] bg-[rgba(255,180,92,0.10)] text-[var(--vk-orange)]">
+            <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-[color:color-mix(in_srgb,var(--vk-accent)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-accent)_12%,transparent)] text-[var(--vk-accent)]">
               <Loader2 className="h-5 w-5 animate-spin" />
             </div>
             <h2 className="mt-4 text-[18px] font-medium text-[var(--vk-text-strong)]">
@@ -1987,7 +2106,7 @@ export default function DashboardClient({
       );
     }
 
-    if (selectedSessionId) {
+    if (selectedSessionId && !(workspaceView === "board" && selectedProjectId !== null)) {
       return (
         <div className="relative min-h-0 h-full min-w-0 flex-1 overflow-hidden">
           {mountedSessionIds.map((sessionId) => {
@@ -2048,6 +2167,7 @@ export default function DashboardClient({
     sessionsById,
     bridgeScopePending,
     toggleSidebar,
+    workspaceView,
   ]);
 
   return (
@@ -2066,7 +2186,7 @@ export default function DashboardClient({
             rightContent={(
               <>
                 <span
-                  className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[12px] font-medium ${scopeBadgeClassName}`}
+                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium ${scopeBadgeClassName}`}
                   title={scopeBadgeTitle}
                 >
                   {scopeBadgeLabel}
