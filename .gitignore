@@ -46,7 +46,7 @@ pnpm-lock.yaml
 *.db-wal
 /dashboard/node_modules
 /dashboard/dist
-projects/
+/projects/
 packages/cli/native/
 
 # Local hook configs
