@@ -290,10 +290,9 @@ impl AcpServer {
                     .map(String::as_str)
                     != Some(serialized.as_str());
                 if changed {
-                    session.metadata.insert(
-                        ACP_SESSION_MCP_SERVERS_METADATA_KEY.to_string(),
-                        serialized,
-                    );
+                    session
+                        .metadata
+                        .insert(ACP_SESSION_MCP_SERVERS_METADATA_KEY.to_string(), serialized);
                 }
                 changed
             }
