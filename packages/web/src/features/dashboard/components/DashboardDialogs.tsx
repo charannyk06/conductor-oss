@@ -2590,7 +2590,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                     <section className="rounded-[6px] border border-[var(--vk-border)] bg-[color:color-mix(in_srgb,var(--vk-accent)_10%,transparent)] px-4 py-3">
                       <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
                         Conductor is already running locally. Finish setup here in the dashboard, then you can start using
-                        chat and boards immediately.
+                        terminals and boards immediately.
                       </p>
                     </section>
                   )}

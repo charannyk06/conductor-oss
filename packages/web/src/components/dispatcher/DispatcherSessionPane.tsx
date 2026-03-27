@@ -32,7 +32,7 @@ import { cn } from "@/lib/cn";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildSessionHref } from "@/lib/dashboardHref";
 import { getKnownAgent, KNOWN_AGENTS } from "@/lib/knownAgents";
-import type { TerminalInsertRequest } from "./terminalInsert";
+import type { TerminalInsertRequest } from "@/components/sessions/terminalInsert";
 import type { DashboardSession } from "@/lib/types";
 import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
 
@@ -88,7 +88,7 @@ type FeedDeltaEvent =
       payload: SessionFeedPayload;
     };
 
-type SessionChatDockProps = {
+type DispatcherSessionPaneProps = {
   session: DashboardSession;
   bridgeId?: string | null;
   onClose?: () => void;
@@ -100,13 +100,13 @@ type SessionChatDockProps = {
   headerActions?: ReactNode;
   composerInsert?: TerminalInsertRequest | null;
   composerToolbar?: ReactNode;
-  apiPaths?: SessionChatDockApiPaths;
+  apiPaths: DispatcherSessionPaneApiPaths;
 };
 
-type SessionChatDockApiPaths = {
-  feed?: string;
-  stream?: string;
-  send?: string;
+type DispatcherSessionPaneApiPaths = {
+  feed: string;
+  stream: string;
+  send: string;
   interrupt?: string | null;
   repositories?: string;
 };
@@ -804,7 +804,7 @@ function shouldShowDispatcherApprovalBanner(
   return false;
 }
 
-export function SessionChatDock({
+export function DispatcherSessionPane({
   session,
   bridgeId = null,
   onClose,
@@ -817,7 +817,7 @@ export function SessionChatDock({
   composerInsert = null,
   composerToolbar = null,
   apiPaths,
-}: SessionChatDockProps) {
+}: DispatcherSessionPaneProps) {
   const router = useRouter();
   const [payload, setPayload] = useState<SessionFeedPayload>(EMPTY_FEED_PAYLOAD);
   const [loading, setLoading] = useState(true);
@@ -831,16 +831,16 @@ export function SessionChatDock({
   const [savingAgent, setSavingAgent] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
   const sessionApiPaths = useMemo(() => ({
-    feed: apiPaths?.feed ?? `/api/sessions/${encodeURIComponent(session.id)}/feed?limit=120`,
-    stream: apiPaths?.stream ?? `/api/sessions/${encodeURIComponent(session.id)}/feed/stream?limit=120`,
-    send: apiPaths?.send ?? `/api/sessions/${encodeURIComponent(session.id)}/feedback`,
-    interrupt: apiPaths?.interrupt ?? null,
-    repositories: apiPaths?.repositories ?? "/api/repositories",
-  }), [apiPaths, session.id]);
+    feed: apiPaths.feed,
+    stream: apiPaths.stream,
+    send: apiPaths.send,
+    interrupt: apiPaths.interrupt ?? null,
+    repositories: apiPaths.repositories ?? "/api/repositories",
+  }), [apiPaths]);
 
   const sessionLabel = useMemo(() => {
     if (session.metadata.sessionKind === "project_dispatcher") {
-      return `ACP / ${session.projectId}`;
+      return `Dispatcher / ${session.projectId}`;
     }
     const primary = session.issueId?.trim() || session.projectId;
     const secondary = session.branch?.trim() || session.id.slice(0, 8);
@@ -1131,8 +1131,8 @@ export function SessionChatDock({
             type="button"
             onClick={onToggleCollapse}
             className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-            aria-label="Collapse dispatcher chat"
-            title="Collapse dispatcher chat"
+            aria-label="Collapse dispatcher"
+            title="Collapse dispatcher"
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
@@ -1167,7 +1167,7 @@ export function SessionChatDock({
         {loading ? (
           <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            {isDispatcher ? "Loading dispatcher activity…" : "Loading session activity…"}
+            Loading dispatcher activity...
           </div>
         ) : loadingError ? (
           <div className="rounded-[3px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[13px] text-[var(--vk-red)]">
@@ -1225,7 +1225,7 @@ export function SessionChatDock({
 
             {payload.entries.length === 0 ? (
               <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
-                {isDispatcher ? "No dispatcher activity yet." : "No session feed entries yet."}
+                No dispatcher activity yet.
               </div>
             ) : (
               payload.entries.map((entry) => (
@@ -1339,9 +1339,7 @@ export function SessionChatDock({
           <textarea
             value={composerValue}
             onChange={(event) => setComposerValue(event.target.value)}
-            placeholder={session.metadata.sessionKind === "project_dispatcher"
-              ? "Ask the dispatcher to shape work, create tasks, or update the board..."
-              : "Continue working on this task..."}
+            placeholder="Ask the dispatcher to shape work, create tasks, or update the board..."
             disabled={!canContinue || sending}
             rows={2}
             className="w-full resize-none bg-transparent text-[16px] leading-6 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] disabled:opacity-60"

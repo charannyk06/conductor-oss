@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getDefaultSessionPrimaryTab, isProjectDispatcherSession } from "./sessionKinds";
 
-test("getDefaultSessionPrimaryTab defaults every session to chat", () => {
-  assert.equal(getDefaultSessionPrimaryTab(null), "chat");
-  assert.equal(getDefaultSessionPrimaryTab({ metadata: {} as Record<string, string> }), "chat");
+test("getDefaultSessionPrimaryTab keeps regular sessions terminal-first", () => {
+  assert.equal(getDefaultSessionPrimaryTab(null), "terminal");
+  assert.equal(getDefaultSessionPrimaryTab({ metadata: {} as Record<string, string> }), "terminal");
   assert.equal(
     getDefaultSessionPrimaryTab({
       metadata: { sessionKind: "project_dispatcher" } as Record<string, string>,
     }),
-    "chat",
+    "dispatcher",
   );
 });
 

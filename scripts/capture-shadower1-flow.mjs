@@ -24,7 +24,7 @@ async function waitForReady(page) {
   await page.waitForFunction(
     () => {
       const bodyText = document.body?.textContent ?? "";
-      return bodyText.includes("Projects") && bodyText.includes("Chat");
+      return bodyText.includes("Projects") && bodyText.includes("Dispatcher");
     },
     { timeout: TIMEOUT_MS },
   );
@@ -87,17 +87,17 @@ async function run() {
   // Ensure shadower project is active in sidebar
   await clickButtonByText(page, "shadower", true);
   await sleep(650);
-  await snapshot(page, "01-shadower-chat-home.png", "chat-home");
+  await snapshot(page, "01-shadower-dispatcher-home.png", "dispatcher-home");
 
   // Board view for real task/column state
   await clickButtonByText(page, "Board", true);
   await sleep(900);
   await snapshot(page, "02-shadower-board.png", "board");
 
-  // Return to chat panel
-  await clickButtonByText(page, "Chat", true);
+  // Return to dispatcher panel
+  await clickButtonByText(page, "Dispatcher", true);
   await sleep(650);
-  await snapshot(page, "03-shadower-chat-panel.png", "chat-panel");
+  await snapshot(page, "03-shadower-dispatcher-panel.png", "dispatcher-panel");
 
   // Open latest real shadower session directly
   const sessionId = await getLatestShadowerSessionId();
@@ -108,10 +108,10 @@ async function run() {
   await sleep(1000);
   await snapshot(page, "04-shadower-session-overview.png", "session-overview");
 
-  // Session Chat tab
-  await clickButtonByText(page, "Chat", true);
+  // Session Terminal tab
+  await clickButtonByText(page, "Terminal", true);
   await sleep(800);
-  await snapshot(page, "05-shadower-session-chat.png", "session-chat");
+  await snapshot(page, "05-shadower-session-terminal.png", "session-terminal");
 
   // Session Diff tab
   await clickButtonByText(page, "Diff", true);

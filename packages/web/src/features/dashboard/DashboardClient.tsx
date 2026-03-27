@@ -111,7 +111,7 @@ function normalizeDashboardQueryValue(value: string | null): string | null {
 }
 
 function resolveDashboardWorkspaceView(value: string | null): DashboardWorkspaceView {
-  if (value === "board" || value === "chat") return "board";
+  if (value === "board") return "board";
   return "direct";
 }
 
@@ -170,23 +170,12 @@ const WorkspaceKanban = dynamic(
   },
 );
 
-const SessionChatDock = dynamic(
-  () => import("@/components/sessions/SessionChatDock").then((mod) => mod.SessionChatDock),
-  {
-    loading: () => (
-      <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
-        Loading session activity...
-      </div>
-    ),
-  },
-);
-
 const ProjectDispatcherPanel = dynamic(
   () => import("@/components/dispatcher/ProjectDispatcherPanel").then((mod) => mod.ProjectDispatcherPanel),
   {
     loading: () => (
       <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
-        Loading dispatcher chat...
+        Loading dispatcher...
       </div>
     ),
   },
@@ -1198,7 +1187,7 @@ export default function DashboardClient({
       projectId?: string | null;
       sessionId?: string | null;
       workspaceView?: DashboardWorkspaceView | null;
-      tab?: "overview" | "chat" | "diff" | "preview" | "terminal" | null;
+      tab?: "overview" | "dispatcher" | "diff" | "preview" | "terminal" | null;
       bridgeId?: string | null;
     },
     mode: "push" | "replace" = "push",
@@ -1228,7 +1217,7 @@ export default function DashboardClient({
       }
     }
     if ("tab" in updates) {
-      if (updates.tab && updates.tab !== "chat") {
+      if (updates.tab && updates.tab !== "dispatcher") {
         params.set("tab", updates.tab);
       } else {
         params.delete("tab");
@@ -1357,7 +1346,7 @@ export default function DashboardClient({
   );
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
-    if (tab === "overview" || tab === "preview" || tab === "diff" || tab === "chat") {
+    if (tab === "overview" || tab === "preview" || tab === "diff" || tab === "dispatcher") {
       return false;
     }
     if (tab === "terminal") {
@@ -1880,7 +1869,7 @@ export default function DashboardClient({
     closeSidebarOnMobile();
   }, [closeSidebarOnMobile, navigateDashboard, preferences?.codingAgent, workspaceView]);
 
-  const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" | "chat" | "terminal" }) => {
+  const handleSelectSession = useCallback((id: string, options?: { tab?: "overview" | "preview" | "diff" | "dispatcher" | "terminal" }) => {
     const matchedSession = sessionsById.get(id) ?? null;
     const nextTab = options?.tab ?? getDefaultSessionPrimaryTab(matchedSession);
     navigateDashboard(
@@ -2101,14 +2090,18 @@ export default function DashboardClient({
           }`}>
             {selectedSessionId ? (
               dockedBoardSession ? (
-                <SessionChatDock
-                  session={dockedBoardSession}
+                <SessionDetail
+                  key={selectedSessionId}
+                  sessionId={selectedSessionId}
+                  initialSession={dockedBoardSession}
                   bridgeId={effectiveBridgeId}
-                  onClose={() => navigateDashboard({ sessionId: null, tab: null }, "replace")}
+                  active
+                  suppressPreviewAutoOpen={launchpadSessionIdRef.current === selectedSessionId}
+                  immersiveMobileMode={immersiveMobileMode}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center bg-[var(--vk-bg-panel)] text-[13px] text-[var(--vk-text-muted)]">
-                  Loading session activity...
+                  Loading session workspace...
                 </div>
               )
             ) : (

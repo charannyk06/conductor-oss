@@ -73,6 +73,9 @@ export default function SessionPageClient({
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
+    if (tab === "dispatcher") {
+      return false;
+    }
     if (tab === "terminal") {
       return getDefaultSessionPrimaryTab(currentSession) === "terminal";
     }
