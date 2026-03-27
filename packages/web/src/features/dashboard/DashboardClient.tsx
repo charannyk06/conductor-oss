@@ -97,7 +97,7 @@ import {
 
 const DEFAULT_AGENT = "claude-code";
 const SESSION_DETAIL_KEEPALIVE_LIMIT = 1;
-type DashboardWorkspaceView = "direct" | "chat" | "board";
+type DashboardWorkspaceView = "direct" | "board";
 
 function normalizeDashboardQueryValue(value: string | null): string | null {
   const trimmed = value?.trim();
@@ -105,8 +105,7 @@ function normalizeDashboardQueryValue(value: string | null): string | null {
 }
 
 function resolveDashboardWorkspaceView(value: string | null): DashboardWorkspaceView {
-  if (value === "board") return "board";
-  if (value === "chat") return "chat";
+  if (value === "board" || value === "chat") return "board";
   return "direct";
 }
 
@@ -1156,8 +1155,6 @@ export default function DashboardClient({
     if ("workspaceView" in updates) {
       if (updates.workspaceView === "board") {
         params.set("view", "board");
-      } else if (updates.workspaceView === "chat") {
-        params.set("view", "chat");
       } else {
         params.delete("view");
       }
@@ -1899,17 +1896,6 @@ export default function DashboardClient({
         </button>
         <button
           type="button"
-          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "chat" }, "replace")}
-          className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
-            workspaceView === "chat"
-              ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
-              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-          }`}
-        >
-          Dispatcher chat
-        </button>
-        <button
-          type="button"
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
           className={`min-h-[31px] rounded-[2px] px-3 text-[13px] ${
             workspaceView === "board"
@@ -1935,17 +1921,6 @@ export default function DashboardClient({
           headerAccessory={projectViewToggle}
           showAgenticPanel={false}
           onOpenSession={handleSelectSession}
-        />
-      );
-    }
-
-    if (workspaceView === "chat" && selectedProjectId) {
-      return (
-        <ProjectDispatcherPanel
-          projectId={selectedProjectId}
-          bridgeId={effectiveBridgeId}
-          defaultAgent={resolvedCodingAgent}
-          projectSessions={selectedProjectSessions}
         />
       );
     }
@@ -2014,9 +1989,9 @@ export default function DashboardClient({
           <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
             {workspaceMainPanel}
           </div>
-          {selectedSessionId ? (
-            <div className="min-h-[360px] xl:min-h-0 xl:w-[405px]">
-              {dockedBoardSession ? (
+          <div className="min-h-[360px] border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:min-h-0 xl:w-[405px] xl:border-l xl:border-t-0">
+            {selectedSessionId ? (
+              dockedBoardSession ? (
                 <SessionChatDock
                   session={dockedBoardSession}
                   bridgeId={effectiveBridgeId}
@@ -2026,9 +2001,16 @@ export default function DashboardClient({
                 <div className="flex h-full items-center justify-center bg-[var(--vk-bg-panel)] text-[13px] text-[var(--vk-text-muted)]">
                   Loading session activity...
                 </div>
-              )}
-            </div>
-          ) : null}
+              )
+            ) : (
+              <ProjectDispatcherPanel
+                projectId={selectedProject.id}
+                bridgeId={effectiveBridgeId}
+                defaultAgent={resolvedCodingAgent}
+                projectSessions={selectedProjectSessions}
+              />
+            )}
+          </div>
         </div>
       );
     }
@@ -2057,17 +2039,6 @@ export default function DashboardClient({
                 }`}
               >
                 Direct launch
-              </button>
-              <button
-                type="button"
-                onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "chat" }, "replace")}
-                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
-                  workspaceView === "chat"
-                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                }`}
-              >
-                Dispatcher chat
               </button>
               <button
                 type="button"
