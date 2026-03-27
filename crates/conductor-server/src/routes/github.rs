@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::routes::boards::{
     build_task_text, default_heading_for_role, load_board_response, next_human_task_ref,
-    normalize_role, parse_board, split_task_text, write_parsed_board, BoardTaskRecord,
-    ParsedBoardColumn,
+    normalize_role, parse_board, split_task_text, write_parsed_board, BoardTaskPacket,
+    BoardTaskRecord, ParsedBoardColumn,
 };
 use crate::state::{resolve_board_file, AppState};
 
@@ -1249,6 +1249,8 @@ async fn pull_github_project_into_board(
             ),
             checked: matches!(target_role.as_str(), "done" | "cancelled"),
             agent: None,
+            model: None,
+            reasoning_effort: None,
             project: Some(project_id.to_string()),
             task_type: if item.content_kind == "PullRequest" {
                 Some("pull-request".to_string())
@@ -1262,6 +1264,7 @@ async fn pull_github_project_into_board(
             github_item_id: Some(item.item_id.clone()),
             attachments: Vec::new(),
             notes: normalize_notes(item.body.as_deref()),
+            packet: BoardTaskPacket::default(),
         };
         push_task_to_columns(&mut result_columns, &target_role, next_task.clone());
         push_task_to_columns(&mut ref_board.columns, &target_role, next_task);

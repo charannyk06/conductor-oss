@@ -13,7 +13,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use uuid::Uuid;
 
-use crate::routes::boards::{parse_board, update_task_dispatch_state, write_parsed_board};
+use crate::routes::boards::{
+    board_task_prefers_worktree, parse_board, update_task_dispatch_state, write_parsed_board,
+};
 use crate::state::{AppState, SessionStatus, SpawnRequest};
 use crate::task_context::compile_task_context;
 
@@ -280,7 +282,7 @@ async fn process_board_change(
                 prompt: context.prompt,
                 issue_id: None,
                 agent: Some(agent),
-                use_worktree: Some(true),
+                use_worktree: board_task_prefers_worktree(&task).or(Some(true)),
                 permission_mode: None,
                 model,
                 reasoning_effort,

@@ -5,13 +5,13 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::state::{AppState, SessionRecord, SessionStatus, SpawnRequest};
 use crate::routes::boards::{
     build_task_text, default_heading_for_role, insert_task_into_board, load_board_response,
-    next_human_task_ref, normalize_role, parse_board, resolve_board_path_for_project,
-    resolve_board_task_record, split_task_text, write_parsed_board, BoardTaskRecord, ParsedBoard,
-    ParsedBoardColumn,
+    next_human_task_ref, normalize_execution_mode, normalize_role, parse_board,
+    resolve_board_path_for_project, resolve_board_task_record, split_task_text, write_parsed_board,
+    BoardTaskPacket, BoardTaskRecord, ParsedBoard, ParsedBoardColumn,
 };
+use crate::state::{AppState, SessionRecord, SessionStatus, SpawnRequest};
 
 const MCP_SERVER_NAME: &str = "conductor";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -54,10 +54,7 @@ impl AppStateMcpBackend {
 
     async fn resolve_project_id(&self, requested: Option<&str>) -> Result<String> {
         let config = self.state.config.read().await.clone();
-        match requested
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        match requested.map(str::trim).filter(|value| !value.is_empty()) {
             Some(project) => {
                 if !config.projects.contains_key(project) {
                     let available = config
@@ -87,8 +84,11 @@ impl AppStateMcpBackend {
         let Some(session_id) = session_id else {
             return Ok(None);
         };
+        if let Some(session) = self.state.get_session(&session_id).await {
+            return Ok(Some(session));
+        }
         self.state
-            .get_session(&session_id)
+            .get_dispatcher_thread(&session_id)
             .await
             .map(Some)
             .ok_or_else(|| anyhow!("MCP caller session \"{session_id}\" was not found"))
@@ -118,9 +118,7 @@ impl AppStateMcpBackend {
         if approved && active_turn {
             return Ok(());
         }
-        bail!(
-            "ACP dispatcher board mutations require explicit approval for the current turn"
-        );
+        bail!("ACP dispatcher board mutations require explicit approval for the current turn");
     }
 }
 
@@ -222,10 +220,7 @@ impl McpBackend for AppStateMcpBackend {
     async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value> {
         let project_id = self.resolve_project_id(args.project.as_deref()).await?;
         self.ensure_board_mutation_allowed(&project_id).await?;
-        let title = args
-            .title
-            .trim()
-            .to_string();
+        let title = args.title.trim().to_string();
         if title.is_empty() {
             bail!("title is required");
         }
@@ -238,6 +233,9 @@ impl McpBackend for AppStateMcpBackend {
             text: build_task_text(&title, args.description.as_deref()),
             checked: args.checked.unwrap_or(false),
             agent: trimmed_option(args.agent),
+            model: trimmed_option(args.model),
+            reasoning_effort: trimmed_option(args.reasoning_effort)
+                .map(|value| value.to_ascii_lowercase()),
             project: Some(project_id.clone()),
             task_type: trimmed_option(args.task_type),
             priority: trimmed_option(args.priority),
@@ -247,6 +245,21 @@ impl McpBackend for AppStateMcpBackend {
             github_item_id: trimmed_option(args.github_item_id),
             attachments: sanitize_string_list(args.attachments.unwrap_or_default()),
             notes: trimmed_option(args.context_notes),
+            packet: BoardTaskPacket {
+                objective: trimmed_option(args.objective),
+                execution_mode: args
+                    .execution_mode
+                    .as_deref()
+                    .and_then(normalize_execution_mode)
+                    .map(str::to_string),
+                surfaces: sanitize_string_list(args.surfaces.unwrap_or_default()),
+                constraints: sanitize_string_list(args.constraints.unwrap_or_default()),
+                dependencies: sanitize_string_list(args.dependencies.unwrap_or_default()),
+                acceptance: sanitize_string_list(args.acceptance.unwrap_or_default()),
+                skills: sanitize_string_list(args.skills.unwrap_or_default()),
+                review_refs: sanitize_string_list(args.review_refs.unwrap_or_default()),
+                deliverables: sanitize_string_list(args.deliverables.unwrap_or_default()),
+            },
         };
 
         insert_task_into_board(&board_path, role, &task, &project_id)?;
@@ -274,7 +287,9 @@ impl McpBackend for AppStateMcpBackend {
             .ok_or_else(|| anyhow!("task is required"))?;
         let existing = resolve_board_task_record(&self.state, &project_id, task_lookup)
             .await
-            .ok_or_else(|| anyhow!("Board task \"{task_lookup}\" not found in project \"{project_id}\""))?;
+            .ok_or_else(|| {
+                anyhow!("Board task \"{task_lookup}\" not found in project \"{project_id}\"")
+            })?;
         let board_path = resolve_board_path_for_project(&self.state, &project_id).await?;
         let mut board = parse_board(&board_path, &project_id);
 
@@ -288,7 +303,10 @@ impl McpBackend for AppStateMcpBackend {
         }
 
         let Some((source_column_index, source_task_index, mut task)) = located else {
-            bail!("Board task \"{}\" could not be updated because it disappeared from the board", existing.id);
+            bail!(
+                "Board task \"{}\" could not be updated because it disappeared from the board",
+                existing.id
+            );
         };
 
         let source_role = board.columns[source_column_index].role.clone();
@@ -331,7 +349,9 @@ impl McpBackend for AppStateMcpBackend {
             .ok_or_else(|| anyhow!("task is required"))?;
         let board_task = resolve_board_task_record(&self.state, &project_id, task_lookup)
             .await
-            .ok_or_else(|| anyhow!("Board task \"{task_lookup}\" not found in project \"{project_id}\""))?;
+            .ok_or_else(|| {
+                anyhow!("Board task \"{task_lookup}\" not found in project \"{project_id}\"")
+            })?;
         let board_payload = load_board_response(&self.state, &project_id)
             .await
             .map_err(|(_, message)| anyhow!(message))?;
@@ -355,11 +375,15 @@ impl McpBackend for AppStateMcpBackend {
                 })
             })
             .collect::<Vec<_>>();
-        attempts.sort_by(|left, right| left["createdAt"].as_str().cmp(&right["createdAt"].as_str()));
+        attempts
+            .sort_by(|left, right| left["createdAt"].as_str().cmp(&right["createdAt"].as_str()));
 
         let mut children = sessions
             .iter()
-            .filter(|session| session.metadata.get("parentTaskId").map(String::as_str) == Some(board_task.id.as_str()))
+            .filter(|session| {
+                session.metadata.get("parentTaskId").map(String::as_str)
+                    == Some(board_task.id.as_str())
+            })
             .filter_map(|session| session.metadata.get("taskId").cloned())
             .collect::<Vec<_>>();
         children.sort();
@@ -564,14 +588,18 @@ async fn handle_tool_call(backend: &dyn McpBackend, params: Value) -> Result<Val
                 Ok(payload) => Ok(tool_success(payload)),
                 Err(err) => Ok(tool_error(err.to_string())),
             },
-            Err(err) => Ok(tool_error(format!("Invalid create_board_task arguments: {err}"))),
+            Err(err) => Ok(tool_error(format!(
+                "Invalid create_board_task arguments: {err}"
+            ))),
         },
         TOOL_UPDATE_BOARD_TASK => match serde_json::from_value::<UpdateBoardTaskArgs>(arguments) {
             Ok(args) => match backend.update_board_task(args).await {
                 Ok(payload) => Ok(tool_success(payload)),
                 Err(err) => Ok(tool_error(err.to_string())),
             },
-            Err(err) => Ok(tool_error(format!("Invalid update_board_task arguments: {err}"))),
+            Err(err) => Ok(tool_error(format!(
+                "Invalid update_board_task arguments: {err}"
+            ))),
         },
         TOOL_TASK_GRAPH => match serde_json::from_value::<TaskGraphArgs>(arguments) {
             Ok(args) => match backend.task_graph(args).await {
@@ -675,7 +703,18 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                     "description": { "type": "string", "description": "Optional task description" },
                     "context_notes": { "type": "string", "description": "Optional orchestration notes for the task" },
                     "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional attachment paths" },
+                    "objective": { "type": "string", "description": "Explicit objective for the task brief and worker handoff" },
+                    "execution_mode": { "type": "string", "description": "Execution mode for spawned work: worktree, main_workspace, or temp_clone" },
+                    "surfaces": { "type": "array", "items": { "type": "string" }, "description": "Exact files, folders, APIs, or product surfaces to inspect" },
+                    "constraints": { "type": "array", "items": { "type": "string" }, "description": "Non-negotiable constraints, guardrails, or rules" },
+                    "dependencies": { "type": "array", "items": { "type": "string" }, "description": "Upstream tasks, context, or blockers this task depends on" },
+                    "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Acceptance criteria for completion or review sign-off" },
+                    "skills": { "type": "array", "items": { "type": "string" }, "description": "Suggested skills, domains, or tools the worker should lean on" },
+                    "review_refs": { "type": "array", "items": { "type": "string" }, "description": "PR URLs, issue URLs, commits, or branch refs to review" },
+                    "deliverables": { "type": "array", "items": { "type": "string" }, "description": "Expected outputs such as code patch, review report, migration, or checklist update" },
                     "agent": { "type": "string", "description": "Preferred coding agent" },
+                    "model": { "type": "string", "description": "Preferred coding model" },
+                    "reasoning_effort": { "type": "string", "description": "Preferred coding reasoning level" },
                     "role": { "type": "string", "description": "Board lifecycle column (intake, ready, dispatching, inProgress, needsInput, blocked, errored, review, merge, done, cancelled)" },
                     "task_type": { "type": "string", "description": "Task type label such as feature, fix, review, chore, docs" },
                     "priority": { "type": "string", "description": "Priority label" },
@@ -700,7 +739,18 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                     "description": { "type": "string", "description": "Optional replacement description" },
                     "context_notes": { "type": "string", "description": "Optional replacement notes" },
                     "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement attachment paths" },
+                    "objective": { "type": "string", "description": "Optional replacement objective for the task brief" },
+                    "execution_mode": { "type": "string", "description": "Optional execution mode override: worktree, main_workspace, or temp_clone" },
+                    "surfaces": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement surfaces list" },
+                    "constraints": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement constraints list" },
+                    "dependencies": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement dependencies list" },
+                    "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement acceptance criteria list" },
+                    "skills": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement skills list" },
+                    "review_refs": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement review references list" },
+                    "deliverables": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement deliverables list" },
                     "agent": { "type": "string", "description": "Optional preferred coding agent" },
+                    "model": { "type": "string", "description": "Optional preferred coding model" },
+                    "reasoning_effort": { "type": "string", "description": "Optional preferred coding reasoning level" },
                     "task_type": { "type": "string", "description": "Optional task type label" },
                     "priority": { "type": "string", "description": "Optional priority label" },
                     "task_ref": { "type": "string", "description": "Optional replacement human task ref" },
@@ -757,7 +807,18 @@ pub struct CreateBoardTaskArgs {
     pub description: Option<String>,
     pub context_notes: Option<String>,
     pub attachments: Option<Vec<String>>,
+    pub objective: Option<String>,
+    pub execution_mode: Option<String>,
+    pub surfaces: Option<Vec<String>>,
+    pub constraints: Option<Vec<String>>,
+    pub dependencies: Option<Vec<String>>,
+    pub acceptance: Option<Vec<String>>,
+    pub skills: Option<Vec<String>>,
+    pub review_refs: Option<Vec<String>>,
+    pub deliverables: Option<Vec<String>>,
     pub agent: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub role: Option<String>,
     #[serde(alias = "type")]
     pub task_type: Option<String>,
@@ -778,7 +839,18 @@ pub struct UpdateBoardTaskArgs {
     pub description: Option<String>,
     pub context_notes: Option<String>,
     pub attachments: Option<Vec<String>>,
+    pub objective: Option<String>,
+    pub execution_mode: Option<String>,
+    pub surfaces: Option<Vec<String>>,
+    pub constraints: Option<Vec<String>>,
+    pub dependencies: Option<Vec<String>>,
+    pub acceptance: Option<Vec<String>>,
+    pub skills: Option<Vec<String>>,
+    pub review_refs: Option<Vec<String>>,
+    pub deliverables: Option<Vec<String>>,
     pub agent: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     #[serde(alias = "type")]
     pub task_type: Option<String>,
     pub priority: Option<String>,
@@ -860,10 +932,19 @@ fn insert_board_task_at_position(
     }
 }
 
-fn apply_board_task_update(task: &mut BoardTaskRecord, args: &UpdateBoardTaskArgs, project_id: &str) {
+fn apply_board_task_update(
+    task: &mut BoardTaskRecord,
+    args: &UpdateBoardTaskArgs,
+    project_id: &str,
+) {
     let (mut title, mut description) = split_task_text(&task.text);
 
-    if let Some(next_title) = args.title.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(next_title) = args
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         title = next_title.to_string();
     }
     if let Some(next_description) = args.description.as_ref() {
@@ -878,6 +959,13 @@ fn apply_board_task_update(task: &mut BoardTaskRecord, args: &UpdateBoardTaskArg
     task.text = build_task_text(&title, description.as_deref());
     if let Some(value) = args.agent.as_ref() {
         task.agent = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.model.as_ref() {
+        task.model = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.reasoning_effort.as_ref() {
+        task.reasoning_effort =
+            trimmed_option(Some(value.clone())).map(|item| item.to_ascii_lowercase());
     }
     if let Some(value) = args.task_type.as_ref() {
         task.task_type = trimmed_option(Some(value.clone()));
@@ -900,11 +988,38 @@ fn apply_board_task_update(task: &mut BoardTaskRecord, args: &UpdateBoardTaskArg
     if let Some(value) = args.context_notes.as_ref() {
         task.notes = trimmed_option(Some(value.clone()));
     }
+    if let Some(value) = args.objective.as_ref() {
+        task.packet.objective = trimmed_option(Some(value.clone()));
+    }
+    if let Some(value) = args.execution_mode.as_deref() {
+        task.packet.execution_mode = normalize_execution_mode(value).map(str::to_string);
+    }
     if let Some(checked) = args.checked {
         task.checked = checked;
     }
     if let Some(attachments) = args.attachments.as_ref() {
         task.attachments = sanitize_string_list(attachments.clone());
+    }
+    if let Some(values) = args.surfaces.as_ref() {
+        task.packet.surfaces = sanitize_string_list(values.clone());
+    }
+    if let Some(values) = args.constraints.as_ref() {
+        task.packet.constraints = sanitize_string_list(values.clone());
+    }
+    if let Some(values) = args.dependencies.as_ref() {
+        task.packet.dependencies = sanitize_string_list(values.clone());
+    }
+    if let Some(values) = args.acceptance.as_ref() {
+        task.packet.acceptance = sanitize_string_list(values.clone());
+    }
+    if let Some(values) = args.skills.as_ref() {
+        task.packet.skills = sanitize_string_list(values.clone());
+    }
+    if let Some(values) = args.review_refs.as_ref() {
+        task.packet.review_refs = sanitize_string_list(values.clone());
+    }
+    if let Some(values) = args.deliverables.as_ref() {
+        task.packet.deliverables = sanitize_string_list(values.clone());
     }
     if task
         .project
@@ -926,6 +1041,8 @@ fn board_task_value(task: &BoardTaskRecord, role: &str) -> Value {
         "text": task.text,
         "checked": task.checked,
         "agent": task.agent,
+        "model": task.model,
+        "reasoningEffort": task.reasoning_effort,
         "project": task.project,
         "type": task.task_type,
         "priority": task.priority,
@@ -935,6 +1052,17 @@ fn board_task_value(task: &BoardTaskRecord, role: &str) -> Value {
         "githubItemId": task.github_item_id,
         "attachments": task.attachments,
         "notes": task.notes,
+        "packet": {
+            "objective": task.packet.objective.clone(),
+            "executionMode": task.packet.execution_mode.clone(),
+            "surfaces": task.packet.surfaces.clone(),
+            "constraints": task.packet.constraints.clone(),
+            "dependencies": task.packet.dependencies.clone(),
+            "acceptance": task.packet.acceptance.clone(),
+            "skills": task.packet.skills.clone(),
+            "reviewRefs": task.packet.review_refs.clone(),
+            "deliverables": task.packet.deliverables.clone(),
+        },
     })
 }
 
@@ -947,7 +1075,8 @@ fn find_board_task_role(board_payload: &Value, task_id: &str) -> Option<String> 
         .find_map(|column| {
             let role = column.get("role").and_then(Value::as_str)?;
             let tasks = column.get("tasks").and_then(Value::as_array)?;
-            tasks.iter()
+            tasks
+                .iter()
                 .any(|task| task.get("id").and_then(Value::as_str) == Some(task_id))
                 .then(|| role.to_string())
         })

@@ -2,7 +2,7 @@ use anyhow::Result;
 use conductor_core::event::{Event, EventBus};
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -52,10 +52,12 @@ impl BoardWatcher {
         )?;
 
         // Watch each board file's parent directory.
+        let mut watched_parents = HashSet::new();
         for (_, path) in &boards {
             if let Some(parent) = path.parent() {
-                if parent.exists() {
-                    watcher.watch(parent, RecursiveMode::NonRecursive)?;
+                let parent = parent.to_path_buf();
+                if parent.exists() && watched_parents.insert(parent.clone()) {
+                    watcher.watch(&parent, RecursiveMode::NonRecursive)?;
                 }
             }
         }
@@ -71,7 +73,7 @@ impl BoardWatcher {
         tokio::spawn(async move {
             // Debounce: wait 500ms after last change before processing.
             let mut debounce_timer: Option<tokio::time::Instant> = None;
-            let mut pending_paths: Vec<PathBuf> = Vec::new();
+            let mut pending_paths: HashSet<PathBuf> = HashSet::new();
 
             loop {
                 tokio::select! {
@@ -83,7 +85,7 @@ impl BoardWatcher {
                         if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                             for path in event.paths {
                                 if board_map.contains_key(&path) {
-                                    pending_paths.push(path);
+                                    pending_paths.insert(path);
                                     debounce_timer = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
                                 }
                             }
@@ -97,7 +99,7 @@ impl BoardWatcher {
                         }
                     } => {
                         debounce_timer = None;
-                        for path in pending_paths.drain(..) {
+                        for path in pending_paths.drain() {
                             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                                 let new_hash = content_hash(&content);
                                 let mut hashes = paths.lock().unwrap();

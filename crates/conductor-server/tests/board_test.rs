@@ -2,17 +2,25 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{
-    build_app, spawn_request, ttyd_available, wait_for_condition, TestExecutor, TestHarness,
+    build_app, build_state, seed_git_repo, spawn_request, ttyd_available, wait_for_condition,
+    TestExecutor, TestHarness,
 };
 use conductor_core::board::Board;
+use conductor_core::config::ProjectConfig;
 use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use conductor_core::EventBus;
 use serde_json::Value;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower::util::ServiceExt;
+use uuid::Uuid;
+
+fn temp_path(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("conductor-board-route-{label}-{}", Uuid::new_v4()))
+}
 
 #[tokio::test]
 async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
@@ -215,6 +223,83 @@ async fn board_routes_reorder_cards_within_same_column_with_target_index() {
         .find("task-2")
         .expect("existing task should be present");
     assert!(second_index < first_index);
+}
+
+#[tokio::test]
+async fn board_routes_prefer_project_repo_board_outside_workspace() {
+    let workspace = temp_path("workspace");
+    let repo = temp_path("repo");
+    fs::create_dir_all(&workspace).unwrap();
+    seed_git_repo(&repo);
+    fs::write(
+        workspace.join("CONDUCTOR.md"),
+        [
+            "# Workspace Board",
+            "",
+            "## To do",
+            "",
+            "- [ ] Workspace-only task | id:workspace-task | project:demo",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fs::write(
+        repo.join("CONDUCTOR.md"),
+        [
+            "# Repo Board",
+            "",
+            "## Ready to Dispatch",
+            "",
+            "- [ ] Repo task | id:repo-task | project:demo | taskRef:DEM-999",
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let project = ProjectConfig {
+        path: repo.to_string_lossy().to_string(),
+        board_dir: repo
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_string),
+        agent: Some("codex".to_string()),
+        runtime: Some("ttyd".to_string()),
+        default_branch: "main".to_string(),
+        ..ProjectConfig::default()
+    };
+    let state = build_state(&workspace, project, "demo").await;
+    let app = build_app(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/boards?projectId=demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let task_ids = payload["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|column| column["tasks"].as_array().into_iter().flatten())
+        .filter_map(|task| task["id"].as_str())
+        .collect::<Vec<_>>();
+
+    assert!(task_ids.contains(&"repo-task"));
+    assert!(!task_ids.contains(&"workspace-task"));
+
+    let _ = fs::remove_dir_all(&workspace);
+    let _ = fs::remove_dir_all(&repo);
 }
 
 #[tokio::test]

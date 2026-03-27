@@ -1,7 +1,6 @@
 "use client";
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import {
   type ReactNode,
   useCallback,
@@ -13,23 +12,29 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import {
+  ArrowUpDown,
   Check,
   ChevronDown,
   ChevronRight,
+  Columns3,
   ExternalLink,
   FileImage,
   FileText,
+  Filter,
   Folder,
   FolderOpen,
+  Layers,
+  List,
   Loader2,
   MessageSquare,
   Pencil,
   Plus,
   RefreshCw,
   Search,
+  User,
+  X,
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
-import { BoardAgenticPanel } from "@/components/board/BoardAgenticPanel";
 import { usePreferences } from "@/hooks/usePreferences";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
@@ -175,17 +180,35 @@ interface WorkspaceKanbanProps {
   bridgeId?: string | null;
   defaultAgent: string;
   agentOptions: string[];
-  modelAccess: ModelAccessPreferences | null;
   projectSessions: ProjectSession[];
   projectLabel?: string | null;
   headerAccessory?: ReactNode;
-  showAgenticPanel?: boolean;
   onOpenSession?: (sessionId: string, options?: {
     tab?: "overview" | "preview" | "diff" | "chat" | "terminal";
   }) => void;
 }
 
 type BoardViewFilter = "active" | "all" | "backlog" | "cancelled";
+type BoardLayout = "kanban" | "list";
+type BoardListSortField = "status" | "priority" | "title" | "agent";
+type BoardListSortDir = "asc" | "desc";
+type BoardListGroupBy = "status" | "priority" | "assignee" | "none";
+
+type BoardListViewState = {
+  roles: BoardRole[];
+  priorities: string[];
+  agents: string[];
+  sortField: BoardListSortField;
+  sortDir: BoardListSortDir;
+  groupBy: BoardListGroupBy;
+  collapsedGroups: string[];
+};
+
+type BoardListEntry = {
+  task: BoardTask;
+  role: BoardRole;
+  heading: string;
+};
 
 const ROLE_COLOR: Record<BoardRole, string> = {
   intake: "#3c83f6",
@@ -242,6 +265,53 @@ const MENU_PANEL_CLASS =
   "z-[120] rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.35)]";
 const MENU_ITEM_CLASS =
   "flex min-h-[40px] cursor-default items-center gap-2 rounded-[4px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
+const BOARD_LAYOUT_STORAGE_KEY = "conductor:board-layout";
+const BOARD_LIST_VIEW_STORAGE_KEY = "conductor:board-list-view:v2";
+const BOARD_ROLE_ORDER: BoardRole[] = [
+  "intake",
+  "ready",
+  "dispatching",
+  "inProgress",
+  "needsInput",
+  "blocked",
+  "errored",
+  "review",
+  "merge",
+  "done",
+  "cancelled",
+];
+const BOARD_PRIORITY_ORDER = ["high", "medium", "low"];
+const DEFAULT_BOARD_LIST_VIEW_STATE: BoardListViewState = {
+  roles: [],
+  priorities: [],
+  agents: [],
+  sortField: "title",
+  sortDir: "asc",
+  groupBy: "none",
+  collapsedGroups: [],
+};
+const BOARD_LIST_QUICK_FILTERS: Array<{
+  label: string;
+  roles: BoardRole[];
+}> = [
+  { label: "All", roles: [] },
+  {
+    label: "Active",
+    roles: [
+      "intake",
+      "ready",
+      "dispatching",
+      "inProgress",
+      "needsInput",
+      "blocked",
+      "errored",
+      "review",
+      "merge",
+    ],
+  },
+  { label: "Backlog", roles: ["intake", "ready"] },
+  { label: "Done", roles: ["done", "cancelled"] },
+];
 
 function toRole(value: string): BoardRole {
   const roles: BoardRole[] = [
@@ -266,6 +336,19 @@ function splitTaskText(text: string): { title: string; description: string } {
     title: (title ?? text).trim(),
     description: rest.join(" - ").trim(),
   };
+}
+
+function taskMatchesBoardSearch(task: BoardTask, query: string): boolean {
+  if (!query) return true;
+  const commentText = task.comments
+    .map((comment) => `${comment.author} ${comment.body}`)
+    .join(" ");
+  const haystack = `${task.text} ${task.agent ?? ""} ${task.type ?? ""} ${
+    task.priority ?? ""
+  } ${task.issueId ?? ""} ${task.notes ?? ""} ${task.briefPath ?? ""} ${task.attachments.join(
+    " "
+  )} ${commentText}`.toLowerCase();
+  return haystack.includes(query);
 }
 
 function formatAgentLabel(value: string): string {
@@ -297,6 +380,77 @@ function getContextOpenLabel(editorId: string): string {
     return `Open in ${getMarkdownEditorLabel(editorId)}`;
   }
   return "Open file";
+}
+
+function getTaskReference(task: BoardTask): string {
+  return (
+    task.taskRef?.trim() ||
+    (task.id.length > 12
+      ? `TASK-${task.id.split("-")[0]?.toUpperCase() ?? task.id.toUpperCase()}`
+      : task.id)
+  );
+}
+
+function getBoardRoleSortIndex(role: BoardRole): number {
+  return BOARD_ROLE_ORDER.indexOf(role);
+}
+
+function getBoardPrioritySortIndex(priority: string | null): number {
+  if (!priority) return BOARD_PRIORITY_ORDER.length;
+  const index = BOARD_PRIORITY_ORDER.indexOf(priority);
+  return index >= 0 ? index : BOARD_PRIORITY_ORDER.length;
+}
+
+function toggleBoardListValue(values: string[], value: string): string[] {
+  return values.includes(value)
+    ? values.filter((item) => item !== value)
+    : [...values, value];
+}
+
+function boardListValuesEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function countBoardListFilters(state: BoardListViewState): number {
+  let count = 0;
+  if (state.roles.length > 0) count += 1;
+  if (state.priorities.length > 0) count += 1;
+  if (state.agents.length > 0) count += 1;
+  return count;
+}
+
+function readBoardListViewState(storageKey: string): BoardListViewState {
+  if (typeof window === "undefined") {
+    return { ...DEFAULT_BOARD_LIST_VIEW_STATE };
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return { ...DEFAULT_BOARD_LIST_VIEW_STATE };
+    const parsed = JSON.parse(raw) as Partial<BoardListViewState>;
+    return {
+      ...DEFAULT_BOARD_LIST_VIEW_STATE,
+      ...parsed,
+      roles: Array.isArray(parsed.roles)
+        ? parsed.roles.filter((value): value is BoardRole =>
+            BOARD_ROLE_ORDER.includes(value as BoardRole)
+          )
+        : [],
+      priorities: Array.isArray(parsed.priorities)
+        ? parsed.priorities.filter((value) => typeof value === "string")
+        : [],
+      agents: Array.isArray(parsed.agents)
+        ? parsed.agents.filter((value) => typeof value === "string")
+        : [],
+      collapsedGroups: Array.isArray(parsed.collapsedGroups)
+        ? parsed.collapsedGroups.filter((value) => typeof value === "string")
+        : [],
+    };
+  } catch {
+    return { ...DEFAULT_BOARD_LIST_VIEW_STATE };
+  }
 }
 
 function normalizePathSegments(path: string): string[] {
@@ -816,6 +970,80 @@ function getTaskLinkKey(task: BoardTask): string {
   return task.issueId?.trim() || task.taskRef?.trim() || task.id;
 }
 
+function getTaskLinkedRunData(
+  projectSessions: ProjectSession[],
+  task: BoardTask
+): {
+  linkedSessions: ProjectSession[];
+  primaryLinkedSession: ProjectSession | null;
+  unresolvedPrimaryLink: string | null;
+} {
+  const linkedSessions = projectSessions
+    .filter(
+      (session) =>
+        !isBoardPlanningSession(session) && sessionMatchesTask(session, task)
+    )
+    .sort((left, right) =>
+      compareProjectSessions(left, right, task.attemptRef ?? null)
+    );
+  const primaryLinkedSession = task.attemptRef
+    ? linkedSessions.find((session) => session.id === task.attemptRef) ?? null
+    : linkedSessions[0] ?? null;
+  const unresolvedPrimaryLink =
+    task.attemptRef &&
+    !linkedSessions.some((session) => session.id === task.attemptRef)
+      ? task.attemptRef
+      : null;
+
+  return {
+    linkedSessions,
+    primaryLinkedSession,
+    unresolvedPrimaryLink,
+  };
+}
+
+function getTaskLastActivityTimestamp(
+  task: BoardTask,
+  linkedSessions: ProjectSession[]
+): string | null {
+  let latest = 0;
+
+  for (const session of linkedSessions) {
+    const parsed = session.lastActivityAt ? Date.parse(session.lastActivityAt) : 0;
+    if (!Number.isNaN(parsed) && parsed > latest) {
+      latest = parsed;
+    }
+  }
+
+  for (const comment of task.comments) {
+    const parsed = Date.parse(comment.timestamp);
+    if (!Number.isNaN(parsed) && parsed > latest) {
+      latest = parsed;
+    }
+  }
+
+  return latest > 0 ? new Date(latest).toISOString() : null;
+}
+
+function formatRelativeBoardTime(timestamp: string): string {
+  const parsed = Date.parse(timestamp);
+  if (Number.isNaN(parsed)) return timestamp;
+
+  const diffSeconds = Math.round((Date.now() - parsed) / 1000);
+  if (diffSeconds < 60) return "just now";
+
+  const diffMinutes = Math.round(diffSeconds / 60);
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+
+  const diffDays = Math.round(diffHours / 24);
+  if (diffDays < 30) return `${diffDays}d ago`;
+
+  return formatActivityTime(timestamp);
+}
+
 function sessionMatchesTask(session: ProjectSession, task: BoardTask): boolean {
   if (session.id === task.attemptRef) return true;
   if (session.metadata?.taskId === task.id) return true;
@@ -1081,25 +1309,482 @@ function compareProjectSessions(
   return rightTime - leftTime;
 }
 
+function BoardTaskCard({
+  task,
+  role,
+  layout,
+  boardRepository,
+  projectSessions,
+  openingContextPath,
+  onOpenContextAttachment,
+  onOpenSessionView,
+  onOpenEditor,
+  dragEnabled = false,
+  isDragging = false,
+  onDragStart,
+  onDragOver,
+  onDragEnd,
+}: {
+  task: BoardTask;
+  role: BoardRole;
+  layout: BoardLayout;
+  boardRepository?: string | null;
+  projectSessions: ProjectSession[];
+  openingContextPath: string | null;
+  onOpenContextAttachment: (path: string) => void | Promise<void>;
+  onOpenSessionView: (
+    sessionId: string,
+    tab?: "chat" | "terminal"
+  ) => void | Promise<void>;
+  onOpenEditor: (task: BoardTask, role: BoardRole) => void;
+  dragEnabled?: boolean;
+  isDragging?: boolean;
+  onDragStart?: () => void;
+  onDragOver?: (event: DragEvent<HTMLDivElement>) => void;
+  onDragEnd?: () => void;
+}) {
+  const { title: taskTitle, description: taskDescription } = splitTaskText(
+    task.text
+  );
+  const issueUrl = buildGitHubIssueUrl(boardRepository, task.issueId);
+  const { linkedSessions, primaryLinkedSession, unresolvedPrimaryLink } =
+    getTaskLinkedRunData(projectSessions, task);
+  const taskReference = getTaskReference(task);
+
+  return (
+    <div
+      draggable={dragEnabled}
+      onDragStart={
+        dragEnabled && onDragStart
+          ? () => {
+              onDragStart();
+            }
+          : undefined
+      }
+      onDragOver={dragEnabled ? onDragOver : undefined}
+      onDragEnd={dragEnabled ? onDragEnd : undefined}
+      className={cn(
+        layout === "kanban"
+          ? "rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]"
+          : "rounded-[10px] border border-[var(--vk-border)] bg-[rgba(23,25,30,0.72)] p-4 shadow-[0_10px_24px_rgba(0,0,0,0.18)]",
+        isDragging && "opacity-60"
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <p className="min-w-0 flex-1 font-mono text-[12px] text-[var(--vk-text-muted)]">
+          {taskReference}
+        </p>
+        <button
+          type="button"
+          onClick={() => onOpenEditor(task, role)}
+          className="inline-flex h-9 w-9 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-6 sm:w-6"
+          aria-label="Edit task"
+          title="Edit task"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <p className="pt-1 text-[15px] leading-[22px] text-[var(--vk-text-normal)]">
+        {taskTitle}
+      </p>
+      {taskDescription && (
+        <p className="pt-1 text-[13px] leading-[20px] text-[var(--vk-text-muted)]">
+          {taskDescription}
+        </p>
+      )}
+      {task.notes && (
+        <p className="pt-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
+          {task.notes}
+        </p>
+      )}
+
+      {task.commentCount > 0 && (
+        <div className="mt-2 flex items-center gap-1 text-[11px] text-[var(--vk-text-muted)]">
+          <MessageSquare className="h-3.5 w-3.5" />
+          <span>
+            {task.commentCount} comment{task.commentCount === 1 ? "" : "s"}
+          </span>
+        </div>
+      )}
+
+      {(task.issueId || task.briefPath || task.attachments.length > 0) && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {task.issueId ? (
+            issueUrl ? (
+              <a
+                href={issueUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-5 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+              >
+                <span>Issue #{task.issueId}</span>
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            ) : (
+              <span className="inline-flex h-5 items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                Issue {task.issueId}
+              </span>
+            )
+          ) : null}
+
+          {task.briefPath ? (
+            <ContextAttachmentChip
+              attachment={task.briefPath}
+              opening={openingContextPath === task.briefPath}
+              onOpen={() => void onOpenContextAttachment(task.briefPath as string)}
+            />
+          ) : null}
+
+          {task.attachments.map((attachment) => (
+            <ContextAttachmentChip
+              key={`${task.id}-${attachment}`}
+              attachment={attachment}
+              opening={openingContextPath === attachment}
+              onOpen={() => void onOpenContextAttachment(attachment)}
+            />
+          ))}
+        </div>
+      )}
+
+      {(linkedSessions.length > 0 || unresolvedPrimaryLink) && (
+        <div className="mt-3 rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+              Runs
+            </span>
+            <span className="text-[11px] text-[var(--vk-text-muted)]">
+              {linkedSessions.length + (unresolvedPrimaryLink ? 1 : 0)}
+            </span>
+          </div>
+
+          <div className="mt-2 space-y-1.5">
+            {primaryLinkedSession ? (
+              <button
+                type="button"
+                onClick={() => void onOpenSessionView(primaryLinkedSession.id, "chat")}
+                className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                title={primaryLinkedSession.id}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  {getSessionAgent(primaryLinkedSession) ? (
+                    <AgentTileIcon
+                      seed={{
+                        label: getSessionAgent(primaryLinkedSession) as string,
+                      }}
+                      className="h-5 w-5"
+                    />
+                  ) : null}
+                  <div className="min-w-0">
+                    <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
+                      {formatLinkedSessionLabel(primaryLinkedSession)}
+                    </div>
+                    <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
+                      Primary run
+                    </div>
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span
+                    className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
+                      primaryLinkedSession.status
+                    )}`}
+                  >
+                    {formatSessionStatus(primaryLinkedSession.status)}
+                  </span>
+                  <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
+                </div>
+              </button>
+            ) : null}
+
+            {linkedSessions
+              .filter((session) => session.id !== primaryLinkedSession?.id)
+              .map((session) => (
+                <button
+                  key={session.id}
+                  type="button"
+                  onClick={() => void onOpenSessionView(session.id, "chat")}
+                  className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                  title={session.id}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    {getSessionAgent(session) ? (
+                      <AgentTileIcon
+                        seed={{
+                          label: getSessionAgent(session) as string,
+                        }}
+                        className="h-5 w-5"
+                      />
+                    ) : null}
+                    <span className="truncate text-[12px] text-[var(--vk-text-normal)]">
+                      {formatLinkedSessionLabel(session)}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span
+                      className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
+                        session.status
+                      )}`}
+                    >
+                      {formatSessionStatus(session.status)}
+                    </span>
+                    <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
+                  </div>
+                </button>
+              ))}
+
+            {unresolvedPrimaryLink ? (
+              <button
+                type="button"
+                onClick={() => void onOpenSessionView(unresolvedPrimaryLink, "chat")}
+                className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
+                title={unresolvedPrimaryLink}
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
+                    {unresolvedPrimaryLink}
+                  </div>
+                  <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
+                    Primary run
+                  </div>
+                </div>
+                <ExternalLink className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          {task.agent ? (
+            <>
+              <AgentTileIcon
+                seed={{ label: task.agent }}
+                className="h-6 w-6"
+              />
+              <span className="truncate text-[12px] text-[var(--vk-text-muted)]">
+                {formatAgentLabel(task.agent)}
+              </span>
+            </>
+          ) : (
+            <span className="text-[12px] text-[var(--vk-text-muted)]">
+              No agent
+            </span>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1">
+          {task.type && (
+            <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
+              {task.type}
+            </span>
+          )}
+          {task.priority && (
+            <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
+              {task.priority}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BoardListRow({
+  entry,
+  boardRepository,
+  projectSessions,
+  onOpenEditor,
+  onOpenSessionView,
+}: {
+  entry: BoardListEntry;
+  boardRepository?: string | null;
+  projectSessions: ProjectSession[];
+  onOpenEditor: (task: BoardTask, role: BoardRole) => void;
+  onOpenSessionView: (sessionId: string, tab?: "chat" | "terminal") => void;
+}) {
+  const { task, role } = entry;
+  const { title: taskTitle } = splitTaskText(task.text);
+  const taskReference = getTaskReference(task);
+  const issueUrl = buildGitHubIssueUrl(boardRepository, task.issueId);
+  const { linkedSessions, primaryLinkedSession } = getTaskLinkedRunData(
+    projectSessions,
+    task
+  );
+  const hasLiveRun = linkedSessions.some((session) => {
+    const normalized = session.status.trim().toLowerCase();
+    return normalized === "working" || normalized === "running";
+  });
+  const lastActivity = getTaskLastActivityTimestamp(task, linkedSessions);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpenEditor(task, role)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpenEditor(task, role);
+        }
+      }}
+      className="group flex items-start gap-2 border-b border-[var(--vk-border)] py-2.5 pl-2 pr-3 text-sm text-[var(--vk-text-normal)] transition-colors hover:bg-[var(--vk-bg-hover)] last:border-b-0 sm:items-center sm:py-2 sm:pl-1"
+    >
+      <span className="shrink-0 pt-px sm:hidden">
+        <span
+          className="inline-flex h-3.5 w-3.5 rounded-full"
+          style={{ backgroundColor: ROLE_COLOR[role] }}
+        />
+      </span>
+
+      <span className="flex min-w-0 flex-1 flex-col gap-1 sm:contents">
+        <span className="line-clamp-2 text-[14px] sm:order-2 sm:min-w-0 sm:flex-1 sm:truncate sm:line-clamp-none">
+          {taskTitle}
+        </span>
+
+        <span className="flex items-center gap-2 sm:order-1 sm:shrink-0">
+          <span className="hidden shrink-0 sm:inline-flex">
+            <span
+              className="inline-flex h-3.5 w-3.5 rounded-full"
+              style={{ backgroundColor: ROLE_COLOR[role] }}
+            />
+          </span>
+          <span className="shrink-0 font-mono text-[11px] text-[var(--vk-text-muted)]">
+            {taskReference}
+          </span>
+          {hasLiveRun ? (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (primaryLinkedSession) {
+                  onOpenSessionView(primaryLinkedSession.id, "chat");
+                }
+              }}
+              className="inline-flex items-center gap-1 rounded-full bg-[color:color-mix(in_srgb,var(--status-working)_18%,transparent)] px-2 py-0.5 text-[10px] font-medium text-[var(--status-working)]"
+            >
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-pulse rounded-full bg-[var(--status-working)] opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--status-working)]" />
+              </span>
+              <span className="hidden sm:inline">Live</span>
+            </button>
+          ) : null}
+          {lastActivity ? (
+            <>
+              <span className="text-[11px] text-[var(--vk-text-muted)] sm:hidden">
+                &middot;
+              </span>
+              <span className="text-[11px] text-[var(--vk-text-muted)] sm:hidden">
+                {formatRelativeBoardTime(lastActivity)}
+              </span>
+            </>
+          ) : null}
+        </span>
+      </span>
+
+      <span className="ml-auto hidden shrink-0 items-center gap-2 sm:order-3 sm:flex sm:gap-3">
+        <span className="hidden items-center gap-1 overflow-hidden md:flex md:max-w-[240px]">
+          {task.type ? (
+            <span className="inline-flex items-center rounded-full border border-[var(--vk-border)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--vk-text-muted)]">
+              {task.type}
+            </span>
+          ) : null}
+          {task.priority ? (
+            <span className="inline-flex items-center rounded-full border border-[var(--vk-border)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--vk-text-muted)]">
+              {task.priority}
+            </span>
+          ) : null}
+          {task.commentCount > 0 ? (
+            <span className="inline-flex items-center gap-1 text-[11px] text-[var(--vk-text-muted)]">
+              <MessageSquare className="h-3 w-3" />
+              {task.commentCount}
+            </span>
+          ) : null}
+        </span>
+
+        <div className="flex w-[180px] shrink-0 items-center rounded-md px-2 py-1">
+          {task.agent ? (
+            <span className="inline-flex min-w-0 items-center gap-2 text-[12px]">
+              <AgentTileIcon
+                seed={{ label: task.agent }}
+                className="h-5 w-5 border-none bg-transparent"
+              />
+              <span className="truncate">{formatAgentLabel(task.agent)}</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-[12px] text-[var(--vk-text-muted)]">
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-dashed border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)]">
+                <User className="h-3 w-3" />
+              </span>
+              No agent
+            </span>
+          )}
+        </div>
+
+        {issueUrl ? (
+          <a
+            href={issueUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.stopPropagation()}
+            className="text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+          >
+            #{task.issueId}
+          </a>
+        ) : primaryLinkedSession ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onOpenSessionView(primaryLinkedSession.id, "chat");
+            }}
+            className="text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+          >
+            {formatLinkedSessionLabel(primaryLinkedSession)}
+          </button>
+        ) : null}
+
+        {lastActivity ? (
+          <span className="text-[11px] text-[var(--vk-text-muted)]">
+            {formatRelativeBoardTime(lastActivity)}
+          </span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
 export function WorkspaceKanban({
   projectId,
   bridgeId,
   defaultAgent,
   agentOptions,
-  modelAccess,
   projectSessions,
   projectLabel,
   headerAccessory,
-  showAgenticPanel = true,
   onOpenSession,
 }: WorkspaceKanbanProps) {
   const router = useRouter();
   const { preferences } = usePreferences(bridgeId);
+  const boardListStorageKey = projectId
+    ? `${BOARD_LIST_VIEW_STORAGE_KEY}:${projectId}`
+    : BOARD_LIST_VIEW_STORAGE_KEY;
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [viewFilter, setViewFilter] = useState<BoardViewFilter>("active");
+  const [boardLayout, setBoardLayout] = useState<BoardLayout>(() => {
+    if (typeof window === "undefined") return "kanban";
+    const stored = window.localStorage.getItem(BOARD_LAYOUT_STORAGE_KEY);
+    return stored === "list" || stored === "kanban" ? stored : "kanban";
+  });
+  const [boardListView, setBoardListView] = useState<BoardListViewState>(() =>
+    readBoardListViewState(boardListStorageKey)
+  );
 
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerRole, setComposerRole] = useState<BoardRole>("intake");
@@ -1168,7 +1853,6 @@ export function WorkspaceKanban({
     preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
   const [pageVisible, setPageVisible] = useState(true);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const orderedAgentOptions = useMemo(() => {
     const normalized = [...new Set(agentOptions.filter(Boolean))];
@@ -1183,6 +1867,23 @@ export function WorkspaceKanban({
   }, [board]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(BOARD_LAYOUT_STORAGE_KEY, boardLayout);
+  }, [boardLayout]);
+
+  useEffect(() => {
+    setBoardListView(readBoardListViewState(boardListStorageKey));
+  }, [boardListStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      boardListStorageKey,
+      JSON.stringify(boardListView)
+    );
+  }, [boardListStorageKey, boardListView]);
+
+  useEffect(() => {
     if (!orderedAgentOptions.includes(agent)) {
       setAgent(orderedAgentOptions[0] ?? defaultAgent);
     }
@@ -1193,6 +1894,16 @@ export function WorkspaceKanban({
       setEditAgent(orderedAgentOptions[0] ?? defaultAgent);
     }
   }, [defaultAgent, editAgent, orderedAgentOptions]);
+
+  const updateBoardListView = useCallback(
+    (patch: Partial<BoardListViewState>) => {
+      setBoardListView((current) => ({
+        ...current,
+        ...patch,
+      }));
+    },
+    []
+  );
 
   useEffect(() => {
     if ((!composerOpen && !editingTask) || !projectId) return;
@@ -1310,30 +2021,6 @@ export function WorkspaceKanban({
     [bridgeId, projectId]
   );
 
-  const selectedBoardTask = useMemo(() => {
-    if (!board) return null;
-    if (selectedTaskId) {
-      const existing = findBoardTask(board, selectedTaskId);
-      if (existing) return existing;
-    }
-    for (const column of board.columns) {
-      if (column.tasks.length > 0) {
-        return { task: column.tasks[0], role: column.role };
-      }
-    }
-    return null;
-  }, [board, selectedTaskId]);
-
-  useEffect(() => {
-    if (selectedBoardTask?.task.id && selectedBoardTask.task.id !== selectedTaskId) {
-      setSelectedTaskId(selectedBoardTask.task.id);
-      return;
-    }
-    if (!selectedBoardTask && selectedTaskId) {
-      setSelectedTaskId(null);
-    }
-  }, [selectedBoardTask, selectedTaskId]);
-
   const openSessionView = useCallback(
     (sessionId: string, tab: "chat" | "terminal" = "chat") => {
       if (onOpenSession) {
@@ -1343,40 +2030,6 @@ export function WorkspaceKanban({
       router.push(buildSessionHref(sessionId, { bridgeId, tab }));
     },
     [bridgeId, onOpenSession, router]
-  );
-
-  const launchTaskSession = useCallback(
-    async (task: {
-      id: string;
-      issueId: string;
-      agent?: string | null;
-    }) => {
-      if (!projectId) {
-        throw new Error("Select a project before launching a task session.");
-      }
-
-      const response = await fetch(withBridgeQuery("/api/sessions", bridgeId), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          projectId,
-          issueId: task.issueId,
-          prompt: "",
-          agent: task.agent?.trim() || defaultAgent,
-        }),
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(payload?.error ?? "Failed to launch task session");
-      }
-      const sessionId = payload?.session?.id ?? payload?.id ?? payload?.session_id ?? null;
-      if (!sessionId) {
-        throw new Error("Task session response did not include a session id");
-      }
-      await loadBoard({ silent: true });
-      openSessionView(sessionId, "chat");
-    },
-    [bridgeId, defaultAgent, loadBoard, openSessionView, projectId]
   );
 
   const scheduleBoardRefresh = useCallback(
@@ -1537,23 +2190,148 @@ export function WorkspaceKanban({
         if (!query) return column;
         return {
           ...column,
-          tasks: column.tasks.filter((task) => {
-            const commentText = task.comments
-              .map((comment) => `${comment.author} ${comment.body}`)
-              .join(" ");
-            const haystack = `${task.text} ${task.agent ?? ""} ${
-              task.type ?? ""
-            } ${task.priority ?? ""} ${task.issueId ?? ""} ${
-              task.notes ?? ""
-            } ${task.briefPath ?? ""} ${task.attachments.join(
-              " "
-            )} ${commentText}`.toLowerCase();
-            return haystack.includes(query);
-          }),
+          tasks: column.tasks.filter((task) => taskMatchesBoardSearch(task, query)),
         };
       });
   }, [allColumns, search, viewFilter]);
-  const dragEnabled = search.trim().length === 0;
+  const dragEnabled =
+    boardLayout === "kanban" && search.trim().length === 0;
+  const boardListFilterCount = useMemo(
+    () => countBoardListFilters(boardListView),
+    [boardListView]
+  );
+  const availableBoardListAgents = useMemo(() => {
+    const uniqueAgents = new Set<string>();
+    for (const column of allColumns) {
+      for (const task of column.tasks) {
+        if (task.agent?.trim()) {
+          uniqueAgents.add(task.agent.trim());
+        }
+      }
+    }
+    return [...uniqueAgents].sort((left, right) =>
+      left.localeCompare(right, undefined, { sensitivity: "base" })
+    );
+  }, [allColumns]);
+  const boardListEntries = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    let entries = allColumns.flatMap((column) =>
+      column.tasks.map((task) => ({
+        task,
+        role: column.role,
+        heading: column.heading || ROLE_LABEL[column.role],
+      }))
+    );
+
+    if (query) {
+      entries = entries.filter((entry) => taskMatchesBoardSearch(entry.task, query));
+    }
+    if (boardListView.roles.length > 0) {
+      entries = entries.filter((entry) => boardListView.roles.includes(entry.role));
+    }
+    if (boardListView.priorities.length > 0) {
+      entries = entries.filter(
+        (entry) =>
+          entry.task.priority != null &&
+          boardListView.priorities.includes(entry.task.priority)
+      );
+    }
+    if (boardListView.agents.length > 0) {
+      entries = entries.filter((entry) => {
+        const taskAgent = entry.task.agent?.trim();
+        if (!taskAgent) {
+          return boardListView.agents.includes("__unassigned");
+        }
+        return boardListView.agents.includes(taskAgent);
+      });
+    }
+
+    const sortedEntries = [...entries];
+    sortedEntries.sort((left, right) => {
+      const direction = boardListView.sortDir === "asc" ? 1 : -1;
+      switch (boardListView.sortField) {
+        case "status":
+          return (
+            direction *
+            (getBoardRoleSortIndex(left.role) - getBoardRoleSortIndex(right.role))
+          );
+        case "priority":
+          return (
+            direction *
+            (getBoardPrioritySortIndex(left.task.priority) -
+              getBoardPrioritySortIndex(right.task.priority))
+          );
+        case "agent":
+          return direction * (left.task.agent ?? "").localeCompare(right.task.agent ?? "");
+        case "title":
+        default: {
+          const leftTitle = splitTaskText(left.task.text).title;
+          const rightTitle = splitTaskText(right.task.text).title;
+          return direction * leftTitle.localeCompare(rightTitle);
+        }
+      }
+    });
+
+    return sortedEntries;
+  }, [allColumns, boardListView, search]);
+  const groupedBoardListEntries = useMemo(() => {
+    if (boardListView.groupBy === "none") {
+      return [{ key: "__all", label: null as string | null, items: boardListEntries }];
+    }
+    if (boardListView.groupBy === "status") {
+      return BOARD_ROLE_ORDER.map((role) => {
+        const items = boardListEntries.filter((entry) => entry.role === role);
+        if (items.length === 0) return null;
+        return {
+          key: role,
+          label: items[0]?.heading || ROLE_LABEL[role],
+          items,
+        };
+      }).filter(
+        (
+          value
+        ): value is { key: string; label: string | null; items: BoardListEntry[] } =>
+          Boolean(value)
+      );
+    }
+    if (boardListView.groupBy === "priority") {
+      return BOARD_PRIORITY_ORDER.map((priority) => {
+        const items = boardListEntries.filter(
+          (entry) => entry.task.priority === priority
+        );
+        if (items.length === 0) return null;
+        return {
+          key: priority,
+          label: priority[0]?.toUpperCase() + priority.slice(1),
+          items,
+        };
+      }).filter(
+        (
+          value
+        ): value is { key: string; label: string | null; items: BoardListEntry[] } =>
+          Boolean(value)
+      );
+    }
+
+    const grouped = new Map<string, BoardListEntry[]>();
+    for (const entry of boardListEntries) {
+      const key = entry.task.agent?.trim() || "__unassigned";
+      const current = grouped.get(key) ?? [];
+      current.push(entry);
+      grouped.set(key, current);
+    }
+    return [...grouped.entries()]
+      .map(([key, items]) => ({
+        key,
+        label: key === "__unassigned" ? "No agent" : formatAgentLabel(key),
+        items,
+      }))
+      .sort((left, right) =>
+        (left.label ?? "").localeCompare(right.label ?? "", undefined, {
+          sensitivity: "base",
+        })
+      );
+  }, [boardListEntries, boardListView.groupBy]);
 
   const filteredContextFiles = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
@@ -2227,33 +3005,10 @@ export function WorkspaceKanban({
     }
   }
 
-  const selectedAgenticTask = useMemo(() => {
-    const task = selectedBoardTask?.task;
-    if (!task) return null;
-    const planningSession = projectSessions
-      .filter(
-        (session) =>
-          isBoardPlanningSession(session) &&
-          sessionMatchesTask(session, task)
-      )
-      .sort((left, right) => compareProjectSessions(left, right, null))[0] ?? null;
-    const { title, description } = splitTaskText(task.text);
-    return {
-      id: task.id,
-      issueId: getTaskLinkKey(task),
-      title,
-      description,
-      notes: task.notes,
-      agent: task.agent,
-      linkedSessionId: planningSession?.id ?? null,
-      linkedSessionLabel: planningSession ? formatLinkedSessionLabel(planningSession) : null,
-    };
-  }, [projectSessions, selectedBoardTask]);
-
   if (!projectId) {
     return (
       <div className="flex h-full items-center justify-center text-[14px] text-[var(--vk-text-muted)]">
-        Select a workspace to view its Kanban board.
+        Select a workspace to view its board.
       </div>
     );
   }
@@ -2274,53 +3029,454 @@ export function WorkspaceKanban({
           ) : null}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
-            {(
-              [
-                ["active", "Active"],
-                ["all", "All"],
-                ["backlog", "Backlog"],
-                ["cancelled", "Cancelled"],
-              ] as const
-            ).map(([value, label]) => (
+        {boardLayout === "list" ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3">
+            <div className="flex min-w-0 items-center gap-2 sm:gap-3">
               <button
-                key={value}
                 type="button"
-                onClick={() => setViewFilter(value)}
-                className={cn(
-                  "px-3 py-[5px] text-[13px]",
-                  viewFilter === value
-                    ? "rounded-[2px] bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
-                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                )}
+                onClick={() => openComposer("intake")}
+                className="inline-flex h-[31px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
               >
-                {label}
+                <Plus className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">New Issue</span>
               </button>
-            ))}
-          </div>
 
-          <div className="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:min-w-[220px] sm:flex-nowrap sm:flex-none">
-            <label className="flex h-[31px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:min-w-[200px] sm:w-[240px] sm:flex-none">
-              <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search issues..."
-                className="ml-2 w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
-              />
-            </label>
+              <label className="relative w-48 sm:w-64 md:w-80">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--vk-text-muted)]" />
+                <input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search issues..."
+                  className="h-[31px] w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] pl-7 pr-3 text-[13px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                />
+              </label>
+            </div>
+
+            <div className="flex shrink-0 items-center gap-1">
+              <div className="mr-1 flex items-center overflow-hidden rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
+                <button
+                  type="button"
+                  className={cn(
+                    "p-1.5 transition-colors",
+                    boardLayout === "list"
+                      ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+                      : "text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                  )}
+                  onClick={() => setBoardLayout("list")}
+                  title="List view"
+                >
+                  <List className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "p-1.5 transition-colors",
+                    boardLayout === "kanban"
+                      ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+                      : "text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                  )}
+                  onClick={() => setBoardLayout("kanban")}
+                  title="Board view"
+                >
+                  <Columns3 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className={cn(
+                      "inline-flex h-[31px] items-center gap-1 rounded-[3px] px-2.5 text-[12px] hover:bg-[var(--vk-bg-hover)]",
+                      boardListFilterCount > 0
+                        ? "text-[var(--vk-orange)]"
+                        : "text-[var(--vk-text-muted)]"
+                    )}
+                  >
+                    <Filter className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">
+                      {boardListFilterCount > 0
+                        ? `Filters: ${boardListFilterCount}`
+                        : "Filter"}
+                    </span>
+                    {boardListFilterCount > 0 ? (
+                      <span className="text-[10px] font-medium sm:hidden">
+                        {boardListFilterCount}
+                      </span>
+                    ) : null}
+                    {boardListFilterCount > 0 ? (
+                      <X
+                        className="hidden h-3 w-3 sm:block"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          updateBoardListView({
+                            roles: [],
+                            priorities: [],
+                            agents: [],
+                          });
+                        }}
+                      />
+                    ) : null}
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    align="end"
+                    sideOffset={6}
+                    className={`${MENU_PANEL_CLASS} w-[min(420px,calc(100vw-2rem))]`}
+                  >
+                    <div className="space-y-3 p-1">
+                      <div className="flex items-center justify-between px-2 pt-1">
+                        <span className="text-[12px] font-semibold text-[var(--vk-text-normal)]">
+                          Filters
+                        </span>
+                        {boardListFilterCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateBoardListView({
+                                roles: [],
+                                priorities: [],
+                                agents: [],
+                              })
+                            }
+                            className="text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                          >
+                            Clear
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <div className="space-y-1.5 px-2">
+                        <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                          Quick filters
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BOARD_LIST_QUICK_FILTERS.map((preset) => {
+                            const active = boardListValuesEqual(
+                              boardListView.roles,
+                              preset.roles
+                            );
+                            return (
+                              <button
+                                key={preset.label}
+                                type="button"
+                                onClick={() =>
+                                  updateBoardListView({
+                                    roles: active ? [] : [...preset.roles],
+                                  })
+                                }
+                                className={cn(
+                                  "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                                  active
+                                    ? "border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_18%,transparent)] text-[var(--vk-text-normal)]"
+                                    : "border-[var(--vk-border)] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                                )}
+                              >
+                                {preset.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="border-t border-[var(--vk-border)]" />
+
+                      <div className="grid grid-cols-1 gap-3 px-2 pb-2 sm:grid-cols-2">
+                        <div className="space-y-1">
+                          <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                            Status
+                          </span>
+                          <div className="space-y-0.5">
+                            {BOARD_ROLE_ORDER.map((role) => (
+                              <button
+                                key={role}
+                                type="button"
+                                onClick={() =>
+                                  updateBoardListView({
+                                    roles: toggleBoardListValue(
+                                      boardListView.roles,
+                                      role
+                                    ),
+                                  })
+                                }
+                                className="flex w-full items-center gap-2 rounded-[4px] px-2 py-1 text-left text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                              >
+                                <span
+                                  className="h-2.5 w-2.5 rounded-full"
+                                  style={{ backgroundColor: ROLE_COLOR[role] }}
+                                />
+                                <span className="flex-1 truncate">
+                                  {ROLE_LABEL[role]}
+                                </span>
+                                {boardListView.roles.includes(role) ? (
+                                  <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />
+                                ) : null}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="space-y-1">
+                            <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                              Priority
+                            </span>
+                            <div className="space-y-0.5">
+                              {BOARD_PRIORITY_ORDER.map((priority) => (
+                                <button
+                                  key={priority}
+                                  type="button"
+                                  onClick={() =>
+                                    updateBoardListView({
+                                      priorities: toggleBoardListValue(
+                                        boardListView.priorities,
+                                        priority
+                                      ),
+                                    })
+                                  }
+                                  className="flex w-full items-center gap-2 rounded-[4px] px-2 py-1 text-left text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                                >
+                                  <span className="flex-1 truncate capitalize">
+                                    {priority}
+                                  </span>
+                                  {boardListView.priorities.includes(priority) ? (
+                                    <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />
+                                  ) : null}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="space-y-1">
+                            <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                              Assignee
+                            </span>
+                            <div className="max-h-40 space-y-0.5 overflow-y-auto">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateBoardListView({
+                                    agents: toggleBoardListValue(
+                                      boardListView.agents,
+                                      "__unassigned"
+                                    ),
+                                  })
+                                }
+                                className="flex w-full items-center gap-2 rounded-[4px] px-2 py-1 text-left text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                              >
+                                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-dashed border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)]">
+                                  <User className="h-3 w-3 text-[var(--vk-text-muted)]" />
+                                </span>
+                                <span className="flex-1 truncate">No agent</span>
+                                {boardListView.agents.includes("__unassigned") ? (
+                                  <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />
+                                ) : null}
+                              </button>
+                              {availableBoardListAgents.map((agentOption) => (
+                                <button
+                                  key={agentOption}
+                                  type="button"
+                                  onClick={() =>
+                                    updateBoardListView({
+                                      agents: toggleBoardListValue(
+                                        boardListView.agents,
+                                        agentOption
+                                      ),
+                                    })
+                                  }
+                                  className="flex w-full items-center gap-2 rounded-[4px] px-2 py-1 text-left text-[12px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                                >
+                                  <AgentTileIcon
+                                    seed={{ label: agentOption }}
+                                    className="h-5 w-5 border-none bg-transparent"
+                                  />
+                                  <span className="flex-1 truncate">
+                                    {formatAgentLabel(agentOption)}
+                                  </span>
+                                  {boardListView.agents.includes(agentOption) ? (
+                                    <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />
+                                  ) : null}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex h-[31px] items-center gap-1 rounded-[3px] px-2.5 text-[12px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                  >
+                    <ArrowUpDown className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">Sort</span>
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    align="end"
+                    sideOffset={6}
+                    className={`${MENU_PANEL_CLASS} min-w-[180px]`}
+                  >
+                    {(
+                      [
+                        ["status", "Status"],
+                        ["priority", "Priority"],
+                        ["title", "Title"],
+                        ["agent", "Agent"],
+                      ] as const
+                    ).map(([field, label]) => {
+                      const active = boardListView.sortField === field;
+                      return (
+                        <button
+                          key={field}
+                          type="button"
+                          onClick={() =>
+                            updateBoardListView({
+                              sortField: field,
+                              sortDir: active
+                                ? boardListView.sortDir === "asc"
+                                  ? "desc"
+                                  : "asc"
+                                : "asc",
+                            })
+                          }
+                          className={cn(
+                            "flex w-full items-center justify-between rounded-[4px] px-3 py-2 text-[13px]",
+                            active
+                              ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+                              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                          )}
+                        >
+                          <span>{label}</span>
+                          {active ? (
+                            <span className="text-[11px] text-[var(--vk-text-muted)]">
+                              {boardListView.sortDir === "asc" ? "↑" : "↓"}
+                            </span>
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex h-[31px] items-center gap-1 rounded-[3px] px-2.5 text-[12px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                  >
+                    <Layers className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">Group</span>
+                  </button>
+                </DropdownMenu.Trigger>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    align="end"
+                    sideOffset={6}
+                    className={`${MENU_PANEL_CLASS} min-w-[180px]`}
+                  >
+                    {(
+                      [
+                        ["status", "Status"],
+                        ["priority", "Priority"],
+                        ["assignee", "Assignee"],
+                        ["none", "None"],
+                      ] as const
+                    ).map(([value, label]) => {
+                      const active = boardListView.groupBy === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => updateBoardListView({ groupBy: value })}
+                          className={cn(
+                            "flex w-full items-center justify-between rounded-[4px] px-3 py-2 text-[13px]",
+                            active
+                              ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+                              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                          )}
+                        >
+                          <span>{label}</span>
+                          {active ? (
+                            <Check className="h-3.5 w-3.5 text-[var(--vk-orange)]" />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
+              {(
+                [
+                  ["active", "Active"],
+                  ["all", "All"],
+                  ["backlog", "Backlog"],
+                  ["cancelled", "Cancelled"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setViewFilter(value)}
+                  className={cn(
+                    "px-3 py-[5px] text-[13px]",
+                    viewFilter === value
+                      ? "rounded-[2px] bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
+                      : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
 
             <button
               type="button"
-              onClick={() => openComposer("intake")}
-              className="inline-flex h-[31px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-orange)] px-3 text-[14px] text-white hover:bg-[var(--accent-hover)] sm:w-auto"
+              onClick={() => setBoardLayout("list")}
+              className="inline-flex h-[31px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+              aria-label="Switch to list view"
+              title="Switch to list view"
             >
-              <span>New Issue</span>
-              <Plus className="h-3.5 w-3.5" />
+              <List className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">List view</span>
             </button>
+
+            <div className="ml-auto flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:min-w-[220px] sm:flex-nowrap sm:flex-none">
+              <label className="flex h-[31px] min-w-0 flex-1 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 sm:min-w-[200px] sm:w-[240px] sm:flex-none">
+                <Search className="h-3.5 w-3.5 text-[var(--vk-text-muted)]" />
+                <input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search issues..."
+                  className="ml-2 w-full bg-transparent text-[14px] text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)]"
+                />
+              </label>
+
+              <button
+                type="button"
+                onClick={() => openComposer("intake")}
+                className="inline-flex h-[31px] w-full items-center justify-center gap-1 rounded-[3px] bg-[var(--vk-orange)] px-3 text-[14px] text-white hover:bg-[var(--accent-hover)] sm:w-auto"
+              >
+                <span>New Issue</span>
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
@@ -2350,7 +3506,7 @@ export function WorkspaceKanban({
           ) : null}
         </div>
 
-        {!dragEnabled && (
+        {boardLayout === "kanban" && !dragEnabled && (
           <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">
             Clear search to reorder cards.
           </p>
@@ -2525,476 +3681,244 @@ export function WorkspaceKanban({
             {error}
           </div>
         ) : (
-          <div className="flex h-full min-h-0 flex-col gap-4 xl:flex-row">
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y sm:touch-auto">
-              <div className="flex min-w-0 flex-row items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-3 [-webkit-overflow-scrolling:touch] px-0.5 sm:h-full sm:gap-0 sm:overflow-x-auto sm:px-0 sm:pb-3">
-            {visibleColumns.map((column) => {
-              const fullColumn = allColumns.find(
-                (candidate) => candidate.role === column.role
-              );
-              const sourceIndex =
-                dragEnabled && draggingTask?.role === column.role
-                  ? fullColumn?.tasks.findIndex(
-                      (task) => task.id === draggingTask.taskId
-                    ) ?? -1
-                  : -1;
-              const fullTaskCount =
-                fullColumn?.tasks.length ?? column.tasks.length;
-              const effectiveTaskCount = Math.max(
-                fullTaskCount - (sourceIndex >= 0 ? 1 : 0),
-                0
-              );
+          boardLayout === "kanban" ? (
+            <div className="flex h-full min-h-0 flex-col gap-4">
+              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y sm:touch-auto">
+                <div className="flex min-w-0 flex-row items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-3 [-webkit-overflow-scrolling:touch] px-0.5 sm:h-full sm:gap-0 sm:overflow-x-auto sm:px-0 sm:pb-3">
+                  {visibleColumns.map((column) => {
+                    const fullColumn = allColumns.find(
+                      (candidate) => candidate.role === column.role
+                    );
+                    const sourceIndex =
+                      dragEnabled && draggingTask?.role === column.role
+                        ? fullColumn?.tasks.findIndex(
+                            (task) => task.id === draggingTask.taskId
+                          ) ?? -1
+                        : -1;
+                    const fullTaskCount =
+                      fullColumn?.tasks.length ?? column.tasks.length;
+                    const effectiveTaskCount = Math.max(
+                      fullTaskCount - (sourceIndex >= 0 ? 1 : 0),
+                      0
+                    );
 
-              return (
-                <article
-                  key={column.role}
-                  className={cn(
-                    "flex max-h-[min(560px,65dvh)] min-h-0 w-[min(85vw,320px)] shrink-0 flex-col border border-[var(--vk-border)] bg-[var(--vk-bg-main)] shadow-none sm:max-h-none sm:h-full sm:min-h-[560px] sm:w-[320px] sm:border-l-0 first:sm:border-l",
-                    draggingTask && "snap-start"
-                  )}
-                >
-                  <header className="flex items-center gap-2 border-b border-[var(--vk-border)] px-3 py-3">
-                    <span
-                      className="h-2.5 w-2.5 rounded-full"
-                      style={{ backgroundColor: ROLE_COLOR[column.role] }}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-[14px] font-medium text-[var(--vk-text-normal)]">
-                        {column.heading || ROLE_LABEL[column.role]}
-                      </p>
-                    </div>
-                    <span className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                      {column.tasks.length}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => openComposer(column.role)}
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] sm:h-7 sm:w-7"
-                      aria-label={`Add task to ${column.heading}`}
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                    </button>
-                  </header>
-
-                  <div
-                    className={cn(
-                      "flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 pt-2",
-                      draggingTask?.role === column.role &&
-                        "bg-[rgba(255,255,255,0.02)]"
-                    )}
-                    onDragOver={(event) =>
-                      dragEnabled
-                        ? handleColumnDragOver(event, column.role)
-                        : undefined
-                    }
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      if (!dragEnabled) return;
-                      void handleColumnDrop(column.role);
-                    }}
-                  >
-                    {dragEnabled &&
-                    dropIndicator?.role === column.role &&
-                    dropIndicator.index === 0 ? (
-                      <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
-                    ) : null}
-
-                    {column.tasks.length === 0 && (
-                      <div className="rounded-[10px] border border-dashed border-[var(--vk-border)] px-3 py-4 text-[13px] text-[var(--vk-text-muted)]">
-                        Drop a card here or create a new one.
-                      </div>
-                    )}
-
-                    <div className="space-y-2">
-                      {column.tasks.map((task) => {
-                        const {
-                          title: taskTitle,
-                          description: taskDescription,
-                        } = splitTaskText(task.text);
-                        const fullTaskIndex =
-                          fullColumn?.tasks.findIndex(
-                            (item) => item.id === task.id
-                          ) ?? 0;
-                        const effectiveTaskIndex =
-                          sourceIndex >= 0
-                            ? task.id === draggingTask?.taskId
-                              ? null
-                              : fullTaskIndex > sourceIndex
-                              ? fullTaskIndex - 1
-                              : fullTaskIndex
-                            : fullTaskIndex;
-                        const taskLinkKey = getTaskLinkKey(task);
-                        const issueUrl = buildGitHubIssueUrl(
-                          board?.repository,
-                          task.issueId
-                        );
-                        const linkedSessions = projectSessions
-                          .filter(
-                            (session) =>
-                              !isBoardPlanningSession(session) &&
-                              sessionMatchesTask(session, task)
-                          )
-                          .sort((left, right) =>
-                            compareProjectSessions(
-                              left,
-                              right,
-                              task.attemptRef ?? null
-                            )
-                          );
-                        const planningSession = projectSessions
-                          .filter(
-                            (session) =>
-                              isBoardPlanningSession(session) &&
-                              sessionMatchesTask(session, task)
-                          )
-                          .sort((left, right) =>
-                            compareProjectSessions(left, right, null)
-                          )[0] ?? null;
-                        const primaryLinkedSession = task.attemptRef
-                          ? linkedSessions.find(
-                              (session) => session.id === task.attemptRef
-                            ) ?? null
-                          : linkedSessions[0] ?? null;
-                        const unresolvedPrimaryLink =
-                          task.attemptRef &&
-                          !linkedSessions.some(
-                            (session) => session.id === task.attemptRef
-                          )
-                            ? task.attemptRef
-                            : null;
-                        return (
-                          <div key={`${column.role}-${task.id}`}>
-                            {dragEnabled &&
-                            dropIndicator?.role === column.role &&
-                            effectiveTaskIndex !== null &&
-                            dropIndicator.index === effectiveTaskIndex ? (
-                              <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
-                            ) : null}
-                            <div
-                              draggable={dragEnabled}
-                              onClick={() => setSelectedTaskId(task.id)}
-                              onDragStart={() =>
-                                dragEnabled
-                                  ? handleTaskDragStart(task.id, column.role)
-                                  : undefined
-                              }
-                              onDragOver={(event) =>
-                                dragEnabled
-                                  ? handleTaskDragOver(
-                                      event,
-                                      column.role,
-                                      task.id
-                                    )
-                                  : undefined
-                              }
-                              onDragEnd={() => {
-                                setDraggingTask(null);
-                                setDropIndicator(null);
-                              }}
-                              className={cn(
-                                "cursor-pointer rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]",
-                                draggingTask?.taskId === task.id && "opacity-60",
-                                selectedTaskId === task.id && "border-[var(--vk-accent)] shadow-[0_0_0_1px_var(--vk-accent),0_10px_24px_rgba(0,0,0,0.24)]"
-                              )}
-                            >
-                              <div className="flex items-start gap-2">
-                                <p className="min-w-0 flex-1 font-mono text-[12px] text-[var(--vk-text-muted)]">
-                                  {task.taskRef?.trim() ||
-                                    (task.id.length > 12
-                                      ? `TASK-${
-                                          task.id
-                                            .split("-")[0]
-                                            ?.toUpperCase() ??
-                                          task.id.toUpperCase()
-                                        }`
-                                      : task.id)}
-                                </p>
-                                <button
-                                  type="button"
-                                  onClick={() => openEditor(task, column.role)}
-                                  className="inline-flex h-9 w-9 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-6 sm:w-6"
-                                  aria-label="Edit task"
-                                  title="Edit task"
-                                >
-                                  <Pencil className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                              <p className="pt-1 text-[15px] leading-[22px] text-[var(--vk-text-normal)]">
-                                {taskTitle}
-                              </p>
-                              {taskDescription && (
-                                <p className="pt-1 text-[13px] leading-[20px] text-[var(--vk-text-muted)]">
-                                  {taskDescription}
-                                </p>
-                              )}
-                              {task.notes && (
-                                <p className="pt-2 text-[12px] leading-[18px] text-[var(--vk-text-muted)]">
-                                  {task.notes}
-                                </p>
-                              )}
-
-                              {task.commentCount > 0 && (
-                                <div className="mt-2 flex items-center gap-1 text-[11px] text-[var(--vk-text-muted)]">
-                                  <MessageSquare className="h-3.5 w-3.5" />
-                                  <span>
-                                    {task.commentCount} comment
-                                    {task.commentCount === 1 ? "" : "s"}
-                                  </span>
-                                </div>
-                              )}
-
-                              {(task.issueId ||
-                                task.briefPath ||
-                                task.attachments.length > 0) && (
-                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                                  {task.issueId ? (
-                                    issueUrl ? (
-                                      <a
-                                        href={issueUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="inline-flex h-5 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                                      >
-                                        <span>Issue #{task.issueId}</span>
-                                        <ExternalLink className="h-3 w-3" />
-                                      </a>
-                                    ) : (
-                                      <span className="inline-flex h-5 items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                                        Issue {task.issueId}
-                                      </span>
-                                    )
-                                  ) : null}
-
-                                  {task.briefPath ? (
-                                    <ContextAttachmentChip
-                                      attachment={task.briefPath}
-                                      opening={
-                                        openingContextPath === task.briefPath
-                                      }
-                                      onOpen={() =>
-                                        void openContextAttachment(
-                                          task.briefPath as string
-                                        )
-                                      }
-                                    />
-                                  ) : null}
-
-                                  {task.attachments.map((attachment) => (
-                                    <ContextAttachmentChip
-                                      key={`${task.id}-${attachment}`}
-                                      attachment={attachment}
-                                      opening={
-                                        openingContextPath === attachment
-                                      }
-                                      onOpen={() =>
-                                        void openContextAttachment(attachment)
-                                      }
-                                    />
-                                  ))}
-                                </div>
-                              )}
-
-                              {(linkedSessions.length > 0 ||
-                                unresolvedPrimaryLink) && (
-                                <div className="mt-3 rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                                      Runs
-                                    </span>
-                                    <span className="text-[11px] text-[var(--vk-text-muted)]">
-                                      {linkedSessions.length +
-                                        (unresolvedPrimaryLink ? 1 : 0)}
-                                    </span>
-                                  </div>
-
-                                  <div className="mt-2 space-y-1.5">
-                                    {primaryLinkedSession ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => openSessionView(primaryLinkedSession.id, "chat")}
-                                        className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
-                                        title={primaryLinkedSession.id}
-                                      >
-                                        <div className="flex min-w-0 items-center gap-2">
-                                          {getSessionAgent(
-                                            primaryLinkedSession
-                                          ) ? (
-                                            <AgentTileIcon
-                                              seed={{
-                                                label: getSessionAgent(
-                                                  primaryLinkedSession
-                                                ) as string,
-                                              }}
-                                              className="h-5 w-5"
-                                            />
-                                          ) : null}
-                                          <div className="min-w-0">
-                                            <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
-                                              {formatLinkedSessionLabel(
-                                                primaryLinkedSession
-                                              )}
-                                            </div>
-                                            <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
-                                              Primary run
-                                            </div>
-                                          </div>
-                                        </div>
-                                        <div className="flex shrink-0 items-center gap-2">
-                                          <span
-                                            className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
-                                              primaryLinkedSession.status
-                                            )}`}
-                                          >
-                                            {formatSessionStatus(
-                                              primaryLinkedSession.status
-                                            )}
-                                          </span>
-                                          <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
-                                        </div>
-                                      </button>
-                                    ) : null}
-
-                                    {linkedSessions
-                                      .filter(
-                                        (session) =>
-                                          session.id !==
-                                          primaryLinkedSession?.id
-                                      )
-                                      .map((session) => (
-                                        <button
-                                          key={session.id}
-                                          type="button"
-                                          onClick={() => openSessionView(session.id, "chat")}
-                                          className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
-                                          title={session.id}
-                                        >
-                                          <div className="flex min-w-0 items-center gap-2">
-                                            {getSessionAgent(session) ? (
-                                              <AgentTileIcon
-                                                seed={{
-                                                  label: getSessionAgent(
-                                                    session
-                                                  ) as string,
-                                                }}
-                                                className="h-5 w-5"
-                                              />
-                                            ) : null}
-                                            <span className="truncate text-[12px] text-[var(--vk-text-normal)]">
-                                              {formatLinkedSessionLabel(
-                                                session
-                                              )}
-                                            </span>
-                                          </div>
-                                          <div className="flex shrink-0 items-center gap-2">
-                                            <span
-                                              className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${sessionStatusPillClass(
-                                                session.status
-                                              )}`}
-                                            >
-                                              {formatSessionStatus(
-                                                session.status
-                                              )}
-                                            </span>
-                                            <ExternalLink className="h-3 w-3 text-[var(--vk-text-muted)]" />
-                                          </div>
-                                        </button>
-                                      ))}
-
-                                    {unresolvedPrimaryLink ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => openSessionView(unresolvedPrimaryLink, "chat")}
-                                        className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
-                                        title={unresolvedPrimaryLink}
-                                      >
-                                        <div className="min-w-0">
-                                          <div className="truncate text-[12px] text-[var(--vk-text-normal)]">
-                                            {unresolvedPrimaryLink}
-                                          </div>
-                                          <div className="truncate text-[11px] text-[var(--vk-text-muted)]">
-                                            Primary run
-                                          </div>
-                                        </div>
-                                        <ExternalLink className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
-                                      </button>
-                                    ) : null}
-                                  </div>
-                                </div>
-                              )}
-
-                              <div className="mt-2 flex items-center justify-between gap-2">
-                                <button
-                                  type="button"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setSelectedTaskId(task.id);
-                                  }}
-                                  className="inline-flex h-6 items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                                >
-                                  {planningSession ? "Continue planning" : "Open agentic chat"}
-                                </button>
-                                <div className="flex min-w-0 items-center gap-1.5">
-                                  {task.agent ? (
-                                    <>
-                                      <AgentTileIcon
-                                        seed={{ label: task.agent }}
-                                        className="h-6 w-6"
-                                      />
-                                      <span className="truncate text-[12px] text-[var(--vk-text-muted)]">
-                                        {formatAgentLabel(task.agent)}
-                                      </span>
-                                    </>
-                                  ) : (
-                                    <span className="text-[12px] text-[var(--vk-text-muted)]">
-                                      No agent
-                                    </span>
-                                  )}
-                                </div>
-
-                                <div className="flex flex-wrap items-center gap-1">
-                                  {task.type && (
-                                    <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                                      {task.type}
-                                    </span>
-                                  )}
-                                  {task.priority && (
-                                    <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
-                                      {task.priority}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
+                    return (
+                      <article
+                        key={column.role}
+                        className={cn(
+                          "flex max-h-[min(560px,65dvh)] min-h-0 w-[min(85vw,320px)] shrink-0 flex-col border border-[var(--vk-border)] bg-[var(--vk-bg-main)] shadow-none sm:max-h-none sm:h-full sm:min-h-[560px] sm:w-[320px] sm:border-l-0 first:sm:border-l",
+                          draggingTask && "snap-start"
+                        )}
+                      >
+                        <header className="flex items-center gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+                          <span
+                            className="h-2.5 w-2.5 rounded-full"
+                            style={{ backgroundColor: ROLE_COLOR[column.role] }}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-[14px] font-medium text-[var(--vk-text-normal)]">
+                              {column.heading || ROLE_LABEL[column.role]}
+                            </p>
                           </div>
-                        );
-                      })}
-                    </div>
+                          <span className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 text-[11px] text-[var(--vk-text-muted)]">
+                            {column.tasks.length}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => openComposer(column.role)}
+                            className="inline-flex h-9 w-9 items-center justify-center rounded-[7px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] sm:h-7 sm:w-7"
+                            aria-label={`Add task to ${column.heading}`}
+                          >
+                            <Plus className="h-3.5 w-3.5" />
+                          </button>
+                        </header>
 
-                    {dragEnabled &&
-                    dropIndicator?.role === column.role &&
-                    dropIndicator.index === effectiveTaskCount ? (
-                      <div className="mt-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
-                    ) : null}
-                  </div>
-                </article>
-              );
-            })}
+                        <div
+                          className={cn(
+                            "flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 pt-2",
+                            draggingTask?.role === column.role &&
+                              "bg-[rgba(255,255,255,0.02)]"
+                          )}
+                          onDragOver={(event) =>
+                            dragEnabled
+                              ? handleColumnDragOver(event, column.role)
+                              : undefined
+                          }
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            if (!dragEnabled) return;
+                            void handleColumnDrop(column.role);
+                          }}
+                        >
+                          {dragEnabled &&
+                          dropIndicator?.role === column.role &&
+                          dropIndicator.index === 0 ? (
+                            <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                          ) : null}
+
+                          {column.tasks.length === 0 && (
+                            <div className="rounded-[10px] border border-dashed border-[var(--vk-border)] px-3 py-4 text-[13px] text-[var(--vk-text-muted)]">
+                              Drop a card here or create a new one.
+                            </div>
+                          )}
+
+                          <div className="space-y-2">
+                            {column.tasks.map((task) => {
+                              const fullTaskIndex =
+                                fullColumn?.tasks.findIndex(
+                                  (item) => item.id === task.id
+                                ) ?? 0;
+                              const effectiveTaskIndex =
+                                sourceIndex >= 0
+                                  ? task.id === draggingTask?.taskId
+                                    ? null
+                                    : fullTaskIndex > sourceIndex
+                                    ? fullTaskIndex - 1
+                                    : fullTaskIndex
+                                  : fullTaskIndex;
+
+                              return (
+                                <div key={`${column.role}-${task.id}`}>
+                                  {dragEnabled &&
+                                  dropIndicator?.role === column.role &&
+                                  effectiveTaskIndex !== null &&
+                                  dropIndicator.index === effectiveTaskIndex ? (
+                                    <div className="mb-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                                  ) : null}
+
+                                  <BoardTaskCard
+                                    task={task}
+                                    role={column.role}
+                                    layout="kanban"
+                                    boardRepository={board?.repository}
+                                    projectSessions={projectSessions}
+                                    openingContextPath={openingContextPath}
+                                    onOpenContextAttachment={openContextAttachment}
+                                    onOpenSessionView={openSessionView}
+                                    onOpenEditor={openEditor}
+                                    dragEnabled={dragEnabled}
+                                    isDragging={draggingTask?.taskId === task.id}
+                                    onDragStart={() =>
+                                      handleTaskDragStart(task.id, column.role)
+                                    }
+                                    onDragOver={(event) =>
+                                      handleTaskDragOver(
+                                        event,
+                                        column.role,
+                                        task.id
+                                      )
+                                    }
+                                    onDragEnd={() => {
+                                      setDraggingTask(null);
+                                      setDropIndicator(null);
+                                    }}
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {dragEnabled &&
+                          dropIndicator?.role === column.role &&
+                          dropIndicator.index === effectiveTaskCount ? (
+                            <div className="mt-2 h-[3px] rounded-full bg-[var(--vk-orange)] shadow-[0_0_0_1px_rgba(0,0,0,0.2)]" />
+                          ) : null}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
               </div>
             </div>
-            {showAgenticPanel ? (
-              <div className="w-full shrink-0 xl:min-h-0 xl:w-[380px]">
-                <BoardAgenticPanel
-                  task={selectedAgenticTask}
-                  projectId={projectId}
-                  bridgeId={bridgeId}
-                  defaultAgent={defaultAgent}
-                  modelAccess={modelAccess}
-                  onLaunchTask={launchTaskSession}
-                  onOpenSession={openSessionView}
-                />
+          ) : boardListEntries.length === 0 ? (
+            <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center">
+              <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[var(--vk-text-muted)]">
+                <List className="h-5 w-5" />
               </div>
-            ) : null}
-          </div>
+              <p className="text-[14px] font-medium text-[var(--vk-text-normal)]">
+                No tasks match the current filters or search.
+              </p>
+              <p className="mt-1 text-[13px] text-[var(--vk-text-muted)]">
+                Adjust the current view or create a new board task.
+              </p>
+              <button
+                type="button"
+                onClick={() => openComposer("intake")}
+                className="mt-4 inline-flex h-[31px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>New Issue</span>
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {groupedBoardListEntries.map((group) => {
+                const isCollapsed =
+                  group.label != null &&
+                  boardListView.collapsedGroups.includes(group.key);
+                const composerRole =
+                  boardListView.groupBy === "status" &&
+                  BOARD_ROLE_ORDER.includes(group.key as BoardRole)
+                    ? (group.key as BoardRole)
+                    : "intake";
+
+                return (
+                  <section key={group.key} className="space-y-2">
+                    {group.label ? (
+                      <div className="flex items-center py-1.5 pl-1 pr-3">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateBoardListView({
+                              collapsedGroups: isCollapsed
+                                ? boardListView.collapsedGroups.filter(
+                                    (key) => key !== group.key
+                                  )
+                                : [...boardListView.collapsedGroups, group.key],
+                            })
+                          }
+                          className="flex items-center gap-1.5"
+                        >
+                          <ChevronRight
+                            className={cn(
+                              "h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)] transition-transform",
+                              !isCollapsed && "rotate-90"
+                            )}
+                          />
+                          <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-normal)]">
+                            {group.label}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openComposer(composerRole)}
+                          className="ml-auto inline-flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                          aria-label={`Add task to ${group.label}`}
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ) : null}
+
+                    {!isCollapsed ? (
+                      <div>
+                        {group.items.map((entry) => (
+                          <BoardListRow
+                            key={`${entry.role}-${entry.task.id}`}
+                            entry={entry}
+                            boardRepository={board?.repository}
+                            projectSessions={projectSessions}
+                            onOpenEditor={openEditor}
+                            onOpenSessionView={openSessionView}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
+                  </section>
+                );
+              })}
+            </div>
+          )
         )}
       </div>
 
