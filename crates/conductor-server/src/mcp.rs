@@ -88,6 +88,7 @@ impl McpBackend for AppStateMcpBackend {
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                session_kind: None,
                 brief_path: None,
                 attachments: Vec::new(),
                 source: "mcp".to_string(),

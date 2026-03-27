@@ -261,7 +261,14 @@ async fn process_board_change(
             .map(AgentKind::parse)
             .unwrap_or_else(|| AgentKind::parse(&project_default_agent))
             .to_string();
-        let context = compile_task_context(&state, &project_id, &project, &task).await?;
+        let context = compile_task_context(
+            &state,
+            &project_id,
+            &project,
+            &task,
+            crate::task_context::TaskContextMode::Execution,
+        )
+        .await?;
         let model = None;
         let reasoning_effort = None;
         let attempt_id = format!("a-{}", Uuid::new_v4().simple());
@@ -285,6 +292,7 @@ async fn process_board_change(
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                session_kind: None,
                 brief_path: Some(context.repo_brief_path.clone()),
                 attachments: context.attachments,
                 source: "board_dispatch".to_string(),

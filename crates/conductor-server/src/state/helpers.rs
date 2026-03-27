@@ -47,6 +47,7 @@ fn dashboard_metadata_allowlist() -> &'static [&'static str] {
         "recoveryAction",
         "recoveryState",
         "reviewDecision",
+        "sessionKind",
         "runtimeMode",
         "startedAt",
         "summary",
@@ -1510,6 +1511,7 @@ mod tests {
         let oversized = "x".repeat(DASHBOARD_METADATA_MAX_VALUE_BYTES + 128);
         let mut metadata = HashMap::from([
             ("agent".to_string(), "codex".to_string()),
+            ("sessionKind".to_string(), "board_planning".to_string()),
             ("summary".to_string(), oversized),
             (
                 "spawnRequest".to_string(),
@@ -1521,6 +1523,10 @@ mod tests {
         let filtered = dashboard_session_metadata(&metadata);
 
         assert_eq!(filtered.get("agent").map(String::as_str), Some("codex"));
+        assert_eq!(
+            filtered.get("sessionKind").map(String::as_str),
+            Some("board_planning")
+        );
         assert_eq!(filtered.get("taskId").map(String::as_str), Some("task-123"));
         assert!(!filtered.contains_key("spawnRequest"));
         let summary = filtered

@@ -1,6 +1,7 @@
 "use client";
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import {
   useCallback,
   useEffect,
@@ -27,6 +28,7 @@ import {
   Search,
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { BoardAgenticPanel } from "@/components/board/BoardAgenticPanel";
 import { usePreferences } from "@/hooks/usePreferences";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
@@ -172,6 +174,7 @@ interface WorkspaceKanbanProps {
   bridgeId?: string | null;
   defaultAgent: string;
   agentOptions: string[];
+  modelAccess: ModelAccessPreferences | null;
   projectSessions: ProjectSession[];
 }
 
@@ -207,6 +210,7 @@ const ROLE_LABEL: Record<BoardRole, string> = {
 const ACTIVE_BOARD_REFRESH_MS = 20_000;
 const HIDDEN_BOARD_REFRESH_MS = 60_000;
 const BOARD_REFRESH_DEBOUNCE_MS = 1200;
+const BOARD_PLANNING_SESSION_KIND = "board_planning";
 const MARKDOWN_EDITOR_LABELS: Record<string, string> = {
   obsidian: "Obsidian",
   vscode: "VS Code",
@@ -817,6 +821,10 @@ function sessionMatchesTask(session: ProjectSession, task: BoardTask): boolean {
   return session.issueId?.trim() === getTaskLinkKey(task);
 }
 
+function isBoardPlanningSession(session: ProjectSession): boolean {
+  return session.metadata?.sessionKind === BOARD_PLANNING_SESSION_KIND;
+}
+
 function getSessionAgent(session: ProjectSession): string | null {
   const candidate = session.metadata?.agent;
   return typeof candidate === "string" && candidate.trim().length > 0
@@ -1071,6 +1079,7 @@ export function WorkspaceKanban({
   bridgeId,
   defaultAgent,
   agentOptions,
+  modelAccess,
   projectSessions,
 }: WorkspaceKanbanProps) {
   const router = useRouter();
@@ -1148,6 +1157,7 @@ export function WorkspaceKanban({
     preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
   const [pageVisible, setPageVisible] = useState(true);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
 
   const orderedAgentOptions = useMemo(() => {
     const normalized = [...new Set(agentOptions.filter(Boolean))];
@@ -1287,6 +1297,71 @@ export function WorkspaceKanban({
       }
     },
     [bridgeId, projectId]
+  );
+
+  const selectedBoardTask = useMemo(() => {
+    if (!board) return null;
+    if (selectedTaskId) {
+      const existing = findBoardTask(board, selectedTaskId);
+      if (existing) return existing;
+    }
+    for (const column of board.columns) {
+      if (column.tasks.length > 0) {
+        return { task: column.tasks[0], role: column.role };
+      }
+    }
+    return null;
+  }, [board, selectedTaskId]);
+
+  useEffect(() => {
+    if (selectedBoardTask?.task.id && selectedBoardTask.task.id !== selectedTaskId) {
+      setSelectedTaskId(selectedBoardTask.task.id);
+      return;
+    }
+    if (!selectedBoardTask && selectedTaskId) {
+      setSelectedTaskId(null);
+    }
+  }, [selectedBoardTask, selectedTaskId]);
+
+  const openSessionView = useCallback(
+    (sessionId: string, tab: "chat" | "terminal" = "terminal") => {
+      router.push(buildSessionHref(sessionId, { bridgeId, tab }));
+    },
+    [bridgeId, router]
+  );
+
+  const launchTaskSession = useCallback(
+    async (task: {
+      id: string;
+      issueId: string;
+      agent?: string | null;
+    }) => {
+      if (!projectId) {
+        throw new Error("Select a project before launching a task session.");
+      }
+
+      const response = await fetch(withBridgeQuery("/api/sessions", bridgeId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          issueId: task.issueId,
+          prompt: "",
+          agent: task.agent?.trim() || defaultAgent,
+        }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to launch task session");
+      }
+      const sessionId = payload?.session?.id ?? payload?.id ?? payload?.session_id ?? null;
+      if (!sessionId) {
+        throw new Error("Task session response did not include a session id");
+      }
+      await loadBoard({ silent: true });
+      openSessionView(sessionId, "terminal");
+    },
+    [bridgeId, defaultAgent, loadBoard, openSessionView, projectId]
   );
 
   const scheduleBoardRefresh = useCallback(
@@ -2137,6 +2212,29 @@ export function WorkspaceKanban({
     }
   }
 
+  const selectedAgenticTask = useMemo(() => {
+    const task = selectedBoardTask?.task;
+    if (!task) return null;
+    const planningSession = projectSessions
+      .filter(
+        (session) =>
+          isBoardPlanningSession(session) &&
+          sessionMatchesTask(session, task)
+      )
+      .sort((left, right) => compareProjectSessions(left, right, null))[0] ?? null;
+    const { title, description } = splitTaskText(task.text);
+    return {
+      id: task.id,
+      issueId: getTaskLinkKey(task),
+      title,
+      description,
+      notes: task.notes,
+      agent: task.agent,
+      linkedSessionId: planningSession?.id ?? null,
+      linkedSessionLabel: planningSession ? formatLinkedSessionLabel(planningSession) : null,
+    };
+  }, [projectSessions, selectedBoardTask]);
+
   if (!projectId) {
     return (
       <div className="flex h-full items-center justify-center text-[14px] text-[var(--vk-text-muted)]">
@@ -2436,7 +2534,9 @@ export function WorkspaceKanban({
             {error}
           </div>
         ) : (
-          <div className="flex min-w-0 flex-col gap-3 pb-3 sm:h-full sm:flex-row sm:items-stretch sm:overflow-x-auto sm:pb-3">
+          <div className="flex h-full min-h-0 flex-col gap-4 xl:flex-row">
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y sm:touch-auto">
+              <div className="flex min-w-0 flex-col gap-3 pb-3 sm:h-full sm:flex-row sm:items-stretch sm:overflow-x-auto sm:pb-3">
             {visibleColumns.map((column) => {
               const fullColumn = allColumns.find(
                 (candidate) => candidate.role === column.role
@@ -2538,8 +2638,10 @@ export function WorkspaceKanban({
                           task.issueId
                         );
                         const linkedSessions = projectSessions
-                          .filter((session) =>
-                            sessionMatchesTask(session, task)
+                          .filter(
+                            (session) =>
+                              !isBoardPlanningSession(session) &&
+                              sessionMatchesTask(session, task)
                           )
                           .sort((left, right) =>
                             compareProjectSessions(
@@ -2548,6 +2650,15 @@ export function WorkspaceKanban({
                               task.attemptRef ?? null
                             )
                           );
+                        const planningSession = projectSessions
+                          .filter(
+                            (session) =>
+                              isBoardPlanningSession(session) &&
+                              sessionMatchesTask(session, task)
+                          )
+                          .sort((left, right) =>
+                            compareProjectSessions(left, right, null)
+                          )[0] ?? null;
                         const primaryLinkedSession = task.attemptRef
                           ? linkedSessions.find(
                               (session) => session.id === task.attemptRef
@@ -2570,6 +2681,7 @@ export function WorkspaceKanban({
                             ) : null}
                             <div
                               draggable={dragEnabled}
+                              onClick={() => setSelectedTaskId(task.id)}
                               onDragStart={() =>
                                 dragEnabled
                                   ? handleTaskDragStart(task.id, column.role)
@@ -2589,8 +2701,9 @@ export function WorkspaceKanban({
                                 setDropIndicator(null);
                               }}
                               className={cn(
-                                "rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]",
-                                draggingTask?.taskId === task.id && "opacity-60"
+                                "cursor-pointer rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]",
+                                draggingTask?.taskId === task.id && "opacity-60",
+                                selectedTaskId === task.id && "border-[var(--vk-accent)] shadow-[0_0_0_1px_var(--vk-accent),0_10px_24px_rgba(0,0,0,0.24)]"
                               )}
                             >
                               <div className="flex items-start gap-2">
@@ -2843,6 +2956,16 @@ export function WorkspaceKanban({
                               )}
 
                               <div className="mt-2 flex items-center justify-between gap-2">
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setSelectedTaskId(task.id);
+                                  }}
+                                  className="inline-flex h-6 items-center rounded-[3px] border border-[var(--vk-border)] px-2 text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+                                >
+                                  {planningSession ? "Continue planning" : "Open agentic chat"}
+                                </button>
                                 <div className="flex min-w-0 items-center gap-1.5">
                                   {task.agent ? (
                                     <>
@@ -2889,6 +3012,19 @@ export function WorkspaceKanban({
                 </article>
               );
             })}
+              </div>
+            </div>
+            <div className="w-full shrink-0 xl:min-h-0 xl:w-[380px]">
+              <BoardAgenticPanel
+                task={selectedAgenticTask}
+                projectId={projectId}
+                bridgeId={bridgeId}
+                defaultAgent={defaultAgent}
+                modelAccess={modelAccess}
+                onLaunchTask={launchTaskSession}
+                onOpenSession={openSessionView}
+              />
+            </div>
           </div>
         )}
       </div>

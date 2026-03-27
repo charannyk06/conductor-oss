@@ -30,6 +30,12 @@ pub(crate) struct TaskContextBundle {
     pub repo_brief_path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskContextMode {
+    Execution,
+    Planning,
+}
+
 pub(crate) async fn ensure_task_brief(
     state: &Arc<AppState>,
     project_id: &str,
@@ -134,6 +140,7 @@ pub(crate) async fn compile_task_context(
     project_id: &str,
     project: &ProjectConfig,
     task: &BoardTaskRecord,
+    mode: TaskContextMode,
 ) -> Result<TaskContextBundle> {
     let brief_paths = ensure_task_brief(state, project_id, project, task).await?;
     let config = state.config.read().await.clone();
@@ -162,7 +169,12 @@ pub(crate) async fn compile_task_context(
     }
 
     let mut prompt = String::new();
-    prompt.push_str("You are executing a Conductor board task.\n\n");
+    let intro = match mode {
+        TaskContextMode::Execution => "You are executing a Conductor board task.",
+        TaskContextMode::Planning => "You are helping plan a Conductor board task.",
+    };
+    prompt.push_str(intro);
+    prompt.push_str("\n\n");
     prompt.push_str(&format!("Task: {title}\n"));
     if let Some(task_ref) = task
         .task_ref
@@ -262,9 +274,18 @@ pub(crate) async fn compile_task_context(
         }
     }
 
-    prompt.push_str(
-        "\nUse the board brief and context as the source of truth. Keep implementation updates aligned with this task rather than treating it like a generic PR ticket.\n",
-    );
+    match mode {
+        TaskContextMode::Execution => {
+            prompt.push_str(
+                "\nUse the board brief and context as the source of truth. Keep implementation updates aligned with this task rather than treating it like a generic PR ticket.\n",
+            );
+        }
+        TaskContextMode::Planning => {
+            prompt.push_str(
+                "\nUse the board brief and context as the source of truth. Focus on clarifying scope, dependencies, risks, open questions, and a concrete plan before implementation.\n",
+            );
+        }
+    }
 
     Ok(TaskContextBundle {
         prompt,

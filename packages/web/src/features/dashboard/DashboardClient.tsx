@@ -1861,6 +1861,7 @@ export default function DashboardClient({
           bridgeId={effectiveBridgeId}
           defaultAgent={resolvedCodingAgent}
           agentOptions={agentOptions}
+          modelAccess={resolvedPreferences.modelAccess}
           projectSessions={selectedProjectSessions}
         />
       );

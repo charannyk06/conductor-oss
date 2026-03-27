@@ -22,7 +22,7 @@ use crate::state::{
     build_normalized_chat_feed, trim_lines_tail, AppState, SessionRecord, SessionStatus,
     SpawnRequest,
 };
-use crate::task_context::compile_task_context;
+use crate::task_context::{compile_task_context, TaskContextMode};
 use uuid::Uuid;
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -33,6 +33,7 @@ const SPAWN_RATE_LIMIT: u64 = 10;
 const SPAWN_RATE_WINDOW_SECS: u64 = 60;
 const DEFAULT_FEED_WINDOW_LIMIT: usize = 120;
 const MAX_FEED_WINDOW_LIMIT: usize = 240;
+const BOARD_PLANNING_SESSION_KIND: &str = "board_planning";
 
 static SPAWN_RATE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SPAWN_RATE_WINDOW_START: AtomicU64 = AtomicU64::new(0);
@@ -320,6 +321,7 @@ struct SpawnBody {
     reasoning_effort: Option<String>,
     branch: Option<String>,
     base_branch: Option<String>,
+    session_kind: Option<String>,
     attachments: Option<Vec<String>>,
 }
 
@@ -337,6 +339,15 @@ async fn spawn_session(
         .map(|value| value.to_string());
     let issue_id_for_log = issue_id.clone();
     let user_prompt = body.prompt.unwrap_or_default();
+    let session_kind = body.session_kind.clone();
+    let is_board_planning = session_kind.as_deref() == Some(BOARD_PLANNING_SESSION_KIND);
+    let permission_mode = body.permission_mode.clone().or_else(|| {
+        if is_board_planning {
+            Some("plan".to_string())
+        } else {
+            None
+        }
+    });
     let user_attachments = body
         .attachments
         .unwrap_or_default()
@@ -366,11 +377,22 @@ async fn spawn_session(
                     format!("Unknown project: {project_id}"),
                 );
             };
-            let context =
-                match compile_task_context(&state, &project_id, &project, &linked_task).await {
-                    Ok(context) => context,
-                    Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
-                };
+            let context = match compile_task_context(
+                &state,
+                &project_id,
+                &project,
+                &linked_task,
+                if is_board_planning {
+                    TaskContextMode::Planning
+                } else {
+                    TaskContextMode::Execution
+                },
+            )
+            .await
+            {
+                Ok(context) => context,
+                Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+            };
 
             task_id = Some(linked_task.id.clone());
             task_ref = linked_task.task_ref.clone();
@@ -404,7 +426,7 @@ async fn spawn_session(
             issue_id,
             agent: body.agent,
             use_worktree: body.use_worktree,
-            permission_mode: body.permission_mode,
+            permission_mode,
             model: body.model,
             reasoning_effort: body.reasoning_effort,
             branch: body.branch,
@@ -415,6 +437,7 @@ async fn spawn_session(
             parent_task_id: None,
             retry_of_session_id: None,
             profile: None,
+            session_kind,
             brief_path,
             attachments,
             source: "spawn".to_string(),
@@ -422,10 +445,17 @@ async fn spawn_session(
         .await
     {
         Ok(session) => {
-            if let Some(task_id) = session.metadata.get("taskId") {
-                let _ =
-                    update_board_task_attempt_ref(&state, &project_id, task_id, &session.id, None)
-                        .await;
+            if !is_board_planning {
+                if let Some(task_id) = session.metadata.get("taskId") {
+                    let _ = update_board_task_attempt_ref(
+                        &state,
+                        &project_id,
+                        task_id,
+                        &session.id,
+                        None,
+                    )
+                    .await;
+                }
             }
 
             let session_value = state.serialize_dashboard_session(&session).await;
@@ -930,6 +960,7 @@ async fn retry_session(
             profile: body
                 .profile
                 .or_else(|| source.metadata.get("profile").cloned()),
+            session_kind: source.metadata.get("sessionKind").cloned(),
             brief_path: source.metadata.get("briefPath").cloned(),
             attachments: Vec::new(),
             source: "retry".to_string(),
@@ -937,15 +968,19 @@ async fn retry_session(
         .await
     {
         Ok(session) => {
-            if let Some(task_id) = source.metadata.get("taskId") {
-                let _ = update_board_task_attempt_ref(
-                    &state,
-                    &source.project_id,
-                    task_id,
-                    &session.id,
-                    None,
-                )
-                .await;
+            let is_board_planning = source.metadata.get("sessionKind").map(String::as_str)
+                == Some(BOARD_PLANNING_SESSION_KIND);
+            if !is_board_planning {
+                if let Some(task_id) = source.metadata.get("taskId") {
+                    let _ = update_board_task_attempt_ref(
+                        &state,
+                        &source.project_id,
+                        task_id,
+                        &session.id,
+                        None,
+                    )
+                    .await;
+                }
             }
             let session_value = state.serialize_dashboard_session(&session).await;
             ok(json!({ "session": session_value }))

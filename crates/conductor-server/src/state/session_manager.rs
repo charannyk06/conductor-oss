@@ -1255,6 +1255,11 @@ impl AppState {
         if let Some(profile) = request.profile.clone() {
             record.metadata.insert("profile".to_string(), profile);
         }
+        if let Some(session_kind) = request.session_kind.clone() {
+            record
+                .metadata
+                .insert("sessionKind".to_string(), session_kind);
+        }
         if let Some(brief_path) = request.brief_path.clone() {
             record.metadata.insert("briefPath".to_string(), brief_path);
         }
@@ -2087,6 +2092,7 @@ impl AppState {
             parent_task_id: session.metadata.get("parentTaskId").cloned(),
             retry_of_session_id: None,
             profile: session.metadata.get("profile").cloned(),
+            session_kind: session.metadata.get("sessionKind").cloned(),
             brief_path: session.metadata.get("briefPath").cloned(),
             attachments: Vec::new(),
             source: "restore".to_string(),
@@ -2439,6 +2445,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2514,6 +2521,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2625,6 +2633,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2692,6 +2701,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2750,6 +2760,7 @@ mod tests {
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                session_kind: None,
                 brief_path: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
@@ -2841,6 +2852,7 @@ mod tests {
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                session_kind: None,
                 brief_path: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
@@ -2910,6 +2922,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
