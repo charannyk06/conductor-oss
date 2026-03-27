@@ -32,7 +32,8 @@ use conductor_executors::executor::SpawnOptions;
 
 /// How long to wait for ttyd to bind its listening port.
 const TTYD_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const TTYD_OWNER_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const TTYD_OWNER_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const TTYD_OWNER_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const TTYD_BINARY_ENV: &str = "CONDUCTOR_TTYD_BINARY";
 const FALLBACK_INTERACTIVE_SHELLS: &[&str] = &["/bin/zsh", "/bin/bash", "/bin/sh"];
 
@@ -544,15 +545,21 @@ async fn run_ttyd_session_owner(
     mut channels: TtydSessionOwnerChannels,
 ) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
-    let request = ttyd_protocol::connect_request(url).context("mirror request")?;
-    let (ws, _) = match tokio_tungstenite::connect_async(request).await {
-        Ok(connection) => connection,
-        Err(err) => {
-            let error = anyhow!(err).context("ttyd session owner connect");
-            if let Some(tx) = channels.ready_tx.take() {
-                let _ = tx.send(Err(anyhow!(error.to_string())));
+    let connect_deadline = tokio::time::Instant::now() + TTYD_OWNER_ATTACH_TIMEOUT;
+    let (ws, _) = loop {
+        let request = ttyd_protocol::connect_request(url).context("mirror request")?;
+        match tokio_tungstenite::connect_async(request).await {
+            Ok(connection) => break connection,
+            Err(err) => {
+                if tokio::time::Instant::now() >= connect_deadline {
+                    let error = anyhow!(err).context("ttyd session owner connect");
+                    if let Some(tx) = channels.ready_tx.take() {
+                        let _ = tx.send(Err(anyhow!(error.to_string())));
+                    }
+                    return Err(error);
+                }
+                tokio::time::sleep(TTYD_OWNER_CONNECT_RETRY_DELAY).await;
             }
-            return Err(error);
         }
     };
     let (mut w, mut r) = ws.split();
