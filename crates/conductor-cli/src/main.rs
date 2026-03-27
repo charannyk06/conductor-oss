@@ -74,6 +74,7 @@ enum Commands {
         path: PathBuf,
     },
     McpServer,
+    AcpServer,
     Projects,
     Status {
         #[arg(long, short, default_value = "4747")]
@@ -276,6 +277,27 @@ async fn main() -> Result<()> {
             state.discover_executors().await;
             let backend = Arc::new(conductor_server::mcp::AppStateMcpBackend::new(state));
             conductor_server::mcp::serve_stdio(backend).await?;
+        }
+        Commands::AcpServer => {
+            let config_path = cli
+                .config
+                .unwrap_or_else(|| cli.workspace.join("conductor.yaml"));
+            let mut config = if config_path.exists() {
+                ConductorConfig::load(&config_path)?
+            } else {
+                ConductorConfig::default_for_workspace(&cli.workspace)
+            };
+            config.workspace = cli.workspace.clone();
+            config.config_path = Some(config_path.clone());
+            let db_path = cli.workspace.join(".conductor").join("conductor.db");
+            let db = Database::connect(&db_path)
+                .await
+                .context("Failed to connect to database")?;
+            let state = conductor_server::state::AppState::new(config_path, config, db).await;
+            state.discover_executors().await;
+            state.start_acp_dispatcher_watchdog();
+            state.publish_snapshot().await;
+            conductor_server::acp::serve_stdio(state).await?;
         }
         Commands::Projects => {
             let config_path = cli

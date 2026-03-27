@@ -1,3 +1,4 @@
+mod acp_dispatcher;
 mod app_update;
 mod board_collaboration;
 mod bridge_registry;

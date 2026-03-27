@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::state::{AppState, SessionRecord, SpawnRequest};
+use crate::state::{AppState, SessionRecord, SessionStatus, SpawnRequest};
 use crate::routes::boards::{
     build_task_text, default_heading_for_role, insert_task_into_board, load_board_response,
     next_human_task_ref, normalize_role, parse_board, resolve_board_path_for_project,
@@ -24,6 +24,11 @@ const TOOL_GET_BOARD: &str = "conductor_get_board";
 const TOOL_CREATE_BOARD_TASK: &str = "conductor_create_board_task";
 const TOOL_UPDATE_BOARD_TASK: &str = "conductor_update_board_task";
 const TOOL_TASK_GRAPH: &str = "conductor_task_graph";
+const MCP_CALLER_SESSION_ENV: &str = "CONDUCTOR_SESSION_ID";
+const MCP_CALLER_PROJECT_ENV: &str = "CONDUCTOR_PROJECT_ID";
+const ACP_SESSION_KIND: &str = "project_dispatcher";
+const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
+const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
 
 #[async_trait]
 pub trait McpBackend: Send + Sync {
@@ -72,6 +77,50 @@ impl AppStateMcpBackend {
                 .cloned()
                 .ok_or_else(|| anyhow!("No projects configured in conductor.yaml")),
         }
+    }
+
+    async fn caller_session(&self) -> Result<Option<SessionRecord>> {
+        let session_id = std::env::var(MCP_CALLER_SESSION_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let Some(session_id) = session_id else {
+            return Ok(None);
+        };
+        self.state
+            .get_session(&session_id)
+            .await
+            .map(Some)
+            .ok_or_else(|| anyhow!("MCP caller session \"{session_id}\" was not found"))
+    }
+
+    async fn ensure_board_mutation_allowed(&self, project_id: &str) -> Result<()> {
+        let Some(session) = self.caller_session().await? else {
+            return Ok(());
+        };
+        if session.metadata.get("sessionKind").map(String::as_str) != Some(ACP_SESSION_KIND) {
+            return Ok(());
+        }
+        let caller_project = std::env::var(MCP_CALLER_PROJECT_ENV)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| session.project_id.clone());
+        if caller_project != project_id || session.project_id != project_id {
+            bail!("ACP dispatcher cannot mutate board tasks for another project");
+        }
+        let approved = session
+            .metadata
+            .get(ACP_APPROVAL_STATE_METADATA_KEY)
+            .map(String::as_str)
+            == Some(ACP_APPROVAL_GRANTED);
+        let active_turn = matches!(session.status, SessionStatus::Working);
+        if approved && active_turn {
+            return Ok(());
+        }
+        bail!(
+            "ACP dispatcher board mutations require explicit approval for the current turn"
+        );
     }
 }
 
@@ -172,6 +221,7 @@ impl McpBackend for AppStateMcpBackend {
 
     async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value> {
         let project_id = self.resolve_project_id(args.project.as_deref()).await?;
+        self.ensure_board_mutation_allowed(&project_id).await?;
         let title = args
             .title
             .trim()
@@ -215,6 +265,7 @@ impl McpBackend for AppStateMcpBackend {
 
     async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value> {
         let project_id = self.resolve_project_id(args.project.as_deref()).await?;
+        self.ensure_board_mutation_allowed(&project_id).await?;
         let task_lookup = args
             .task
             .as_deref()

@@ -58,26 +58,38 @@ fn build_project_dispatcher_prompt(
 ) -> String {
     let mut prompt = format!(
         concat!(
-            "You are the Conductor dispatcher for project `{}`.\n\n",
+            "You are the Conductor ACP dispatcher for project `{}`.\n\n",
             "This is a long-lived orchestration chat, not a coding run. You are the master puppeteer for the project.\n\n",
             "Core responsibilities:\n",
             "- Maintain and refine the board at `{}`\n",
             "- Turn rough requests into a few high-signal tasks\n",
             "- Prefer meaningful parent tasks plus internal checklists over noisy child-task spam\n",
-            "- Keep track of context, heartbeat-style follow-ups, blockers, and next actions inside this ongoing session\n",
+            "- Maintain ACP long-term memory for stable directives, architecture constraints, and repeated preferences\n",
+            "- Maintain ACP short-term session memory for the latest decisions, blockers, live context, and next actions\n",
+            "- Keep track of heartbeat-style follow-ups so deferred work surfaces again instead of getting lost in chat\n",
             "- Create or update board tasks so dedicated coding sessions can be launched separately\n",
             "- Use native Conductor MCP tools when available to inspect the board, create tasks, update task state, and inspect task attempt lifecycles\n",
-            "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n\n",
+            "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n",
+            "- Prefer handing implementation to dedicated `codex`, `claude-code`, or `gemini` sessions\n\n",
             "Project context:\n",
             "- Repo path: `{}`\n",
             "- Board path: `{}`\n",
             "- Default branch: `{}`\n\n",
             "Operating rules:\n",
+            "- Operate against the main project workspace and board context; do not create isolated implementation branches or worktrees from this ACP session\n",
+            "- Default to planning mode: inspect the repo and board, then produce the finalized plan before making board changes\n",
             "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
             "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
             "- Keep the conversation stateful and use the board as the shared execution surface\n",
+            "- Every task you create should carry the minimum viable implementation packet: problem statement, exact files or surfaces to inspect, relevant skills or constraints, and the recommended agent (`codex`, `claude-code`, or `gemini`)\n",
+            "- Before any board mutation, first present: the proposed plan, the exact board/task mutations, the intended tool calls, and the recommended implementation agent per task\n",
+            "- Do not create or update board tasks until the user explicitly approves the proposal\n",
+            "- If the user asks for revisions, revise the proposal and ask for approval again\n",
+            "- After explicit approval, execute only the approved board/task mutations and then report the exact task refs or titles you created or updated\n",
+            "- When proposing tasks, use a compact task packet for each item: title, target board role, recommended agent, objective, exact files or surfaces to inspect, required skills or constraints, dependencies, and acceptance shape\n",
+            "- When creating tasks after approval, keep the board task title concise and put the implementation packet into the task description or notes so a dedicated coding session can execute without reopening planning\n",
             "- If you defer work, create an explicit follow-up task instead of burying it in chat, such as a Phase 2 heartbeat or memory integration item\n",
-            "- If you create tasks, reference the exact task refs or titles you created so the user can launch coding sessions from them\n"
+            "- If you create tasks, assign the best-fit implementation agent (`codex`, `claude-code`, or `gemini`) and reference the exact task refs or titles you created so the user can launch coding sessions from them\n"
         ),
         project_id,
         board_display,
@@ -298,6 +310,7 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
             "windowLimit": next.get("windowLimit").cloned().unwrap_or(Value::Null),
             "truncated": next.get("truncated").cloned().unwrap_or(Value::Null),
             "sessionStatus": next.get("sessionStatus").cloned().unwrap_or(Value::Null),
+            "approvalState": next.get("approvalState").cloned().unwrap_or(Value::Null),
             "parserState": next.get("parserState").cloned().unwrap_or(Value::Null),
             "runtimeStatus": next.get("runtimeStatus").cloned().unwrap_or(Value::Null),
             "source": next.get("source").cloned().unwrap_or(Value::Null),
@@ -509,7 +522,11 @@ async fn spawn_session(
             prompt,
             issue_id,
             agent: body.agent,
-            use_worktree: body.use_worktree,
+            use_worktree: if is_board_planning || is_project_dispatcher {
+                Some(false)
+            } else {
+                body.use_worktree
+            },
             permission_mode,
             model: body.model,
             reasoning_effort: body.reasoning_effort,
@@ -793,6 +810,7 @@ async fn session_feed_payload(
         "windowLimit": window_limit,
         "truncated": total_entries > window_limit,
         "sessionStatus": session.status,
+        "approvalState": session.metadata.get("acpPlanApprovalState").cloned(),
         "parserState": parser_state,
         "runtimeStatus": runtime_status,
         "source": if session.output.is_empty() { "conversation-only" } else { "runtime-output" },
@@ -1021,6 +1039,15 @@ async fn retry_session(
         return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
     }
 
+    let session_kind = source.metadata.get("sessionKind").cloned();
+    let is_board_planning = session_kind.as_deref() == Some(BOARD_PLANNING_SESSION_KIND);
+    let is_project_dispatcher = session_kind.as_deref() == Some(PROJECT_DISPATCHER_SESSION_KIND);
+    let source_uses_worktree = source
+        .workspace_path
+        .as_deref()
+        .map(|path| path.contains("/worktrees/") || path.contains("\\worktrees\\"))
+        .unwrap_or(true);
+
     match state
         .spawn_session(SpawnRequest {
             project_id: source.project_id.clone(),
@@ -1028,7 +1055,7 @@ async fn retry_session(
             prompt: source.prompt.clone(),
             issue_id: source.issue_id.clone(),
             agent: body.agent.or_else(|| Some(source.agent.clone())),
-            use_worktree: Some(true),
+            use_worktree: Some(!is_board_planning && !is_project_dispatcher && source_uses_worktree),
             permission_mode: None,
             model: body.model.or_else(|| source.model.clone()),
             reasoning_effort: body
@@ -1044,7 +1071,7 @@ async fn retry_session(
             profile: body
                 .profile
                 .or_else(|| source.metadata.get("profile").cloned()),
-            session_kind: source.metadata.get("sessionKind").cloned(),
+            session_kind: session_kind.clone(),
             brief_path: source.metadata.get("briefPath").cloned(),
             attachments: Vec::new(),
             source: "retry".to_string(),
@@ -1052,9 +1079,6 @@ async fn retry_session(
         .await
     {
         Ok(session) => {
-            let session_kind = source.metadata.get("sessionKind").map(String::as_str);
-            let is_board_planning = session_kind == Some(BOARD_PLANNING_SESSION_KIND);
-            let is_project_dispatcher = session_kind == Some(PROJECT_DISPATCHER_SESSION_KIND);
             if !is_board_planning && !is_project_dispatcher {
                 if let Some(task_id) = source.metadata.get("taskId") {
                     let _ = update_board_task_attempt_ref(

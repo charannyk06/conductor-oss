@@ -33,7 +33,7 @@ import { cn } from "@/lib/cn";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildSessionHref } from "@/lib/dashboardHref";
 import { getKnownAgent, KNOWN_AGENTS } from "@/lib/knownAgents";
-import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
+import type { TerminalInsertRequest } from "./terminalInsert";
 import type { DashboardSession } from "@/lib/types";
 import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
 
@@ -63,6 +63,7 @@ type SessionFeedPayload = {
   windowLimit: number;
   truncated: boolean;
   sessionStatus: string | null;
+  approvalState: string | null;
   parserState: SessionParserState | null;
   runtimeStatus: SessionRuntimeStatus | null;
   source: string | null;
@@ -77,6 +78,7 @@ type FeedDeltaEvent =
       windowLimit: number;
       truncated: boolean;
       sessionStatus: string | null;
+      approvalState: string | null;
       parserState: SessionParserState | null;
       runtimeStatus: SessionRuntimeStatus | null;
       source: string | null;
@@ -94,6 +96,7 @@ type SessionChatDockProps = {
   onToggleCollapse?: () => void;
   className?: string;
   hideOpenSessionAction?: boolean;
+  composerInsert?: TerminalInsertRequest | null;
 };
 
 type RepositoryPathHealth = {
@@ -137,6 +140,7 @@ const EMPTY_FEED_PAYLOAD: SessionFeedPayload = {
   windowLimit: 120,
   truncated: false,
   sessionStatus: null,
+  approvalState: null,
   parserState: null,
   runtimeStatus: null,
   source: null,
@@ -215,6 +219,7 @@ function normalizeFeedPayload(value: unknown): SessionFeedPayload {
     windowLimit: typeof record.windowLimit === "number" ? record.windowLimit : 120,
     truncated: record.truncated === true,
     sessionStatus: readString(record.sessionStatus),
+    approvalState: readString(record.approvalState),
     parserState: normalizeParserState(record.parserState),
     runtimeStatus: normalizeRuntimeStatus(record.runtimeStatus),
     source: readString(record.source),
@@ -240,6 +245,7 @@ function normalizeFeedDelta(value: unknown): FeedDeltaEvent | null {
       windowLimit: payload.windowLimit,
       truncated: payload.truncated,
       sessionStatus: payload.sessionStatus,
+      approvalState: payload.approvalState,
       parserState: payload.parserState,
       runtimeStatus: payload.runtimeStatus,
       source: payload.source,
@@ -363,9 +369,10 @@ function MarkdownMessage({ text }: { text: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
+      className="min-w-0 break-words [overflow-wrap:anywhere]"
       components={{
         h1: ({ children }) => (
-          <h1 className="mb-5 text-[36px] font-semibold tracking-[-0.03em] text-[var(--vk-text-strong)] last:mb-0">
+          <h1 className="mb-5 text-[22px] font-semibold tracking-[-0.03em] text-[var(--vk-text-strong)] last:mb-0 sm:text-[28px] lg:text-[36px]">
             {children}
           </h1>
         ),
@@ -671,7 +678,7 @@ function ProjectAgentSelect({
         <button
           type="button"
           disabled={disabled || !project}
-          className="inline-flex h-10 min-w-[220px] max-w-full items-center justify-between gap-3 rounded-[8px] border border-[var(--vk-accent)] bg-[color:color-mix(in_srgb,var(--vk-accent)_88%,black_12%)] px-3 text-left text-[13px] text-white shadow-[0_10px_24px_rgba(0,0,0,0.18)] transition hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex h-10 w-full min-w-0 max-w-full items-center justify-between gap-3 rounded-[8px] border border-[var(--vk-accent)] bg-[color:color-mix(in_srgb,var(--vk-accent)_88%,black_12%)] px-3 text-left text-[13px] text-white shadow-[0_10px_24px_rgba(0,0,0,0.18)] transition hover:bg-[var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-60 sm:min-w-[220px] sm:w-auto"
           aria-label="Select coding agent"
           title={project ? `Coding agent: ${formatAgentName(activeAgent)}` : "Project agent unavailable"}
         >
@@ -722,6 +729,31 @@ function ProjectAgentSelect({
   );
 }
 
+/** Only show "plan ready" when the model has produced a substantive reply (avoids empty/blip states). */
+const DISPATCHER_APPROVAL_MIN_ASSISTANT_CHARS = 64;
+
+function shouldShowDispatcherApprovalBanner(
+  entries: SessionFeedEntry[],
+  approvalState: string | null,
+): boolean {
+  if (approvalState === "approved_for_next_mutation") {
+    return false;
+  }
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.kind === "tool") {
+      continue;
+    }
+    if (entry.kind === "user") {
+      return false;
+    }
+    if (entry.kind === "assistant" || entry.kind === "status" || entry.kind === "system") {
+      return entry.text.trim().length >= DISPATCHER_APPROVAL_MIN_ASSISTANT_CHARS;
+    }
+  }
+  return false;
+}
+
 export function SessionChatDock({
   session,
   bridgeId = null,
@@ -729,6 +761,7 @@ export function SessionChatDock({
   onToggleCollapse,
   className,
   hideOpenSessionAction = false,
+  composerInsert = null,
 }: SessionChatDockProps) {
   const router = useRouter();
   const [payload, setPayload] = useState<SessionFeedPayload>(EMPTY_FEED_PAYLOAD);
@@ -763,13 +796,17 @@ export function SessionChatDock({
     () => payload.entries.filter((entry) => entry.kind === "tool").length,
     [payload.entries],
   );
+  const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
+  const approvalState = payload.approvalState ?? session.metadata.acpPlanApprovalState ?? null;
+  const awaitingApproval = useMemo(
+    () => isDispatcher && shouldShowDispatcherApprovalBanner(payload.entries, approvalState),
+    [approvalState, isDispatcher, payload.entries],
+  );
   const messageCount = useMemo(
     () => payload.entries.filter((entry) => entry.kind !== "tool").length,
     [payload.entries],
   );
   const canContinue = session.status !== "archived";
-  const fullSessionTab = getDefaultSessionPrimaryTab(session);
-
   const loadRepository = useCallback(async () => {
     setRepositoryLoading(true);
     setRepositoryError(null);
@@ -854,6 +891,7 @@ export function SessionChatDock({
           windowLimit: delta.windowLimit,
           truncated: delta.truncated,
           sessionStatus: delta.sessionStatus,
+          approvalState: delta.approvalState,
           parserState: delta.parserState,
           runtimeStatus: delta.runtimeStatus,
           source: delta.source,
@@ -884,12 +922,31 @@ export function SessionChatDock({
     node.scrollTop = node.scrollHeight;
   }, [payload.entries.length]);
 
-  const handleSend = useCallback(async () => {
-    const message = composerValue.trim();
-    if (!message || sending) {
+  useEffect(() => {
+    if (!composerInsert) {
       return;
     }
+    setComposerValue((current) => {
+      const next = composerInsert.draftText.trim();
+      if (!next) {
+        return current;
+      }
+      const trimmedCurrent = current.trim();
+      if (!trimmedCurrent) {
+        return next;
+      }
+      if (trimmedCurrent.includes(next)) {
+        return current;
+      }
+      return `${current.trimEnd()}\n\n${next}`;
+    });
+  }, [composerInsert]);
 
+  const sendMessage = useCallback(async (message: string) => {
+    const trimmed = message.trim();
+    if (!trimmed || sending) {
+      return false;
+    }
     setSending(true);
     setSendError(null);
     try {
@@ -900,20 +957,36 @@ export function SessionChatDock({
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ message }),
+          body: JSON.stringify({ message: trimmed }),
         },
       );
       const body = await response.json().catch(() => null);
       if (!response.ok) {
         throw new Error(readString(asRecord(body).error) ?? `Failed to send message (${response.status})`);
       }
-      setComposerValue("");
+      return true;
     } catch (error) {
       setSendError(error instanceof Error ? error.message : "Failed to send message");
+      return false;
     } finally {
       setSending(false);
     }
-  }, [bridgeId, composerValue, sending, session.id]);
+  }, [bridgeId, sending, session.id]);
+
+  const handleSend = useCallback(async () => {
+    const message = composerValue.trim();
+    if (!message) {
+      return;
+    }
+    const sent = await sendMessage(message);
+    if (sent) {
+      setComposerValue("");
+    }
+  }, [composerValue, sendMessage]);
+
+  const handleApprovalAction = useCallback(async (action: "approve" | "reject") => {
+    await sendMessage(action);
+  }, [sendMessage]);
 
   const handleAgentChange = useCallback(async (nextAgent: string) => {
     if (!repository || savingAgent || nextAgent === repository.agent) {
@@ -952,7 +1025,7 @@ export function SessionChatDock({
 
   return (
     <aside className={cn(
-      "flex h-full min-h-0 w-full shrink-0 flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:w-[405px] xl:border-l xl:border-t-0",
+      "flex h-full min-h-0 w-full min-w-0 shrink-0 flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:w-[405px] xl:border-l xl:border-t-0",
       className,
     )}>
       <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-muted)]">
@@ -971,7 +1044,7 @@ export function SessionChatDock({
         {!hideOpenSessionAction ? (
           <button
             type="button"
-            onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: fullSessionTab === "terminal" ? "terminal" : null }))}
+            onClick={() => router.push(buildSessionHref(session.id, { bridgeId, tab: null }))}
             className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
             aria-label="Open full session"
           >
@@ -992,7 +1065,7 @@ export function SessionChatDock({
 
       <div
         ref={feedRef}
-        className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
+        className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 sm:px-4"
       >
         {loading ? (
           <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
@@ -1005,11 +1078,29 @@ export function SessionChatDock({
           </div>
         ) : (
           <div className="space-y-5">
-            <div className="flex flex-wrap items-center gap-2 text-[12px] text-[var(--vk-text-muted)]">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-[12px] text-[var(--vk-text-muted)]">
               <span className="inline-flex items-center gap-2">
                 <Wrench className="h-3.5 w-3.5" />
                 <span>{toolCount} tool calls, {messageCount} messages</span>
               </span>
+              {isDispatcher ? (
+                <>
+                  <span className="text-[var(--vk-text-dim)]">•</span>
+                  <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
+                    {approvalState === "approved_for_next_mutation" ? (
+                      <>
+                        <Check className="h-3 w-3" />
+                        <span>Approved execution</span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="h-3 w-3" />
+                        <span>Awaiting approval</span>
+                      </>
+                    )}
+                  </span>
+                </>
+              ) : null}
               {payload.parserState ? (
                 <>
                   <span className="text-[var(--vk-text-dim)]">•</span>
@@ -1048,15 +1139,15 @@ export function SessionChatDock({
         )}
       </div>
 
-      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-4 py-4">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-4 sm:px-4">
+        <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
           <ProjectAgentSelect
             project={repository}
             disabled={repositoryLoading}
             saving={savingAgent}
             onChange={(value) => void handleAgentChange(value)}
           />
-          <div className="ml-auto inline-flex items-center gap-2 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-[11px] text-[var(--vk-text-muted)]">
+          <div className="inline-flex w-fit max-w-full items-center gap-2 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-[11px] text-[var(--vk-text-muted)] sm:ml-auto">
             <AgentTileIcon
               seed={{ label: agentLabel }}
               className="h-4 w-4 border-none bg-transparent"
@@ -1078,6 +1169,41 @@ export function SessionChatDock({
           <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">
             <AlertCircle className="h-3.5 w-3.5 shrink-0" />
             <span>{sendError}</span>
+          </div>
+        ) : null}
+
+        {awaitingApproval ? (
+          <div className="mb-3 rounded-[12px] border border-[rgba(204,163,92,0.35)] bg-[rgba(64,49,27,0.58)] px-3 py-3 text-[12px] text-[#f1e3bf]">
+            <div className="flex items-center gap-2 text-[13px] font-medium text-[#f6ead0]">
+              <AlertCircle className="h-4 w-4" />
+              <span>Plan ready for approval</span>
+            </div>
+            <p className="mt-2 leading-5 text-[#dccba1]">
+              ACP will only create or update board tasks after approval. Review the proposal above, then approve it or request changes.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                disabled={!canContinue || sending}
+                onClick={() => void handleApprovalAction("approve")}
+                className="h-[31px] rounded-[6px] border-[rgba(255,255,255,0.08)] bg-[#e6c786] px-3 text-[13px] text-[#22170d] hover:bg-[#edd39d]"
+              >
+                {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                <span>Approve plan</span>
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!canContinue || sending}
+                onClick={() => void handleApprovalAction("reject")}
+                className="h-[31px] rounded-[6px] border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[#f3ead8] hover:bg-[rgba(255,255,255,0.08)]"
+              >
+                <X className="h-3.5 w-3.5" />
+                <span>Request changes</span>
+              </Button>
+            </div>
           </div>
         ) : null}
 

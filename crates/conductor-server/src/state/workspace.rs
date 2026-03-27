@@ -38,6 +38,19 @@ impl AppState {
         self.worktree_root().join(project_id).join(session_id)
     }
 
+    pub(crate) fn prepare_orchestration_workspace(
+        &self,
+        project: &ProjectConfig,
+    ) -> Result<PreparedWorkspace> {
+        let repo_path = self.resolve_project_path(project);
+        Ok(PreparedWorkspace {
+            working_directory: repo_path.clone(),
+            repo_path: repo_path.clone(),
+            root_path: repo_path,
+            uses_worktree: false,
+        })
+    }
+
     pub(crate) async fn prepare_workspace(
         &self,
         project_id: &str,

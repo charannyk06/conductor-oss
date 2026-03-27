@@ -86,11 +86,8 @@ function resolveSessionTab(
   if (value === "overview" || value === "preview" || value === "skills") {
     return value;
   }
-  if (value === "chat") {
-    return defaultTab === "chat" ? "chat" : "terminal";
-  }
-  if (value === "terminal") {
-    return defaultTab === "chat" ? "chat" : "terminal";
+  if (value === "chat" || value === "terminal") {
+    return "chat";
   }
   return defaultTab;
 }
@@ -207,7 +204,8 @@ export function SessionDetail({
       nonce: terminalInsertNonceRef.current,
       ...request,
     });
-  }, []);
+    handleTabChange("chat");
+  }, [handleTabChange]);
   useEffect(() => {
     autoPreviewOpenedRef.current = false;
     terminalInsertNonceRef.current = 0;
@@ -269,7 +267,6 @@ export function SessionDetail({
   const statusDotClass = getStatusDotClass(status);
   const statusAnimated = isStatusAnimated(status);
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
-  const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
 
@@ -279,17 +276,10 @@ export function SessionDetail({
         <LayoutDashboard className="h-3.5 w-3.5" />
         Overview
       </TabsTrigger>
-      {dispatcherSession ? (
-        <TabsTrigger value="chat" className={tabTriggerClass}>
-          <Bot className="h-3.5 w-3.5" />
-          Chat
-        </TabsTrigger>
-      ) : (
-        <TabsTrigger value="terminal" className={tabTriggerClass}>
-          <SquareTerminal className="h-3.5 w-3.5" />
-          Terminal
-        </TabsTrigger>
-      )}
+      <TabsTrigger value="chat" className={tabTriggerClass}>
+        <Bot className="h-3.5 w-3.5" />
+        Chat
+      </TabsTrigger>
       <TabsTrigger value="preview" className={tabTriggerClass}>
         <Globe className="h-3.5 w-3.5" />
         Preview
@@ -303,97 +293,44 @@ export function SessionDetail({
 
   return (
     <div
-      className={`flex h-full min-h-0 min-w-0 w-full flex-col ${
-        immersiveTerminalActive
-          ? "overflow-hidden bg-[#060404]"
-          : "overflow-y-auto overscroll-contain lg:overflow-hidden"
-      }`}
+      className="flex h-full min-h-0 min-w-0 w-full flex-col overflow-y-auto overscroll-contain lg:overflow-hidden"
     >
       <Tabs
         key={sessionId}
         value={activeTab}
         onValueChange={handleTabChange}
-        className={immersiveTerminalActive ? "flex min-h-0 min-w-0 w-full flex-1 flex-col gap-0 p-0" : "flex min-h-0 min-w-0 w-full flex-1 flex-col gap-1 p-1 lg:gap-2 lg:p-3"}
+        className="flex min-h-0 min-w-0 w-full flex-1 flex-col gap-1 p-1 lg:gap-2 lg:p-3"
       >
-        {immersiveTerminalActive ? (
-          <div className="flex shrink-0 flex-col border-b border-white/10 bg-[#0d0908]">
-            {/* compact info row */}
-            <div className="flex h-10 items-center gap-2 px-2">
-              {onOpenSidebar ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-                  onClick={onOpenSidebar}
-                  aria-label="Open workspace panel"
-                  >
-                    <PanelLeftOpen className="h-4 w-4" />
-                  </Button>
-              ) : null}
-              <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
-                <span className="text-[12px] font-medium text-[#efe8e1]">{compactStatusLabel}</span>
-                <span className="font-mono text-[10px] text-[#8e847d]">· {sessionId.slice(0, 7)}</span>
-              </div>
-              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 sm:flex-nowrap">
+          {sessionTabs}
+          <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
+            <div className="flex items-center gap-1.5">
+              <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
+              <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
+              <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
             </div>
-            {/* tab row */}
-            <div className="px-1.5 pb-1.5">
-              {sessionTabs}
-            </div>
+            {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
           </div>
-        ) : (
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 sm:flex-nowrap">
-            {sessionTabs}
-            <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
-              <div className="flex items-center gap-1.5">
-                <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
-                <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
-                <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
-              </div>
-              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
-            </div>
-          </div>
-        )}
+        </div>
 
         <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           <TabsContent value="overview" className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
             <SessionOverview session={session} sessionId={sessionId} active={active && activeTab === "overview"} />
           </TabsContent>
 
-          {dispatcherSession ? (
-            <TabsContent
-              value="chat"
-              forceMount
-              className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-            >
-              <SessionChatDock
-                session={session}
-                bridgeId={session.bridgeId ?? bridgeId}
-                className="h-full w-full border-0 xl:w-full"
-                hideOpenSessionAction
-              />
-            </TabsContent>
-          ) : (
-            <TabsContent
-              value="terminal"
-              forceMount
-              className={immersiveTerminalActive
-                ? "flex min-h-0 h-full min-w-0 w-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-                : "flex min-h-0 h-full min-w-0 flex-col w-full overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
-            >
-              <SessionTerminal
-                sessionId={sessionId}
-                projectId={session.projectId}
-                bridgeId={session.bridgeId ?? null}
-                sessionState={status}
-                runtimeMode={session.metadata["runtimeMode"]?.trim() ?? null}
-                pendingInsert={pendingTerminalInsert}
-                immersiveMobileMode={immersiveTerminalActive}
-              />
-            </TabsContent>
-          )}
+          <TabsContent
+            value="chat"
+            forceMount
+            className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
+          >
+            <SessionChatDock
+              session={session}
+              bridgeId={session.bridgeId ?? bridgeId}
+              className="h-full w-full border-0 xl:w-full"
+              hideOpenSessionAction
+              composerInsert={pendingTerminalInsert}
+            />
+          </TabsContent>
           <TabsContent
             value="preview"
             className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"

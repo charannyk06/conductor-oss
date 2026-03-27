@@ -81,6 +81,7 @@ export function ProjectDispatcherPanel({
           projectId,
           agent: defaultAgent,
           prompt: "",
+          useWorktree: false,
           permissionMode: "plan",
           sessionKind: PROJECT_DISPATCHER_SESSION_KIND,
         }),
@@ -118,15 +119,17 @@ export function ProjectDispatcherPanel({
             </button>
           ) : null}
         </div>
-        <div className="flex flex-1 items-center justify-center p-6">
-          <div className="w-full max-w-[640px] rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-6 text-center shadow-[0_16px_48px_rgba(0,0,0,0.18)]">
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto p-4 sm:p-6">
+          <div className="w-full max-w-[640px] rounded-[12px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-4 text-center shadow-[0_16px_48px_rgba(0,0,0,0.18)] sm:p-6">
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)]">
               <Bot className="h-6 w-6" />
             </div>
-            <h2 className="mt-4 text-[24px] font-semibold text-[var(--vk-text-strong)]">Project dispatcher</h2>
+            <h2 className="mt-4 text-[20px] font-semibold leading-snug text-[var(--vk-text-strong)] sm:text-[24px]">
+              ACP dispatcher
+            </h2>
             <p className="mt-3 text-[14px] leading-6 text-[var(--vk-text-muted)]">
               This is the master orchestration chat for the project. It should shape work, maintain the board,
-              create or refine launchable tasks, and leave dedicated coding sessions to the implementation agents.
+              create or refine launchable tasks, and hand implementation to dedicated Codex, Claude Code, or Gemini sessions.
             </p>
             <div className="mt-5 rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-4 text-left text-[13px] leading-6 text-[var(--vk-text-muted)]">
               <div className="flex items-center gap-2 text-[var(--vk-text-normal)]">
@@ -136,8 +139,8 @@ export function ProjectDispatcherPanel({
               <ul className="mt-3 list-disc space-y-1 pl-5">
                 <li>Turn rough product requests into high-signal board tasks</li>
                 <li>Keep long-lived project context in one orchestration session</li>
-                <li>Act like the dispatcher or master puppeteer, not the coding terminal</li>
-                <li>Hand work off to dedicated coding sessions launched from board tasks</li>
+                <li>Act like the ACP master puppeteer, not the coding terminal</li>
+                <li>Hand work off to Codex, Claude Code, or Gemini sessions launched from board tasks</li>
               </ul>
             </div>
             {error ? <div className="mt-4 text-[13px] text-[#d25151]">{error}</div> : null}
@@ -154,8 +157,8 @@ export function ProjectDispatcherPanel({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
-      <div className="min-h-0 flex-1 overflow-hidden">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         <SessionChatDock
           session={dispatcherSession}
           bridgeId={bridgeId}

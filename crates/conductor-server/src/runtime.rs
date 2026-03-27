@@ -351,6 +351,13 @@ async fn active_session_counts(state: &Arc<AppState>, project_id: &str) -> (usiz
     let mut global = 0usize;
     let mut project = 0usize;
     for session in sessions.values() {
+        let session_kind = session.metadata.get("sessionKind").map(String::as_str);
+        if session.metadata.get("role").map(String::as_str) == Some("orchestrator")
+            || session_kind == Some("board_planning")
+            || session_kind == Some("project_dispatcher")
+        {
+            continue;
+        }
         if session.status.is_terminal()
             || session.status == SessionStatus::Queued
             || matches!(

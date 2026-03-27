@@ -22,6 +22,7 @@ const LEGACY_TMUX_RUNTIME_SUMMARY: &str = "Archived legacy tmux session after tm
 fn dashboard_metadata_allowlist() -> &'static [&'static str] {
     &[
         "agent",
+        "acpPlanApprovalState",
         "bridgeStatus",
         "agentCwd",
         "briefPath",

@@ -1285,7 +1285,7 @@ export default function DashboardClient({
       return false;
     }
     if (tab === "terminal") {
-      return true;
+      return getDefaultSessionPrimaryTab(dockedBoardSession) === "terminal";
     }
     return getDefaultSessionPrimaryTab(dockedBoardSession) === "terminal";
   }, [dockedBoardSession, searchParams]);
@@ -1665,7 +1665,7 @@ export default function DashboardClient({
         {
           projectId,
           sessionId: data.session.id,
-          tab: "terminal",
+          tab: null,
           bridgeId: targetBridgeId,
         },
         "push",
@@ -1997,12 +1997,12 @@ export default function DashboardClient({
           <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
             {workspaceMainPanel}
           </div>
-          <div className={`border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0 ${
+          <div className={`flex flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0 ${
             selectedSessionId
-              ? "min-h-[360px] xl:min-h-0 xl:w-[405px]"
+              ? "flex-1 min-h-[min(360px,50dvh)] xl:w-[405px] xl:flex-none xl:min-h-0"
               : dispatcherCollapsed
-                ? "min-h-[33px] xl:min-h-0 xl:w-[56px]"
-                : "min-h-[360px] xl:min-h-0 xl:w-[405px]"
+                ? "h-[33px] max-h-[33px] shrink-0 xl:h-auto xl:max-h-none xl:w-[56px] xl:min-h-0"
+                : "flex-1 min-h-[min(360px,50dvh)] xl:w-[405px] xl:flex-none xl:min-h-0"
           }`}>
             {selectedSessionId ? (
               dockedBoardSession ? (

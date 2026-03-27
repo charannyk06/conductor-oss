@@ -1335,7 +1335,7 @@ export function WorkspaceKanban({
   }, [selectedBoardTask, selectedTaskId]);
 
   const openSessionView = useCallback(
-    (sessionId: string, tab: "chat" | "terminal" = "terminal") => {
+    (sessionId: string, tab: "chat" | "terminal" = "chat") => {
       if (onOpenSession) {
         onOpenSession(sessionId, { tab });
         return;
@@ -1374,7 +1374,7 @@ export function WorkspaceKanban({
         throw new Error("Task session response did not include a session id");
       }
       await loadBoard({ silent: true });
-      openSessionView(sessionId, "terminal");
+      openSessionView(sessionId, "chat");
     },
     [bridgeId, defaultAgent, loadBoard, openSessionView, projectId]
   );
@@ -2260,10 +2260,10 @@ export function WorkspaceKanban({
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden sm:overflow-hidden">
-      <header className="border-b border-[var(--vk-border)] px-4 py-4">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+      <header className="border-b border-[var(--vk-border)] px-3 py-3 sm:px-4 sm:py-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3 sm:mb-4">
           <div className="min-w-0">
-            <h1 className="truncate text-[24px] font-medium leading-[32px] text-[var(--vk-text-normal)]">
+            <h1 className="truncate text-[20px] font-medium leading-[28px] text-[var(--vk-text-normal)] sm:text-[24px] sm:leading-[32px]">
               {projectLabel?.trim() || projectId}
             </h1>
           </div>
@@ -2514,7 +2514,7 @@ export function WorkspaceKanban({
 
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 touch-pan-y sm:touch-auto">
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-3 touch-pan-y sm:p-4 sm:touch-auto">
         {loading ? (
           <div className="flex h-full items-center justify-center text-[var(--vk-text-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -2527,7 +2527,7 @@ export function WorkspaceKanban({
         ) : (
           <div className="flex h-full min-h-0 flex-col gap-4 xl:flex-row">
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain touch-pan-y sm:touch-auto">
-              <div className="flex min-w-0 flex-col gap-3 pb-3 sm:h-full sm:flex-row sm:items-stretch sm:overflow-x-auto sm:gap-0 sm:pb-3">
+              <div className="flex min-w-0 flex-row items-stretch gap-3 overflow-x-auto overscroll-x-contain pb-3 [-webkit-overflow-scrolling:touch] px-0.5 sm:h-full sm:gap-0 sm:overflow-x-auto sm:px-0 sm:pb-3">
             {visibleColumns.map((column) => {
               const fullColumn = allColumns.find(
                 (candidate) => candidate.role === column.role
@@ -2549,7 +2549,7 @@ export function WorkspaceKanban({
                 <article
                   key={column.role}
                   className={cn(
-                    "flex min-h-0 w-full shrink-0 flex-col border border-[var(--vk-border)] bg-[var(--vk-bg-main)] shadow-none sm:h-full sm:min-h-[560px] sm:w-[320px] sm:border-l-0 first:sm:border-l",
+                    "flex max-h-[min(560px,65dvh)] min-h-0 w-[min(85vw,320px)] shrink-0 flex-col border border-[var(--vk-border)] bg-[var(--vk-bg-main)] shadow-none sm:max-h-none sm:h-full sm:min-h-[560px] sm:w-[320px] sm:border-l-0 first:sm:border-l",
                     draggingTask && "snap-start"
                   )}
                 >
@@ -2578,7 +2578,7 @@ export function WorkspaceKanban({
 
                   <div
                     className={cn(
-                      "flex-1 min-h-0 px-3 pb-3 pt-2 sm:overflow-y-auto sm:overscroll-contain",
+                      "flex-1 min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 pt-2",
                       draggingTask?.role === column.role &&
                         "bg-[rgba(255,255,255,0.02)]"
                     )}
@@ -2811,7 +2811,7 @@ export function WorkspaceKanban({
                                     {primaryLinkedSession ? (
                                       <button
                                         type="button"
-                                        onClick={() => openSessionView(primaryLinkedSession.id, "terminal")}
+                                        onClick={() => openSessionView(primaryLinkedSession.id, "chat")}
                                         className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                         title={primaryLinkedSession.id}
                                       >
@@ -2864,7 +2864,7 @@ export function WorkspaceKanban({
                                         <button
                                           key={session.id}
                                           type="button"
-                                          onClick={() => openSessionView(session.id, "terminal")}
+                                          onClick={() => openSessionView(session.id, "chat")}
                                           className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                           title={session.id}
                                         >
@@ -2903,7 +2903,7 @@ export function WorkspaceKanban({
                                     {unresolvedPrimaryLink ? (
                                       <button
                                         type="button"
-                                        onClick={() => openSessionView(unresolvedPrimaryLink, "terminal")}
+                                        onClick={() => openSessionView(unresolvedPrimaryLink, "chat")}
                                         className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                                         title={unresolvedPrimaryLink}
                                       >

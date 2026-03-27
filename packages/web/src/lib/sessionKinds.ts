@@ -13,5 +13,5 @@ export function isProjectDispatcherSession(
 export function getDefaultSessionPrimaryTab(
   session: Pick<DashboardSession, "metadata"> | null | undefined,
 ): SessionPrimaryTab {
-  return isProjectDispatcherSession(session) ? "chat" : "terminal";
+  return "chat";
 }

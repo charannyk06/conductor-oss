@@ -178,7 +178,7 @@ export function BoardAgenticPanel({
     }
   };
 
-  const openInSessionView = (tab: "chat" | "terminal") => {
+  const openInSessionView = (tab: "chat") => {
     if (!planning.sessionId) return;
     if (onOpenSession) {
       onOpenSession(planning.sessionId, tab);
@@ -262,13 +262,6 @@ export function BoardAgenticPanel({
                     onClick={() => openInSessionView("chat")}
                   >
                     Open chat
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-md border border-[var(--vk-border)] px-3 py-2 text-xs font-medium text-[var(--vk-text-normal)]"
-                    onClick={() => openInSessionView("terminal")}
-                  >
-                    Open terminal
                   </button>
                 </div>
               ) : null}
