@@ -5,23 +5,6 @@
 /// so long paragraphs cannot accidentally trigger approval via substring matches.
 const ACP_CASUAL_PHRASE_MAX_CHARS: usize = 96;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcpApprovalDecision {
-    None,
-    Approve,
-    Reject,
-}
-
-pub fn acp_approval_decision(prompt: &str) -> AcpApprovalDecision {
-    if matches_acp_approve_command(prompt) {
-        return AcpApprovalDecision::Approve;
-    }
-    if matches_acp_reject_command(prompt) {
-        return AcpApprovalDecision::Reject;
-    }
-    AcpApprovalDecision::None
-}
-
 pub fn matches_acp_approve_command(prompt: &str) -> bool {
     let trimmed = prompt.trim();
     let normalized = trimmed.to_ascii_lowercase();
@@ -89,16 +72,54 @@ pub fn matches_acp_reject_command(prompt: &str) -> bool {
     )
 }
 
+pub fn matches_acp_plan_only_command(prompt: &str) -> bool {
+    let trimmed = prompt.trim();
+    let normalized = trimmed.to_ascii_lowercase();
+
+    if matches!(
+        normalized.as_str(),
+        "/plan"
+            | "plan"
+            | "plan only"
+            | "proposal only"
+            | "show the plan"
+            | "show me the plan"
+            | "review the plan"
+            | "don't mutate the board"
+            | "do not mutate the board"
+            | "no board changes"
+    ) || normalized.starts_with("/plan ")
+    {
+        return true;
+    }
+
+    if trimmed.chars().count() > ACP_CASUAL_PHRASE_MAX_CHARS {
+        return false;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "plan first" | "review first" | "proposal first"
+    )
+}
+
+pub fn acp_dispatcher_turn_allows_board_mutations(prompt: &str) -> bool {
+    !matches_acp_reject_command(prompt) && !matches_acp_plan_only_command(prompt)
+}
+
 pub fn rewrite_acp_dispatcher_command(prompt: &str) -> String {
     let trimmed = prompt.trim();
     if trimmed.is_empty() {
-        return "Review the current dispatcher state, summarize the plan status, and respond according to the ACP approval gate.".to_string();
+        return "Review the current dispatcher state, summarize the plan status, and respond according to the current ACP execution mode.".to_string();
     }
     if matches_acp_approve_command(trimmed) {
-        return "The user approved the current ACP proposal. Execute only the previously proposed board mutations, create or update the agreed tasks, populate the approved task packet fields exactly as proposed, and report the exact task refs or titles changed.".to_string();
+        return "If ACP is waiting on a plan-only review, the user approved the current proposal. Apply the proposed board mutations now, create or update the agreed tasks, preserve the planned task packet fields, and report the exact task refs or titles changed.".to_string();
     }
     if matches_acp_reject_command(trimmed) {
         return "Do not mutate the board. Revise the dispatcher proposal, restate the exact intended tool calls and board/task mutations, and ask for approval again.".to_string();
+    }
+    if matches_acp_plan_only_command(trimmed) {
+        return "Plan-only turn. Inspect the repo and board, produce the finalized plan, exact board/task mutations, intended tool calls, and recommended implementation agents. Do not mutate the board in this turn.".to_string();
     }
     if trimmed.eq_ignore_ascii_case("/board") || trimmed.eq_ignore_ascii_case("board") {
         return "Review the attached board and summarize active work, blockers, stale tasks, and the highest-priority next actions.".to_string();
@@ -123,11 +144,11 @@ pub fn rewrite_acp_dispatcher_command(prompt: &str) -> String {
     prompt.to_string()
 }
 
-pub fn acp_dispatcher_turn_prefix(approved_turn: bool) -> &'static str {
-    if approved_turn {
-        "ACP approval gate: the user has explicitly approved execution for this turn. You may now create or update only the board tasks and mutations that match the approved proposal. Preserve the approved task packet structure and do not expand scope beyond the approved plan."
+pub fn acp_dispatcher_turn_prefix(allow_board_mutations: bool) -> &'static str {
+    if allow_board_mutations {
+        "ACP execution mode: inspect context first, then create or update the necessary board tasks in this same turn when the request is actionable. Use tool calls to review the repo, board, relevant files, and diffs before writing task packets. Only pause for plan-only review when the user explicitly asks for it or the requested mutation would be ambiguous or unsafe."
     } else {
-        "ACP approval gate: planning only. Do not create or update board tasks in this turn. First inspect context, then present the finalized plan, intended tool calls, exact board/task mutations, and recommended implementation agents. For each proposed task, include the execution packet fields you intend to write. Stop and ask for explicit approval."
+        "ACP plan-only mode: inspect context first, then present the finalized plan, intended tool calls, exact board/task mutations, and recommended implementation agents. For each proposed task, include the execution packet fields you intend to write. Do not create or update board tasks in this turn."
     }
 }
 
@@ -186,6 +207,24 @@ mod tests {
         assert!(!matches_acp_reject_command(
             "The section on retries needs changes to match the new API, and we should add tests"
         ));
+    }
+
+    #[test]
+    fn plan_only_detection_requires_explicit_request() {
+        assert!(matches_acp_plan_only_command("/plan"));
+        assert!(matches_acp_plan_only_command("show me the plan"));
+        assert!(!matches_acp_plan_only_command(
+            "Create the tasks and plan the rollout for me in one turn"
+        ));
+    }
+
+    #[test]
+    fn dispatcher_turns_default_to_board_mutations() {
+        assert!(acp_dispatcher_turn_allows_board_mutations(
+            "Create clean review tasks for the current PR"
+        ));
+        assert!(!acp_dispatcher_turn_allows_board_mutations("/plan"));
+        assert!(!acp_dispatcher_turn_allows_board_mutations("needs changes"));
     }
 
     #[test]

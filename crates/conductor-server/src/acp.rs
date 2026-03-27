@@ -12,7 +12,7 @@ use tokio::time::{sleep, Duration, Instant};
 use uuid::Uuid;
 
 use crate::acp_prompt::{
-    acp_approval_decision, rewrite_acp_dispatcher_command, AcpApprovalDecision,
+    acp_dispatcher_turn_allows_board_mutations, rewrite_acp_dispatcher_command,
 };
 use crate::state::{
     dispatcher_implementation_agent_options, dispatcher_implementation_model_options,
@@ -469,22 +469,17 @@ impl AcpServer {
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
         let raw_prompt_message = prompt.user_message.clone();
-        let approval_decision = acp_approval_decision(&raw_prompt_message);
-        let mut approval_state = approval_state(&session).to_string();
-        match approval_decision {
-            AcpApprovalDecision::Approve => {
-                self.update_approval_state(&params.session_id, ACP_APPROVAL_GRANTED)
-                    .await?;
-                approval_state = ACP_APPROVAL_GRANTED.to_string();
-            }
-            AcpApprovalDecision::Reject => {
-                self.update_approval_state(&params.session_id, ACP_APPROVAL_REQUIRED)
-                    .await?;
-                approval_state = ACP_APPROVAL_REQUIRED.to_string();
-            }
-            AcpApprovalDecision::None => {}
+        let next_approval_state = if acp_dispatcher_turn_allows_board_mutations(&raw_prompt_message)
+        {
+            ACP_APPROVAL_GRANTED
+        } else {
+            ACP_APPROVAL_REQUIRED
+        };
+        if approval_state(&session) != next_approval_state {
+            self.update_approval_state(&params.session_id, next_approval_state)
+                .await?;
         }
-        let turn_is_approved = approval_state == ACP_APPROVAL_GRANTED;
+        let turn_is_approved = next_approval_state == ACP_APPROVAL_GRANTED;
         let dispatch_message = dispatcher_message_from_prompt_content(&prompt);
         let effective_model = prompt_meta.model.or_else(|| session.model.clone());
         let effective_reasoning = prompt_meta
@@ -518,15 +513,17 @@ impl AcpServer {
         let launched_session = self
             .ensure_prompt_runtime(&params.session_id, turn_request.clone())
             .await?;
-        if let Some(launched_session) = launched_session {
-            cursor = PromptStreamCursor::from_session(&launched_session);
-            cursor.commands_sent = true;
-            cursor.config_sent = true;
-            cursor.mode_sent = true;
-        } else {
+        if launched_session.is_none() {
             self.state
                 .send_to_dispatcher_thread(&params.session_id, turn_request)
                 .await?;
+        }
+        let current_session = match launched_session {
+            Some(session) => Some(session),
+            None => self.state.get_dispatcher_thread(&params.session_id).await,
+        };
+        if let Some(current) = current_session {
+            stream_prompt_delta(writer, &current, &mut cursor).await?;
         }
 
         let started_at = Instant::now();
@@ -576,15 +573,6 @@ impl AcpServer {
             "cancelled"
         };
         stream_plan_update(writer, &params.session_id, plan_entries(plan_state)).await?;
-        if turn_is_approved {
-            self.update_approval_state(&params.session_id, ACP_APPROVAL_REQUIRED)
-                .await?;
-            if let Some(updated_session) =
-                self.state.get_dispatcher_thread(&params.session_id).await
-            {
-                stream_static_session_updates(writer, &updated_session, &mut cursor).await?;
-            }
-        }
 
         make_success_response(
             request,
@@ -754,7 +742,7 @@ fn prompt_turn_dispatch_message(raw_prompt_message: &str) -> String {
 
 fn dispatcher_message_from_prompt_content(prompt: &ParsedPromptBlocks) -> String {
     if prompt.user_message.trim().is_empty() && prompt.has_non_text_content {
-        "Review the provided ACP context and respond according to the ACP approval gate."
+        "Review the provided ACP context and respond according to the current ACP execution mode."
             .to_string()
     } else {
         prompt_turn_dispatch_message(&prompt.user_message)
@@ -1413,12 +1401,16 @@ fn available_commands_value() -> Value {
             }
         },
         {
+            "name": "plan",
+            "description": "Switch the next dispatcher turn into plan-only mode so ACP pauses before mutating the board."
+        },
+        {
             "name": "approve",
-            "description": "Approve the current dispatcher proposal so ACP can create or update the agreed board tasks."
+            "description": "If ACP is in plan-only mode, approve the current proposal so it can apply the agreed board tasks."
         },
         {
             "name": "reject",
-            "description": "Reject or revise the current dispatcher proposal without mutating the board."
+            "description": "Reject or revise the current dispatcher proposal and keep the board unchanged."
         }
     ])
 }
@@ -1472,7 +1464,7 @@ fn plan_entries(stage: &str) -> Value {
             "status": proposal
         },
         {
-            "content": "Wait for explicit approval before creating or updating board tasks",
+            "content": "Apply board mutations now, or pause in plan-only mode for review",
             "priority": "high",
             "status": approval
         },
@@ -1728,21 +1720,85 @@ pub struct JsonRpcError {
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatcher_message_from_prompt_content, parse_prompt_blocks, prompt_turn_dispatch_message,
-        session_config_options, updates_for_entry, AcpServer, CreateDispatcherThreadOptions,
-        LoadSessionRequest, ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL,
-        ACP_CONFIG_THOUGHT_LEVEL,
+        approval_state, dispatcher_message_from_prompt_content, parse_prompt_blocks,
+        prompt_turn_dispatch_message, session_config_options, updates_for_entry, AcpServer,
+        CreateDispatcherThreadOptions, LoadSessionRequest, ACP_APPROVAL_GRANTED,
+        ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL, ACP_CONFIG_THOUGHT_LEVEL,
     };
     use crate::state::{
         AppState, ConversationEntry, SessionRecord, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
     };
+    use anyhow::Result;
+    use async_trait::async_trait;
     use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
+    use conductor_core::types::AgentKind;
     use conductor_db::Database;
+    use conductor_executors::executor::{
+        Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
+    };
     use serde_json::{json, Value};
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::{mpsc, oneshot, Mutex};
+    use tokio::time::{sleep, Duration};
     use uuid::Uuid;
+
+    struct PromptCompletionExecutor;
+
+    #[async_trait]
+    impl Executor for PromptCompletionExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "ACP Prompt Completion Test Executor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/bin/true")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
+            let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8);
+            tokio::spawn(async move {
+                sleep(Duration::from_millis(20)).await;
+                let _ = output_tx
+                    .send(ExecutorOutput::Completed { exit_code: 0 })
+                    .await;
+            });
+            let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
+            tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
+            let (kill_tx, _kill_rx) = oneshot::channel();
+            Ok(ExecutorHandle::new(
+                1,
+                AgentKind::Codex,
+                output_rx,
+                input_tx,
+                kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
 
     async fn build_test_state(label: &str) -> (std::path::PathBuf, Arc<AppState>) {
         let root = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
@@ -1772,6 +1828,11 @@ mod tests {
             .await
             .expect("test db should initialize");
         let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(PromptCompletionExecutor));
         (root, state)
     }
 
@@ -1853,7 +1914,7 @@ mod tests {
         assert_eq!(prompt_turn_dispatch_message("/board"), "/board");
         assert_eq!(
             prompt_turn_dispatch_message("   "),
-            "Review the current dispatcher state, summarize the plan status, and respond according to the ACP approval gate."
+            "Review the current dispatcher state, summarize the plan status, and respond according to the current ACP execution mode."
         );
     }
 
@@ -1910,7 +1971,7 @@ mod tests {
 
         assert_eq!(
             dispatcher_message_from_prompt_content(&prompt),
-            "Review the provided ACP context and respond according to the ACP approval gate."
+            "Review the provided ACP context and respond according to the current ACP execution mode."
         );
     }
 
@@ -1984,6 +2045,77 @@ mod tests {
         assert!(!persisted
             .metadata
             .contains_key(ACP_SESSION_MCP_SERVERS_METADATA_KEY));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn new_dispatchers_default_to_execution_enabled() {
+        let (root, state) = build_test_state("acp-default-execution-state").await;
+        let session = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        assert_eq!(approval_state(&session), ACP_APPROVAL_GRANTED);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn prompt_turn_streams_current_user_message_after_runtime_launch() {
+        let (root, state) = build_test_state("acp-prompt-streaming").await;
+        let server = AcpServer::new(Arc::clone(&state));
+        let session = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        let request = super::JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "session/prompt".to_string(),
+            params: Some(json!({})),
+        };
+        let params = super::PromptRequest {
+            session_id: session.id.clone(),
+            message_id: Some("user-turn-1".to_string()),
+            prompt: vec![json!({
+                "type": "text",
+                "text": "Plan the next board change.",
+            })],
+            meta: None,
+        };
+        let (mut client, writer_stream) = duplex(16 * 1024);
+        let writer = Arc::new(Mutex::new(writer_stream));
+
+        let response = server
+            .run_prompt_turn(
+                &request,
+                &params,
+                session,
+                Arc::new(AtomicBool::new(false)),
+                &writer,
+            )
+            .await
+            .expect("prompt turn should succeed");
+        {
+            let mut guard = writer.lock().await;
+            guard.shutdown().await.expect("writer should shut down");
+        }
+
+        let mut output = Vec::new();
+        client
+            .read_to_end(&mut output)
+            .await
+            .expect("reader should capture session updates");
+        let output = String::from_utf8(output).expect("ACP notifications should be utf8");
+        let super::JsonRpcPayload::Result(result) = response.payload else {
+            panic!("prompt turn should return a result payload");
+        };
+        assert_eq!(result["stopReason"], Value::String("end_turn".to_string()));
+        assert!(output.contains("\"sessionUpdate\":\"user_message_chunk\""));
+        assert!(output.contains("Plan the next board change."));
 
         let _ = fs::remove_dir_all(root);
     }
