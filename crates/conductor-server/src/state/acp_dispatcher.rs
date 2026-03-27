@@ -24,6 +24,7 @@ use crate::acp_prompt::{
     acp_dispatcher_preference_note, acp_dispatcher_turn_prefix, matches_acp_approve_command,
     rewrite_acp_dispatcher_command,
 };
+use crate::task_context::{attachment_allowed_roots, attachment_context_sections};
 use conductor_core::types::DEFAULT_SESSION_HISTORY_LIMIT;
 
 const ACP_SESSION_KIND: &str = "project_dispatcher";
@@ -869,19 +870,59 @@ fn merge_dispatcher_context_attachments(
     effective
 }
 
-fn append_attachments_to_prompt(prompt: &str, attachments: &[String]) -> String {
-    if attachments.is_empty() {
+fn dispatcher_internal_attachment_prefix(thread: &SessionRecord) -> String {
+    format!(".conductor/rust-backend/acp/{}/", thread.project_id)
+}
+
+fn is_dispatcher_internal_attachment(
+    attachment: &str,
+    hidden_paths: &[String],
+    hidden_prefix: &str,
+) -> bool {
+    let trimmed = attachment.trim();
+    !trimmed.is_empty()
+        && (hidden_paths.iter().any(|path| path == trimmed) || trimmed.starts_with(hidden_prefix))
+}
+
+fn strip_dispatcher_context_attachments(thread: &mut SessionRecord) -> bool {
+    if !is_acp_dispatcher_thread(thread) {
+        return false;
+    }
+
+    let hidden_paths = dispatcher_context_attachment_paths(thread);
+    let hidden_prefix = dispatcher_internal_attachment_prefix(thread);
+    let mut changed = false;
+
+    for entry in &mut thread.conversation {
+        let original_len = entry.attachments.len();
+        entry.attachments.retain(|attachment| {
+            !is_dispatcher_internal_attachment(attachment, &hidden_paths, &hidden_prefix)
+        });
+        if entry.attachments.len() != original_len {
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn append_dispatcher_context_sections(prompt: &str, sections: &[String]) -> String {
+    if sections.is_empty() {
         return prompt.to_string();
     }
-    format!(
-        "{}\n\nAttachments:\n{}",
-        prompt,
-        attachments
-            .iter()
-            .map(|item| format!("- {item}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    )
+
+    let mut combined = String::with_capacity(prompt.len() + 256);
+    combined.push_str(prompt);
+    combined.push_str(
+        "\n\nRelevant project context for this turn. Treat this as supplied ACP context, not as a user-visible attachment list.\n",
+    );
+    for section in sections {
+        combined.push_str(section);
+        if !section.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+    combined
 }
 
 fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
@@ -930,6 +971,10 @@ fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
             "summary".to_string(),
             "Dispatcher ready for the next turn".to_string(),
         );
+        changed = true;
+    }
+
+    if strip_dispatcher_context_attachments(thread) {
         changed = true;
     }
 
@@ -1430,6 +1475,7 @@ impl AppState {
                         if let Ok(updated) = serde_json::to_string_pretty(&session) {
                             let _ = tokio::fs::write(&path, updated).await;
                         }
+                        let _ = self.sync_acp_dispatcher_state(&session).await;
                     }
                     loaded.insert(session.id.clone(), session);
                 }
@@ -2171,6 +2217,32 @@ impl AppState {
             .map(|handle| handle.input_tx)
     }
 
+    async fn dispatcher_prompt_with_context(
+        &self,
+        thread: &SessionRecord,
+        prompt: &str,
+        attachments: &[String],
+    ) -> String {
+        if attachments.is_empty() {
+            return prompt.to_string();
+        }
+
+        let config = self.config.read().await.clone();
+        let Some(project) = config.projects.get(&thread.project_id) else {
+            return prompt.to_string();
+        };
+
+        let allowed_roots = attachment_allowed_roots(
+            self,
+            &thread.project_id,
+            project,
+            &config.preferences.markdown_editor,
+            &config.preferences.markdown_editor_path,
+        );
+        let sections = attachment_context_sections(self, attachments, &allowed_roots);
+        append_dispatcher_context_sections(prompt, &sections)
+    }
+
     async fn store_dispatcher_runtime(
         &self,
         thread_id: &str,
@@ -2252,10 +2324,13 @@ impl AppState {
             None
         };
 
-        let prompt = append_attachments_to_prompt(
-            &merge_dispatcher_prompt_with_user(&thread.prompt, initial_message),
-            attachments,
-        );
+        let prompt = self
+            .dispatcher_prompt_with_context(
+                thread,
+                &merge_dispatcher_prompt_with_user(&thread.prompt, initial_message),
+                attachments,
+            )
+            .await;
         let handle = executor
             .spawn(SpawnOptions {
                 cwd: PathBuf::from(
@@ -2588,14 +2663,13 @@ impl AppState {
         self.persist_dispatcher_thread(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
 
+        let runtime_prompt = self
+            .dispatcher_prompt_with_context(&updated, &runtime_message, &effective_attachments)
+            .await;
+
         if !uses_headless_codex_turns {
             if let Some(input_tx) = self.dispatcher_runtime_input(thread_id).await {
-                input_tx
-                    .send(ExecutorInput::Text(append_attachments_to_prompt(
-                        &runtime_message,
-                        &effective_attachments,
-                    )))
-                    .await?;
+                input_tx.send(ExecutorInput::Text(runtime_prompt)).await?;
             } else {
                 self.ensure_dispatcher_runtime(
                     &updated,
@@ -2715,9 +2789,12 @@ mod tests {
     use super::{
         codex_runtime_model_entry, codex_runtime_reasoning_supported_in_cache,
         dispatcher_context_attachment_paths, dispatcher_model_supported_for_agent,
-        merge_dispatcher_context_attachments, prepare_dispatcher_runtime_env,
+        merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
+        prepare_dispatcher_runtime_env, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
+        ACP_SESSION_KIND,
     };
-    use crate::state::{SessionRecord, SessionStatus};
+    use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
+    use chrono::Utc;
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -2855,6 +2932,66 @@ mod tests {
                 ".acp/session-memory.md".to_string(),
                 "CONDUCTOR.md".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn normalize_loaded_dispatcher_thread_strips_internal_context_attachments() {
+        let mut thread = SessionRecord::new(
+            "dispatcher-load-test".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/repo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::Idle;
+        thread
+            .metadata
+            .insert("sessionKind".to_string(), ACP_SESSION_KIND.to_string());
+        thread
+            .metadata
+            .insert("role".to_string(), "orchestrator".to_string());
+        thread.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+        thread.metadata.insert(
+            "acpProjectMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/demo/project-memory.md".to_string(),
+        );
+        thread.metadata.insert(
+            "acpSessionMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/demo/session-memory.md".to_string(),
+        );
+        thread.metadata.insert(
+            "acpBoardPath".to_string(),
+            "projects/demo/CONDUCTOR.md".to_string(),
+        );
+        thread.conversation.push(ConversationEntry {
+            id: "user-turn".to_string(),
+            kind: "user_message".to_string(),
+            source: "dispatcher_ui".to_string(),
+            text: "create two tasks".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: vec![
+                ".conductor/rust-backend/acp/demo/project-memory.md".to_string(),
+                ".conductor/rust-backend/acp/demo/session-memory.md".to_string(),
+                ".conductor/rust-backend/acp/demo/generated-context.md".to_string(),
+                "projects/demo/CONDUCTOR.md".to_string(),
+                "notes/spec.md".to_string(),
+            ],
+            metadata: HashMap::new(),
+        });
+
+        assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert_eq!(
+            thread.conversation[0].attachments,
+            vec!["notes/spec.md".to_string()]
         );
     }
 }

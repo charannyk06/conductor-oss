@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task;
+use url::Url;
 
 use crate::routes::boards::{split_task_text, BoardTaskPacket, BoardTaskRecord};
 use crate::state::AppState;
@@ -686,7 +687,7 @@ fn read_text_preview(path: &Path, limit: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(truncated).to_string())
 }
 
-fn attachment_context_sections(
+pub(crate) fn attachment_context_sections(
     state: &AppState,
     attachments: &[String],
     allowed_roots: &[PathBuf],
@@ -736,7 +737,12 @@ fn attachment_context_sections(
 }
 
 fn resolve_attachment_path(workspace_root: &Path, value: &str) -> Option<PathBuf> {
-    let candidate = PathBuf::from(value);
+    let candidate = if value.starts_with("file://") {
+        let url = Url::parse(value).ok()?;
+        url.to_file_path().ok()?
+    } else {
+        PathBuf::from(value)
+    };
     let resolved = if candidate.is_absolute() {
         candidate
     } else {
@@ -745,7 +751,7 @@ fn resolve_attachment_path(workspace_root: &Path, value: &str) -> Option<PathBuf
     std::fs::canonicalize(resolved).ok()
 }
 
-fn attachment_allowed_roots(
+pub(crate) fn attachment_allowed_roots(
     state: &AppState,
     project_id: &str,
     project: &ProjectConfig,
@@ -910,6 +916,22 @@ mod tests {
         fs::write(&file, "hello").unwrap();
 
         let resolved = resolve_attachment_path(&workspace, "docs/../docs/note.txt");
+        assert_eq!(resolved, Some(fs::canonicalize(&file).unwrap()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_attachment_path_supports_file_uris() {
+        let root = temp_root();
+        let workspace = root.join("workspace");
+        let nested = workspace.join("docs");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("note.txt");
+        fs::write(&file, "hello").unwrap();
+
+        let uri = format!("file://{}", file.display());
+        let resolved = resolve_attachment_path(&workspace, &uri);
         assert_eq!(resolved, Some(fs::canonicalize(&file).unwrap()));
 
         fs::remove_dir_all(root).unwrap();

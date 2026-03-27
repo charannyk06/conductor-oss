@@ -921,10 +921,14 @@ fn normalized_entry_attachments(
     .filter_map(|key| session.metadata.get(*key))
     .collect::<Vec<_>>();
 
+    let hidden_prefix = format!(".conductor/rust-backend/acp/{}/", session.project_id);
+
     entry
         .attachments
         .iter()
-        .filter(|attachment| !hidden.contains(attachment))
+        .filter(|attachment| {
+            !hidden.contains(attachment) && !attachment.trim().starts_with(&hidden_prefix)
+        })
         .cloned()
         .collect()
 }
@@ -1561,13 +1565,14 @@ mod tests {
         session
             .metadata
             .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+        session.project_id = "demo".to_string();
         session.metadata.insert(
             "acpProjectMemoryPath".to_string(),
-            ".conductor/rust-backend/acp/project-memory.md".to_string(),
+            ".conductor/rust-backend/acp/demo/project-memory.md".to_string(),
         );
         session.metadata.insert(
             "acpSessionMemoryPath".to_string(),
-            ".conductor/rust-backend/acp/session-memory.md".to_string(),
+            ".conductor/rust-backend/acp/demo/session-memory.md".to_string(),
         );
         session.metadata.insert(
             "acpBoardPath".to_string(),
@@ -1580,8 +1585,9 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             source: "follow_up".to_string(),
             attachments: vec![
-                ".conductor/rust-backend/acp/project-memory.md".to_string(),
-                ".conductor/rust-backend/acp/session-memory.md".to_string(),
+                ".conductor/rust-backend/acp/demo/project-memory.md".to_string(),
+                ".conductor/rust-backend/acp/demo/session-memory.md".to_string(),
+                ".conductor/rust-backend/acp/demo/generated-context.md".to_string(),
                 "projects/demo/CONDUCTOR.md".to_string(),
                 "notes/spec.md".to_string(),
             ],
