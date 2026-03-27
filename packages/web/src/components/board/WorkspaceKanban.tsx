@@ -210,6 +210,12 @@ type BoardListEntry = {
   heading: string;
 };
 
+type BoardListGroup = {
+  key: string;
+  label: string | null;
+  items: BoardListEntry[];
+};
+
 const ROLE_COLOR: Record<BoardRole, string> = {
   intake: "#3c83f6",
   ready: "#f59f0a",
@@ -401,7 +407,7 @@ function getBoardPrioritySortIndex(priority: string | null): number {
   return index >= 0 ? index : BOARD_PRIORITY_ORDER.length;
 }
 
-function toggleBoardListValue(values: string[], value: string): string[] {
+function toggleBoardListValue<T extends string>(values: T[], value: T): T[] {
   return values.includes(value)
     ? values.filter((item) => item !== value)
     : [...values, value];
@@ -2274,12 +2280,12 @@ export function WorkspaceKanban({
 
     return sortedEntries;
   }, [allColumns, boardListView, search]);
-  const groupedBoardListEntries = useMemo(() => {
+  const groupedBoardListEntries = useMemo<BoardListGroup[]>(() => {
     if (boardListView.groupBy === "none") {
       return [{ key: "__all", label: null as string | null, items: boardListEntries }];
     }
     if (boardListView.groupBy === "status") {
-      return BOARD_ROLE_ORDER.map((role) => {
+      return BOARD_ROLE_ORDER.map<BoardListGroup | null>((role) => {
         const items = boardListEntries.filter((entry) => entry.role === role);
         if (items.length === 0) return null;
         return {
@@ -2287,15 +2293,10 @@ export function WorkspaceKanban({
           label: items[0]?.heading || ROLE_LABEL[role],
           items,
         };
-      }).filter(
-        (
-          value
-        ): value is { key: string; label: string | null; items: BoardListEntry[] } =>
-          Boolean(value)
-      );
+      }).filter((value): value is BoardListGroup => value !== null);
     }
     if (boardListView.groupBy === "priority") {
-      return BOARD_PRIORITY_ORDER.map((priority) => {
+      return BOARD_PRIORITY_ORDER.map<BoardListGroup | null>((priority) => {
         const items = boardListEntries.filter(
           (entry) => entry.task.priority === priority
         );
@@ -2305,12 +2306,7 @@ export function WorkspaceKanban({
           label: priority[0]?.toUpperCase() + priority.slice(1),
           items,
         };
-      }).filter(
-        (
-          value
-        ): value is { key: string; label: string | null; items: BoardListEntry[] } =>
-          Boolean(value)
-      );
+      }).filter((value): value is BoardListGroup => value !== null);
     }
 
     const grouped = new Map<string, BoardListEntry[]>();
@@ -3071,9 +3067,7 @@ export function WorkspaceKanban({
                   type="button"
                   className={cn(
                     "p-1.5 transition-colors",
-                    boardLayout === "kanban"
-                      ? "bg-[var(--vk-bg-hover)] text-[var(--vk-text-normal)]"
-                      : "text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
+                    "text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
                   )}
                   onClick={() => setBoardLayout("kanban")}
                   title="Board view"
