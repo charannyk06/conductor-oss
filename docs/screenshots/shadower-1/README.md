@@ -8,16 +8,16 @@ Branch: `task/t-f5d1ec-a-860f66`
 
 ## Files
 
-1. `01-shadower-chat-home.png`  
-   Main workspace home (Chat mode) with `shadower` selected.
+1. `01-shadower-dispatcher-home.png`
+   Main workspace home with `shadower` selected and the dispatcher pane visible.
 2. `02-shadower-board.png`  
    Real board view with the `Shadower-1` task in flow.
-3. `03-shadower-chat-panel.png`  
-   Chat prompt panel for creating/spawning new workspaces.
+3. `03-shadower-dispatcher-panel.png`
+   Dispatcher panel for shaping and spawning new work.
 4. `04-shadower-session-overview.png`  
    Session detail, Overview tab.
-5. `05-shadower-session-chat.png`  
-   Session detail, Chat tab.
+5. `05-shadower-session-terminal.png`
+   Session detail, Terminal tab.
 6. `06-shadower-session-diff.png`  
    Session detail, Diff tab.
 7. `07-new-workspace-dialog.png`  

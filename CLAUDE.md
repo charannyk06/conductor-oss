@@ -15,7 +15,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 - **Backend:** Rust (axum, tokio, sqlx/SQLite). Repo dev scripts use port 4749; the launcher defaults to 4748 and forwards `CONDUCTOR_BACKEND_URL` / `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` into the dashboard.
 - **Dashboard:** Next.js (packages/web). Repo dev scripts use port 3000; the launcher defaults to 4747.
 - **CLI:** Node.js launcher + Rust native binary
-- **Runtime:** ttyd-first PTY-based session management
+- **Runtime:** ttyd-first PTY-based session management; regular sessions stay terminal-first and only ACP dispatcher sessions use the dispatcher conversation pane
 - **Persistence:** SQLite in `.conductor/conductor.db` + Markdown files
 - **Bridge/Access:** optional relay, paired-device bridge, and dashboard access-control flows in the same repo
 

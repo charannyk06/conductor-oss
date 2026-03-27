@@ -15,7 +15,7 @@ const TIMEOUT_MS = 45_000;
 
 const STEPS = [
   { file: "01-dashboard-overview.png", label: "overview", run: captureDashboard },
-  { file: "02-dashboard-chat.png", label: "chat", run: openChatTab },
+  { file: "02-dashboard-dispatcher.png", label: "dispatcher", run: openDispatcherTab },
   { file: "03-dashboard-review.png", label: "review", run: openReviewTab },
   { file: "04-dashboard-agents.png", label: "agents", run: openAgentsTab },
   { file: "05-launch-session.png", label: "launch", run: openLaunchFlow },
@@ -113,9 +113,9 @@ async function captureDashboard(page, fileName = "01-dashboard-overview.png") {
   await snapshot(page, fileName, "overview");
 }
 
-async function openChatTab(page, fileName = "02-dashboard-chat.png") {
-  await openTab(page, "Chat");
-  await snapshot(page, fileName, "chat");
+async function openDispatcherTab(page, fileName = "02-dashboard-dispatcher.png") {
+  await openTab(page, "Dispatcher");
+  await snapshot(page, fileName, "dispatcher");
 }
 
 async function openReviewTab(page, fileName = "03-dashboard-review.png") {

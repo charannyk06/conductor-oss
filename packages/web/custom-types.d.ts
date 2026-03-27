@@ -30,10 +30,7 @@ type AppRouteHandlerRoutes =
   | "/api/sessions/[id]/archive"
   | "/api/sessions/[id]/checks"
   | "/api/sessions/[id]/diff"
-  | "/api/sessions/[id]/feedback"
   | "/api/sessions/[id]/files"
-  | "/api/sessions/[id]/feed"
-  | "/api/sessions/[id]/interrupt"
   | "/api/sessions/[id]/keys"
   | "/api/sessions/[id]/kill"
   | "/api/sessions/[id]/output"
@@ -42,7 +39,6 @@ type AppRouteHandlerRoutes =
   | "/api/sessions/[id]/preview/dom"
   | "/api/sessions/[id]/preview/screenshot"
   | "/api/sessions/[id]/restore"
-  | "/api/sessions/[id]/send"
   | "/api/spawn"
   | "/api/workspaces"
   | "/api/workspaces/branches"
@@ -79,10 +75,7 @@ interface ParamMap {
   "/api/sessions/[id]/archive": { "id": string; }
   "/api/sessions/[id]/checks": { "id": string; }
   "/api/sessions/[id]/diff": { "id": string; }
-  "/api/sessions/[id]/feedback": { "id": string; }
   "/api/sessions/[id]/files": { "id": string; }
-  "/api/sessions/[id]/feed": { "id": string; }
-  "/api/sessions/[id]/interrupt": { "id": string; }
   "/api/sessions/[id]/keys": { "id": string; }
   "/api/sessions/[id]/kill": { "id": string; }
   "/api/sessions/[id]/output": { "id": string; }
@@ -91,7 +84,6 @@ interface ParamMap {
   "/api/sessions/[id]/preview/dom": { "id": string; }
   "/api/sessions/[id]/preview/screenshot": { "id": string; }
   "/api/sessions/[id]/restore": { "id": string; }
-  "/api/sessions/[id]/send": { "id": string; }
   "/api/spawn": {}
   "/api/workspaces": {}
   "/api/workspaces/branches": {}
