@@ -5,7 +5,7 @@ import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, ListTodo, Loader2, PencilLine } from "lucide-react";
 import { DispatcherPreferenceChips } from "@/components/dispatcher/DispatcherPreferenceChips";
-import { SessionChatDock } from "@/components/sessions/SessionChatDock";
+import { DispatcherSessionPane } from "@/components/dispatcher/DispatcherSessionPane";
 import {
   buildModelSelection,
   resolveModelSelectionValue,
@@ -17,13 +17,13 @@ import { cn } from "@/lib/cn";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import type { DashboardSession } from "@/lib/types";
 
-type DispatcherChatDockProps = {
+type DispatcherPaneProps = {
   thread: DashboardSession;
-  threads: DashboardSession[];
+  threads?: DashboardSession[];
   projectId: string;
   bridgeId?: string | null;
-  modelAccess: ModelAccessPreferences;
-  runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
+  modelAccess?: ModelAccessPreferences;
+  runtimeModelCatalogs?: Record<string, RuntimeAgentModelCatalog>;
   onSelectThread?: (threadId: string) => void;
   onStartNewConversation?: () => void;
   creatingConversation?: boolean;
@@ -74,7 +74,7 @@ function summarizeThread(thread: DashboardSession): string {
   if (thread.status === "working") {
     return "Working";
   }
-  return `Conversation ${thread.id.slice(0, 8)}`;
+  return `Thread ${thread.id.slice(0, 8)}`;
 }
 
 function DispatcherBadge({
@@ -101,19 +101,19 @@ function DispatcherBadge({
   );
 }
 
-export function DispatcherChatDock({
+export function DispatcherPane({
   thread,
-  threads,
+  threads = [],
   projectId,
   bridgeId,
-  modelAccess,
-  runtimeModelCatalogs,
+  modelAccess = {} as ModelAccessPreferences,
+  runtimeModelCatalogs = {},
   onSelectThread,
   onStartNewConversation,
   creatingConversation = false,
   onToggleCollapse,
   className,
-}: DispatcherChatDockProps) {
+}: DispatcherPaneProps) {
   const preferredImplementationAgent = useMemo(
     () => readMetadataValue(thread, "acpImplementationAgent", "codex"),
     [thread],
@@ -152,6 +152,7 @@ export function DispatcherChatDock({
       preferredImplementationReasoning || null,
     ));
   const [updatingPreferences, setUpdatingPreferences] = useState(false);
+  const showPreferenceEditor = Object.keys(runtimeModelCatalogs).length > 0;
 
   useEffect(() => {
     setImplementationAgent(preferredImplementationAgent);
@@ -240,8 +241,8 @@ export function DispatcherChatDock({
             <button
               type="button"
               className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-              aria-label="Switch conversation"
-              title="Switch conversation"
+              aria-label="Switch dispatcher thread"
+              title="Switch dispatcher thread"
             >
               <ListTodo className="h-3.5 w-3.5" />
             </button>
@@ -253,7 +254,7 @@ export function DispatcherChatDock({
               className="z-50 min-w-[300px] rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
             >
               <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
-                Conversations
+                Threads
               </div>
               {threads.map((candidate) => {
                 const selected = candidate.id === thread.id;
@@ -288,8 +289,8 @@ export function DispatcherChatDock({
           onClick={onStartNewConversation}
           disabled={creatingConversation}
           className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:cursor-not-allowed disabled:opacity-60"
-          aria-label="Start new conversation"
-          title="Start new conversation"
+          aria-label="Start new dispatcher thread"
+          title="Start new dispatcher thread"
         >
           {creatingConversation ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -303,15 +304,17 @@ export function DispatcherChatDock({
 
   const composerToolbar = (
     <div className="space-y-2">
-      <DispatcherPreferenceChips
-        implementationAgent={implementationAgent}
-        modelSelection={modelSelection}
-        modelAccess={modelAccess}
-        runtimeModelCatalogs={runtimeModelCatalogs}
-        disabled={updatingPreferences}
-        onImplementationAgentChange={handleImplementationAgentChange}
-        onModelSelectionChange={handleModelSelectionChange}
-      />
+      {showPreferenceEditor ? (
+        <DispatcherPreferenceChips
+          implementationAgent={implementationAgent}
+          modelSelection={modelSelection}
+          modelAccess={modelAccess}
+          runtimeModelCatalogs={runtimeModelCatalogs}
+          disabled={updatingPreferences}
+          onImplementationAgentChange={handleImplementationAgentChange}
+          onModelSelectionChange={handleModelSelectionChange}
+        />
+      ) : null}
       <div className="flex flex-wrap gap-2">
         <DispatcherBadge
           label={heartbeatState === "due" ? "Heartbeat due" : "Heartbeat active"}
@@ -335,7 +338,7 @@ export function DispatcherChatDock({
   );
 
   return (
-    <SessionChatDock
+    <DispatcherSessionPane
       session={thread}
       bridgeId={bridgeId}
       onToggleCollapse={onToggleCollapse}

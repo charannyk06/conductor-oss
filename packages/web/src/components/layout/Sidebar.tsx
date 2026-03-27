@@ -19,7 +19,7 @@ interface SidebarProps {
   selectedId: string | null;
   onSelect: (
     id: string,
-    options?: { tab?: "overview" | "preview" | "diff" | "chat" | "terminal" },
+    options?: { tab?: "overview" | "preview" | "diff" | "dispatcher" | "terminal" },
   ) => void;
   onArchive?: (id: string) => Promise<void> | void;
   onCreateWorkspace?: () => void;

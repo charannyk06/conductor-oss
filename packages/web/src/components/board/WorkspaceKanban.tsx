@@ -39,6 +39,7 @@ import { usePreferences } from "@/hooks/usePreferences";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
 import { buildSessionHref } from "@/lib/dashboardHref";
+import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 
 type BoardRole =
   | "intake"
@@ -175,6 +176,12 @@ type ProjectSession = {
   metadata?: Record<string, string> | null;
 };
 
+function getPrimaryTabForSession(
+  session: Pick<ProjectSession, "metadata"> | null | undefined,
+): "dispatcher" | "terminal" {
+  return getDefaultSessionPrimaryTab({ metadata: session?.metadata ?? {} });
+}
+
 interface WorkspaceKanbanProps {
   projectId: string | null;
   bridgeId?: string | null;
@@ -184,7 +191,7 @@ interface WorkspaceKanbanProps {
   projectLabel?: string | null;
   headerAccessory?: ReactNode;
   onOpenSession?: (sessionId: string, options?: {
-    tab?: "overview" | "preview" | "diff" | "chat" | "terminal";
+    tab?: "overview" | "preview" | "diff" | "dispatcher" | "terminal";
   }) => void;
 }
 
@@ -1340,7 +1347,7 @@ function BoardTaskCard({
   onOpenContextAttachment: (path: string) => void | Promise<void>;
   onOpenSessionView: (
     sessionId: string,
-    tab?: "chat" | "terminal"
+    tab?: "dispatcher" | "terminal"
   ) => void | Promise<void>;
   onOpenEditor: (task: BoardTask, role: BoardRole) => void;
   dragEnabled?: boolean;
@@ -1467,7 +1474,7 @@ function BoardTaskCard({
             {primaryLinkedSession ? (
               <button
                 type="button"
-                onClick={() => void onOpenSessionView(primaryLinkedSession.id, "chat")}
+                onClick={() => void onOpenSessionView(primaryLinkedSession.id, getPrimaryTabForSession(primaryLinkedSession))}
                 className="flex w-full items-center justify-between gap-2 rounded-[3px] border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                 title={primaryLinkedSession.id}
               >
@@ -1508,7 +1515,7 @@ function BoardTaskCard({
                 <button
                   key={session.id}
                   type="button"
-                  onClick={() => void onOpenSessionView(session.id, "chat")}
+                  onClick={() => void onOpenSessionView(session.id, getPrimaryTabForSession(session))}
                   className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                   title={session.id}
                 >
@@ -1541,7 +1548,7 @@ function BoardTaskCard({
             {unresolvedPrimaryLink ? (
               <button
                 type="button"
-                onClick={() => void onOpenSessionView(unresolvedPrimaryLink, "chat")}
+                onClick={() => void onOpenSessionView(unresolvedPrimaryLink, "terminal")}
                 className="flex w-full items-center justify-between gap-2 rounded-[3px] px-2 py-1.5 text-left hover:bg-[var(--vk-bg-hover)]"
                 title={unresolvedPrimaryLink}
               >
@@ -1607,7 +1614,7 @@ function BoardListRow({
   boardRepository?: string | null;
   projectSessions: ProjectSession[];
   onOpenEditor: (task: BoardTask, role: BoardRole) => void;
-  onOpenSessionView: (sessionId: string, tab?: "chat" | "terminal") => void;
+  onOpenSessionView: (sessionId: string, tab?: "dispatcher" | "terminal") => void;
 }) {
   const { task, role } = entry;
   const { title: taskTitle } = splitTaskText(task.text);
@@ -1665,7 +1672,7 @@ function BoardListRow({
                 event.preventDefault();
                 event.stopPropagation();
                 if (primaryLinkedSession) {
-                  onOpenSessionView(primaryLinkedSession.id, "chat");
+                  onOpenSessionView(primaryLinkedSession.id, getPrimaryTabForSession(primaryLinkedSession));
                 }
               }}
               className="inline-flex items-center gap-1 rounded-full bg-[color:color-mix(in_srgb,var(--status-working)_18%,transparent)] px-2 py-0.5 text-[10px] font-medium text-[var(--status-working)]"
@@ -1745,7 +1752,7 @@ function BoardListRow({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              onOpenSessionView(primaryLinkedSession.id, "chat");
+              onOpenSessionView(primaryLinkedSession.id, getPrimaryTabForSession(primaryLinkedSession));
             }}
             className="text-[11px] text-[var(--vk-text-muted)] hover:text-[var(--vk-text-normal)]"
           >
@@ -2028,7 +2035,7 @@ export function WorkspaceKanban({
   );
 
   const openSessionView = useCallback(
-    (sessionId: string, tab: "chat" | "terminal" = "chat") => {
+    (sessionId: string, tab: "dispatcher" | "terminal" = "terminal") => {
       if (onOpenSession) {
         onOpenSession(sessionId, { tab });
         return;

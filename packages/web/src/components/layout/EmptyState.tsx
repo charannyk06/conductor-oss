@@ -25,7 +25,7 @@ export function LayoutEmptyState({
           <div>
             <h2 className="text-[17px] font-semibold text-[var(--text-strong)]">Select a session</h2>
             <p className="mt-1 text-[13px] text-[var(--text-muted)]">
-              Pick a live session from the left rail to open the streaming chat, timeline, and diff views.
+              Pick a live session from the left rail to open the terminal, preview, and diff views.
             </p>
           </div>
 
