@@ -30,8 +30,8 @@ use super::{
     TTYD_WS_URL_METADATA_KEY,
 };
 use crate::acp_prompt::{
-    acp_dispatcher_preference_note, acp_dispatcher_turn_prefix, matches_acp_approve_command,
-    rewrite_acp_dispatcher_command,
+    acp_dispatcher_preference_note, acp_dispatcher_turn_allows_board_mutations,
+    acp_dispatcher_turn_prefix, rewrite_acp_dispatcher_command,
 };
 use crate::error_logger::{categories, ErrorContext};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
@@ -1871,8 +1871,8 @@ impl AppState {
             let preferred_implementation_model = dispatcher_preferred_implementation_model(session);
             let preferred_implementation_reasoning =
                 dispatcher_preferred_implementation_reasoning_effort(session);
-            let approved_turn = matches_acp_approve_command(&message);
-            let approval_state = if approved_turn {
+            let allow_board_mutations = acp_dispatcher_turn_allows_board_mutations(&message);
+            let approval_state = if allow_board_mutations {
                 ACP_APPROVAL_GRANTED
             } else {
                 ACP_APPROVAL_REQUIRED
@@ -1883,7 +1883,7 @@ impl AppState {
             );
             runtime_message = format!(
                 "{}\n\n{}\n\n{}",
-                acp_dispatcher_turn_prefix(approved_turn),
+                acp_dispatcher_turn_prefix(allow_board_mutations),
                 acp_dispatcher_preference_note(
                     &preferred_implementation_agent,
                     preferred_implementation_model.as_deref(),
@@ -2077,10 +2077,10 @@ impl AppState {
                 dispatcher_preferred_implementation_model(&session_snapshot);
             let preferred_implementation_reasoning =
                 dispatcher_preferred_implementation_reasoning_effort(&session_snapshot);
-            let approved_turn = matches_acp_approve_command(&message);
+            let allow_board_mutations = acp_dispatcher_turn_allows_board_mutations(&message);
             runtime_message = format!(
                 "{}\n\n{}\n\n{}",
-                acp_dispatcher_turn_prefix(approved_turn),
+                acp_dispatcher_turn_prefix(allow_board_mutations),
                 acp_dispatcher_preference_note(
                     &preferred_implementation_agent,
                     preferred_implementation_model.as_deref(),
@@ -2204,7 +2204,7 @@ impl AppState {
             touch_acp_dispatcher_heartbeat(session);
             session.metadata.insert(
                 ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
-                if matches_acp_approve_command(&message) {
+                if acp_dispatcher_turn_allows_board_mutations(&message) {
                     ACP_APPROVAL_GRANTED.to_string()
                 } else {
                     ACP_APPROVAL_REQUIRED.to_string()

@@ -24,8 +24,8 @@ use super::{
     ACP_SESSION_MCP_SERVERS_METADATA_KEY,
 };
 use crate::acp_prompt::{
-    acp_dispatcher_preference_note, acp_dispatcher_turn_prefix, matches_acp_approve_command,
-    rewrite_acp_dispatcher_command,
+    acp_dispatcher_preference_note, acp_dispatcher_turn_allows_board_mutations,
+    acp_dispatcher_turn_prefix, rewrite_acp_dispatcher_command,
 };
 use crate::task_context::{attachment_allowed_roots, attachment_context_sections};
 use conductor_core::types::DEFAULT_SESSION_HISTORY_LIMIT;
@@ -395,9 +395,9 @@ fn should_sync_dispatcher_session_memory(session: &mut SessionRecord, force: boo
 }
 
 fn heartbeat_due_eligible(session: &SessionRecord) -> bool {
-    !matches!(
+    matches!(
         session.status,
-        SessionStatus::Queued | SessionStatus::Spawning | SessionStatus::Working
+        SessionStatus::Idle | SessionStatus::NeedsInput
     )
 }
 
@@ -983,15 +983,23 @@ fn normalize_loaded_dispatcher_thread(thread: &mut SessionRecord) -> bool {
             .insert("role".to_string(), "orchestrator".to_string());
         changed = true;
     }
-    if thread
+    let should_grant_approval = thread
         .metadata
         .get(ACP_APPROVAL_STATE_METADATA_KEY)
         .map(String::as_str)
         .is_none()
-    {
+        || (thread
+            .metadata
+            .get(ACP_APPROVAL_STATE_METADATA_KEY)
+            .map(String::as_str)
+            == Some(ACP_APPROVAL_REQUIRED)
+            && thread.status == SessionStatus::Idle
+            && thread.activity.as_deref() == Some("idle")
+            && thread.summary.as_deref() == Some("Dispatcher ready"));
+    if should_grant_approval {
         thread.metadata.insert(
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
-            ACP_APPROVAL_REQUIRED.to_string(),
+            ACP_APPROVAL_GRANTED.to_string(),
         );
         changed = true;
     }
@@ -1442,26 +1450,28 @@ pub(crate) fn build_acp_dispatcher_prompt(
             "- Research or audit: create scoped investigation tasks with explicit deliverables and no hidden implementation work\n\n",
             "Operating rules:\n",
             "- Operate against the main project workspace, current checked-out branch, and board context; do not create isolated implementation branches or worktrees from this ACP session\n",
-            "- Default to planning mode: inspect the repo and board, then produce the finalized plan before making board changes\n",
+            "- Default to execution mode: inspect the repo and board first, then create or update the right board tasks in the same turn when the request is actionable\n",
             "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
             "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
             "- Keep the conversation stateful and use the board as the shared execution surface\n",
             "- Every task you create should carry a real execution packet, not vague notes\n",
+            "- Use enough tool calls to inspect relevant files, diffs, branches, board history, and live attempts before shaping or updating tasks\n",
             "- Use the board task packet fields explicitly when creating or updating tasks: `objective`, `execution_mode`, `surfaces`, `constraints`, `dependencies`, `acceptance`, `skills`, `review_refs`, and `deliverables`\n",
+            "- ACP task creation now rejects thin handoffs: every created task needs a real agent assignment, objective, execution mode, surfaces, acceptance, skills, deliverables, and concrete context through notes, dependencies, constraints, review refs, or attachments\n",
             "- When an implementation preference is present, persist it onto the task using `agent:<name>`, `model:<id>`, and `reasoningEffort:<level>` metadata unless the user explicitly overrides it\n",
+            "- If the current dispatcher turn includes user-provided attachments, those attachments should travel with the tasks you create unless you are intentionally narrowing to a smaller task-specific subset\n",
             "- For implementation tasks, default `execution_mode` to `worktree` unless main-workspace or temp-clone execution is genuinely better\n",
             "- For repo review, PR review, and dispatcher shaping work, prefer `task_type=review` and `execution_mode=main_workspace` so the worker inspects the current branch directly without creating an extra repo copy\n",
             "- Use `execution_mode=temp_clone` only when the user explicitly asks for isolation or the task genuinely needs a separate full repo copy for destructive repro, cross-branch comparison, or external branch inspection\n",
             "- For review tasks, capture the exact PR URLs, branches, commits, issues, and files to inspect in `review_refs` and `surfaces`\n",
             "- For implementation tasks, capture the exact files or surfaces to inspect, the rules that must not be violated, the dependencies, and the concrete acceptance criteria before handing off\n",
             "- For research or audit tasks, set clear deliverables such as review memo, comparison, risk list, migration plan, or reproduction notes\n",
-            "- Before any board mutation, first present: the proposed plan, the exact board/task mutations, the intended tool calls, and the recommended implementation agent per task\n",
-            "- Do not create or update board tasks until the user explicitly approves the proposal\n",
-            "- If the user asks for revisions, revise the proposal and ask for approval again\n",
-            "- After explicit approval, execute only the approved board/task mutations and then report the exact task refs or titles you created or updated\n",
-            "- When proposing tasks, use a compact task packet for each item: title, target board role, task type, recommended agent, execution mode, objective, exact files or surfaces to inspect, constraints, dependencies, acceptance shape, and deliverables\n",
-            "- Proposal format should be concise and explicit: summary, board mutations, intended MCP tool calls, then task packets\n",
-            "- When creating tasks after approval, keep the board task title concise and use the task packet fields to populate the generated task brief so a dedicated coding or review session can execute without reopening planning\n",
+            "- If the user explicitly asks for a plan-only review, stop after presenting: the proposed plan, the exact board/task mutations, the intended tool calls, and the recommended implementation agent per task\n",
+            "- If the request is ambiguous or a mutation would be risky, you may pause for a plan-only review before mutating the board\n",
+            "- When proposing tasks in plan-only mode, use a compact task packet for each item: title, target board role, task type, recommended agent, execution mode, objective, exact files or surfaces to inspect, constraints, dependencies, acceptance shape, and deliverables\n",
+            "- Plan-only proposal format should be concise and explicit: summary, board mutations, intended MCP tool calls, then task packets\n",
+            "- When creating tasks, keep the board task title concise and use the task packet fields to populate the generated task brief so a dedicated coding or review session can execute without reopening planning\n",
+            "- If the user asks for revisions after a plan-only review, revise the proposal and wait before mutating the board again\n",
             "- If you defer work, create an explicit follow-up task instead of burying it in chat, such as a Phase 2 heartbeat or memory integration item\n",
             "- If you create tasks, assign the best-fit implementation agent (`codex`, `claude-code`, or `gemini`) and reference the exact task refs or titles you created so the user can launch coding sessions from them\n"
         ),
@@ -1751,7 +1761,7 @@ impl AppState {
         );
         thread.metadata.insert(
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
-            ACP_APPROVAL_REQUIRED.to_string(),
+            ACP_APPROVAL_GRANTED.to_string(),
         );
         let selected_implementation_agent = implementation_agent.unwrap_or_else(|| {
             default_implementation_agent(
@@ -2498,6 +2508,7 @@ impl AppState {
             append_output(&mut thread.output, &line);
         }
         thread.last_activity_at = Utc::now().to_rfc3339();
+        touch_acp_dispatcher_heartbeat(thread);
 
         match event {
             ExecutorOutput::Stdout(line) => {
@@ -2681,10 +2692,10 @@ impl AppState {
         let preferred_implementation_model = dispatcher_preferred_implementation_model(thread);
         let preferred_implementation_reasoning =
             dispatcher_preferred_implementation_reasoning_effort(thread);
-        let approved_turn = matches_acp_approve_command(&message);
+        let allow_board_mutations = acp_dispatcher_turn_allows_board_mutations(&message);
         thread.metadata.insert(
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
-            if approved_turn {
+            if allow_board_mutations {
                 ACP_APPROVAL_GRANTED.to_string()
             } else {
                 ACP_APPROVAL_REQUIRED.to_string()
@@ -2693,7 +2704,7 @@ impl AppState {
         let runtime_input_message = runtime_message.as_deref().unwrap_or(&message);
         let mut runtime_message = format!(
             "{}\n\n{}\n\n{}",
-            acp_dispatcher_turn_prefix(approved_turn),
+            acp_dispatcher_turn_prefix(allow_board_mutations),
             acp_dispatcher_preference_note(
                 &preferred_implementation_agent,
                 preferred_implementation_model.as_deref(),
@@ -2868,8 +2879,8 @@ mod tests {
         dispatcher_context_attachment_paths, dispatcher_model_supported_for_agent,
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
-        CreateDispatcherThreadOptions, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
-        ACP_HEARTBEAT_INTERVAL, ACP_SESSION_KIND,
+        CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED,
+        ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL, ACP_SESSION_KIND,
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
     use chrono::Utc;
@@ -3111,6 +3122,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn normalize_loaded_dispatcher_thread_restores_ready_dispatchers_to_execution_mode() {
+        let mut thread = SessionRecord::new(
+            "dispatcher-load-approval".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/repo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "dispatcher prompt".to_string(),
+            None,
+        );
+        thread.status = SessionStatus::Idle;
+        thread.activity = Some("idle".to_string());
+        thread.summary = Some("Dispatcher ready".to_string());
+        thread
+            .metadata
+            .insert("sessionKind".to_string(), ACP_SESSION_KIND.to_string());
+        thread
+            .metadata
+            .insert("role".to_string(), "orchestrator".to_string());
+        thread.metadata.insert(
+            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+            ACP_APPROVAL_REQUIRED.to_string(),
+        );
+
+        assert!(normalize_loaded_dispatcher_thread(&mut thread));
+        assert_eq!(
+            thread
+                .metadata
+                .get(ACP_APPROVAL_STATE_METADATA_KEY)
+                .map(String::as_str),
+            Some(ACP_APPROVAL_GRANTED)
+        );
+    }
+
     #[tokio::test]
     async fn runtime_events_refresh_session_memory_artifacts() {
         let (root, state) = build_test_state("acp-runtime-memory-sync").await;
@@ -3136,6 +3185,60 @@ mod tests {
             .recent_conversation
             .iter()
             .any(|note| note.label == "Assistant" && note.text.contains("assistant update")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn structured_runtime_events_refresh_heartbeat_metadata() {
+        let (root, state) = build_test_state("acp-structured-heartbeat").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let overdue_at =
+            (Utc::now() - ACP_HEARTBEAT_INTERVAL - chrono::Duration::minutes(1)).to_rfc3339();
+        thread
+            .metadata
+            .insert("acpHeartbeatState".to_string(), "due".to_string());
+        thread
+            .metadata
+            .insert("acpLastHeartbeatAt".to_string(), overdue_at.clone());
+        thread
+            .metadata
+            .insert("acpNextHeartbeatAt".to_string(), overdue_at);
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                ExecutorOutput::StructuredStatus {
+                    text: "Thinking".to_string(),
+                    metadata: HashMap::new(),
+                },
+            )
+            .await
+            .expect("structured runtime event should be applied");
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(
+            updated
+                .metadata
+                .get("acpHeartbeatState")
+                .map(String::as_str),
+            Some("active")
+        );
+        assert!(updated
+            .metadata
+            .get("acpNextHeartbeatAt")
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -3173,6 +3276,46 @@ mod tests {
         state.maintain_acp_dispatchers().await;
 
         assert!(input_rx.try_recv().is_err());
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_ne!(updated.summary.as_deref(), Some("ACP heartbeat due"));
+        assert!(updated
+            .conversation
+            .iter()
+            .all(|entry| entry.source != "acp_heartbeat"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn watchdog_skips_terminal_dispatchers() {
+        let (root, state) = build_test_state("acp-watchdog-terminal").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let overdue_at =
+            (Utc::now() - ACP_HEARTBEAT_INTERVAL - chrono::Duration::minutes(1)).to_rfc3339();
+        thread.status = SessionStatus::Errored;
+        thread.activity = Some("exited".to_string());
+        thread
+            .metadata
+            .insert("acpHeartbeatState".to_string(), "active".to_string());
+        thread
+            .metadata
+            .insert("acpLastHeartbeatAt".to_string(), overdue_at.clone());
+        thread
+            .metadata
+            .insert("acpNextHeartbeatAt".to_string(), overdue_at);
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        state.maintain_acp_dispatchers().await;
+
         let updated = state
             .get_dispatcher_thread(&thread.id)
             .await

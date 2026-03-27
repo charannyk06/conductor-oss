@@ -11,7 +11,11 @@ use crate::routes::boards::{
     resolve_board_path_for_project, resolve_board_task_record, split_task_text, write_parsed_board,
     BoardTaskPacket, BoardTaskRecord, ParsedBoard, ParsedBoardColumn,
 };
-use crate::state::{AppState, SessionRecord, SessionStatus, SpawnRequest};
+use crate::state::{
+    dispatcher_preferred_implementation_agent, dispatcher_preferred_implementation_model,
+    dispatcher_preferred_implementation_reasoning_effort, AppState, SessionRecord, SessionStatus,
+    SpawnRequest,
+};
 
 const MCP_SERVER_NAME: &str = "conductor";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -118,7 +122,7 @@ impl AppStateMcpBackend {
         if approved && active_turn {
             return Ok(());
         }
-        bail!("ACP dispatcher board mutations require explicit approval for the current turn");
+        bail!("ACP dispatcher board mutations are disabled for this plan-only turn");
     }
 }
 
@@ -220,6 +224,7 @@ impl McpBackend for AppStateMcpBackend {
     async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value> {
         let project_id = self.resolve_project_id(args.project.as_deref()).await?;
         self.ensure_board_mutation_allowed(&project_id).await?;
+        let caller_session = self.caller_session().await?;
         let title = args.title.trim().to_string();
         if title.is_empty() {
             bail!("title is required");
@@ -228,38 +233,60 @@ impl McpBackend for AppStateMcpBackend {
         let board_path = resolve_board_path_for_project(&self.state, &project_id).await?;
         let board = parse_board(&board_path, &project_id);
         let role = normalize_role(args.role.as_deref().unwrap_or("intake"));
+        let attachments = merge_dispatcher_turn_attachments(
+            caller_session.as_ref(),
+            args.attachments.unwrap_or_default(),
+        );
+        let notes = trimmed_option(args.context_notes);
+        let task_type = trimmed_option(args.task_type);
+        let agent = effective_dispatcher_task_agent(caller_session.as_ref(), args.agent);
+        let model = effective_dispatcher_task_model(caller_session.as_ref(), args.model);
+        let reasoning_effort = effective_dispatcher_task_reasoning_effort(
+            caller_session.as_ref(),
+            args.reasoning_effort,
+        );
+        let packet = BoardTaskPacket {
+            objective: trimmed_option(args.objective),
+            execution_mode: args
+                .execution_mode
+                .as_deref()
+                .and_then(normalize_execution_mode)
+                .map(str::to_string),
+            surfaces: sanitize_string_list(args.surfaces.unwrap_or_default()),
+            constraints: sanitize_string_list(args.constraints.unwrap_or_default()),
+            dependencies: sanitize_string_list(args.dependencies.unwrap_or_default()),
+            acceptance: sanitize_string_list(args.acceptance.unwrap_or_default()),
+            skills: sanitize_string_list(args.skills.unwrap_or_default()),
+            review_refs: sanitize_string_list(args.review_refs.unwrap_or_default()),
+            deliverables: sanitize_string_list(args.deliverables.unwrap_or_default()),
+        };
+        validate_dispatcher_task_handoff(
+            caller_session.as_ref(),
+            &title,
+            task_type.as_deref(),
+            notes.as_deref(),
+            &attachments,
+            &packet,
+            agent.as_deref(),
+        )?;
+
         let task = BoardTaskRecord {
             id: uuid::Uuid::new_v4().to_string(),
             text: build_task_text(&title, args.description.as_deref()),
             checked: args.checked.unwrap_or(false),
-            agent: trimmed_option(args.agent),
-            model: trimmed_option(args.model),
-            reasoning_effort: trimmed_option(args.reasoning_effort)
-                .map(|value| value.to_ascii_lowercase()),
+            agent,
+            model,
+            reasoning_effort,
             project: Some(project_id.clone()),
-            task_type: trimmed_option(args.task_type),
+            task_type,
             priority: trimmed_option(args.priority),
             task_ref: Some(next_human_task_ref(&board, &project_id)),
             attempt_ref: trimmed_option(args.attempt_ref),
             issue_id: trimmed_option(args.issue_id),
             github_item_id: trimmed_option(args.github_item_id),
-            attachments: sanitize_string_list(args.attachments.unwrap_or_default()),
-            notes: trimmed_option(args.context_notes),
-            packet: BoardTaskPacket {
-                objective: trimmed_option(args.objective),
-                execution_mode: args
-                    .execution_mode
-                    .as_deref()
-                    .and_then(normalize_execution_mode)
-                    .map(str::to_string),
-                surfaces: sanitize_string_list(args.surfaces.unwrap_or_default()),
-                constraints: sanitize_string_list(args.constraints.unwrap_or_default()),
-                dependencies: sanitize_string_list(args.dependencies.unwrap_or_default()),
-                acceptance: sanitize_string_list(args.acceptance.unwrap_or_default()),
-                skills: sanitize_string_list(args.skills.unwrap_or_default()),
-                review_refs: sanitize_string_list(args.review_refs.unwrap_or_default()),
-                deliverables: sanitize_string_list(args.deliverables.unwrap_or_default()),
-            },
+            attachments,
+            notes,
+            packet,
         };
 
         insert_task_into_board(&board_path, role, &task, &project_id)?;
@@ -703,7 +730,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_CREATE_BOARD_TASK.to_string(),
-            description: "Create a new task directly on the Conductor board for a project".to_string(),
+            description: "Create a new task directly on the Conductor board for a project. ACP dispatcher turns must provide a launch-ready handoff packet, and current-turn attachments are inherited automatically.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -711,7 +738,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
                     "title": { "type": "string", "description": "Task title" },
                     "description": { "type": "string", "description": "Optional task description" },
                     "context_notes": { "type": "string", "description": "Optional orchestration notes for the task" },
-                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional attachment paths" },
+                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional attachment paths. ACP dispatcher turns also inherit the current turn's recorded attachments." },
                     "objective": { "type": "string", "description": "Explicit objective for the task brief and worker handoff" },
                     "execution_mode": { "type": "string", "description": "Execution mode for spawned work: worktree, main_workspace, or temp_clone" },
                     "surfaces": { "type": "array", "items": { "type": "string" }, "description": "Exact files, folders, APIs, or product surfaces to inspect" },
@@ -895,6 +922,158 @@ fn sanitize_string_list(values: Vec<String>) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .filter(|value| seen.insert(value.clone()))
         .collect()
+}
+
+fn is_acp_dispatcher_session(session: &SessionRecord) -> bool {
+    session.metadata.get("sessionKind").map(String::as_str) == Some(ACP_SESSION_KIND)
+}
+
+fn latest_dispatcher_turn_attachments(session: &SessionRecord) -> Vec<String> {
+    session
+        .conversation
+        .iter()
+        .rev()
+        .find(|entry| entry.kind == "user_message")
+        .map(|entry| sanitize_string_list(entry.attachments.clone()))
+        .unwrap_or_default()
+}
+
+fn merge_dispatcher_turn_attachments(
+    caller_session: Option<&SessionRecord>,
+    attachments: Vec<String>,
+) -> Vec<String> {
+    let mut effective = sanitize_string_list(attachments);
+    let Some(session) = caller_session.filter(|session| is_acp_dispatcher_session(session)) else {
+        return effective;
+    };
+
+    for attachment in latest_dispatcher_turn_attachments(session) {
+        if !effective.iter().any(|item| item == &attachment) {
+            effective.push(attachment);
+        }
+    }
+
+    effective
+}
+
+fn effective_dispatcher_task_agent(
+    caller_session: Option<&SessionRecord>,
+    agent: Option<String>,
+) -> Option<String> {
+    trimmed_option(agent).or_else(|| {
+        caller_session
+            .filter(|session| is_acp_dispatcher_session(session))
+            .map(dispatcher_preferred_implementation_agent)
+    })
+}
+
+fn effective_dispatcher_task_model(
+    caller_session: Option<&SessionRecord>,
+    model: Option<String>,
+) -> Option<String> {
+    trimmed_option(model).or_else(|| {
+        caller_session
+            .filter(|session| is_acp_dispatcher_session(session))
+            .and_then(dispatcher_preferred_implementation_model)
+    })
+}
+
+fn effective_dispatcher_task_reasoning_effort(
+    caller_session: Option<&SessionRecord>,
+    reasoning_effort: Option<String>,
+) -> Option<String> {
+    trimmed_option(reasoning_effort)
+        .map(|value| value.to_ascii_lowercase())
+        .or_else(|| {
+            caller_session
+                .filter(|session| is_acp_dispatcher_session(session))
+                .and_then(dispatcher_preferred_implementation_reasoning_effort)
+                .map(|value| value.to_ascii_lowercase())
+        })
+}
+
+fn validate_dispatcher_task_handoff(
+    caller_session: Option<&SessionRecord>,
+    title: &str,
+    task_type: Option<&str>,
+    notes: Option<&str>,
+    attachments: &[String],
+    packet: &BoardTaskPacket,
+    agent: Option<&str>,
+) -> Result<()> {
+    if !caller_session.is_some_and(is_acp_dispatcher_session) {
+        return Ok(());
+    }
+
+    let mut missing = Vec::new();
+    if agent
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        missing.push("agent");
+    }
+    if packet
+        .objective
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
+        missing.push("objective");
+    }
+    if packet.execution_mode.is_none() {
+        missing.push("execution_mode");
+    }
+    if packet.acceptance.is_empty() {
+        missing.push("acceptance");
+    }
+    if packet.skills.is_empty() {
+        missing.push("skills");
+    }
+    if packet.deliverables.is_empty() {
+        missing.push("deliverables");
+    }
+
+    let review_task = task_type
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("review"));
+    if review_task {
+        if packet.review_refs.is_empty() {
+            missing.push("review_refs");
+        }
+        if packet.surfaces.is_empty() {
+            missing.push("surfaces");
+        }
+    } else if packet.surfaces.is_empty() {
+        missing.push("surfaces");
+    }
+
+    let has_context = notes
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || !attachments.is_empty()
+        || !packet.constraints.is_empty()
+        || !packet.dependencies.is_empty()
+        || !packet.review_refs.is_empty();
+    if !has_context {
+        missing.push("context_notes/attachments/dependencies/constraints/review_refs");
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let task_kind = if review_task {
+        "review"
+    } else {
+        "implementation"
+    };
+    bail!(
+        "ACP dispatcher task \"{title}\" is missing a launch-ready {task_kind} handoff packet. Missing: {}.",
+        missing.join(", ")
+    );
 }
 
 fn insert_board_task_at_position(
@@ -1187,10 +1366,65 @@ pub struct JsonRpcError {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
+    use conductor_db::Database;
     use serde_json::json;
+    use std::collections::{BTreeMap, HashMap};
+    use std::fs;
+    use std::sync::{Arc, OnceLock};
     use tokio::io::duplex;
+    use tokio::sync::Mutex;
+    use uuid::Uuid;
 
     struct MockBackend;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    async fn build_app_state(label: &str) -> (std::path::PathBuf, Arc<AppState>) {
+        let root = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("test repo should be created");
+        fs::write(
+            repo.join("CONDUCTOR.md"),
+            [
+                "## Inbox",
+                "",
+                "## Ready to Dispatch",
+                "",
+                "## Dispatching",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("board should be created");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: repo.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("ttyd".to_string()),
+                    default_branch: "main".to_string(),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory()
+            .await
+            .expect("test db should initialize");
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        (root, state)
+    }
 
     #[async_trait]
     impl McpBackend for MockBackend {
@@ -1391,6 +1625,175 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Phase 2 heartbeat integration"));
+    }
+
+    #[tokio::test]
+    async fn acp_dispatcher_can_create_board_tasks_without_extra_approval_turn() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_app_state("mcp-acp-default-create-task").await;
+        let mut dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        dispatcher.status = SessionStatus::Working;
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        std::env::set_var(MCP_CALLER_SESSION_ENV, &dispatcher.id);
+        std::env::set_var(MCP_CALLER_PROJECT_ENV, "demo");
+
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+        let payload = backend
+            .create_board_task(CreateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                title: "Dispatcher created task".to_string(),
+                objective: Some("Create the implementation handoff task on the board.".to_string()),
+                execution_mode: Some("worktree".to_string()),
+                surfaces: Some(vec!["crates/conductor-server/src/mcp.rs".to_string()]),
+                constraints: Some(vec!["Preserve existing board semantics.".to_string()]),
+                acceptance: Some(vec!["Task is written to CONDUCTOR.md.".to_string()]),
+                skills: Some(vec!["rust".to_string(), "board orchestration".to_string()]),
+                deliverables: Some(vec!["launch-ready board task".to_string()]),
+                role: Some("intake".to_string()),
+                ..CreateBoardTaskArgs::default()
+            })
+            .await
+            .expect("ACP dispatcher should be allowed to create a board task");
+
+        assert_eq!(payload["task"]["title"], "Dispatcher created task");
+        assert_eq!(payload["task"]["agent"], "codex");
+        let board_contents = fs::read_to_string(root.join("repo").join("CONDUCTOR.md"))
+            .expect("board should be readable");
+        assert!(board_contents.contains("Dispatcher created task"));
+
+        std::env::remove_var(MCP_CALLER_SESSION_ENV);
+        std::env::remove_var(MCP_CALLER_PROJECT_ENV);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn acp_dispatcher_create_task_inherits_turn_attachments() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_app_state("mcp-acp-attachment-handoff").await;
+        let mut dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        dispatcher.status = SessionStatus::Working;
+        dispatcher
+            .conversation
+            .push(crate::state::ConversationEntry {
+                id: Uuid::new_v4().to_string(),
+                kind: "user_message".to_string(),
+                source: "dashboard".to_string(),
+                text: "Please review the incident doc and create tasks.".to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                attachments: vec!["docs/incidents/dispatcher-audit.md".to_string()],
+                metadata: HashMap::new(),
+            });
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        std::env::set_var(MCP_CALLER_SESSION_ENV, &dispatcher.id);
+        std::env::set_var(MCP_CALLER_PROJECT_ENV, "demo");
+
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+        let payload = backend
+            .create_board_task(CreateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                title: "Dispatcher attachment handoff".to_string(),
+                objective: Some(
+                    "Turn the incident doc into an actionable worker task.".to_string(),
+                ),
+                execution_mode: Some("main_workspace".to_string()),
+                surfaces: Some(vec![
+                    "crates/conductor-server/src/state/acp_dispatcher.rs".to_string(),
+                    "crates/conductor-server/src/mcp.rs".to_string(),
+                ]),
+                review_refs: Some(vec!["docs/incidents/dispatcher-audit.md".to_string()]),
+                acceptance: Some(vec![
+                    "Task packet references the incident context.".to_string()
+                ]),
+                skills: Some(vec!["rust".to_string(), "dispatcher review".to_string()]),
+                deliverables: Some(vec!["review findings".to_string()]),
+                task_type: Some("review".to_string()),
+                role: Some("review".to_string()),
+                ..CreateBoardTaskArgs::default()
+            })
+            .await
+            .expect("ACP dispatcher should be allowed to create a board task");
+
+        assert_eq!(payload["task"]["agent"], "codex");
+        assert_eq!(
+            payload["task"]["attachments"],
+            json!(["docs/incidents/dispatcher-audit.md"])
+        );
+        let board_contents = fs::read_to_string(root.join("repo").join("CONDUCTOR.md"))
+            .expect("board should be readable");
+        assert!(board_contents.contains("attachments:docs/incidents/dispatcher-audit.md"));
+
+        std::env::remove_var(MCP_CALLER_SESSION_ENV);
+        std::env::remove_var(MCP_CALLER_PROJECT_ENV);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn acp_dispatcher_rejects_incomplete_task_handoff_packets() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_app_state("mcp-acp-reject-thin-task").await;
+        let mut dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        dispatcher.status = SessionStatus::Working;
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        std::env::set_var(MCP_CALLER_SESSION_ENV, &dispatcher.id);
+        std::env::set_var(MCP_CALLER_PROJECT_ENV, "demo");
+
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+        let err = backend
+            .create_board_task(CreateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                title: "Thin dispatcher task".to_string(),
+                role: Some("intake".to_string()),
+                ..CreateBoardTaskArgs::default()
+            })
+            .await
+            .expect_err("ACP dispatcher should be blocked from creating thin task packets");
+
+        let message = err.to_string();
+        assert!(message.contains("launch-ready implementation handoff packet"));
+        assert!(message.contains("objective"));
+        assert!(message.contains("execution_mode"));
+        assert!(message.contains("surfaces"));
+        assert!(message.contains("acceptance"));
+        assert!(message.contains("skills"));
+        assert!(message.contains("deliverables"));
+
+        let board_contents = fs::read_to_string(root.join("repo").join("CONDUCTOR.md"))
+            .expect("board should be readable");
+        assert!(!board_contents.contains("Thin dispatcher task"));
+
+        std::env::remove_var(MCP_CALLER_SESSION_ENV);
+        std::env::remove_var(MCP_CALLER_PROJECT_ENV);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
