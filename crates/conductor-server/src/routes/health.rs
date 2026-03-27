@@ -5,7 +5,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::state::{AppState, SessionStatus};
+use crate::state::{is_dashboard_hidden_session, AppState, SessionStatus};
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -24,18 +24,22 @@ async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<V
     let sessions = state.sessions.read().await;
     let queue_depth = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|session| session.status == SessionStatus::Queued)
         .count();
     let recovering = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|session| session.metadata.contains_key("recoveryState"))
         .count();
     let detached = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|session| session.metadata.contains_key("detachedPid"))
         .count();
     let launching = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|session| {
             session.status == SessionStatus::Spawning || live_session_ids.contains(&session.id)
         })
@@ -66,6 +70,7 @@ async fn session_health(State(state): State<Arc<AppState>>) -> (StatusCode, Json
     let now = chrono::Utc::now();
     let metrics = sessions
         .iter()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .map(|session| {
             let created = chrono::DateTime::parse_from_rfc3339(&session.created_at)
                 .map(|value| value.with_timezone(&chrono::Utc))
@@ -127,21 +132,24 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> (StatusCode, 
     let executors = state.executors.read().await;
     let sessions = state.sessions.read().await;
 
-    let total_sessions = sessions.len();
     let queued = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|s| s.status == SessionStatus::Queued)
         .count();
     let spawning = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|s| s.status == SessionStatus::Spawning)
         .count();
     let working = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|s| s.status == SessionStatus::Working)
         .count();
     let completed = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|s| {
             matches!(
                 s.status,
@@ -151,11 +159,17 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> (StatusCode, 
         .count();
     let errored = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|s| s.status == SessionStatus::Errored)
         .count();
     let stuck = sessions
         .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|s| s.status == SessionStatus::Stuck)
+        .count();
+    let total_sessions = sessions
+        .values()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .count();
 
     let metrics = format!(

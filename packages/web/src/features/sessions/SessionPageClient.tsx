@@ -21,6 +21,7 @@ import {
 } from "@/lib/bridgeSessionIds";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildAllProjectsHref, buildSessionHref } from "@/lib/dashboardHref";
+import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import type { DashboardSession } from "@/lib/types";
 
 export default function SessionPageClient({
@@ -72,8 +73,11 @@ export default function SessionPageClient({
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
   const terminalTabActive = useMemo(() => {
     const tab = searchParams.get("tab");
-    return tab === null || tab === "terminal";
-  }, [searchParams]);
+    if (tab === "terminal") {
+      return getDefaultSessionPrimaryTab(currentSession) === "terminal";
+    }
+    return tab === null && getDefaultSessionPrimaryTab(currentSession) === "terminal";
+  }, [currentSession, searchParams]);
   const immersiveTerminalMode = terminalTabActive && compactTerminalChrome;
   const notificationProjectId = currentSession?.projectId ?? null;
 
@@ -204,9 +208,10 @@ export default function SessionPageClient({
           sessions={dashboardSessions}
           selectedSessionId={canonicalSessionId}
           onSelectSession={(sessionId, options) => {
+            const matchedSession = dashboardSessions.find((candidate) => candidate.id === sessionId) ?? null;
             router.push(buildSessionHref(sessionId, {
               bridgeId: effectiveBridgeId,
-              tab: options?.tab ?? "terminal",
+              tab: options?.tab ?? getDefaultSessionPrimaryTab(matchedSession),
             }));
             closeSidebarOnMobile();
           }}

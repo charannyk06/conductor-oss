@@ -491,6 +491,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "url",
  "uuid",
  "vt100",
  "which",

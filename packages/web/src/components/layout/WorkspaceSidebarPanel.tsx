@@ -24,7 +24,7 @@ interface WorkspaceSidebarPanelProps {
   sessions: DashboardSession[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string, options?: {
-    tab?: "overview" | "preview" | "diff" | "terminal";
+    tab?: "overview" | "preview" | "diff" | "chat" | "terminal";
   }) => void;
   onArchiveSession?: (sessionId: string) => Promise<void> | void;
   onCreateWorkspace: () => void;

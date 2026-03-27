@@ -11,14 +11,14 @@ interface TopBarProps {
 
 export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightContent }: TopBarProps) {
   return (
-    <header className="flex h-11 items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] pl-14 pr-2 text-[13px] text-[var(--vk-text-muted)] sm:h-14 sm:pl-5 sm:pr-5 sm:text-[14px]">
+    <header className="flex h-[33px] items-center border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] pl-14 pr-2 text-[12px] text-[var(--vk-text-muted)] sm:pl-5 sm:pr-5 sm:text-[13px]">
       <div className="min-w-0 flex-1 text-left sm:text-center">
-        <span className="block truncate font-medium tracking-[0.01em] text-[var(--vk-text-normal)]">
+        <span className="block truncate font-medium tracking-[0.01em] text-[var(--vk-text-muted)]">
           {title ?? "All Projects"}
         </span>
       </div>
       {rightContent ? (
-        <div className="ml-1 flex shrink-0 items-center gap-2">
+        <div className="ml-1 flex shrink-0 items-center gap-1.5">
           {rightContent}
         </div>
       ) : null}
@@ -27,7 +27,7 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
           <button
             type="button"
             onClick={onOpenPreferences}
-            className="inline-flex h-11 w-11 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-9 sm:w-9"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
             aria-label="Open preferences"
             title="Preferences"
           >

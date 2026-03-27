@@ -9,10 +9,12 @@ use std::path::Path as FsPath;
 use std::sync::Arc;
 use tokio::process::Command;
 
-use crate::state::AppState;
+use crate::state::{resolve_board_file, AppState};
+use conductor_core::config::ProjectConfig;
 use conductor_core::support::{
     resolve_project_path, sync_project_local_config, sync_support_files_for_directory,
 };
+use conductor_db::repo::project_repo::ProjectRow;
 use conductor_db::repo::ProjectRepo;
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -43,17 +45,17 @@ async fn list_projects(State(state): State<Arc<AppState>>) -> Json<Vec<ProjectRe
     let pool = state.db.pool();
     let projects = ProjectRepo::list(pool).await.unwrap_or_default();
 
+    if !projects.is_empty() {
+        return Json(projects.into_iter().map(db_project_response).collect());
+    }
+
+    let config = state.config.read().await.clone();
+    let default_agent = config.preferences.coding_agent.clone();
     Json(
-        projects
-            .into_iter()
-            .map(|p| ProjectResponse {
-                id: p.id,
-                name: p.name,
-                path: p.path,
-                board_path: p.board_path,
-                default_executor: p.default_executor,
-                max_sessions: p.max_sessions,
-            })
+        config
+            .projects
+            .iter()
+            .map(|(id, project)| config_project_response(&state, id, project, &default_agent))
             .collect(),
     )
 }
@@ -65,14 +67,60 @@ async fn get_project(
     let pool = state.db.pool();
     let project = ProjectRepo::get(pool, &id).await.unwrap_or(None);
 
-    Json(project.map(|p| ProjectResponse {
-        id: p.id,
-        name: p.name,
-        path: p.path,
-        board_path: p.board_path,
-        default_executor: p.default_executor,
-        max_sessions: p.max_sessions,
-    }))
+    if let Some(project) = project {
+        return Json(Some(db_project_response(project)));
+    }
+
+    let config = state.config.read().await.clone();
+    let default_agent = config.preferences.coding_agent.clone();
+    Json(
+        config
+            .projects
+            .get(&id)
+            .map(|project| config_project_response(&state, &id, project, &default_agent)),
+    )
+}
+
+fn db_project_response(project: ProjectRow) -> ProjectResponse {
+    ProjectResponse {
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        board_path: project.board_path,
+        default_executor: project.default_executor,
+        max_sessions: project.max_sessions,
+    }
+}
+
+fn config_project_response(
+    state: &AppState,
+    id: &str,
+    project: &ProjectConfig,
+    default_agent: &str,
+) -> ProjectResponse {
+    let name = project
+        .name
+        .clone()
+        .or_else(|| project.repo.clone())
+        .unwrap_or_else(|| id.to_string());
+    let board_dir = project.board_dir.as_deref().unwrap_or(id);
+    let board_path = Some(resolve_board_file(
+        &state.workspace_path,
+        board_dir,
+        Some(&project.path),
+    ));
+
+    ProjectResponse {
+        id: id.to_string(),
+        name,
+        path: project.path.clone(),
+        board_path,
+        default_executor: project
+            .agent
+            .clone()
+            .or_else(|| Some(default_agent.to_string())),
+        max_sessions: 5,
+    }
 }
 
 async fn setup_project(

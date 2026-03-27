@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::state::AppState;
+use crate::state::{is_dashboard_hidden_session, AppState};
 
 type ApiResponse = (StatusCode, Json<Value>);
 
@@ -49,6 +49,7 @@ async fn list_notifications(
         .all_sessions()
         .await
         .into_iter()
+        .filter(|session| !is_dashboard_hidden_session(session))
         .filter(|session| match query.project.as_deref() {
             Some(project_id) if !project_id.trim().is_empty() => session.project_id == project_id,
             _ => true,

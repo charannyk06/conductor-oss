@@ -22,7 +22,15 @@ use super::types::{
     DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::{AppState, DETACHED_PID_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY};
+use super::{
+    dispatcher_preferred_implementation_agent, dispatcher_preferred_implementation_model,
+    dispatcher_preferred_implementation_reasoning_effort, AppState, DETACHED_PID_METADATA_KEY,
+    TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
+};
+use crate::acp_prompt::{
+    acp_dispatcher_preference_note, acp_dispatcher_turn_prefix, matches_acp_approve_command,
+    rewrite_acp_dispatcher_command,
+};
 use crate::error_logger::{categories, ErrorContext};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
 
@@ -190,6 +198,7 @@ impl AppState {
 
         for session in &changed {
             let _ = self.persist_session(session).await;
+            self.publish_feed_update(&session.id);
         }
     }
 }
@@ -209,6 +218,42 @@ fn project_defaults_to_skip_permissions(project: &conductor_core::config::Projec
         project.agent_config.permissions.as_deref().map(str::trim),
         Some("default")
     )
+}
+
+fn is_orchestration_session_kind(session_kind: Option<&str>) -> bool {
+    matches!(
+        session_kind,
+        Some(kind) if kind == "board_planning" || kind == "project_dispatcher"
+    )
+}
+
+fn is_acp_dispatcher_session_kind(session_kind: Option<&str>) -> bool {
+    matches!(session_kind, Some("project_dispatcher"))
+}
+
+fn is_acp_dispatcher_session(session: &SessionRecord) -> bool {
+    is_acp_dispatcher_session_kind(session.metadata.get("sessionKind").map(String::as_str))
+}
+
+const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
+const ACP_APPROVAL_REQUIRED: &str = "approval_required";
+const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
+
+fn touch_acp_dispatcher_heartbeat(session: &mut SessionRecord) {
+    if !is_acp_dispatcher_session(session) {
+        return;
+    }
+    let now = Utc::now();
+    session
+        .metadata
+        .insert("acpHeartbeatState".to_string(), "active".to_string());
+    session
+        .metadata
+        .insert("acpLastHeartbeatAt".to_string(), now.to_rfc3339());
+    session.metadata.insert(
+        "acpNextHeartbeatAt".to_string(),
+        (now + ChronoDuration::minutes(15)).to_rfc3339(),
+    );
 }
 
 fn resolve_skip_permissions(
@@ -483,6 +528,7 @@ fn runtime_pids(session: &SessionRecord) -> Vec<u32> {
 /// Shared Stdout event handler used by both `append_and_apply` and `apply_runtime_event`.
 fn apply_stdout_event(session: &mut SessionRecord, line: &str, is_live: bool) {
     maybe_update_session_branch_from_output(session, line);
+    touch_acp_dispatcher_heartbeat(session);
 
     if is_live && !session.status.is_terminal() {
         session.status = SessionStatus::Working;
@@ -1004,12 +1050,53 @@ impl AppState {
         let existing_bridge_id = existing_record
             .as_ref()
             .and_then(|record| record.bridge_id.clone());
-        let branch = request.branch.clone().or_else(|| {
-            Some(format!(
-                "session/{}",
-                session_id.get(..8).unwrap_or(&session_id)
-            ))
-        });
+        let is_orchestration_session =
+            is_orchestration_session_kind(request.session_kind.as_deref());
+        let is_acp_dispatcher = is_acp_dispatcher_session_kind(request.session_kind.as_deref());
+        let mut session_prompt = request.prompt.clone();
+        let mut session_attachments = request.attachments.clone();
+        if is_acp_dispatcher {
+            let artifacts = self
+                .ensure_acp_dispatcher_artifacts(
+                    &request.project_id,
+                    &session_id,
+                    &project.default_branch,
+                )
+                .await?;
+            for attachment in [
+                artifacts.project_memory_display.clone(),
+                artifacts.session_memory_display.clone(),
+                artifacts.board_display.clone(),
+            ] {
+                if !session_attachments.iter().any(|item| item == &attachment) {
+                    session_attachments.push(attachment);
+                }
+            }
+            let protocol_context = format!(
+                "\n\nACP dispatcher state:\n- Long-term memory: {}\n- Session memory: {}\n- Board: {}\nUse these as the authoritative ACP context. Keep long-term memory stable, keep session memory current, and shape board tasks with clear context, skills, and implementation-agent handoff for codex, claude-code, and gemini.",
+                artifacts.project_memory_display,
+                artifacts.session_memory_display,
+                artifacts.board_display,
+            );
+            if !session_prompt.contains("ACP dispatcher state:") {
+                session_prompt.push_str(&protocol_context);
+            }
+        }
+        let mut branch = if is_orchestration_session {
+            None
+        } else {
+            request.branch.clone().or_else(|| {
+                if matches!(request.use_worktree, Some(false)) {
+                    None
+                } else {
+                    Some(format!(
+                        "session/{}",
+                        session_id.get(..8).unwrap_or(&session_id)
+                    ))
+                }
+            })
+        };
+        let branch_for_workspace = branch.clone();
         self.ensure_terminal_host(&session_id).await;
         let _ = self
             .update_launch_stage(&session_id, "Preparing workspace")
@@ -1020,31 +1107,51 @@ impl AppState {
         )
         .await;
         let workspace_job = async {
-            let workspace_path = self
-                .prepare_workspace(
-                    &request.project_id,
+            let workspace_path = if is_orchestration_session {
+                let _ = self
+                    .update_launch_stage(&session_id, "Using project workspace")
+                    .await;
+                self.emit_terminal_text(
                     &session_id,
-                    &project,
-                    request.use_worktree.unwrap_or(true),
-                    branch.as_deref(),
-                    request.base_branch.as_deref(),
+                    format_launch_progress("Using main project workspace..."),
                 )
-                .await?;
-            let _ = self
-                .update_launch_stage(&session_id, "Running workspace setup")
                 .await;
-            self.emit_terminal_text(
-                &session_id,
-                format_launch_progress("Running workspace setup..."),
-            )
-            .await;
-            if let Err(err) = self.initialize_workspace(&project, &workspace_path).await {
-                let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
-                return Err(err);
-            }
+                self.prepare_orchestration_workspace(&project)?
+            } else {
+                let workspace_path = self
+                    .prepare_workspace(
+                        &request.project_id,
+                        &session_id,
+                        &project,
+                        request.use_worktree.unwrap_or(true),
+                        branch_for_workspace.as_deref(),
+                        request.base_branch.as_deref(),
+                    )
+                    .await?;
+                let _ = self
+                    .update_launch_stage(&session_id, "Running workspace setup")
+                    .await;
+                self.emit_terminal_text(
+                    &session_id,
+                    format_launch_progress("Running workspace setup..."),
+                )
+                .await;
+                if let Err(err) = self.initialize_workspace(&project, &workspace_path).await {
+                    let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
+                    return Err(err);
+                }
+                workspace_path
+            };
             Ok::<_, anyhow::Error>(workspace_path)
         };
         let dev_server_job = async {
+            if is_orchestration_session {
+                return Ok::<_, anyhow::Error>(super::DevServerLaunch {
+                    log_path: None,
+                    preview_url: None,
+                    preview_port: None,
+                });
+            }
             self.emit_terminal_text(
                 &session_id,
                 format_launch_progress("Checking shared dev server..."),
@@ -1064,6 +1171,9 @@ impl AppState {
                 return Err(err);
             }
         };
+        if !workspace_path.uses_worktree && request.branch.is_none() {
+            branch = None;
+        }
         let dev_server = match dev_server_result {
             Ok(dev_server) => dev_server,
             Err(err) => {
@@ -1079,15 +1189,14 @@ impl AppState {
 
         let prompt = if request.task_id.is_some()
             || request.brief_path.is_some()
-            || request.attachments.is_empty()
+            || session_attachments.is_empty()
         {
-            request.prompt.clone()
+            session_prompt.clone()
         } else {
             format!(
                 "{}\n\nAttachments:\n{}",
-                request.prompt,
-                request
-                    .attachments
+                session_prompt,
+                session_attachments
                     .iter()
                     .map(|item| format!("- {item}"))
                     .collect::<Vec<_>>()
@@ -1116,6 +1225,14 @@ impl AppState {
         }
 
         let mut spawn_env = HashMap::new();
+        spawn_env.insert("CONDUCTOR_SESSION_ID".to_string(), session_id.clone());
+        spawn_env.insert(
+            "CONDUCTOR_PROJECT_ID".to_string(),
+            request.project_id.clone(),
+        );
+        if let Some(session_kind) = request.session_kind.clone() {
+            spawn_env.insert("CONDUCTOR_SESSION_KIND".to_string(), session_kind);
+        }
         if executor.kind() == AgentKind::ClaudeCode {
             spawn_env.insert("CLAUDECODE".to_string(), String::new());
             // Mirror the JS Claude launcher behavior so the local Claude login
@@ -1186,7 +1303,7 @@ impl AppState {
             project_agent.clone(),
             request.model.clone(),
             request.reasoning_effort.clone(),
-            request.prompt.clone(),
+            session_prompt.clone(),
             Some(pid),
         );
         record.bridge_id = request.bridge_id.clone().or(existing_bridge_id);
@@ -1196,10 +1313,14 @@ impl AppState {
             format_launch_progress("Runtime attached. Streaming session..."),
         )
         .await;
-        record.metadata.insert(
-            "worktree".to_string(),
-            workspace_path.root_path.to_string_lossy().to_string(),
-        );
+        if workspace_path.uses_worktree {
+            record.metadata.insert(
+                "worktree".to_string(),
+                workspace_path.root_path.to_string_lossy().to_string(),
+            );
+        } else {
+            record.metadata.remove("worktree");
+        }
         record.metadata.insert(
             "agentCwd".to_string(),
             workspace_path
@@ -1255,6 +1376,51 @@ impl AppState {
         if let Some(profile) = request.profile.clone() {
             record.metadata.insert("profile".to_string(), profile);
         }
+        if let Some(session_kind) = request.session_kind.clone() {
+            record
+                .metadata
+                .insert("sessionKind".to_string(), session_kind);
+        }
+        if is_acp_dispatcher {
+            record
+                .metadata
+                .insert("role".to_string(), "orchestrator".to_string());
+            record
+                .metadata
+                .insert("dashboardHidden".to_string(), "true".to_string());
+            record.metadata.insert(
+                ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+                ACP_APPROVAL_REQUIRED.to_string(),
+            );
+            if let Some(project_memory_path) = session_attachments
+                .iter()
+                .find(|item| item.ends_with("project-memory.md"))
+                .cloned()
+            {
+                record
+                    .metadata
+                    .insert("acpProjectMemoryPath".to_string(), project_memory_path);
+            }
+            if let Some(session_memory_path) = session_attachments
+                .iter()
+                .find(|item| item.ends_with("session-memory.md"))
+                .cloned()
+            {
+                record
+                    .metadata
+                    .insert("acpSessionMemoryPath".to_string(), session_memory_path);
+            }
+            if let Some(board_path) = session_attachments
+                .iter()
+                .find(|item| item.ends_with("CONDUCTOR.md"))
+                .cloned()
+            {
+                record
+                    .metadata
+                    .insert("acpBoardPath".to_string(), board_path);
+            }
+            touch_acp_dispatcher_heartbeat(&mut record);
+        }
         if let Some(brief_path) = request.brief_path.clone() {
             record.metadata.insert("briefPath".to_string(), brief_path);
         }
@@ -1290,15 +1456,15 @@ impl AppState {
         }
 
         if record.conversation.is_empty()
-            && (!request.prompt.trim().is_empty() || !request.attachments.is_empty())
+            && (!session_prompt.trim().is_empty() || !session_attachments.is_empty())
         {
             record.conversation.push(ConversationEntry {
                 id: Uuid::new_v4().to_string(),
                 kind: "user_message".to_string(),
                 source: request.source,
-                text: request.prompt.clone(),
+                text: session_prompt.clone(),
                 created_at: Utc::now().to_rfc3339(),
-                attachments: request.attachments.clone(),
+                attachments: session_attachments.clone(),
                 metadata: HashMap::new(),
             });
         }
@@ -1335,6 +1501,15 @@ impl AppState {
                     .map(std::time::Duration::from_secs),
             },
         );
+        if is_acp_dispatcher {
+            if let Err(err) = self.sync_acp_dispatcher_state(&record).await {
+                tracing::warn!(
+                    session_id = %record.id,
+                    error = %err,
+                    "failed to synchronize ACP dispatcher state after spawn"
+                );
+            }
+        }
 
         Ok(record)
     }
@@ -1408,6 +1583,7 @@ impl AppState {
             append_output(session, output_line);
         }
         session.last_activity_at = Utc::now().to_rfc3339();
+        let invalidate_runtime_status = matches!(&event, ExecutorOutput::StructuredStatus { .. });
 
         // Apply event (inline from apply_runtime_event logic)
         match event {
@@ -1440,19 +1616,17 @@ impl AppState {
             }
             _ => {}
         }
-
-        let updated = session.clone();
         drop(sessions);
         if clear_live_handle {
             self.detach_terminal_runtime(session_id).await;
         }
-        self.persist_session(&updated).await?;
+        self.queue_hot_path_session_update(session_id, invalidate_runtime_status)
+            .await;
         if let Some(output_line) = line {
             let _ = self
                 .output_updates
-                .send((updated.id.clone(), output_line.to_string()));
+                .send((session_id.to_string(), output_line.to_string()));
         }
-        self.publish_snapshot().await;
         Ok(())
     }
 
@@ -1492,6 +1666,13 @@ impl AppState {
         let requested_termination = termination_requested
             .as_deref()
             .filter(|action| matches!(*action, "kill" | "archive"));
+        let invalidate_runtime_status = matches!(
+            &event,
+            ExecutorOutput::NeedsInput(_)
+                | ExecutorOutput::Completed { .. }
+                | ExecutorOutput::Failed { .. }
+                | ExecutorOutput::StructuredStatus { .. }
+        );
 
         match event {
             ExecutorOutput::Stdout(line) => {
@@ -1620,13 +1801,12 @@ impl AppState {
             ExecutorOutput::Composite(_) => {}
         }
 
-        let updated = session.clone();
         drop(sessions);
         if clear_live_handle {
             self.detach_terminal_runtime(session_id).await;
         }
-        self.persist_session(&updated).await?;
-        self.publish_snapshot().await;
+        self.queue_hot_path_session_update(session_id, invalidate_runtime_status)
+            .await;
         Ok(())
     }
 
@@ -1649,20 +1829,9 @@ impl AppState {
             .await
             .clone()
             .with_context(|| format!("Session {session_id} is still launching"))?;
-
-        let effective_message = if attachments.is_empty() {
-            message.clone()
-        } else {
-            format!(
-                "{}\n\nAttachments:\n{}",
-                message,
-                attachments
-                    .iter()
-                    .map(|item| format!("- {item}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        };
+        let recorded_attachments = attachments.clone();
+        let mut effective_attachments = attachments;
+        let mut runtime_message = message.clone();
         let mut sessions = self.sessions.write().await;
         let session = sessions
             .get_mut(session_id)
@@ -1671,6 +1840,44 @@ impl AppState {
         session.last_activity_at = Utc::now().to_rfc3339();
         session.status = SessionStatus::Working;
         session.activity = Some("active".to_string());
+        if is_acp_dispatcher_session(session) {
+            touch_acp_dispatcher_heartbeat(session);
+            for key in [
+                "acpProjectMemoryPath",
+                "acpSessionMemoryPath",
+                "acpBoardPath",
+            ] {
+                if let Some(path) = session.metadata.get(key).cloned() {
+                    if !effective_attachments.iter().any(|item| item == &path) {
+                        effective_attachments.push(path);
+                    }
+                }
+            }
+            let preferred_implementation_agent = dispatcher_preferred_implementation_agent(session);
+            let preferred_implementation_model = dispatcher_preferred_implementation_model(session);
+            let preferred_implementation_reasoning =
+                dispatcher_preferred_implementation_reasoning_effort(session);
+            let approved_turn = matches_acp_approve_command(&message);
+            let approval_state = if approved_turn {
+                ACP_APPROVAL_GRANTED
+            } else {
+                ACP_APPROVAL_REQUIRED
+            };
+            session.metadata.insert(
+                ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+                approval_state.to_string(),
+            );
+            runtime_message = format!(
+                "{}\n\n{}\n\n{}",
+                acp_dispatcher_turn_prefix(approved_turn),
+                acp_dispatcher_preference_note(
+                    &preferred_implementation_agent,
+                    preferred_implementation_model.as_deref(),
+                    preferred_implementation_reasoning.as_deref(),
+                ),
+                rewrite_acp_dispatcher_command(&message)
+            );
+        }
         let previous_model = session.model.clone();
         let previous_reasoning_effort = session.reasoning_effort.clone();
         let model_changed = model
@@ -1735,19 +1942,45 @@ impl AppState {
             id: Uuid::new_v4().to_string(),
             kind: "user_message".to_string(),
             source: source.to_string(),
-            text: message,
+            text: message.clone(),
             created_at: Utc::now().to_rfc3339(),
-            attachments,
+            attachments: recorded_attachments.clone(),
             metadata: HashMap::new(),
         });
         enforce_conversation_limit(session);
         let updated = session.clone();
         drop(sessions);
         self.persist_session(&updated).await?;
+        self.publish_feed_update(session_id);
         self.publish_snapshot().await;
+        let effective_message = if effective_attachments.is_empty() {
+            runtime_message.clone()
+        } else {
+            format!(
+                "{}\n\nAttachments:\n{}",
+                runtime_message,
+                effective_attachments
+                    .iter()
+                    .map(|item| format!("- {item}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
         input_tx
             .send(ExecutorInput::Text(effective_message))
             .await?;
+        if is_acp_dispatcher_session(&updated) {
+            if let Err(err) = self
+                .record_acp_dispatcher_turn(&updated, &message, &recorded_attachments)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %updated.id,
+                    error = %err,
+                    "failed to record ACP dispatcher turn"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1808,13 +2041,47 @@ impl AppState {
             .with_context(|| format!("Executor '{}' is not available", session_snapshot.agent))?;
         drop(executors);
 
-        let effective_message = if attachments.is_empty() {
-            message.clone()
+        let is_acp_dispatcher = is_acp_dispatcher_session(&session_snapshot);
+        let recorded_attachments = attachments.clone();
+        let mut effective_attachments = attachments.clone();
+        let mut runtime_message = message.clone();
+        if is_acp_dispatcher {
+            for key in [
+                "acpProjectMemoryPath",
+                "acpSessionMemoryPath",
+                "acpBoardPath",
+            ] {
+                if let Some(path) = session_snapshot.metadata.get(key).cloned() {
+                    if !effective_attachments.iter().any(|item| item == &path) {
+                        effective_attachments.push(path);
+                    }
+                }
+            }
+            let preferred_implementation_agent =
+                dispatcher_preferred_implementation_agent(&session_snapshot);
+            let preferred_implementation_model =
+                dispatcher_preferred_implementation_model(&session_snapshot);
+            let preferred_implementation_reasoning =
+                dispatcher_preferred_implementation_reasoning_effort(&session_snapshot);
+            let approved_turn = matches_acp_approve_command(&message);
+            runtime_message = format!(
+                "{}\n\n{}\n\n{}",
+                acp_dispatcher_turn_prefix(approved_turn),
+                acp_dispatcher_preference_note(
+                    &preferred_implementation_agent,
+                    preferred_implementation_model.as_deref(),
+                    preferred_implementation_reasoning.as_deref(),
+                ),
+                rewrite_acp_dispatcher_command(&message)
+            );
+        }
+        let effective_message = if effective_attachments.is_empty() {
+            runtime_message.clone()
         } else {
             format!(
                 "{}\n\nAttachments:\n{}",
-                message,
-                attachments
+                runtime_message,
+                effective_attachments
                     .iter()
                     .map(|item| format!("- {item}"))
                     .collect::<Vec<_>>()
@@ -1834,6 +2101,14 @@ impl AppState {
         // Apply the same environment overrides as initial spawn to avoid
         // leaking ANTHROPIC_API_KEY on resumed sessions.
         let mut resume_env = HashMap::new();
+        resume_env.insert("CONDUCTOR_SESSION_ID".to_string(), session_id.to_string());
+        resume_env.insert(
+            "CONDUCTOR_PROJECT_ID".to_string(),
+            session_snapshot.project_id.clone(),
+        );
+        if let Some(session_kind) = session_snapshot.metadata.get("sessionKind").cloned() {
+            resume_env.insert("CONDUCTOR_SESSION_KIND".to_string(), session_kind);
+        }
         if executor.kind() == AgentKind::ClaudeCode {
             resume_env.insert("CLAUDECODE".to_string(), String::new());
             resume_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
@@ -1889,6 +2164,17 @@ impl AppState {
         session.model = effective_model.clone();
         session.reasoning_effort = effective_reasoning_effort.clone();
         session.summary = Some(message.trim().to_string());
+        if is_acp_dispatcher {
+            touch_acp_dispatcher_heartbeat(session);
+            session.metadata.insert(
+                ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
+                if matches_acp_approve_command(&message) {
+                    ACP_APPROVAL_GRANTED.to_string()
+                } else {
+                    ACP_APPROVAL_REQUIRED.to_string()
+                },
+            );
+        }
         session.metadata.remove(DETACHED_PID_METADATA_KEY);
         session.metadata.extend(runtime_launch.metadata.clone());
         session
@@ -1915,7 +2201,7 @@ impl AppState {
                 source: source.to_string(),
                 text: message.clone(),
                 created_at: Utc::now().to_rfc3339(),
-                attachments: attachments.clone(),
+                attachments: recorded_attachments.clone(),
                 metadata: HashMap::new(),
             });
         }
@@ -1923,7 +2209,19 @@ impl AppState {
         let updated = session.clone();
         drop(sessions);
 
-        self.replace_session(updated).await?;
+        self.replace_session(updated.clone()).await?;
+        if is_acp_dispatcher {
+            if let Err(err) = self
+                .record_acp_dispatcher_turn(&updated, &message, &attachments)
+                .await
+            {
+                tracing::warn!(
+                    session_id = %updated.id,
+                    error = %err,
+                    "failed to record ACP dispatcher turn after resume"
+                );
+            }
+        }
         self.attach_terminal_runtime(session_id, input_tx, resize_tx, kill_tx)
             .await;
         self.start_output_consumer(
@@ -1986,6 +2284,7 @@ impl AppState {
             let updated = session.clone();
             drop(sessions);
             self.persist_session(&updated).await?;
+            self.publish_feed_update(session_id);
             self.publish_snapshot().await;
         } else {
             tracing::warn!("send_raw_to_session: session {session_id} not found in sessions map");
@@ -2058,10 +2357,25 @@ impl AppState {
                     let updated = original.clone();
                     drop(sessions);
                     let _ = self.persist_session(&updated).await;
+                    self.publish_feed_update(session_id);
                     self.publish_snapshot().await;
                 }
             }
         }
+
+        let use_worktree = if is_orchestration_session_kind(
+            session.metadata.get("sessionKind").map(String::as_str),
+        ) {
+            Some(false)
+        } else {
+            Some(
+                session
+                    .workspace_path
+                    .as_deref()
+                    .map(|path| path.contains("/worktrees/") || path.contains("\\worktrees\\"))
+                    .unwrap_or(true),
+            )
+        };
 
         self.spawn_session(SpawnRequest {
             project_id: session.project_id.clone(),
@@ -2069,13 +2383,7 @@ impl AppState {
             prompt: session.prompt.clone(),
             issue_id: session.issue_id.clone(),
             agent: Some(session.agent.clone()),
-            use_worktree: Some(
-                session
-                    .workspace_path
-                    .as_deref()
-                    .map(|path| path.contains("/worktrees/") || path.contains("\\worktrees\\"))
-                    .unwrap_or(true),
-            ),
+            use_worktree,
             permission_mode: None,
             model: session.model.clone(),
             reasoning_effort: session.reasoning_effort.clone(),
@@ -2087,6 +2395,7 @@ impl AppState {
             parent_task_id: session.metadata.get("parentTaskId").cloned(),
             retry_of_session_id: None,
             profile: session.metadata.get("profile").cloned(),
+            session_kind: session.metadata.get("sessionKind").cloned(),
             brief_path: session.metadata.get("briefPath").cloned(),
             attachments: Vec::new(),
             source: "restore".to_string(),
@@ -2439,6 +2748,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2514,6 +2824,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2588,6 +2899,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_to_session_keeps_acp_context_runtime_only() {
+        let root = std::env::temp_dir().join(format!("conductor-acp-ui-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    bridge_id: None,
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: Some("codex".to_string()),
+                    use_worktree: Some(false),
+                    permission_mode: None,
+                    model: None,
+                    reasoning_effort: None,
+                    branch: None,
+                    base_branch: None,
+                    task_id: None,
+                    task_ref: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
+                    session_kind: Some("project_dispatcher".to_string()),
+                    brief_path: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut seeded = state.get_session(&session.id).await.unwrap();
+        seeded.metadata.insert(
+            "acpProjectMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/project-memory.md".to_string(),
+        );
+        seeded.metadata.insert(
+            "acpSessionMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/session-memory.md".to_string(),
+        );
+        seeded.metadata.insert(
+            "acpBoardPath".to_string(),
+            "projects/demo/CONDUCTOR.md".to_string(),
+        );
+        state.replace_session(seeded).await.unwrap();
+
+        state
+            .send_to_session(
+                &session.id,
+                "add two tasks".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let updated = state.get_session(&session.id).await.unwrap();
+        let user_entry = updated
+            .conversation
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "user_message" && entry.text == "add two tasks")
+            .expect("user message should be stored");
+
+        assert!(user_entry.attachments.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn ttyd_runtime_keeps_terminal_alive_after_agent_command_exits() {
         let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -2625,6 +3023,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2692,6 +3091,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -2750,6 +3150,7 @@ mod tests {
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                session_kind: None,
                 brief_path: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
@@ -2841,6 +3242,7 @@ mod tests {
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                session_kind: None,
                 brief_path: None,
                 attachments: Vec::new(),
                 source: "spawn".to_string(),
@@ -2910,6 +3312,7 @@ mod tests {
                     parent_task_id: None,
                     retry_of_session_id: None,
                     profile: None,
+                    session_kind: None,
                     brief_path: None,
                     attachments: Vec::new(),
                     source: "spawn".to_string(),
@@ -3083,6 +3486,103 @@ mod tests {
         assert!(updated
             .metadata
             .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resume_session_with_prompt_keeps_acp_context_runtime_only() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-resume-acp-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(ResumeExecutor));
+
+        let mut session = SessionRecord::new(
+            "resume-acp-session".to_string(),
+            "demo".to_string(),
+            Some("session/resume-acp".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = SessionStatus::NeedsInput;
+        session.activity = Some("waiting_input".to_string());
+        session
+            .metadata
+            .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+        session.metadata.insert(
+            "acpProjectMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/project-memory.md".to_string(),
+        );
+        session.metadata.insert(
+            "acpSessionMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/session-memory.md".to_string(),
+        );
+        session.metadata.insert(
+            "acpBoardPath".to_string(),
+            "projects/demo/CONDUCTOR.md".to_string(),
+        );
+        session
+            .metadata
+            .insert("agentCwd".to_string(), repo.to_string_lossy().to_string());
+        state.replace_session(session).await.unwrap();
+
+        state
+            .resume_session_with_prompt(
+                "resume-acp-session",
+                "add two tasks".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let updated = timeout(test_wait_timeout(), async {
+            loop {
+                let current = state.get_session("resume-acp-session").await.unwrap();
+                if current
+                    .conversation
+                    .iter()
+                    .any(|entry| entry.kind == "user_message" && entry.text == "add two tasks")
+                {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("resume should record the follow-up");
+
+        let user_entry = updated
+            .conversation
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "user_message" && entry.text == "add two tasks")
+            .expect("user message should be stored");
+
+        assert!(user_entry.attachments.is_empty());
+
         let _ = fs::remove_dir_all(&root);
     }
 

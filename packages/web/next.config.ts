@@ -35,6 +35,7 @@ const nextConfig: NextConfig = {
   // `type: "module"` setting.
   output: isVercelDeployment ? undefined : "standalone",
   reactStrictMode: false,
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   experimental: {
     turbopackFileSystemCacheForBuild: true,
   },

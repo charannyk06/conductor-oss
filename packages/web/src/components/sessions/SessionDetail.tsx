@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
+  Bot,
   Globe,
   LayoutDashboard,
   Puzzle,
@@ -14,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { useSession } from "@/hooks/useSession";
+import { getDefaultSessionPrimaryTab, isProjectDispatcherSession } from "@/lib/sessionKinds";
 import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
 import { SessionProjectOpenMenu } from "./SessionProjectOpenMenu";
@@ -53,6 +55,17 @@ const SessionSkills = dynamic(
   },
 );
 
+const SessionChatDock = dynamic(
+  () => import("./SessionChatDock").then((mod) => mod.SessionChatDock),
+  {
+    loading: () => (
+      <div className="flex h-full min-h-[240px] items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
+        Loading chat...
+      </div>
+    ),
+  },
+);
+
 interface SessionDetailProps {
   sessionId: string;
   initialSession?: DashboardSession | null;
@@ -63,13 +76,20 @@ interface SessionDetailProps {
   onOpenSidebar?: () => void;
 }
 
-type SessionTab = "overview" | "terminal" | "preview" | "skills";
+type SessionTab = "overview" | "chat" | "terminal" | "preview" | "skills";
 
-function resolveSessionTab(value: string | null): SessionTab {
-  if (value === "overview" || value === "terminal" || value === "preview" || value === "skills") {
+function resolveSessionTab(
+  value: string | null,
+  session: Pick<DashboardSession, "metadata"> | null | undefined,
+): SessionTab {
+  const defaultTab = getDefaultSessionPrimaryTab(session);
+  if (value === "overview" || value === "preview" || value === "skills") {
     return value;
   }
-  return "terminal";
+  if (value === "chat" || value === "terminal") {
+    return "chat";
+  }
+  return defaultTab;
 }
 
 function getCompactSessionStatusLabel(status: string): string {
@@ -104,7 +124,7 @@ function getStatusDotClass(status: string): string {
     case "errored":
       return "bg-red-400";
     case "stuck":
-      return "bg-orange-500";
+      return "bg-[var(--vk-accent)]";
     case "terminated":
     case "killed":
       return "bg-gray-500";
@@ -137,13 +157,14 @@ export function SessionDetail({
   const autoPreviewOpenedRef = useRef(false);
   const [pendingTerminalInsert, setPendingTerminalInsert] = useState<TerminalInsertRequest | null>(null);
   const activeTab = useMemo(
-    () => resolveSessionTab(searchParams.get("tab")),
-    [searchParams],
+    () => resolveSessionTab(searchParams.get("tab"), session),
+    [searchParams, session],
   );
   const handleTabChange = useCallback((value: string) => {
-    const nextTab = resolveSessionTab(value);
+    const nextTab = resolveSessionTab(value, session);
+    const defaultTab = getDefaultSessionPrimaryTab(session);
     const params = new URLSearchParams(searchParams.toString());
-    if (nextTab === "terminal") {
+    if (nextTab === defaultTab) {
       params.delete("tab");
     } else {
       params.set("tab", nextTab);
@@ -151,14 +172,40 @@ export function SessionDetail({
     const nextQuery = params.toString();
     const nextUrl = nextQuery.length > 0 ? `${pathname}?${nextQuery}` : pathname;
     router.replace(nextUrl, { scroll: false });
-  }, [pathname, router, searchParams]);
+  }, [pathname, router, searchParams, session]);
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
+    const requestedTab = searchParams.get("tab");
+    const resolvedTab = resolveSessionTab(requestedTab, session);
+    const defaultTab = getDefaultSessionPrimaryTab(session);
+    const canonicalTab = resolvedTab === defaultTab ? null : resolvedTab;
+    const currentTab = requestedTab?.trim() ? requestedTab : null;
+
+    if (currentTab === canonicalTab) {
+      return;
+    }
+
+    const params = new URLSearchParams(searchParams.toString());
+    if (canonicalTab) {
+      params.set("tab", canonicalTab);
+    } else {
+      params.delete("tab");
+    }
+    const nextQuery = params.toString();
+    const nextUrl = nextQuery.length > 0 ? `${pathname}?${nextQuery}` : pathname;
+    router.replace(nextUrl, { scroll: false });
+  }, [pathname, router, searchParams, session]);
   const queueTerminalInsert = useCallback((request: Omit<TerminalInsertRequest, "nonce">) => {
     terminalInsertNonceRef.current += 1;
     setPendingTerminalInsert({
       nonce: terminalInsertNonceRef.current,
       ...request,
     });
-  }, []);
+    handleTabChange("chat");
+  }, [handleTabChange]);
   useEffect(() => {
     autoPreviewOpenedRef.current = false;
     terminalInsertNonceRef.current = 0;
@@ -215,11 +262,11 @@ export function SessionDetail({
   }
 
   const status = typeof session.status === "string" ? session.status : "unknown";
+  const dispatcherSession = isProjectDispatcherSession(session);
   const compactStatusLabel = getCompactSessionStatusLabel(status);
   const statusDotClass = getStatusDotClass(status);
   const statusAnimated = isStatusAnimated(status);
   const showProjectOpenMenu = status !== "queued" && status !== "spawning";
-  const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
 
@@ -229,9 +276,9 @@ export function SessionDetail({
         <LayoutDashboard className="h-3.5 w-3.5" />
         Overview
       </TabsTrigger>
-      <TabsTrigger value="terminal" className={tabTriggerClass}>
-        <SquareTerminal className="h-3.5 w-3.5" />
-        Terminal
+      <TabsTrigger value="chat" className={tabTriggerClass}>
+        <Bot className="h-3.5 w-3.5" />
+        Chat
       </TabsTrigger>
       <TabsTrigger value="preview" className={tabTriggerClass}>
         <Globe className="h-3.5 w-3.5" />
@@ -246,59 +293,25 @@ export function SessionDetail({
 
   return (
     <div
-      className={`flex h-full min-h-0 min-w-0 w-full flex-col ${
-        immersiveTerminalActive
-          ? "overflow-hidden bg-[#060404]"
-          : "overflow-y-auto overscroll-contain lg:overflow-hidden"
-      }`}
+      className="flex h-full min-h-0 min-w-0 w-full flex-col overflow-y-auto overscroll-contain lg:overflow-hidden"
     >
       <Tabs
         key={sessionId}
         value={activeTab}
         onValueChange={handleTabChange}
-        className={immersiveTerminalActive ? "flex min-h-0 min-w-0 w-full flex-1 flex-col gap-0 p-0" : "flex min-h-0 min-w-0 w-full flex-1 flex-col gap-1 p-1 lg:gap-2 lg:p-3"}
+        className="flex min-h-0 min-w-0 w-full flex-1 flex-col gap-1 p-1 lg:gap-2 lg:p-3"
       >
-        {immersiveTerminalActive ? (
-          <div className="flex shrink-0 flex-col border-b border-white/10 bg-[#0d0908]">
-            {/* compact info row */}
-            <div className="flex h-10 items-center gap-2 px-2">
-              {onOpenSidebar ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-                  onClick={onOpenSidebar}
-                  aria-label="Open workspace panel"
-                  >
-                    <PanelLeftOpen className="h-4 w-4" />
-                  </Button>
-              ) : null}
-              <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
-                <span className="text-[12px] font-medium text-[#efe8e1]">{compactStatusLabel}</span>
-                <span className="font-mono text-[10px] text-[#8e847d]">· {sessionId.slice(0, 7)}</span>
-              </div>
-              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 sm:flex-nowrap">
+          {sessionTabs}
+          <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
+            <div className="flex items-center gap-1.5">
+              <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
+              <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
+              <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
             </div>
-            {/* tab row */}
-            <div className="px-1.5 pb-1.5">
-              {sessionTabs}
-            </div>
+            {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
           </div>
-        ) : (
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1.5 sm:flex-nowrap">
-            {sessionTabs}
-            <div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end">
-              <div className="flex items-center gap-1.5">
-                <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
-                <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
-                <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
-              </div>
-              {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
-            </div>
-          </div>
-        )}
+        </div>
 
         <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
           <TabsContent value="overview" className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0">
@@ -306,20 +319,16 @@ export function SessionDetail({
           </TabsContent>
 
           <TabsContent
-            value="terminal"
+            value="chat"
             forceMount
-            className={immersiveTerminalActive
-              ? "flex min-h-0 h-full min-w-0 w-full flex-col overflow-hidden bg-[#060404] focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
-              : "flex min-h-0 h-full min-w-0 flex-col w-full overflow-hidden bg-transparent focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"}
+            className="min-h-0 h-full min-w-0 w-full overflow-hidden focus-visible:outline-none [&[hidden]]:block data-[state=inactive]:pointer-events-none data-[state=inactive]:absolute data-[state=inactive]:inset-0 data-[state=inactive]:invisible data-[state=inactive]:opacity-0"
           >
-            <SessionTerminal
-              sessionId={sessionId}
-              projectId={session.projectId}
-              bridgeId={session.bridgeId ?? null}
-              sessionState={status}
-              runtimeMode={session.metadata["runtimeMode"]?.trim() ?? null}
-              pendingInsert={pendingTerminalInsert}
-              immersiveMobileMode={immersiveTerminalActive}
+            <SessionChatDock
+              session={session}
+              bridgeId={session.bridgeId ?? bridgeId}
+              className="h-full w-full border-0 xl:w-full"
+              hideOpenSessionAction
+              composerInsert={pendingTerminalInsert}
             />
           </TabsContent>
           <TabsContent

@@ -146,7 +146,7 @@ function buildSelectionInsert(
       selection.text ? `Text: ${selection.text}` : null,
       selection.htmlPreview ? `HTML preview: ${selection.htmlPreview}` : null,
     ]),
-    successMessage: "Queued the selected element for terminal input.",
+    successMessage: "Added the selected element to the chat composer.",
   };
 }
 
@@ -189,8 +189,8 @@ function buildLogInsert(
       }),
     ]),
     successMessage: kind === "console"
-      ? "Queued recent console logs for terminal input."
-      : "Queued recent network logs for terminal input.",
+      ? "Added recent console logs to the chat composer."
+      : "Added recent network logs to the chat composer.",
   };
 }
 
@@ -707,7 +707,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     const recentNetworkLogs = status.networkLogs.slice(-80);
 
     if (target === "selection" && !status.selectedElement) {
-      setSendError("Select an element before queueing preview context for terminal input.");
+      setSendError("Select an element before adding preview context to the chat composer.");
       return;
     }
 
@@ -876,7 +876,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 {previewMode === "navigate"
                   ? "navigate mode: clicks interact with the page"
                   : canSelectByPoint
-                    ? "inspect mode: click once to select, double-click to queue for terminal input"
+                    ? "inspect mode: click once to select, double-click to add to chat"
                     : "inspect mode: use DOM list for this frame"}
               </Badge>
             </div>
@@ -934,9 +934,9 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                   >
                     <div className="flex items-start justify-between gap-3 border-b border-[var(--vk-border)] px-3 py-3">
                       <div className="min-w-0">
-                        <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">Terminal input</div>
+                        <div className="text-[10px] uppercase tracking-[0.16em] text-[var(--vk-text-muted)]">Chat composer</div>
                         <div className="mt-1 text-[13px] font-medium text-[var(--vk-text-normal)]">
-                          {selectionComposer.pending ? "Selecting element…" : "Queue selection for the terminal"}
+                          {selectionComposer.pending ? "Selecting element…" : "Add selection to chat"}
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
@@ -980,7 +980,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                             </div>
                           </div>
                           <div className="rounded-[6px] border border-dashed border-[var(--vk-border)] px-3 py-2 text-[12px] text-[var(--vk-text-muted)]">
-                            Double-click the element in the preview to queue it immediately, or use the button below. The text is inserted into terminal input instead of being sent to the agent, so you can add more context before submitting.
+                            Double-click the element in the preview to add it immediately, or use the button below. The text is inserted into the chat composer instead of being sent right away, so you can add more context before submitting.
                           </div>
                           {sendError ? (
                             <div className="text-[12px] text-[var(--vk-red)]">{sendError}</div>
@@ -993,12 +993,12 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                             disabled={sending || !status.selectedElement}
                           >
                             {sendingTarget === "selection" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                            Queue for terminal input
+                            Add to chat
                           </Button>
                         </>
                       ) : (
                         <div className="rounded-[6px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
-                          Single-click an element to inspect it here. Double-click to queue it for terminal input.
+                          Single-click an element to inspect it here. Double-click to add it to the chat composer.
                         </div>
                       )}
                     </div>
@@ -1007,7 +1007,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               </div>
             ) : (
               <div className="max-w-md text-center text-[13px] text-[var(--vk-text-muted)]">
-                Connect a local dev URL or explicit preview URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select UI elements and queue browser context into terminal input.
+                Connect a local dev URL or explicit preview URL to start the preview browser. In Navigate mode, click the preview first, then type directly into the running app. Switch to Inspect mode to select UI elements and add browser context into the chat composer.
               </div>
             )}
           </div>
@@ -1076,7 +1076,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 <div className="space-y-1 p-2">
                   {previewMode === "navigate" ? (
                     <div className="rounded-[4px] border border-dashed border-[var(--vk-border)] px-2 py-2 text-[11px] text-[var(--vk-text-muted)]">
-                      Switch to Inspect mode to pick DOM nodes. Single-click selects a node. Double-click queues it for terminal input.
+                      Switch to Inspect mode to pick DOM nodes. Single-click selects a node. Double-click adds it to the chat composer.
                     </div>
                   ) : null}
                   {domLoading ? (
@@ -1162,7 +1162,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 disabled={sending || !status?.consoleLogs.length}
               >
                 {sendingTarget === "console" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                Queue for terminal
+                Add to chat
               </Button>
             </CardHeader>
             <CardContent>
@@ -1206,7 +1206,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 disabled={sending || !status?.networkLogs.length}
               >
                 {sendingTarget === "network" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                Queue for terminal
+                Add to chat
               </Button>
             </CardHeader>
             <CardContent>

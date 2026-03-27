@@ -13,7 +13,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use uuid::Uuid;
 
-use crate::routes::boards::{parse_board, update_task_dispatch_state, write_parsed_board};
+use crate::routes::boards::{
+    board_task_prefers_worktree, parse_board, update_task_dispatch_state, write_parsed_board,
+};
 use crate::state::{AppState, SessionStatus, SpawnRequest};
 use crate::task_context::compile_task_context;
 
@@ -261,7 +263,14 @@ async fn process_board_change(
             .map(AgentKind::parse)
             .unwrap_or_else(|| AgentKind::parse(&project_default_agent))
             .to_string();
-        let context = compile_task_context(&state, &project_id, &project, &task).await?;
+        let context = compile_task_context(
+            &state,
+            &project_id,
+            &project,
+            &task,
+            crate::task_context::TaskContextMode::Execution,
+        )
+        .await?;
         let model = None;
         let reasoning_effort = None;
         let attempt_id = format!("a-{}", Uuid::new_v4().simple());
@@ -273,7 +282,7 @@ async fn process_board_change(
                 prompt: context.prompt,
                 issue_id: None,
                 agent: Some(agent),
-                use_worktree: Some(true),
+                use_worktree: board_task_prefers_worktree(&task).or(Some(true)),
                 permission_mode: None,
                 model,
                 reasoning_effort,
@@ -285,6 +294,7 @@ async fn process_board_change(
                 parent_task_id: None,
                 retry_of_session_id: None,
                 profile: None,
+                session_kind: None,
                 brief_path: Some(context.repo_brief_path.clone()),
                 attachments: context.attachments,
                 source: "board_dispatch".to_string(),
@@ -343,6 +353,13 @@ async fn active_session_counts(state: &Arc<AppState>, project_id: &str) -> (usiz
     let mut global = 0usize;
     let mut project = 0usize;
     for session in sessions.values() {
+        let session_kind = session.metadata.get("sessionKind").map(String::as_str);
+        if session.metadata.get("role").map(String::as_str) == Some("orchestrator")
+            || session_kind == Some("board_planning")
+            || session_kind == Some("project_dispatcher")
+        {
+            continue;
+        }
         if session.status.is_terminal()
             || session.status == SessionStatus::Queued
             || matches!(

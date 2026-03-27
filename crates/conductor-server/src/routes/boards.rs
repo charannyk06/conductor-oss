@@ -67,8 +67,19 @@ struct AddTaskBody {
     description: Option<String>,
     context_notes: Option<String>,
     attachments: Option<Vec<String>>,
+    objective: Option<String>,
+    surfaces: Option<Vec<String>>,
+    constraints: Option<Vec<String>>,
+    dependencies: Option<Vec<String>>,
+    acceptance: Option<Vec<String>>,
+    skills: Option<Vec<String>>,
+    review_refs: Option<Vec<String>>,
+    deliverables: Option<Vec<String>>,
+    execution_mode: Option<String>,
     issue_id: Option<String>,
     agent: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
     role: Option<String>,
     r#type: Option<String>,
     priority: Option<String>,
@@ -85,9 +96,20 @@ struct UpdateTaskBody {
     description: Option<String>,
     context_notes: Option<String>,
     attachments: Option<Vec<String>>,
+    objective: Option<String>,
+    surfaces: Option<Vec<String>>,
+    constraints: Option<Vec<String>>,
+    dependencies: Option<Vec<String>>,
+    acceptance: Option<Vec<String>>,
+    skills: Option<Vec<String>>,
+    review_refs: Option<Vec<String>>,
+    deliverables: Option<Vec<String>>,
+    execution_mode: Option<String>,
     issue_id: Option<String>,
     github_item_id: Option<String>,
     agent: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
     r#type: Option<String>,
     priority: Option<String>,
     task_ref: Option<String>,
@@ -103,12 +125,27 @@ struct AddBoardCommentBody {
     body: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BoardTaskPacket {
+    pub(crate) objective: Option<String>,
+    pub(crate) execution_mode: Option<String>,
+    pub(crate) surfaces: Vec<String>,
+    pub(crate) constraints: Vec<String>,
+    pub(crate) dependencies: Vec<String>,
+    pub(crate) acceptance: Vec<String>,
+    pub(crate) skills: Vec<String>,
+    pub(crate) review_refs: Vec<String>,
+    pub(crate) deliverables: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct BoardTaskRecord {
     pub(crate) id: String,
     pub(crate) text: String,
     pub(crate) checked: bool,
     pub(crate) agent: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) reasoning_effort: Option<String>,
     pub(crate) project: Option<String>,
     pub(crate) task_type: Option<String>,
     pub(crate) priority: Option<String>,
@@ -118,6 +155,7 @@ pub(crate) struct BoardTaskRecord {
     pub(crate) github_item_id: Option<String>,
     pub(crate) attachments: Vec<String>,
     pub(crate) notes: Option<String>,
+    pub(crate) packet: BoardTaskPacket,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +211,9 @@ async fn add_board_task(
         text: build_task_text(body.title.trim(), body.description.as_deref()),
         checked: false,
         agent: body.agent.filter(|value| !value.trim().is_empty()),
+        model: trim_string(body.model),
+        reasoning_effort: trim_string(body.reasoning_effort)
+            .map(|value| value.to_ascii_lowercase()),
         project: Some(body.project_id.clone()),
         task_type: body.r#type.filter(|value| !value.trim().is_empty()),
         priority: body.priority.filter(|value| !value.trim().is_empty()),
@@ -182,6 +223,17 @@ async fn add_board_task(
         github_item_id: None,
         attachments: sanitize_string_list(body.attachments),
         notes: body.context_notes.filter(|value| !value.trim().is_empty()),
+        packet: BoardTaskPacket {
+            objective: trim_string(body.objective),
+            execution_mode: normalize_execution_mode_option(body.execution_mode),
+            surfaces: sanitize_string_list(body.surfaces),
+            constraints: sanitize_string_list(body.constraints),
+            dependencies: sanitize_string_list(body.dependencies),
+            acceptance: sanitize_string_list(body.acceptance),
+            skills: sanitize_string_list(body.skills),
+            review_refs: sanitize_string_list(body.review_refs),
+            deliverables: sanitize_string_list(body.deliverables),
+        },
     };
 
     if let Err(err) = insert_task_into_board(&board_path, role, &task, &body.project_id) {
@@ -464,6 +516,8 @@ pub(crate) async fn load_board_response(
                 "text": task.text,
                 "checked": task.checked,
                 "agent": task.agent,
+                "model": task.model,
+                "reasoningEffort": task.reasoning_effort,
                 "project": task.project,
                 "type": task.task_type,
                 "priority": task.priority,
@@ -473,6 +527,17 @@ pub(crate) async fn load_board_response(
                 "githubItemId": task.github_item_id,
                 "attachments": task.attachments,
                 "notes": task.notes,
+                "packet": {
+                    "objective": task.packet.objective,
+                    "executionMode": task.packet.execution_mode,
+                    "surfaces": task.packet.surfaces,
+                    "constraints": task.packet.constraints,
+                    "dependencies": task.packet.dependencies,
+                    "acceptance": task.packet.acceptance,
+                    "skills": task.packet.skills,
+                    "reviewRefs": task.packet.review_refs,
+                    "deliverables": task.packet.deliverables,
+                },
                 "briefPath": brief.as_ref().map(|value| value.repo_display.clone()),
                 "vaultBriefPath": brief.and_then(|value| value.vault_display),
                 "commentCount": comments.len(),
@@ -656,6 +721,17 @@ pub(crate) fn parse_task_line(
             .map(|value| strip_inline_tags(&value).to_string())
             .filter(|value| !value.is_empty())
             .or_else(|| inline_tags.get("agent").cloned()),
+        model: metadata
+            .remove("model")
+            .map(|value| strip_inline_tags(&value).to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| inline_tags.get("model").cloned()),
+        reasoning_effort: metadata
+            .remove("reasoningEffort")
+            .map(|value| strip_inline_tags(&value).to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| inline_tags.get("reasoningEffort").cloned())
+            .map(|value| value.to_ascii_lowercase()),
         project: metadata
             .remove("project")
             .map(|value| strip_inline_tags(&value).to_string())
@@ -691,18 +767,49 @@ pub(crate) fn parse_task_line(
             .filter(|value| !value.is_empty()),
         attachments: metadata
             .remove("attachments")
-            .map(|value| {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|item| !item.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
+            .map(|value| parse_metadata_list(&value))
             .unwrap_or_default(),
         notes: metadata
             .remove("notes")
             .map(|value| strip_inline_tags(&value).to_string()),
+        packet: BoardTaskPacket {
+            objective: metadata
+                .remove("objective")
+                .map(|value| strip_inline_tags(&value).to_string())
+                .filter(|value| !value.is_empty()),
+            execution_mode: metadata
+                .remove("executionMode")
+                .or_else(|| metadata.remove("workspaceMode"))
+                .and_then(|value| normalize_execution_mode(value.as_str()).map(str::to_string)),
+            surfaces: metadata
+                .remove("surfaces")
+                .map(|value| parse_metadata_list(&value))
+                .unwrap_or_default(),
+            constraints: metadata
+                .remove("constraints")
+                .map(|value| parse_metadata_list(&value))
+                .unwrap_or_default(),
+            dependencies: metadata
+                .remove("dependencies")
+                .map(|value| parse_metadata_list(&value))
+                .unwrap_or_default(),
+            acceptance: metadata
+                .remove("acceptance")
+                .map(|value| parse_metadata_list(&value))
+                .unwrap_or_default(),
+            skills: metadata
+                .remove("skills")
+                .map(|value| parse_metadata_list(&value))
+                .unwrap_or_default(),
+            review_refs: metadata
+                .remove("reviewRefs")
+                .map(|value| parse_metadata_list(&value))
+                .unwrap_or_default(),
+            deliverables: metadata
+                .remove("deliverables")
+                .map(|value| parse_metadata_list(&value))
+                .unwrap_or_default(),
+        },
     })
 }
 
@@ -910,6 +1017,11 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
 
     task.text = build_task_text(&title, description.as_deref());
     apply_optional_text(&mut task.agent, &body.agent);
+    apply_optional_text(&mut task.model, &body.model);
+    apply_optional_text(&mut task.reasoning_effort, &body.reasoning_effort);
+    if let Some(reasoning_effort) = task.reasoning_effort.as_mut() {
+        *reasoning_effort = reasoning_effort.to_ascii_lowercase();
+    }
     apply_optional_text(&mut task.task_type, &body.r#type);
     apply_optional_text(&mut task.priority, &body.priority);
     apply_optional_text(&mut task.task_ref, &body.task_ref);
@@ -917,6 +1029,10 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
     apply_optional_text(&mut task.issue_id, &body.issue_id);
     apply_optional_text(&mut task.github_item_id, &body.github_item_id);
     apply_optional_text(&mut task.notes, &body.context_notes);
+    apply_optional_text(&mut task.packet.objective, &body.objective);
+    if let Some(value) = body.execution_mode.as_deref() {
+        task.packet.execution_mode = normalize_execution_mode(value).map(str::to_string);
+    }
 
     if let Some(checked) = body.checked {
         task.checked = checked;
@@ -928,6 +1044,27 @@ fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .collect();
+    }
+    if let Some(values) = body.surfaces.as_ref() {
+        task.packet.surfaces = sanitize_string_list(Some(values.clone()));
+    }
+    if let Some(values) = body.constraints.as_ref() {
+        task.packet.constraints = sanitize_string_list(Some(values.clone()));
+    }
+    if let Some(values) = body.dependencies.as_ref() {
+        task.packet.dependencies = sanitize_string_list(Some(values.clone()));
+    }
+    if let Some(values) = body.acceptance.as_ref() {
+        task.packet.acceptance = sanitize_string_list(Some(values.clone()));
+    }
+    if let Some(values) = body.skills.as_ref() {
+        task.packet.skills = sanitize_string_list(Some(values.clone()));
+    }
+    if let Some(values) = body.review_refs.as_ref() {
+        task.packet.review_refs = sanitize_string_list(Some(values.clone()));
+    }
+    if let Some(values) = body.deliverables.as_ref() {
+        task.packet.deliverables = sanitize_string_list(Some(values.clone()));
     }
     if task
         .project
@@ -1226,6 +1363,18 @@ fn sanitize_tag_value(value: &str) -> String {
         .to_string()
 }
 
+fn serialize_metadata_list(values: &[String]) -> String {
+    let sanitized = values
+        .iter()
+        .map(|value| sanitize_value(value))
+        .collect::<Vec<_>>();
+    if sanitized.iter().any(|value| value.contains(',')) {
+        serde_json::to_string(&sanitized).unwrap_or_else(|_| sanitized.join(","))
+    } else {
+        sanitized.join(",")
+    }
+}
+
 pub(crate) fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> String {
     let checkbox = if task.checked { "[x]" } else { "[ ]" };
     let mut segments = vec![
@@ -1239,6 +1388,23 @@ pub(crate) fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> Strin
         .filter(|value| !value.trim().is_empty())
     {
         segments.push(format!("agent:{}", sanitize_value(agent)));
+    }
+    if let Some(model) = task
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        segments.push(format!("model:{}", sanitize_value(model)));
+    }
+    if let Some(reasoning_effort) = task
+        .reasoning_effort
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        segments.push(format!(
+            "reasoningEffort:{}",
+            sanitize_value(reasoning_effort)
+        ));
     }
     if let Some(task_type) = task
         .task_type
@@ -1294,11 +1460,7 @@ pub(crate) fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> Strin
     if !task.attachments.is_empty() {
         segments.push(format!(
             "attachments:{}",
-            task.attachments
-                .iter()
-                .map(|value| sanitize_value(value))
-                .collect::<Vec<_>>()
-                .join(",")
+            serialize_metadata_list(&task.attachments)
         ));
     }
     if let Some(notes) = task
@@ -1307,6 +1469,59 @@ pub(crate) fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> Strin
         .filter(|value| !value.trim().is_empty())
     {
         segments.push(format!("notes:{}", sanitize_value(notes)));
+    }
+    if let Some(objective) = task
+        .packet
+        .objective
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        segments.push(format!("objective:{}", sanitize_value(objective)));
+    }
+    if let Some(execution_mode) = task.packet.execution_mode.as_deref() {
+        segments.push(format!("executionMode:{}", sanitize_value(execution_mode)));
+    }
+    if !task.packet.surfaces.is_empty() {
+        segments.push(format!(
+            "surfaces:{}",
+            serialize_metadata_list(&task.packet.surfaces)
+        ));
+    }
+    if !task.packet.constraints.is_empty() {
+        segments.push(format!(
+            "constraints:{}",
+            serialize_metadata_list(&task.packet.constraints)
+        ));
+    }
+    if !task.packet.dependencies.is_empty() {
+        segments.push(format!(
+            "dependencies:{}",
+            serialize_metadata_list(&task.packet.dependencies)
+        ));
+    }
+    if !task.packet.acceptance.is_empty() {
+        segments.push(format!(
+            "acceptance:{}",
+            serialize_metadata_list(&task.packet.acceptance)
+        ));
+    }
+    if !task.packet.skills.is_empty() {
+        segments.push(format!(
+            "skills:{}",
+            serialize_metadata_list(&task.packet.skills)
+        ));
+    }
+    if !task.packet.review_refs.is_empty() {
+        segments.push(format!(
+            "reviewRefs:{}",
+            serialize_metadata_list(&task.packet.review_refs)
+        ));
+    }
+    if !task.packet.deliverables.is_empty() {
+        segments.push(format!(
+            "deliverables:{}",
+            serialize_metadata_list(&task.packet.deliverables)
+        ));
     }
 
     let mut inline_tags = Vec::<String>::new();
@@ -1365,9 +1580,70 @@ fn sanitize_string_list(values: Option<Vec<String>>) -> Vec<String> {
         .collect()
 }
 
+fn parse_metadata_list(value: &str) -> Vec<String> {
+    let trimmed = strip_inline_tags(value).trim();
+    if trimmed.starts_with('[') {
+        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(trimmed) {
+            return parsed
+                .into_iter()
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect();
+        }
+    }
+
+    trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn trim_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+}
+
+pub(crate) fn normalize_execution_mode(value: &str) -> Option<&'static str> {
+    match value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', ' '], "_")
+        .as_str()
+    {
+        "worktree" => Some("worktree"),
+        "main" | "repo" | "repo_root" | "main_workspace" | "mainworkspace" | "root_workspace" => {
+            Some("main_workspace")
+        }
+        "temp" | "temp_clone" | "tempclone" | "full_clone" | "review_clone" => Some("temp_clone"),
+        _ => None,
+    }
+}
+
+fn normalize_execution_mode_option(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .and_then(normalize_execution_mode)
+        .map(str::to_string)
+}
+
+pub(crate) fn board_task_prefers_worktree(task: &BoardTaskRecord) -> Option<bool> {
+    match task.packet.execution_mode.as_deref() {
+        Some("worktree") => Some(true),
+        Some("main_workspace") | Some("temp_clone") => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{update_task_dispatch_state, BoardTaskRecord, ParsedBoard, ParsedBoardColumn};
+    use super::{
+        board_task_prefers_worktree, build_task_line, normalize_execution_mode, parse_task_line,
+        update_task_dispatch_state, BoardTaskPacket, BoardTaskRecord, ParsedBoard,
+        ParsedBoardColumn,
+    };
 
     fn task(id: &str) -> BoardTaskRecord {
         BoardTaskRecord {
@@ -1375,6 +1651,8 @@ mod tests {
             text: format!("Task {id}"),
             checked: false,
             agent: None,
+            model: None,
+            reasoning_effort: None,
             project: None,
             task_type: None,
             priority: None,
@@ -1384,7 +1662,126 @@ mod tests {
             github_item_id: None,
             attachments: Vec::new(),
             notes: None,
+            packet: BoardTaskPacket::default(),
         }
+    }
+
+    #[test]
+    fn task_line_round_trip_preserves_dispatcher_packet_fields() {
+        let task = BoardTaskRecord {
+            id: "task-1".to_string(),
+            text: "Review implementation - Compare the local branch with the PR".to_string(),
+            checked: false,
+            agent: Some("codex".to_string()),
+            model: Some("gpt-5.4".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            project: Some("demo".to_string()),
+            task_type: Some("review".to_string()),
+            priority: Some("high".to_string()),
+            task_ref: Some("DEM-001".to_string()),
+            attempt_ref: None,
+            issue_id: None,
+            github_item_id: None,
+            attachments: vec!["docs/spec.md".to_string()],
+            notes: Some("Focus on behavioral regressions first.".to_string()),
+            packet: BoardTaskPacket {
+                objective: Some(
+                    "Validate the implementation against the PR requirements.".to_string(),
+                ),
+                execution_mode: Some("temp_clone".to_string()),
+                surfaces: vec!["crates/conductor-server/src".to_string()],
+                constraints: vec!["Do not mutate the board during review".to_string()],
+                dependencies: vec!["PR #42 context".to_string()],
+                acceptance: vec!["Summarize findings by severity".to_string()],
+                skills: vec!["github".to_string()],
+                review_refs: vec!["https://github.com/acme/demo/pull/42".to_string()],
+                deliverables: vec!["review summary".to_string()],
+            },
+        };
+
+        let line = build_task_line(&task, "demo");
+        let parsed = parse_task_line(&line, "review", "demo").expect("task should parse");
+
+        assert_eq!(parsed.packet.execution_mode.as_deref(), Some("temp_clone"));
+        assert_eq!(
+            parsed.packet.objective.as_deref(),
+            Some("Validate the implementation against the PR requirements.")
+        );
+        assert_eq!(parsed.packet.surfaces, vec!["crates/conductor-server/src"]);
+        assert_eq!(parsed.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(parsed.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            parsed.packet.review_refs,
+            vec!["https://github.com/acme/demo/pull/42"]
+        );
+        assert_eq!(parsed.packet.deliverables, vec!["review summary"]);
+    }
+
+    #[test]
+    fn task_line_round_trip_preserves_list_items_with_commas() {
+        let task = BoardTaskRecord {
+            id: "task-2".to_string(),
+            text: "Implement ACP fixes".to_string(),
+            checked: false,
+            agent: Some("codex".to_string()),
+            model: None,
+            reasoning_effort: None,
+            project: Some("demo".to_string()),
+            task_type: Some("fix".to_string()),
+            priority: Some("high".to_string()),
+            task_ref: Some("DEM-002".to_string()),
+            attempt_ref: None,
+            issue_id: None,
+            github_item_id: None,
+            attachments: vec!["docs/spec,final.md".to_string()],
+            notes: Some("Keep the dispatcher approval flow intact.".to_string()),
+            packet: BoardTaskPacket {
+                objective: Some("Fix ACP dispatcher mutations.".to_string()),
+                execution_mode: Some("worktree".to_string()),
+                surfaces: vec![
+                    "crates/conductor-server/src/acp.rs, crates/conductor-server/src/mcp.rs"
+                        .to_string(),
+                ],
+                constraints: vec![
+                    "Preserve approval gating, do not widen mutation scope.".to_string()
+                ],
+                dependencies: vec!["ACP proposal output, board persistence format".to_string()],
+                acceptance: vec![
+                    "Approvals create tasks, packet fields survive round-trips.".to_string()
+                ],
+                skills: vec!["rust, testing".to_string()],
+                review_refs: vec!["https://example.test/pr/42?view=files,comments".to_string()],
+                deliverables: vec!["code patch, regression coverage".to_string()],
+            },
+        };
+
+        let line = build_task_line(&task, "demo");
+        let parsed = parse_task_line(&line, "intake", "demo").expect("task should parse");
+
+        assert_eq!(parsed.attachments, task.attachments);
+        assert_eq!(parsed.packet.surfaces, task.packet.surfaces);
+        assert_eq!(parsed.packet.constraints, task.packet.constraints);
+        assert_eq!(parsed.packet.dependencies, task.packet.dependencies);
+        assert_eq!(parsed.packet.acceptance, task.packet.acceptance);
+        assert_eq!(parsed.packet.skills, task.packet.skills);
+        assert_eq!(parsed.packet.review_refs, task.packet.review_refs);
+        assert_eq!(parsed.packet.deliverables, task.packet.deliverables);
+    }
+
+    #[test]
+    fn execution_mode_aliases_normalize_and_drive_worktree_preference() {
+        assert_eq!(
+            normalize_execution_mode("main workspace"),
+            Some("main_workspace")
+        );
+        assert_eq!(normalize_execution_mode("temp-clone"), Some("temp_clone"));
+        assert_eq!(normalize_execution_mode("worktree"), Some("worktree"));
+
+        let mut task = task("task-1");
+        task.packet.execution_mode = Some("temp_clone".to_string());
+        assert_eq!(board_task_prefers_worktree(&task), Some(false));
+        task.packet.execution_mode = Some("worktree".to_string());
+        assert_eq!(board_task_prefers_worktree(&task), Some(true));
     }
 
     #[test]

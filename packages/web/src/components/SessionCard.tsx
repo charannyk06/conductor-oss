@@ -305,24 +305,13 @@ export function SessionCard({
             <a
               href={buildSessionHref(session.id, {
                 bridgeId: session.bridgeId ?? null,
-                tab: "terminal",
+                tab: "chat",
               })}
               onClick={(e) => e.stopPropagation()}
               className="rounded-md border border-[var(--color-border-default)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-text-secondary)] transition-colors hover:border-[var(--color-border-strong)] hover:text-[var(--color-text-primary)] hover:no-underline"
             >
-              View details
+              Open chat
             </a>
-            {isTerminal && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onOpenTerminal?.(session.id);
-                }}
-                className="rounded-md border border-[var(--color-accent)] px-2.5 py-1 text-[10px] font-medium text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent-subtle)]"
-              >
-                Open terminal
-              </button>
-            )}
             {isRestorable && (
               <button
                 onClick={(e) => {

@@ -6,8 +6,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task;
+use url::Url;
 
-use crate::routes::boards::{split_task_text, BoardTaskRecord};
+use crate::routes::boards::{split_task_text, BoardTaskPacket, BoardTaskRecord};
 use crate::state::AppState;
 
 const MAX_BRIEF_BYTES: usize = 16 * 1024;
@@ -28,6 +29,12 @@ pub(crate) struct TaskContextBundle {
     pub prompt: String,
     pub attachments: Vec<String>,
     pub repo_brief_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskContextMode {
+    Execution,
+    Planning,
 }
 
 pub(crate) async fn ensure_task_brief(
@@ -82,8 +89,12 @@ fn ensure_task_brief_sync(
         &title,
         description.as_deref(),
         task.notes.as_deref(),
+        task.agent.as_deref(),
+        task.model.as_deref(),
+        task.reasoning_effort.as_deref(),
         &task.attachments,
         task.attempt_ref.as_deref(),
+        &task.packet,
     );
 
     if let Some(parent) = paths.repo_absolute.parent() {
@@ -134,6 +145,7 @@ pub(crate) async fn compile_task_context(
     project_id: &str,
     project: &ProjectConfig,
     task: &BoardTaskRecord,
+    mode: TaskContextMode,
 ) -> Result<TaskContextBundle> {
     let brief_paths = ensure_task_brief(state, project_id, project, task).await?;
     let config = state.config.read().await.clone();
@@ -162,7 +174,12 @@ pub(crate) async fn compile_task_context(
     }
 
     let mut prompt = String::new();
-    prompt.push_str("You are executing a Conductor board task.\n\n");
+    let intro = match mode {
+        TaskContextMode::Execution => "You are executing a Conductor board task.",
+        TaskContextMode::Planning => "You are helping plan a Conductor board task.",
+    };
+    prompt.push_str(intro);
+    prompt.push_str("\n\n");
     prompt.push_str(&format!("Task: {title}\n"));
     if let Some(task_ref) = task
         .task_ref
@@ -178,6 +195,20 @@ pub(crate) async fn compile_task_context(
         .filter(|value| !value.trim().is_empty())
     {
         prompt.push_str(&format!("Assigned agent: {agent}\n"));
+    }
+    if let Some(model) = task
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        prompt.push_str(&format!("Assigned model: {model}\n"));
+    }
+    if let Some(reasoning_effort) = task
+        .reasoning_effort
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        prompt.push_str(&format!("Assigned reasoning: {reasoning_effort}\n"));
     }
     if let Some(priority) = task
         .priority
@@ -208,6 +239,14 @@ pub(crate) async fn compile_task_context(
     {
         prompt.push_str("\nBoard notes:\n");
         prompt.push_str(notes.trim());
+        prompt.push('\n');
+    }
+
+    let packet_snapshot =
+        render_task_packet_snapshot(&task.packet, description.as_deref(), task.notes.as_deref());
+    if !packet_snapshot.is_empty() {
+        prompt.push_str("\nDispatcher packet:\n");
+        prompt.push_str(&packet_snapshot);
         prompt.push('\n');
     }
 
@@ -262,9 +301,42 @@ pub(crate) async fn compile_task_context(
         }
     }
 
-    prompt.push_str(
-        "\nUse the board brief and context as the source of truth. Keep implementation updates aligned with this task rather than treating it like a generic PR ticket.\n",
-    );
+    match mode {
+        TaskContextMode::Execution => {
+            if let Some(execution_mode) = task.packet.execution_mode.as_deref() {
+                prompt.push_str("\nExecution mode guidance:\n");
+                match execution_mode {
+                    "temp_clone" => {
+                        prompt.push_str(
+                            "- Before substantive implementation or review, create a full temporary clone of the repository outside the main workspace/worktree and do the work there.\n",
+                        );
+                        prompt.push_str(
+                            "- Treat the current Conductor workspace as orchestration context only; do not leave review or implementation edits behind in the main workspace unless the task explicitly changes that plan.\n",
+                        );
+                    }
+                    "main_workspace" => {
+                        prompt.push_str(
+                            "- Execute in the main project workspace on the current checked-out branch. Do not create a worktree unless the task uncovers a concrete need for one.\n",
+                        );
+                    }
+                    "worktree" => {
+                        prompt.push_str(
+                            "- Use the isolated Conductor worktree/session workspace as the primary execution root.\n",
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            prompt.push_str(
+                "\nUse the board brief and context as the source of truth. Keep implementation updates aligned with this task rather than treating it like a generic PR ticket.\n",
+            );
+        }
+        TaskContextMode::Planning => {
+            prompt.push_str(
+                "\nUse the board brief and context as the source of truth. Focus on clarifying scope, dependencies, risks, open questions, and a concrete plan before implementation.\n",
+            );
+        }
+    }
 
     Ok(TaskContextBundle {
         prompt,
@@ -357,8 +429,12 @@ fn render_task_brief(
     title: &str,
     description: Option<&str>,
     notes: Option<&str>,
+    agent: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
     attachments: &[String],
     attempt_ref: Option<&str>,
+    packet: &BoardTaskPacket,
 ) -> String {
     let mut out = String::new();
     out.push_str("---\n");
@@ -370,11 +446,83 @@ fn render_task_brief(
     out.push_str(&format!("# {task_ref} {title}\n\n"));
 
     out.push_str("## Objective\n");
-    if let Some(description) = description.filter(|value| !value.trim().is_empty()) {
-        out.push_str(description.trim());
+    if let Some(objective) = packet
+        .objective
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| description.filter(|value| !value.trim().is_empty()))
+    {
+        out.push_str(objective.trim());
         out.push_str("\n\n");
     } else {
         out.push_str("- Describe the intended outcome here.\n\n");
+    }
+
+    out.push_str("## Execution Mode\n");
+    match packet.execution_mode.as_deref() {
+        Some("temp_clone") => {
+            out.push_str("- Use a full temporary clone of the repository for isolated review or implementation work.\n\n");
+        }
+        Some("main_workspace") => {
+            out.push_str(
+                "- Execute in the main project workspace on the current checked-out branch.\n\n",
+            );
+        }
+        Some("worktree") => {
+            out.push_str("- Use a dedicated git worktree/session workspace.\n\n");
+        }
+        _ => {
+            out.push_str("- No explicit execution mode selected yet.\n\n");
+        }
+    }
+
+    out.push_str("## Agent Preferences\n");
+    if let Some(agent) = agent.map(str::trim).filter(|value| !value.is_empty()) {
+        out.push_str(&format!("- Agent: {agent}\n"));
+    }
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        out.push_str(&format!("- Model: {model}\n"));
+    }
+    if let Some(reasoning_effort) = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        out.push_str(&format!("- Reasoning: {reasoning_effort}\n"));
+    }
+    if !matches!(
+        (
+            agent.map(str::trim).filter(|value| !value.is_empty()),
+            model.map(str::trim).filter(|value| !value.is_empty()),
+            reasoning_effort
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        ),
+        (Some(_), _, _) | (_, Some(_), _) | (_, _, Some(_))
+    ) {
+        out.push_str("- Use the task metadata on the board for assigned agent, model, and reasoning when present.\n");
+    }
+    out.push('\n');
+
+    out.push_str("## Files / Surfaces\n");
+    if packet.surfaces.is_empty() {
+        out.push_str("- Identify the exact files, folders, APIs, or UX surfaces to inspect.\n\n");
+    } else {
+        for surface in &packet.surfaces {
+            out.push_str(&format!("- {surface}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Review References\n");
+    if packet.review_refs.is_empty() {
+        out.push_str(
+            "- Add PR URLs, issue URLs, commits, or branch refs when review context matters.\n\n",
+        );
+    } else {
+        for item in &packet.review_refs {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
     }
 
     out.push_str("## Board Notes\n");
@@ -383,6 +531,56 @@ fn render_task_brief(
         out.push_str("\n\n");
     } else {
         out.push_str("- Add task-specific guidance, constraints, and edge cases.\n\n");
+    }
+
+    out.push_str("## Constraints\n");
+    if packet.constraints.is_empty() {
+        out.push_str("- Capture non-negotiable constraints, invariants, and guardrails.\n\n");
+    } else {
+        for item in &packet.constraints {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Dependencies\n");
+    if packet.dependencies.is_empty() {
+        out.push_str("- \n\n");
+    } else {
+        for item in &packet.dependencies {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Skills / Tools\n");
+    if packet.skills.is_empty() {
+        out.push_str("- Add relevant skills, domains, or tools for the worker.\n\n");
+    } else {
+        for item in &packet.skills {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Deliverables\n");
+    if packet.deliverables.is_empty() {
+        out.push_str("- Describe the exact outputs expected from this task.\n\n");
+    } else {
+        for item in &packet.deliverables {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
+    }
+
+    out.push_str("## Acceptance Criteria\n");
+    if packet.acceptance.is_empty() {
+        out.push_str("- \n\n");
+    } else {
+        for item in &packet.acceptance {
+            out.push_str(&format!("- {item}\n"));
+        }
+        out.push('\n');
     }
 
     out.push_str("## Attachments\n");
@@ -395,8 +593,6 @@ fn render_task_brief(
         out.push('\n');
     }
 
-    out.push_str("## Dependencies\n- \n\n");
-    out.push_str("## Acceptance Criteria\n- \n\n");
     out.push_str(&format!(
         "## Subtasks\n- Create child pages in `{task_ref}/` when this task needs executable subtasks.\n\n"
     ));
@@ -408,6 +604,59 @@ fn render_task_brief(
     }
 
     out
+}
+
+fn render_task_packet_snapshot(
+    packet: &BoardTaskPacket,
+    description: Option<&str>,
+    notes: Option<&str>,
+) -> String {
+    let mut lines = Vec::new();
+    if let Some(objective) = packet
+        .objective
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| description.filter(|value| !value.trim().is_empty()))
+    {
+        lines.push(format!("- Objective: {}", objective.trim()));
+    }
+    if let Some(execution_mode) = packet.execution_mode.as_deref() {
+        lines.push(format!("- Execution mode: {execution_mode}"));
+    }
+    if !packet.surfaces.is_empty() {
+        lines.push(format!("- Surfaces: {}", packet.surfaces.join("; ")));
+    }
+    if !packet.review_refs.is_empty() {
+        lines.push(format!("- Review refs: {}", packet.review_refs.join("; ")));
+    }
+    if !packet.constraints.is_empty() {
+        lines.push(format!("- Constraints: {}", packet.constraints.join("; ")));
+    }
+    if !packet.dependencies.is_empty() {
+        lines.push(format!(
+            "- Dependencies: {}",
+            packet.dependencies.join("; ")
+        ));
+    }
+    if !packet.skills.is_empty() {
+        lines.push(format!("- Skills: {}", packet.skills.join("; ")));
+    }
+    if !packet.deliverables.is_empty() {
+        lines.push(format!(
+            "- Deliverables: {}",
+            packet.deliverables.join("; ")
+        ));
+    }
+    if !packet.acceptance.is_empty() {
+        lines.push(format!("- Acceptance: {}", packet.acceptance.join("; ")));
+    }
+    if lines.is_empty() {
+        if let Some(notes) = notes.map(str::trim).filter(|value| !value.is_empty()) {
+            return format!("- Notes: {notes}");
+        }
+        return String::new();
+    }
+    lines.join("\n")
 }
 
 fn sync_newer_brief(repo_path: &Path, vault_path: &Path) -> Result<()> {
@@ -438,7 +687,7 @@ fn read_text_preview(path: &Path, limit: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(truncated).to_string())
 }
 
-fn attachment_context_sections(
+pub(crate) fn attachment_context_sections(
     state: &AppState,
     attachments: &[String],
     allowed_roots: &[PathBuf],
@@ -488,7 +737,12 @@ fn attachment_context_sections(
 }
 
 fn resolve_attachment_path(workspace_root: &Path, value: &str) -> Option<PathBuf> {
-    let candidate = PathBuf::from(value);
+    let candidate = if value.starts_with("file://") {
+        let url = Url::parse(value).ok()?;
+        url.to_file_path().ok()?
+    } else {
+        PathBuf::from(value)
+    };
     let resolved = if candidate.is_absolute() {
         candidate
     } else {
@@ -497,7 +751,7 @@ fn resolve_attachment_path(workspace_root: &Path, value: &str) -> Option<PathBuf
     std::fs::canonicalize(resolved).ok()
 }
 
-fn attachment_allowed_roots(
+pub(crate) fn attachment_allowed_roots(
     state: &AppState,
     project_id: &str,
     project: &ProjectConfig,
@@ -607,9 +861,10 @@ fn is_image(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        path_is_within_roots, resolve_attachment_path, resolve_task_brief_paths,
+        path_is_within_roots, render_task_brief, resolve_attachment_path, resolve_task_brief_paths,
         sanitize_task_ref_component,
     };
+    use crate::routes::boards::BoardTaskPacket;
     use conductor_core::config::ProjectConfig;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -667,6 +922,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_attachment_path_supports_file_uris() {
+        let root = temp_root();
+        let workspace = root.join("workspace");
+        let nested = workspace.join("docs");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("note.txt");
+        fs::write(&file, "hello").unwrap();
+
+        let uri = format!("file://{}", file.display());
+        let resolved = resolve_attachment_path(&workspace, &uri);
+        assert_eq!(resolved, Some(fs::canonicalize(&file).unwrap()));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn path_is_within_roots_rejects_canonicalized_paths_outside_allowlist() {
         let root = temp_root();
         let workspace = root.join("workspace");
@@ -687,6 +958,43 @@ mod tests {
         assert!(!path_is_within_roots(&canonical_outside, &allowed));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn render_task_brief_includes_dispatcher_packet_sections() {
+        let brief = render_task_brief(
+            "demo",
+            "task-1",
+            "DEM-001",
+            "Review dispatcher task packets",
+            Some("Keep the board handoff rich."),
+            Some("Focus on current-branch review flows."),
+            Some("codex"),
+            Some("gpt-5.4"),
+            Some("high"),
+            &["docs/spec.md".to_string()],
+            Some("session-1"),
+            &BoardTaskPacket {
+                objective: Some(
+                    "Compare orchestrator behavior against kanban-style dispatch.".to_string(),
+                ),
+                execution_mode: Some("main_workspace".to_string()),
+                surfaces: vec!["crates/conductor-server/src/state".to_string()],
+                constraints: vec!["Do not mix dispatcher and normal sessions".to_string()],
+                dependencies: vec!["PR #42".to_string()],
+                acceptance: vec!["Task brief contains review refs".to_string()],
+                skills: vec!["github".to_string()],
+                review_refs: vec!["https://github.com/acme/demo/pull/42".to_string()],
+                deliverables: vec!["review summary".to_string()],
+            },
+        );
+
+        assert!(brief.contains("## Execution Mode"));
+        assert!(brief.contains("## Agent Preferences"));
+        assert!(brief.contains("gpt-5.4"));
+        assert!(brief.contains("current checked-out branch"));
+        assert!(brief.contains("https://github.com/acme/demo/pull/42"));
+        assert!(brief.contains("review summary"));
     }
 
     fn temp_root() -> PathBuf {
