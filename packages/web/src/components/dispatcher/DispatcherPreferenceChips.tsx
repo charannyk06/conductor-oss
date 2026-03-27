@@ -3,7 +3,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import type { ReactNode } from "react";
-import { BrainCircuit, ChevronDown, Sparkles } from "lucide-react";
+import { Check, ChevronDown, LoaderCircle } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { cn } from "@/lib/cn";
 import {
@@ -168,7 +168,7 @@ export function DispatcherPreferenceChips({
                   {model.description}
                 </p>
               </div>
-              {selected ? <Sparkles className="h-3.5 w-3.5 text-[#f2d9cd]" /> : null}
+              {selected ? <Check className="h-4 w-4 text-[#f2d9cd]" /> : null}
             </DropdownMenu.Item>
           );
         })}
@@ -178,7 +178,7 @@ export function DispatcherPreferenceChips({
         <PreferenceChip
           label={(
             <span className="flex items-center gap-2">
-              <BrainCircuit className="h-4 w-4 text-[#d7b6a5]" />
+              <LoaderCircle className="h-4 w-4 text-[#d7b6a5]" />
               <span>{formatReasoningLabel(reasoningValue || availableReasoningOptions[0].id)}</span>
             </span>
           )}
@@ -200,14 +200,14 @@ export function DispatcherPreferenceChips({
                 })}
                 className="flex min-h-[42px] cursor-default items-center gap-3 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)]"
               >
-                <BrainCircuit className="h-4 w-4 text-[#d7b6a5]" />
+                <LoaderCircle className="h-4 w-4 text-[#d7b6a5]" />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[13px] font-medium">{option.label}</p>
                   <p className="truncate text-[11px] text-[rgba(255,255,255,0.58)]">
                     {option.description}
                   </p>
                 </div>
-                {selected ? <Sparkles className="h-3.5 w-3.5 text-[#f2d9cd]" /> : null}
+                {selected ? <Check className="h-4 w-4 text-[#f2d9cd]" /> : null}
               </DropdownMenu.Item>
             );
           })}
@@ -241,7 +241,7 @@ export function DispatcherPreferenceChips({
                   {known?.description ?? "Coding agent"}
                 </p>
               </div>
-              {selected ? <Sparkles className="h-3.5 w-3.5 text-[#f2d9cd]" /> : null}
+              {selected ? <Check className="h-4 w-4 text-[#f2d9cd]" /> : null}
             </DropdownMenu.Item>
           );
         })}

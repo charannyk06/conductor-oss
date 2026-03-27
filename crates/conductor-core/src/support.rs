@@ -781,6 +781,7 @@ mod tests {
                 cleanup_script: Vec::new(),
                 archive_script: Vec::new(),
                 copy_files: Vec::new(),
+                mcp_servers: BTreeMap::new(),
             },
         );
         config
@@ -885,6 +886,7 @@ mod tests {
             cleanup_script: Vec::new(),
             archive_script: Vec::new(),
             copy_files: Vec::new(),
+            mcp_servers: BTreeMap::new(),
         };
 
         let mirror = build_project("demo", &project);

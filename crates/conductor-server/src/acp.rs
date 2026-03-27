@@ -18,8 +18,9 @@ use crate::state::{
     dispatcher_implementation_agent_options, dispatcher_implementation_model_options,
     dispatcher_implementation_reasoning_options, dispatcher_preferred_implementation_agent,
     dispatcher_preferred_implementation_model,
-    dispatcher_preferred_implementation_reasoning_effort, AppState, CreateDispatcherThreadOptions,
-    DispatcherSelectOption, DispatcherTurnRequest, SessionRecord, SessionStatus,
+    dispatcher_preferred_implementation_reasoning_effort, parse_acp_mcp_servers,
+    serialize_mcp_servers, AppState, CreateDispatcherThreadOptions, DispatcherSelectOption,
+    DispatcherTurnRequest, SessionRecord, SessionStatus, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
 };
 
 const ACP_SERVER_NAME: &str = "conductor-acp";
@@ -212,7 +213,7 @@ impl AcpServer {
         if !cwd.is_absolute() {
             bail!("session/new cwd must be an absolute path");
         }
-        ensure_supported_mcp_servers(&params.mcp_servers)?;
+        let session_mcp_servers = parse_acp_mcp_servers(&params.mcp_servers)?;
         let session_meta = parse_conductor_meta(params.meta.as_ref());
         let dispatcher_model = session_meta.model.clone();
         let dispatcher_reasoning_effort = session_meta.reasoning_effort.clone();
@@ -239,6 +240,11 @@ impl AcpServer {
         updated
             .metadata
             .insert("agentCwd".to_string(), cwd.to_string_lossy().to_string());
+        if let Some(serialized) = serialize_mcp_servers(&session_mcp_servers) {
+            updated
+                .metadata
+                .insert(ACP_SESSION_MCP_SERVERS_METADATA_KEY.to_string(), serialized);
+        }
         updated.summary = Some("ACP dispatcher created".to_string());
         updated
             .metadata
@@ -259,7 +265,8 @@ impl AcpServer {
     }
 
     async fn load_session(&self, params: LoadSessionRequest) -> Result<(SessionRecord, Value)> {
-        let session = self
+        let session_mcp_servers = parse_acp_mcp_servers(&params.mcp_servers)?;
+        let mut session = self
             .state
             .get_dispatcher_thread(&params.session_id)
             .await
@@ -274,7 +281,32 @@ impl AcpServer {
         if !cwd.is_absolute() {
             bail!("session/load cwd must be an absolute path");
         }
-        ensure_supported_mcp_servers(&params.mcp_servers)?;
+        let serialized = serialize_mcp_servers(&session_mcp_servers);
+        let metadata_changed = match serialized {
+            Some(serialized) => {
+                let changed = session
+                    .metadata
+                    .get(ACP_SESSION_MCP_SERVERS_METADATA_KEY)
+                    .map(String::as_str)
+                    != Some(serialized.as_str());
+                if changed {
+                    session
+                        .metadata
+                        .insert(ACP_SESSION_MCP_SERVERS_METADATA_KEY.to_string(), serialized);
+                }
+                changed
+            }
+            None => session
+                .metadata
+                .remove(ACP_SESSION_MCP_SERVERS_METADATA_KEY)
+                .is_some(),
+        };
+        if metadata_changed {
+            self.state
+                .replace_dispatcher_thread(session.clone())
+                .await
+                .with_context(|| format!("Failed to update ACP session {}", params.session_id))?;
+        }
         Ok((
             session.clone(),
             json!({
@@ -670,19 +702,6 @@ impl AcpServer {
         session.last_activity_at = chrono::Utc::now().to_rfc3339();
         self.state.replace_dispatcher_thread(session).await
     }
-}
-
-fn ensure_supported_mcp_servers(value: &Value) -> Result<()> {
-    let unsupported = match value {
-        Value::Null => false,
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-        _ => true,
-    };
-    if unsupported {
-        bail!("ACP external MCP server requests are not supported by this Conductor build yet");
-    }
-    Ok(())
 }
 
 pub async fn serve_stdio(state: Arc<AppState>) -> Result<()> {
@@ -1710,12 +1729,51 @@ pub struct JsonRpcError {
 mod tests {
     use super::{
         dispatcher_message_from_prompt_content, parse_prompt_blocks, prompt_turn_dispatch_message,
-        session_config_options, updates_for_entry, ACP_CONFIG_IMPLEMENTATION_AGENT,
-        ACP_CONFIG_MODEL, ACP_CONFIG_THOUGHT_LEVEL,
+        session_config_options, updates_for_entry, AcpServer, CreateDispatcherThreadOptions,
+        LoadSessionRequest, ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL,
+        ACP_CONFIG_THOUGHT_LEVEL,
     };
-    use crate::state::{ConversationEntry, SessionRecord};
+    use crate::state::{
+        AppState, ConversationEntry, SessionRecord, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
+    };
+    use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
+    use conductor_db::Database;
     use serde_json::{json, Value};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
+    use std::fs;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    async fn build_test_state(label: &str) -> (std::path::PathBuf, Arc<AppState>) {
+        let root = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("test repo should be created");
+        fs::write(repo.join("CONDUCTOR.md"), "## Inbox\n").expect("board should be created");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: repo.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("ttyd".to_string()),
+                    default_branch: "main".to_string(),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory()
+            .await
+            .expect("test db should initialize");
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        (root, state)
+    }
 
     fn test_dispatcher_session(
         agent: &str,
@@ -1888,5 +1946,45 @@ mod tests {
             updates[0]["_meta"]["runtime"]["custom"],
             Value::String("kept".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn load_session_clears_stale_session_mcp_servers_when_none_are_requested() {
+        let (root, state) = build_test_state("acp-load-session-mcp-clear").await;
+        let server = AcpServer::new(Arc::clone(&state));
+        let mut session = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        session.metadata.insert(
+            ACP_SESSION_MCP_SERVERS_METADATA_KEY.to_string(),
+            "{\"filesystem\":{\"command\":\"npx\"}}".to_string(),
+        );
+        state
+            .replace_dispatcher_thread(session.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        let (loaded, _) = server
+            .load_session(LoadSessionRequest {
+                cwd: root.join("repo").to_string_lossy().to_string(),
+                mcp_servers: Value::Null,
+                session_id: session.id.clone(),
+            })
+            .await
+            .expect("load_session should succeed");
+
+        assert!(!loaded
+            .metadata
+            .contains_key(ACP_SESSION_MCP_SERVERS_METADATA_KEY));
+        let persisted = state
+            .get_dispatcher_thread(&session.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert!(!persisted
+            .metadata
+            .contains_key(ACP_SESSION_MCP_SERVERS_METADATA_KEY));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

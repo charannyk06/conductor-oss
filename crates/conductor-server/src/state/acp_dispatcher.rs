@@ -19,7 +19,10 @@ use super::helpers::{
     sanitize_terminal_text,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::{AppState, ConversationEntry, SessionRecord, SessionStatus};
+use super::{
+    deserialize_mcp_servers, AppState, ConversationEntry, SessionRecord, SessionStatus,
+    ACP_SESSION_MCP_SERVERS_METADATA_KEY,
+};
 use crate::acp_prompt::{
     acp_dispatcher_preference_note, acp_dispatcher_turn_prefix, matches_acp_approve_command,
     rewrite_acp_dispatcher_command,
@@ -31,6 +34,7 @@ const ACP_SESSION_KIND: &str = "project_dispatcher";
 const ACP_MODE_DISPATCHER: &str = "dispatcher";
 const ACP_MEMORY_VERSION: u8 = 1;
 const ACP_HEARTBEAT_INTERVAL: ChronoDuration = ChronoDuration::minutes(15);
+const ACP_SESSION_MEMORY_SYNC_INTERVAL: ChronoDuration = ChronoDuration::seconds(5);
 const ACP_SHORT_TERM_LIMIT: usize = 8;
 const ACP_LONG_TERM_LIMIT: usize = 24;
 const ACP_RECENT_BOARD_ACTIVITY_LIMIT: usize = 8;
@@ -39,6 +43,7 @@ const ACP_WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
 const ACP_APPROVAL_REQUIRED: &str = "approval_required";
 const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
+const ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY: &str = "acpSessionMemorySyncedAt";
 pub(crate) const ACP_IMPLEMENTATION_AGENT_METADATA_KEY: &str = "acpImplementationAgent";
 pub(crate) const ACP_IMPLEMENTATION_MODEL_METADATA_KEY: &str = "acpImplementationModel";
 pub(crate) const ACP_IMPLEMENTATION_REASONING_METADATA_KEY: &str =
@@ -362,6 +367,45 @@ fn touch_acp_dispatcher_heartbeat(session: &mut SessionRecord) {
         "acpNextHeartbeatAt".to_string(),
         (now + ACP_HEARTBEAT_INTERVAL).to_rfc3339(),
     );
+}
+
+fn should_sync_dispatcher_session_memory(session: &mut SessionRecord, force: bool) -> bool {
+    if !is_acp_dispatcher_thread(session) {
+        return false;
+    }
+
+    let now = Utc::now();
+    let should_sync = force
+        || parse_timestamp(
+            session
+                .metadata
+                .get(ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY),
+        )
+        .map(|last| now.signed_duration_since(last) >= ACP_SESSION_MEMORY_SYNC_INTERVAL)
+        .unwrap_or(true);
+
+    if should_sync {
+        session.metadata.insert(
+            ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY.to_string(),
+            now.to_rfc3339(),
+        );
+    }
+
+    should_sync
+}
+
+fn heartbeat_due_eligible(session: &SessionRecord) -> bool {
+    !matches!(
+        session.status,
+        SessionStatus::Queued | SessionStatus::Spawning | SessionStatus::Working
+    )
+}
+
+fn heartbeat_can_prompt_live_runtime(session: &SessionRecord) -> bool {
+    matches!(
+        session.status,
+        SessionStatus::Idle | SessionStatus::NeedsInput
+    )
 }
 
 fn conversation_note(entry: &ConversationEntry) -> Option<AcpMemoryNote> {
@@ -2317,6 +2361,25 @@ impl AppState {
         }
         prepare_dispatcher_runtime_env(&mut spawn_env);
         let spawn_env = build_runtime_env(executor.binary_path(), &spawn_env);
+        let session_mcp_servers = deserialize_mcp_servers(
+            thread
+                .metadata
+                .get(ACP_SESSION_MCP_SERVERS_METADATA_KEY)
+                .map(String::as_str),
+        )
+        .unwrap_or_default();
+        let extra_args = if executor.kind() == AgentKind::Codex {
+            self.codex_mcp_extra_args(
+                &config,
+                &project,
+                &thread.id,
+                &thread.project_id,
+                Some(ACP_SESSION_KIND),
+                &session_mcp_servers,
+            )
+        } else {
+            Vec::new()
+        };
         let use_headless_codex_turns = executor.kind() == AgentKind::Codex;
         let resume_target = if use_headless_codex_turns {
             thread.metadata.get(ACP_RESUME_TARGET_METADATA_KEY).cloned()
@@ -2345,7 +2408,7 @@ impl AppState {
                 model,
                 reasoning_effort,
                 skip_permissions: false,
-                extra_args: Vec::new(),
+                extra_args,
                 env: spawn_env,
                 branch: None,
                 timeout: project
@@ -2405,6 +2468,12 @@ impl AppState {
         thread_id: &str,
         event: ExecutorOutput,
     ) -> Result<()> {
+        let force_memory_sync = matches!(
+            &event,
+            ExecutorOutput::NeedsInput(_)
+                | ExecutorOutput::Completed { .. }
+                | ExecutorOutput::Failed { .. }
+        );
         let clear_runtime = matches!(
             event,
             ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. }
@@ -2553,12 +2622,16 @@ impl AppState {
             ExecutorOutput::Composite(_) => {}
         }
 
+        let should_sync_memory = should_sync_dispatcher_session_memory(thread, force_memory_sync);
         let updated = thread.clone();
         drop(threads);
         if clear_runtime {
             self.clear_dispatcher_runtime(thread_id).await;
         }
         self.persist_dispatcher_thread(&updated).await?;
+        if should_sync_memory {
+            self.sync_acp_dispatcher_state(&updated).await?;
+        }
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
     }
@@ -2712,6 +2785,7 @@ impl AppState {
                 .values()
                 .filter(|session| is_acp_dispatcher_thread(session))
                 .filter(|session| session.status != SessionStatus::Archived)
+                .filter(|session| heartbeat_due_eligible(session))
                 .filter_map(|session| {
                     let (_, next, state) = heartbeat_times(session);
                     (state != "due" && now >= next).then_some(session.id.clone())
@@ -2748,6 +2822,7 @@ impl AppState {
                     attachments: Vec::new(),
                     metadata: HashMap::new(),
                 });
+                enforce_conversation_limit(session);
                 session.clone()
             };
 
@@ -2758,14 +2833,16 @@ impl AppState {
             if let Err(err) = self.sync_acp_dispatcher_state(&updated).await {
                 tracing::warn!(session_id = %session_id, error = %err, "failed to sync ACP heartbeat state");
             }
-            if let Some(input_tx) = self.dispatcher_runtime_input(&session_id).await {
-                if let Err(err) = input_tx
-                    .send(ExecutorInput::Text(
-                        "ACP heartbeat due. Review board state, blockers, deferred follow-ups, and which tasks should be shaped or handed off next.".to_string(),
-                    ))
-                    .await
-                {
-                    tracing::warn!(session_id = %session_id, error = %err, "failed to deliver ACP heartbeat prompt");
+            if heartbeat_can_prompt_live_runtime(&updated) {
+                if let Some(input_tx) = self.dispatcher_runtime_input(&session_id).await {
+                    if let Err(err) = input_tx
+                        .send(ExecutorInput::Text(
+                            "ACP heartbeat due. Review board state, blockers, deferred follow-ups, and which tasks should be shaped or handed off next.".to_string(),
+                        ))
+                        .await
+                    {
+                        tracing::warn!(session_id = %session_id, error = %err, "failed to deliver ACP heartbeat prompt");
+                    }
                 }
             }
             self.publish_dispatcher_update(&session_id).await;
@@ -2790,13 +2867,52 @@ mod tests {
         codex_runtime_model_entry, codex_runtime_reasoning_supported_in_cache,
         dispatcher_context_attachment_paths, dispatcher_model_supported_for_agent,
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
-        prepare_dispatcher_runtime_env, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
-        ACP_SESSION_KIND,
+        prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
+        CreateDispatcherThreadOptions, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
+        ACP_HEARTBEAT_INTERVAL, ACP_SESSION_KIND,
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
     use chrono::Utc;
+    use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
+    use conductor_db::Database;
+    use conductor_executors::executor::ExecutorOutput;
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
+    use std::fs;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot};
+    use uuid::Uuid;
+
+    async fn build_test_state(label: &str) -> (std::path::PathBuf, Arc<AppState>) {
+        let root = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("test repo should be created");
+        fs::write(repo.join("CONDUCTOR.md"), "## Inbox\n").expect("board should be created");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: repo.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("ttyd".to_string()),
+                    default_branch: "main".to_string(),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory()
+            .await
+            .expect("test db should initialize");
+        let state = AppState::new(root.join("conductor.yaml"), config, db).await;
+        (root, state)
+    }
 
     #[test]
     fn prepare_dispatcher_runtime_env_sets_term_defaults() {
@@ -2993,5 +3109,136 @@ mod tests {
             thread.conversation[0].attachments,
             vec!["notes/spec.md".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_events_refresh_session_memory_artifacts() {
+        let (root, state) = build_test_state("acp-runtime-memory-sync").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        state
+            .apply_dispatcher_runtime_event(
+                &thread.id,
+                ExecutorOutput::Stdout("assistant update".to_string()),
+            )
+            .await
+            .expect("runtime event should be applied");
+
+        let session_memory = read_json::<AcpSessionMemoryState>(
+            &state.acp_session_memory_json_path("demo", &thread.id),
+        )
+        .await
+        .expect("session memory should exist");
+        assert!(session_memory
+            .recent_conversation
+            .iter()
+            .any(|note| note.label == "Assistant" && note.text.contains("assistant update")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn watchdog_skips_working_dispatchers() {
+        let (root, state) = build_test_state("acp-watchdog-working").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let overdue_at =
+            (Utc::now() - ACP_HEARTBEAT_INTERVAL - chrono::Duration::minutes(1)).to_rfc3339();
+        thread.status = SessionStatus::Working;
+        thread.activity = Some("active".to_string());
+        thread
+            .metadata
+            .insert("acpHeartbeatState".to_string(), "active".to_string());
+        thread
+            .metadata
+            .insert("acpLastHeartbeatAt".to_string(), overdue_at.clone());
+        thread
+            .metadata
+            .insert("acpNextHeartbeatAt".to_string(), overdue_at);
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        state
+            .store_dispatcher_runtime(&thread.id, input_tx, kill_tx)
+            .await;
+
+        state.maintain_acp_dispatchers().await;
+
+        assert!(input_rx.try_recv().is_err());
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_ne!(updated.summary.as_deref(), Some("ACP heartbeat due"));
+        assert!(updated
+            .conversation
+            .iter()
+            .all(|entry| entry.source != "acp_heartbeat"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn watchdog_prompts_waiting_dispatchers_with_live_runtime() {
+        let (root, state) = build_test_state("acp-watchdog-waiting").await;
+        let mut thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let overdue_at =
+            (Utc::now() - ACP_HEARTBEAT_INTERVAL - chrono::Duration::minutes(1)).to_rfc3339();
+        thread.status = SessionStatus::NeedsInput;
+        thread.activity = Some("waiting_input".to_string());
+        thread
+            .metadata
+            .insert("acpHeartbeatState".to_string(), "active".to_string());
+        thread
+            .metadata
+            .insert("acpLastHeartbeatAt".to_string(), overdue_at.clone());
+        thread
+            .metadata
+            .insert("acpNextHeartbeatAt".to_string(), overdue_at);
+        state
+            .replace_dispatcher_thread(thread.clone())
+            .await
+            .expect("dispatcher thread should persist");
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        state
+            .store_dispatcher_runtime(&thread.id, input_tx, kill_tx)
+            .await;
+
+        state.maintain_acp_dispatchers().await;
+
+        let message = input_rx
+            .recv()
+            .await
+            .expect("heartbeat prompt should be sent");
+        match message {
+            conductor_executors::executor::ExecutorInput::Text(text) => assert_eq!(
+                text,
+                "ACP heartbeat due. Review board state, blockers, deferred follow-ups, and which tasks should be shaped or handed off next."
+            ),
+            other => panic!("expected heartbeat prompt text, got {other:?}"),
+        }
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should remain available");
+        assert_eq!(updated.summary.as_deref(), Some("ACP heartbeat due"));
+        assert!(updated
+            .conversation
+            .iter()
+            .any(|entry| entry.source == "acp_heartbeat"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

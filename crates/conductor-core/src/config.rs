@@ -25,6 +25,8 @@ pub struct ConductorConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook: Option<WebhookConfig>,
     #[serde(default)]
+    pub defaults: DefaultsConfig,
+    #[serde(default)]
     pub projects: BTreeMap<String, ProjectConfig>,
     #[serde(default)]
     pub preferences: PreferencesConfig,
@@ -41,6 +43,7 @@ impl Default for ConductorConfig {
             port: default_port(),
             dashboard_url: None,
             webhook: None,
+            defaults: DefaultsConfig::default(),
             projects: BTreeMap::new(),
             preferences: PreferencesConfig::default(),
             access: DashboardAccessConfig::default(),
@@ -115,6 +118,78 @@ pub struct AgentConfig {
     /// Maximum session duration in seconds. None means no timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            cwd: None,
+            enabled: true,
+        }
+    }
+}
+
+impl McpServerConfig {
+    fn normalize(&mut self) {
+        self.command = self.command.trim().to_string();
+        self.args = self
+            .args
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        self.env = self
+            .env
+            .iter()
+            .filter_map(|(key, value)| {
+                let key = key.trim();
+                if key.is_empty() {
+                    return None;
+                }
+                Some((key.to_string(), value.trim().to_string()))
+            })
+            .collect();
+        trim_to_option(&mut self.cwd);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultsConfig {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+}
+
+impl DefaultsConfig {
+    fn normalize(&mut self) {
+        self.mcp_servers = self
+            .mcp_servers
+            .iter()
+            .map(|(name, server)| {
+                let mut normalized = server.clone();
+                normalized.normalize();
+                (name.trim().to_string(), normalized)
+            })
+            .filter(|(name, _)| !name.is_empty())
+            .collect();
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -213,6 +288,8 @@ pub struct ProjectConfig {
     pub archive_script: Vec<String>,
     #[serde(default)]
     pub copy_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
 }
 
 impl Default for ProjectConfig {
@@ -246,6 +323,7 @@ impl Default for ProjectConfig {
             cleanup_script: Vec::new(),
             archive_script: Vec::new(),
             copy_files: Vec::new(),
+            mcp_servers: BTreeMap::new(),
         }
     }
 }
@@ -345,6 +423,19 @@ impl ProjectConfig {
                 self.dev_server_https = dev_server.https.unwrap_or(false);
             }
         }
+    }
+
+    pub fn normalize_mcp_servers(&mut self) {
+        self.mcp_servers = self
+            .mcp_servers
+            .iter()
+            .map(|(name, server)| {
+                let mut normalized = server.clone();
+                normalized.normalize();
+                (name.trim().to_string(), normalized)
+            })
+            .filter(|(name, _)| !name.is_empty())
+            .collect();
     }
 
     pub fn resolved_dev_server_url(&self) -> Option<String> {
@@ -610,6 +701,7 @@ impl ConductorConfig {
             port: default_port(),
             dashboard_url: None,
             webhook: None,
+            defaults: DefaultsConfig::default(),
             projects: BTreeMap::new(),
             preferences: PreferencesConfig::default(),
             access: DashboardAccessConfig::default(),
@@ -645,9 +737,11 @@ impl ConductorConfig {
         if let Some(webhook) = config.webhook.as_mut() {
             webhook.normalize();
         }
+        config.defaults.normalize();
         for project in config.projects.values_mut() {
             project.normalize_runtime();
             project.normalize_dev_server();
+            project.normalize_mcp_servers();
         }
         config.config_path = Some(path.to_path_buf());
         config.validate()?;
@@ -733,6 +827,7 @@ mod tests {
         let config = ConductorConfig::default_for_workspace(workspace);
         assert_eq!(config.workspace, workspace);
         assert!(config.projects.is_empty());
+        assert!(config.defaults.mcp_servers.is_empty());
     }
 
     #[test]
@@ -820,5 +915,55 @@ projects:
             project.resolved_dev_server_url().as_deref(),
             Some("https://127.0.0.1:4321/preview")
         );
+    }
+
+    #[test]
+    fn test_load_normalizes_default_and_project_mcp_servers() {
+        let root = std::env::temp_dir().join(format!("conductor-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("conductor.yaml");
+        std::fs::write(
+            &path,
+            r#"
+defaults:
+  mcpServers:
+    filesystem:
+      command: " npx "
+      args: [" @modelcontextprotocol/server-filesystem ", " /tmp "]
+projects:
+  demo:
+    path: /tmp/demo
+    mcpServers:
+      conductor:
+        command: " conductor "
+        args: [" mcp-server "]
+        env:
+          CONDUCTOR_SESSION_ID: " demo-session "
+"#,
+        )
+        .unwrap();
+
+        let config = ConductorConfig::load(&path).unwrap();
+        assert_eq!(
+            config.defaults.mcp_servers["filesystem"].command,
+            "npx".to_string()
+        );
+        assert_eq!(
+            config.defaults.mcp_servers["filesystem"].args,
+            vec![
+                "@modelcontextprotocol/server-filesystem".to_string(),
+                "/tmp".to_string()
+            ]
+        );
+        assert_eq!(
+            config.projects["demo"].mcp_servers["conductor"].command,
+            "conductor".to_string()
+        );
+        assert_eq!(
+            config.projects["demo"].mcp_servers["conductor"].env["CONDUCTOR_SESSION_ID"],
+            "demo-session".to_string()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

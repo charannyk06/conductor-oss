@@ -13,7 +13,6 @@ import {
   type ModelSelectionState,
 } from "@/lib/agentModelSelection";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
-import { cn } from "@/lib/cn";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import type { DashboardSession } from "@/lib/types";
 
@@ -38,10 +37,6 @@ function readMetadataValue(
 ): string {
   const value = thread.metadata?.[key];
   return typeof value === "string" && value.trim().length > 0 ? value : fallback;
-}
-
-function baseName(value: string): string {
-  return value.split(/[\\/]/).filter(Boolean).at(-1) ?? value;
 }
 
 function formatRelativeTimestamp(value: string): string {
@@ -77,30 +72,6 @@ function summarizeThread(thread: DashboardSession): string {
   return `Thread ${thread.id.slice(0, 8)}`;
 }
 
-function DispatcherBadge({
-  label,
-  title,
-  tone = "neutral",
-}: {
-  label: string;
-  title?: string;
-  tone?: "neutral" | "active" | "warn";
-}) {
-  return (
-    <span
-      title={title}
-      className={cn(
-        "inline-flex max-w-full items-center rounded-full border px-2.5 py-1 text-[11px] font-medium",
-        tone === "active" && "border-[rgba(120,194,142,0.28)] bg-[rgba(28,58,36,0.88)] text-[#c8e9d0]",
-        tone === "warn" && "border-[rgba(214,163,126,0.28)] bg-[rgba(66,44,35,0.94)] text-[#f2d9cd]",
-        tone === "neutral" && "border-[rgba(255,255,255,0.08)] bg-[#272220] text-[#d7d0c6]",
-      )}
-    >
-      <span className="truncate">{label}</span>
-    </span>
-  );
-}
-
 export function DispatcherPane({
   thread,
   threads = [],
@@ -124,22 +95,6 @@ export function DispatcherPane({
   );
   const preferredImplementationReasoning = useMemo(
     () => readMetadataValue(thread, "acpImplementationReasoningEffort"),
-    [thread],
-  );
-  const heartbeatState = useMemo(
-    () => readMetadataValue(thread, "acpHeartbeatState", "active").toLowerCase(),
-    [thread],
-  );
-  const nextHeartbeatAt = useMemo(
-    () => readMetadataValue(thread, "acpNextHeartbeatAt"),
-    [thread],
-  );
-  const projectMemoryPath = useMemo(
-    () => readMetadataValue(thread, "acpProjectMemoryPath"),
-    [thread],
-  );
-  const sessionMemoryPath = useMemo(
-    () => readMetadataValue(thread, "acpSessionMemoryPath"),
     [thread],
   );
   const [implementationAgent, setImplementationAgent] = useState(preferredImplementationAgent);
@@ -302,40 +257,17 @@ export function DispatcherPane({
     </>
   );
 
-  const composerToolbar = (
-    <div className="space-y-2">
-      {showPreferenceEditor ? (
-        <DispatcherPreferenceChips
-          implementationAgent={implementationAgent}
-          modelSelection={modelSelection}
-          modelAccess={modelAccess}
-          runtimeModelCatalogs={runtimeModelCatalogs}
-          disabled={updatingPreferences}
-          onImplementationAgentChange={handleImplementationAgentChange}
-          onModelSelectionChange={handleModelSelectionChange}
-        />
-      ) : null}
-      <div className="flex flex-wrap gap-2">
-        <DispatcherBadge
-          label={heartbeatState === "due" ? "Heartbeat due" : "Heartbeat active"}
-          title={nextHeartbeatAt ? `Next heartbeat: ${nextHeartbeatAt}` : "ACP heartbeat status"}
-          tone={heartbeatState === "due" ? "warn" : "active"}
-        />
-        {projectMemoryPath ? (
-          <DispatcherBadge
-            label={`Long-term memory: ${baseName(projectMemoryPath)}`}
-            title={projectMemoryPath}
-          />
-        ) : null}
-        {sessionMemoryPath ? (
-          <DispatcherBadge
-            label={`Short-term memory: ${baseName(sessionMemoryPath)}`}
-            title={sessionMemoryPath}
-          />
-        ) : null}
-      </div>
-    </div>
-  );
+  const composerToolbar = showPreferenceEditor ? (
+    <DispatcherPreferenceChips
+      implementationAgent={implementationAgent}
+      modelSelection={modelSelection}
+      modelAccess={modelAccess}
+      runtimeModelCatalogs={runtimeModelCatalogs}
+      disabled={updatingPreferences}
+      onImplementationAgentChange={handleImplementationAgentChange}
+      onModelSelectionChange={handleModelSelectionChange}
+    />
+  ) : null;
 
   return (
     <DispatcherSessionPane

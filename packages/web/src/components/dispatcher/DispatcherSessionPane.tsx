@@ -7,7 +7,6 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
-  BrainCircuit,
   Check,
   ChevronDown,
   ChevronRight,
@@ -18,6 +17,7 @@ import {
   Globe,
   ListTodo,
   Loader2,
+  LoaderCircle,
   PencilLine,
   Search,
   Send,
@@ -479,7 +479,7 @@ function ToolGlyph({
   const normalizedKind = toolKind?.trim().toLowerCase() ?? "";
 
   if (normalizedKind === "thinking" || normalizedTitle === "thinking") {
-    return <BrainCircuit className={className} />;
+    return <LoaderCircle className={className} />;
   }
   if (
     normalizedKind === "read" ||
@@ -586,7 +586,7 @@ function SessionFeedMessage({
     return (
       <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
         <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
-          <BrainCircuit className="h-4 w-4" />
+          <LoaderCircle className="h-4 w-4 animate-spin" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -942,6 +942,7 @@ export function DispatcherSessionPane({
   useEffect(() => {
     const nextUrl = withBridgeQuery(sessionApiPaths.stream, bridgeId);
     const source = new EventSource(nextUrl);
+    let refreshTimer: number | null = null;
 
     source.onmessage = (event) => {
       let parsed: unknown = null;
@@ -982,11 +983,19 @@ export function DispatcherSessionPane({
     });
 
     source.onerror = () => {
-      source.close();
-      void loadFeed();
+      if (refreshTimer !== null) {
+        return;
+      }
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void loadFeed();
+      }, 250);
     };
 
     return () => {
+      if (refreshTimer !== null) {
+        window.clearTimeout(refreshTimer);
+      }
       source.close();
     };
   }, [bridgeId, loadFeed, sessionApiPaths.stream]);
@@ -1202,7 +1211,7 @@ export function DispatcherSessionPane({
                 <>
                   <span className="text-[var(--vk-text-dim)]">•</span>
                   <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
-                    <BrainCircuit className="h-3 w-3" />
+                    <LoaderCircle className="h-3 w-3" />
                     <span>{payload.parserState.kind}</span>
                   </span>
                   {payload.parserState.command ? (
