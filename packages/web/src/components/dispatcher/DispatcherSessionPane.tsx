@@ -756,6 +756,9 @@ const DISPATCHER_APPROVAL_READY_PROMPT_MARKERS = [
   "approve the plan",
   "approve this proposal",
   "request changes",
+  "plan-only mode",
+  "paused before mutating the board",
+  "approve it or request changes",
   "ask for explicit approval",
   "explicit approval",
 ];
@@ -1196,12 +1199,12 @@ export function DispatcherSessionPane({
                     {approvalState === "approved_for_next_mutation" ? (
                       <>
                         <Check className="h-3 w-3" />
-                        <span>Approved execution</span>
+                        <span>Execution enabled</span>
                       </>
                     ) : (
                       <>
                         <AlertCircle className="h-3 w-3" />
-                        <span>Awaiting approval</span>
+                        <span>Plan-only mode</span>
                       </>
                     )}
                   </span>
@@ -1306,10 +1309,10 @@ export function DispatcherSessionPane({
           <div className="mb-3 rounded-[12px] border border-[rgba(204,163,92,0.35)] bg-[rgba(64,49,27,0.58)] px-3 py-3 text-[12px] text-[#f1e3bf]">
             <div className="flex items-center gap-2 text-[13px] font-medium text-[#f6ead0]">
               <AlertCircle className="h-4 w-4" />
-              <span>Plan ready for approval</span>
+              <span>Plan-only review ready</span>
             </div>
             <p className="mt-2 leading-5 text-[#dccba1]">
-              ACP will only create or update board tasks after approval. Review the proposal above, then approve it or request changes.
+              ACP is paused before mutating the board for this turn. Review the proposal above, then approve it or request changes.
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button
@@ -1342,18 +1345,18 @@ export function DispatcherSessionPane({
             event.preventDefault();
             void handleSend();
           }}
-          className="rounded-[3px] border border-[var(--vk-border)] bg-[#1f1f1f] px-3 py-3"
+          className="rounded-[3px] border border-[var(--vk-border)] bg-[#1f1f1f] px-2.5 py-2.5 sm:px-3 sm:py-3"
         >
-          {composerToolbar ? <div className="mb-3">{composerToolbar}</div> : null}
+          {composerToolbar ? <div className="mb-2.5 sm:mb-3">{composerToolbar}</div> : null}
           <textarea
             value={composerValue}
             onChange={(event) => setComposerValue(event.target.value)}
             placeholder="Ask the dispatcher to shape work, create tasks, or update the board..."
             disabled={!canContinue || sending}
             rows={2}
-            className="w-full resize-none bg-transparent text-[16px] leading-6 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] disabled:opacity-60"
+            className="w-full resize-none bg-transparent text-[15px] leading-5 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] disabled:opacity-60 sm:text-[16px] sm:leading-6"
           />
-          <div className="mt-3 flex items-center justify-end">
+          <div className="mt-2.5 flex items-center justify-end sm:mt-3">
             {showComposerStopAction ? (
               <Button
                 type="button"
