@@ -411,26 +411,6 @@ async fn run_terminal_proxy_session(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ttyd_frontend_websocket_request_adds_tty_subprotocol() {
-        let url =
-            Url::parse("ws://127.0.0.1:4749/api/sessions/session-1/terminal/ttyd/ws?token=test")
-                .expect("valid url");
-        let request = ttyd_frontend_websocket_request(&url).expect("request should build");
-        assert_eq!(
-            request
-                .headers()
-                .get(SEC_WEBSOCKET_PROTOCOL)
-                .and_then(|value| value.to_str().ok()),
-            Some("tty")
-        );
-    }
-}
-
 async fn update_active_session(
     active_session: &Arc<Mutex<Option<String>>>,
     session_id: Option<String>,
@@ -872,4 +852,24 @@ pub fn browse_path(path: &str) -> Vec<FileEntry> {
     }
     entries.sort_by(|left, right| left.name.cmp(&right.name));
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttyd_frontend_websocket_request_adds_tty_subprotocol() {
+        let url =
+            Url::parse("ws://127.0.0.1:4749/api/sessions/session-1/terminal/ttyd/ws?token=test")
+                .expect("valid url");
+        let request = ttyd_frontend_websocket_request(&url).expect("request should build");
+        assert_eq!(
+            request
+                .headers()
+                .get(SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok()),
+            Some("tty")
+        );
+    }
 }

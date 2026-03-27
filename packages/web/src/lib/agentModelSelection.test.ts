@@ -52,9 +52,10 @@ test("runtime-discovered models suppress stale static fallback choices", () => {
   assert.deepEqual(models.map((model) => model.id), ["gpt-5.4-mini"]);
 });
 
-test("missing runtime catalogs do not invent dropdown model choices", () => {
+test("missing runtime catalogs fall back to static dropdown model choices", () => {
   const models = getSelectableAgentModels("codex", { codex: "chatgpt" }, {});
-  assert.deepEqual(models, []);
+  assert.notEqual(models.length, 0);
+  assert.equal(models[0]?.id, "gpt-5.4");
 });
 
 test("buildModelSelection drops stale saved model overrides when runtime models disagree", () => {

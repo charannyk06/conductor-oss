@@ -2,13 +2,12 @@
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
   BrainCircuit,
-  Bot,
   Check,
   ChevronDown,
   ChevronRight,
@@ -96,7 +95,20 @@ type SessionChatDockProps = {
   onToggleCollapse?: () => void;
   className?: string;
   hideOpenSessionAction?: boolean;
+  hideRepositoryControls?: boolean;
+  hideSessionStatusBadge?: boolean;
+  headerActions?: ReactNode;
   composerInsert?: TerminalInsertRequest | null;
+  composerToolbar?: ReactNode;
+  apiPaths?: SessionChatDockApiPaths;
+};
+
+type SessionChatDockApiPaths = {
+  feed?: string;
+  stream?: string;
+  send?: string;
+  interrupt?: string | null;
+  repositories?: string;
 };
 
 type RepositoryPathHealth = {
@@ -729,26 +741,64 @@ function ProjectAgentSelect({
   );
 }
 
-/** Only show "plan ready" when the model has produced a substantive reply (avoids empty/blip states). */
-const DISPATCHER_APPROVAL_MIN_ASSISTANT_CHARS = 64;
+const DISPATCHER_APPROVAL_REQUIRED = "approval_required";
+const INTERRUPTIBLE_SESSION_STATUSES = new Set(["queued", "spawning", "running", "working"]);
+const DISPATCHER_APPROVAL_READY_SECTION_MARKERS = [
+  "## proposed plan",
+  "## intended board mutations",
+  "## intended tool calls",
+  "## task packet",
+  "task packet",
+  "board mutations",
+];
+const DISPATCHER_APPROVAL_READY_PROMPT_MARKERS = [
+  "approve this plan",
+  "approve the plan",
+  "approve this proposal",
+  "request changes",
+  "ask for explicit approval",
+  "explicit approval",
+];
+
+function looksLikeDispatcherApprovalProposal(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (normalized.length < 160) {
+    return false;
+  }
+
+  const sectionMatches = DISPATCHER_APPROVAL_READY_SECTION_MARKERS.reduce(
+    (count, marker) => count + (normalized.includes(marker) ? 1 : 0),
+    0,
+  );
+  const promptMatches = DISPATCHER_APPROVAL_READY_PROMPT_MARKERS.reduce(
+    (count, marker) => count + (normalized.includes(marker) ? 1 : 0),
+    0,
+  );
+
+  return sectionMatches >= 2 && promptMatches >= 1;
+}
 
 function shouldShowDispatcherApprovalBanner(
   entries: SessionFeedEntry[],
   approvalState: string | null,
+  sessionStatus: string | null,
 ): boolean {
-  if (approvalState === "approved_for_next_mutation") {
+  if (approvalState !== DISPATCHER_APPROVAL_REQUIRED) {
+    return false;
+  }
+  if (sessionStatus?.trim().toLowerCase() !== "needs_input") {
     return false;
   }
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
-    if (entry.kind === "tool") {
+    if (entry.kind === "tool" || entry.kind === "status" || entry.kind === "system") {
       continue;
     }
     if (entry.kind === "user") {
       return false;
     }
-    if (entry.kind === "assistant" || entry.kind === "status" || entry.kind === "system") {
-      return entry.text.trim().length >= DISPATCHER_APPROVAL_MIN_ASSISTANT_CHARS;
+    if (entry.kind === "assistant") {
+      return looksLikeDispatcherApprovalProposal(entry.text);
     }
   }
   return false;
@@ -761,7 +811,12 @@ export function SessionChatDock({
   onToggleCollapse,
   className,
   hideOpenSessionAction = false,
+  hideRepositoryControls = false,
+  hideSessionStatusBadge = false,
+  headerActions = null,
   composerInsert = null,
+  composerToolbar = null,
+  apiPaths,
 }: SessionChatDockProps) {
   const router = useRouter();
   const [payload, setPayload] = useState<SessionFeedPayload>(EMPTY_FEED_PAYLOAD);
@@ -775,6 +830,13 @@ export function SessionChatDock({
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [savingAgent, setSavingAgent] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
+  const sessionApiPaths = useMemo(() => ({
+    feed: apiPaths?.feed ?? `/api/sessions/${encodeURIComponent(session.id)}/feed?limit=120`,
+    stream: apiPaths?.stream ?? `/api/sessions/${encodeURIComponent(session.id)}/feed/stream?limit=120`,
+    send: apiPaths?.send ?? `/api/sessions/${encodeURIComponent(session.id)}/feedback`,
+    interrupt: apiPaths?.interrupt ?? null,
+    repositories: apiPaths?.repositories ?? "/api/repositories",
+  }), [apiPaths, session.id]);
 
   const sessionLabel = useMemo(() => {
     if (session.metadata.sessionKind === "project_dispatcher") {
@@ -792,6 +854,10 @@ export function SessionChatDock({
     () => payload.sessionStatus?.trim() || session.status,
     [payload.sessionStatus, session.status],
   );
+  const normalizedStatusLabel = useMemo(
+    () => statusLabel.trim().toLowerCase(),
+    [statusLabel],
+  );
   const toolCount = useMemo(
     () => payload.entries.filter((entry) => entry.kind === "tool").length,
     [payload.entries],
@@ -799,19 +865,30 @@ export function SessionChatDock({
   const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
   const approvalState = payload.approvalState ?? session.metadata.acpPlanApprovalState ?? null;
   const awaitingApproval = useMemo(
-    () => isDispatcher && shouldShowDispatcherApprovalBanner(payload.entries, approvalState),
-    [approvalState, isDispatcher, payload.entries],
+    () => isDispatcher && shouldShowDispatcherApprovalBanner(payload.entries, approvalState, payload.sessionStatus ?? session.status),
+    [approvalState, isDispatcher, payload.entries, payload.sessionStatus, session.status],
   );
   const messageCount = useMemo(
     () => payload.entries.filter((entry) => entry.kind !== "tool").length,
     [payload.entries],
   );
-  const canContinue = session.status !== "archived";
+  const showInterruptAction = Boolean(sessionApiPaths.interrupt)
+    && INTERRUPTIBLE_SESSION_STATUSES.has(normalizedStatusLabel);
+  const showComposerStopAction = isDispatcher && showInterruptAction;
+  const showRowStopAction = showInterruptAction && !showComposerStopAction;
+  const showMetaRow = !hideRepositoryControls || !hideSessionStatusBadge || showRowStopAction;
+  const canContinue = session.status !== "archived" && !(isDispatcher && showInterruptAction);
   const loadRepository = useCallback(async () => {
+    if (hideRepositoryControls) {
+      setRepository(null);
+      setRepositoryError(null);
+      setRepositoryLoading(false);
+      return;
+    }
     setRepositoryLoading(true);
     setRepositoryError(null);
     try {
-      const response = await fetch(withBridgeQuery("/api/repositories", bridgeId), { cache: "no-store" });
+      const response = await fetch(withBridgeQuery(sessionApiPaths.repositories, bridgeId), { cache: "no-store" });
       const body = asRecord(await response.json().catch(() => null));
       if (!response.ok) {
         throw new Error(readString(body.error) ?? `Failed to load project settings (${response.status})`);
@@ -831,16 +908,13 @@ export function SessionChatDock({
     } finally {
       setRepositoryLoading(false);
     }
-  }, [bridgeId, session.projectId]);
+  }, [bridgeId, hideRepositoryControls, session.projectId, sessionApiPaths.repositories]);
 
   const loadFeed = useCallback(async () => {
     setLoading(true);
     setLoadingError(null);
     try {
-      const response = await fetch(
-        withBridgeQuery(`/api/sessions/${encodeURIComponent(session.id)}/feed?limit=120`, bridgeId),
-        { cache: "no-store" },
-      );
+      const response = await fetch(withBridgeQuery(sessionApiPaths.feed, bridgeId), { cache: "no-store" });
       const nextPayload = normalizeFeedPayload(await response.json().catch(() => null));
       if (!response.ok) {
         throw new Error(nextPayload.error ?? `Failed to load session feed (${response.status})`);
@@ -852,18 +926,21 @@ export function SessionChatDock({
     } finally {
       setLoading(false);
     }
-  }, [bridgeId, session.id]);
+  }, [bridgeId, sessionApiPaths.feed]);
 
   useEffect(() => {
     void loadFeed();
   }, [loadFeed]);
 
   useEffect(() => {
+    if (hideRepositoryControls) {
+      return;
+    }
     void loadRepository();
-  }, [loadRepository]);
+  }, [hideRepositoryControls, loadRepository]);
 
   useEffect(() => {
-    const nextUrl = withBridgeQuery(`/api/sessions/${encodeURIComponent(session.id)}/feed/stream?limit=120`, bridgeId);
+    const nextUrl = withBridgeQuery(sessionApiPaths.stream, bridgeId);
     const source = new EventSource(nextUrl);
 
     source.onmessage = (event) => {
@@ -912,7 +989,7 @@ export function SessionChatDock({
     return () => {
       source.close();
     };
-  }, [bridgeId, loadFeed, session.id]);
+  }, [bridgeId, loadFeed, sessionApiPaths.stream]);
 
   useEffect(() => {
     const node = feedRef.current;
@@ -950,16 +1027,13 @@ export function SessionChatDock({
     setSending(true);
     setSendError(null);
     try {
-      const response = await fetch(
-        withBridgeQuery(`/api/sessions/${encodeURIComponent(session.id)}/feedback`, bridgeId),
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ message: trimmed }),
+      const response = await fetch(withBridgeQuery(sessionApiPaths.send, bridgeId), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
         },
-      );
+        body: JSON.stringify({ message: trimmed }),
+      });
       const body = await response.json().catch(() => null);
       if (!response.ok) {
         throw new Error(readString(asRecord(body).error) ?? `Failed to send message (${response.status})`);
@@ -971,7 +1045,7 @@ export function SessionChatDock({
     } finally {
       setSending(false);
     }
-  }, [bridgeId, sending, session.id]);
+  }, [bridgeId, sending, sessionApiPaths.send]);
 
   const handleSend = useCallback(async () => {
     const message = composerValue.trim();
@@ -996,7 +1070,7 @@ export function SessionChatDock({
     setSavingAgent(true);
     setRepositoryError(null);
     try {
-      const response = await fetch(withBridgeQuery("/api/repositories", bridgeId), {
+      const response = await fetch(withBridgeQuery(sessionApiPaths.repositories, bridgeId), {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -1021,7 +1095,29 @@ export function SessionChatDock({
     } finally {
       setSavingAgent(false);
     }
-  }, [bridgeId, repository, savingAgent]);
+  }, [bridgeId, repository, savingAgent, sessionApiPaths.repositories]);
+
+  const handleInterrupt = useCallback(async () => {
+    if (!sessionApiPaths.interrupt) {
+      return;
+    }
+
+    setSending(true);
+    setSendError(null);
+    try {
+      const response = await fetch(withBridgeQuery(sessionApiPaths.interrupt, bridgeId), {
+        method: "POST",
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(readString(asRecord(body).error) ?? `Failed to interrupt session (${response.status})`);
+      }
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : "Failed to interrupt session");
+    } finally {
+      setSending(false);
+    }
+  }, [bridgeId, sessionApiPaths.interrupt]);
 
   return (
     <aside className={cn(
@@ -1041,6 +1137,7 @@ export function SessionChatDock({
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
         ) : null}
+        {headerActions}
         {!hideOpenSessionAction ? (
           <button
             type="button"
@@ -1070,7 +1167,7 @@ export function SessionChatDock({
         {loading ? (
           <div className="flex h-full items-center justify-center text-[13px] text-[var(--vk-text-muted)]">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            Loading session activity…
+            {isDispatcher ? "Loading dispatcher activity…" : "Loading session activity…"}
           </div>
         ) : loadingError ? (
           <div className="rounded-[3px] border border-[color:color-mix(in_srgb,var(--vk-red)_45%,transparent)] bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[13px] text-[var(--vk-red)]">
@@ -1128,7 +1225,7 @@ export function SessionChatDock({
 
             {payload.entries.length === 0 ? (
               <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
-                No session feed entries yet.
+                {isDispatcher ? "No dispatcher activity yet." : "No session feed entries yet."}
               </div>
             ) : (
               payload.entries.map((entry) => (
@@ -1140,23 +1237,47 @@ export function SessionChatDock({
       </div>
 
       <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-4 sm:px-4">
-        <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-          <ProjectAgentSelect
-            project={repository}
-            disabled={repositoryLoading}
-            saving={savingAgent}
-            onChange={(value) => void handleAgentChange(value)}
-          />
-          <div className="inline-flex w-fit max-w-full items-center gap-2 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-[11px] text-[var(--vk-text-muted)] sm:ml-auto">
-            <AgentTileIcon
-              seed={{ label: agentLabel }}
-              className="h-4 w-4 border-none bg-transparent"
-            />
-            <span>{agentLabel}</span>
-            <span className="text-[var(--vk-text-dim)]">•</span>
-            <span>{statusLabel}</span>
+        {showMetaRow ? (
+          <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            {!hideRepositoryControls ? (
+              <ProjectAgentSelect
+                project={repository}
+                disabled={repositoryLoading}
+                saving={savingAgent}
+                onChange={(value) => void handleAgentChange(value)}
+              />
+            ) : null}
+            {!hideSessionStatusBadge ? (
+              <div
+                className={cn(
+                  "inline-flex w-fit max-w-full items-center gap-2 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-1 text-[11px] text-[var(--vk-text-muted)]",
+                  hideRepositoryControls ? null : "sm:ml-auto",
+                )}
+              >
+                <AgentTileIcon
+                  seed={{ label: agentLabel }}
+                  className="h-4 w-4 border-none bg-transparent"
+                />
+                <span>{agentLabel}</span>
+                <span className="text-[var(--vk-text-dim)]">•</span>
+                <span>{statusLabel}</span>
+              </div>
+            ) : null}
+            {showRowStopAction ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={sending}
+                onClick={() => void handleInterrupt()}
+                className="h-[31px] rounded-[6px] border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.03)] px-3 text-[13px] text-[#f3ead8] hover:bg-[rgba(255,255,255,0.08)]"
+              >
+                {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                <span>Stop</span>
+              </Button>
+            ) : null}
           </div>
-        </div>
+        ) : null}
 
         {repositoryError ? (
           <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--vk-red)]">
@@ -1214,6 +1335,7 @@ export function SessionChatDock({
           }}
           className="rounded-[3px] border border-[var(--vk-border)] bg-[#1f1f1f] px-3 py-3"
         >
+          {composerToolbar ? <div className="mb-3">{composerToolbar}</div> : null}
           <textarea
             value={composerValue}
             onChange={(event) => setComposerValue(event.target.value)}
@@ -1225,22 +1347,36 @@ export function SessionChatDock({
             className="w-full resize-none bg-transparent text-[16px] leading-6 text-[var(--vk-text-normal)] outline-none placeholder:text-[var(--vk-text-muted)] disabled:opacity-60"
           />
           <div className="mt-3 flex items-center justify-end">
-            <Button
-              type="submit"
-              variant="outline"
-              size="sm"
-              disabled={!canContinue || sending || composerValue.trim().length === 0}
-              className="h-[29px] rounded-[3px] border-[var(--vk-border)] bg-[#292929] px-3 text-[14px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
-            >
-              {sending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <>
-                  <span>Send</span>
-                  <Send className="h-3.5 w-3.5" />
-                </>
-              )}
-            </Button>
+            {showComposerStopAction ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={sending}
+                onClick={() => void handleInterrupt()}
+                className="h-[29px] rounded-[3px] border-[var(--vk-border)] bg-[#292929] px-3 text-[14px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+              >
+                {sending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+                <span>Stop</span>
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                variant="outline"
+                size="sm"
+                disabled={!canContinue || sending || composerValue.trim().length === 0}
+                className="h-[29px] rounded-[3px] border-[var(--vk-border)] bg-[#292929] px-3 text-[14px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+              >
+                {sending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <>
+                    <span>Send</span>
+                    <Send className="h-3.5 w-3.5" />
+                  </>
+                )}
+              </Button>
+            )}
           </div>
         </form>
       </div>

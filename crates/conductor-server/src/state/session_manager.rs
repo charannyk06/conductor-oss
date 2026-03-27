@@ -22,9 +22,14 @@ use super::types::{
     DEFAULT_SESSION_HISTORY_LIMIT,
 };
 use super::workspace::{is_process_alive, terminate_process};
-use super::{AppState, DETACHED_PID_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY};
+use super::{
+    dispatcher_preferred_implementation_agent, dispatcher_preferred_implementation_model,
+    dispatcher_preferred_implementation_reasoning_effort, AppState, DETACHED_PID_METADATA_KEY,
+    TTYD_PID_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
+};
 use crate::acp_prompt::{
-    acp_dispatcher_turn_prefix, matches_acp_approve_command, rewrite_acp_dispatcher_command,
+    acp_dispatcher_preference_note, acp_dispatcher_turn_prefix, matches_acp_approve_command,
+    rewrite_acp_dispatcher_command,
 };
 use crate::error_logger::{categories, ErrorContext};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
@@ -193,6 +198,7 @@ impl AppState {
 
         for session in &changed {
             let _ = self.persist_session(session).await;
+            self.publish_feed_update(&session.id);
         }
     }
 }
@@ -1046,8 +1052,7 @@ impl AppState {
             .and_then(|record| record.bridge_id.clone());
         let is_orchestration_session =
             is_orchestration_session_kind(request.session_kind.as_deref());
-        let is_acp_dispatcher =
-            is_acp_dispatcher_session_kind(request.session_kind.as_deref());
+        let is_acp_dispatcher = is_acp_dispatcher_session_kind(request.session_kind.as_deref());
         let mut session_prompt = request.prompt.clone();
         let mut session_attachments = request.attachments.clone();
         if is_acp_dispatcher {
@@ -1221,7 +1226,10 @@ impl AppState {
 
         let mut spawn_env = HashMap::new();
         spawn_env.insert("CONDUCTOR_SESSION_ID".to_string(), session_id.clone());
-        spawn_env.insert("CONDUCTOR_PROJECT_ID".to_string(), request.project_id.clone());
+        spawn_env.insert(
+            "CONDUCTOR_PROJECT_ID".to_string(),
+            request.project_id.clone(),
+        );
         if let Some(session_kind) = request.session_kind.clone() {
             spawn_env.insert("CONDUCTOR_SESSION_KIND".to_string(), session_kind);
         }
@@ -1377,6 +1385,9 @@ impl AppState {
             record
                 .metadata
                 .insert("role".to_string(), "orchestrator".to_string());
+            record
+                .metadata
+                .insert("dashboardHidden".to_string(), "true".to_string());
             record.metadata.insert(
                 ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
                 ACP_APPROVAL_REQUIRED.to_string(),
@@ -1572,6 +1583,7 @@ impl AppState {
             append_output(session, output_line);
         }
         session.last_activity_at = Utc::now().to_rfc3339();
+        let invalidate_runtime_status = matches!(&event, ExecutorOutput::StructuredStatus { .. });
 
         // Apply event (inline from apply_runtime_event logic)
         match event {
@@ -1604,19 +1616,17 @@ impl AppState {
             }
             _ => {}
         }
-
-        let updated = session.clone();
         drop(sessions);
         if clear_live_handle {
             self.detach_terminal_runtime(session_id).await;
         }
-        self.persist_session(&updated).await?;
+        self.queue_hot_path_session_update(session_id, invalidate_runtime_status)
+            .await;
         if let Some(output_line) = line {
             let _ = self
                 .output_updates
-                .send((updated.id.clone(), output_line.to_string()));
+                .send((session_id.to_string(), output_line.to_string()));
         }
-        self.publish_snapshot().await;
         Ok(())
     }
 
@@ -1656,6 +1666,13 @@ impl AppState {
         let requested_termination = termination_requested
             .as_deref()
             .filter(|action| matches!(*action, "kill" | "archive"));
+        let invalidate_runtime_status = matches!(
+            &event,
+            ExecutorOutput::NeedsInput(_)
+                | ExecutorOutput::Completed { .. }
+                | ExecutorOutput::Failed { .. }
+                | ExecutorOutput::StructuredStatus { .. }
+        );
 
         match event {
             ExecutorOutput::Stdout(line) => {
@@ -1784,13 +1801,12 @@ impl AppState {
             ExecutorOutput::Composite(_) => {}
         }
 
-        let updated = session.clone();
         drop(sessions);
         if clear_live_handle {
             self.detach_terminal_runtime(session_id).await;
         }
-        self.persist_session(&updated).await?;
-        self.publish_snapshot().await;
+        self.queue_hot_path_session_update(session_id, invalidate_runtime_status)
+            .await;
         Ok(())
     }
 
@@ -1837,11 +1853,10 @@ impl AppState {
                     }
                 }
             }
-            let preferred_implementation_agent = session
-                .metadata
-                .get("acpImplementationAgent")
-                .cloned()
-                .unwrap_or_else(|| "codex".to_string());
+            let preferred_implementation_agent = dispatcher_preferred_implementation_agent(session);
+            let preferred_implementation_model = dispatcher_preferred_implementation_model(session);
+            let preferred_implementation_reasoning =
+                dispatcher_preferred_implementation_reasoning_effort(session);
             let approved_turn = matches_acp_approve_command(&message);
             let approval_state = if approved_turn {
                 ACP_APPROVAL_GRANTED
@@ -1853,8 +1868,13 @@ impl AppState {
                 approval_state.to_string(),
             );
             runtime_message = format!(
-                "{}\n\nACP dispatcher preference: prefer `{preferred_implementation_agent}` for newly created implementation tasks unless the user explicitly wants another agent.\n\n{}",
+                "{}\n\n{}\n\n{}",
                 acp_dispatcher_turn_prefix(approved_turn),
+                acp_dispatcher_preference_note(
+                    &preferred_implementation_agent,
+                    preferred_implementation_model.as_deref(),
+                    preferred_implementation_reasoning.as_deref(),
+                ),
                 rewrite_acp_dispatcher_command(&message)
             );
         }
@@ -1924,13 +1944,14 @@ impl AppState {
             source: source.to_string(),
             text: message.clone(),
             created_at: Utc::now().to_rfc3339(),
-            attachments: effective_attachments.clone(),
+            attachments: recorded_attachments.clone(),
             metadata: HashMap::new(),
         });
         enforce_conversation_limit(session);
         let updated = session.clone();
         drop(sessions);
         self.persist_session(&updated).await?;
+        self.publish_feed_update(session_id);
         self.publish_snapshot().await;
         let effective_message = if effective_attachments.is_empty() {
             runtime_message.clone()
@@ -2021,6 +2042,7 @@ impl AppState {
         drop(executors);
 
         let is_acp_dispatcher = is_acp_dispatcher_session(&session_snapshot);
+        let recorded_attachments = attachments.clone();
         let mut effective_attachments = attachments.clone();
         let mut runtime_message = message.clone();
         if is_acp_dispatcher {
@@ -2035,15 +2057,21 @@ impl AppState {
                     }
                 }
             }
-            let preferred_implementation_agent = session_snapshot
-                .metadata
-                .get("acpImplementationAgent")
-                .map(String::as_str)
-                .unwrap_or("codex");
+            let preferred_implementation_agent =
+                dispatcher_preferred_implementation_agent(&session_snapshot);
+            let preferred_implementation_model =
+                dispatcher_preferred_implementation_model(&session_snapshot);
+            let preferred_implementation_reasoning =
+                dispatcher_preferred_implementation_reasoning_effort(&session_snapshot);
             let approved_turn = matches_acp_approve_command(&message);
             runtime_message = format!(
-                "{}\n\nACP dispatcher preference: prefer `{preferred_implementation_agent}` for newly created implementation tasks unless the user explicitly wants another agent.\n\n{}",
+                "{}\n\n{}\n\n{}",
                 acp_dispatcher_turn_prefix(approved_turn),
+                acp_dispatcher_preference_note(
+                    &preferred_implementation_agent,
+                    preferred_implementation_model.as_deref(),
+                    preferred_implementation_reasoning.as_deref(),
+                ),
                 rewrite_acp_dispatcher_command(&message)
             );
         }
@@ -2173,7 +2201,7 @@ impl AppState {
                 source: source.to_string(),
                 text: message.clone(),
                 created_at: Utc::now().to_rfc3339(),
-                attachments: effective_attachments.clone(),
+                attachments: recorded_attachments.clone(),
                 metadata: HashMap::new(),
             });
         }
@@ -2256,6 +2284,7 @@ impl AppState {
             let updated = session.clone();
             drop(sessions);
             self.persist_session(&updated).await?;
+            self.publish_feed_update(session_id);
             self.publish_snapshot().await;
         } else {
             tracing::warn!("send_raw_to_session: session {session_id} not found in sessions map");
@@ -2328,6 +2357,7 @@ impl AppState {
                     let updated = original.clone();
                     drop(sessions);
                     let _ = self.persist_session(&updated).await;
+                    self.publish_feed_update(session_id);
                     self.publish_snapshot().await;
                 }
             }
@@ -2869,6 +2899,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_to_session_keeps_acp_context_runtime_only() {
+        let root = std::env::temp_dir().join(format!("conductor-acp-ui-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+
+        let session = state
+            .spawn_session_now(
+                SpawnRequest {
+                    project_id: "demo".to_string(),
+                    bridge_id: None,
+                    prompt: "Investigate".to_string(),
+                    issue_id: None,
+                    agent: Some("codex".to_string()),
+                    use_worktree: Some(false),
+                    permission_mode: None,
+                    model: None,
+                    reasoning_effort: None,
+                    branch: None,
+                    base_branch: None,
+                    task_id: None,
+                    task_ref: None,
+                    attempt_id: None,
+                    parent_task_id: None,
+                    retry_of_session_id: None,
+                    profile: None,
+                    session_kind: Some("project_dispatcher".to_string()),
+                    brief_path: None,
+                    attachments: Vec::new(),
+                    source: "spawn".to_string(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut seeded = state.get_session(&session.id).await.unwrap();
+        seeded.metadata.insert(
+            "acpProjectMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/project-memory.md".to_string(),
+        );
+        seeded.metadata.insert(
+            "acpSessionMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/session-memory.md".to_string(),
+        );
+        seeded.metadata.insert(
+            "acpBoardPath".to_string(),
+            "projects/demo/CONDUCTOR.md".to_string(),
+        );
+        state.replace_session(seeded).await.unwrap();
+
+        state
+            .send_to_session(
+                &session.id,
+                "add two tasks".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let updated = state.get_session(&session.id).await.unwrap();
+        let user_entry = updated
+            .conversation
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "user_message" && entry.text == "add two tasks")
+            .expect("user message should be stored");
+
+        assert!(user_entry.attachments.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
     async fn ttyd_runtime_keeps_terminal_alive_after_agent_command_exits() {
         let root = std::env::temp_dir().join(format!("conductor-session-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -3369,6 +3486,103 @@ mod tests {
         assert!(updated
             .metadata
             .contains_key(crate::state::detached::TTYD_WS_URL_METADATA_KEY));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resume_session_with_prompt_keeps_acp_context_runtime_only() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-resume-acp-test-{}", Uuid::new_v4()));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(ResumeExecutor));
+
+        let mut session = SessionRecord::new(
+            "resume-acp-session".to_string(),
+            "demo".to_string(),
+            Some("session/resume-acp".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = SessionStatus::NeedsInput;
+        session.activity = Some("waiting_input".to_string());
+        session
+            .metadata
+            .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+        session.metadata.insert(
+            "acpProjectMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/project-memory.md".to_string(),
+        );
+        session.metadata.insert(
+            "acpSessionMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/session-memory.md".to_string(),
+        );
+        session.metadata.insert(
+            "acpBoardPath".to_string(),
+            "projects/demo/CONDUCTOR.md".to_string(),
+        );
+        session
+            .metadata
+            .insert("agentCwd".to_string(), repo.to_string_lossy().to_string());
+        state.replace_session(session).await.unwrap();
+
+        state
+            .resume_session_with_prompt(
+                "resume-acp-session",
+                "add two tasks".to_string(),
+                Vec::new(),
+                None,
+                None,
+                "follow_up",
+            )
+            .await
+            .unwrap();
+
+        let updated = timeout(test_wait_timeout(), async {
+            loop {
+                let current = state.get_session("resume-acp-session").await.unwrap();
+                if current
+                    .conversation
+                    .iter()
+                    .any(|entry| entry.kind == "user_message" && entry.text == "add two tasks")
+                {
+                    return current;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("resume should record the follow-up");
+
+        let user_entry = updated
+            .conversation
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "user_message" && entry.text == "add two tasks")
+            .expect("user message should be stored");
+
+        assert!(user_entry.attachments.is_empty());
+
         let _ = fs::remove_dir_all(&root);
     }
 

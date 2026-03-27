@@ -8,6 +8,13 @@ use super::types::{SessionRecord, TerminalRestoreSnapshot};
 use super::AppState;
 
 impl AppState {
+    async fn write_session_snapshot(&self, session: &SessionRecord) -> Result<()> {
+        let path = self.session_snapshot_path(&session.id);
+        let content = serde_json::to_string_pretty(session)?;
+        tokio::fs::write(path, content).await?;
+        Ok(())
+    }
+
     pub fn session_store_dir(&self) -> PathBuf {
         self.workspace_path
             .join(".conductor")
@@ -85,11 +92,13 @@ impl AppState {
     }
 
     pub(crate) async fn persist_session(&self, session: &SessionRecord) -> Result<()> {
-        let path = self.session_snapshot_path(&session.id);
-        let content = serde_json::to_string_pretty(session)?;
-        tokio::fs::write(path, content).await?;
+        self.write_session_snapshot(session).await?;
         self.invalidate_session_caches(&session.id).await;
         Ok(())
+    }
+
+    pub(crate) async fn persist_session_snapshot(&self, session: &SessionRecord) -> Result<()> {
+        self.write_session_snapshot(session).await
     }
 
     pub(crate) async fn persist_terminal_restore_snapshot(
@@ -133,6 +142,7 @@ impl AppState {
             let mut sessions = self.sessions.write().await;
             sessions.insert(session.id.clone(), session.clone());
         }
+        self.publish_feed_update(&session.id);
         self.publish_snapshot().await;
         Ok(())
     }

@@ -33,6 +33,7 @@ type SessionsStoreState = {
 
 const sessionsStores = new Map<string, SessionsStoreState>();
 const sessionListenersByScope = new Map<string, Set<Listener>>();
+const sessionRecordListenersByScope = new Map<string, Map<string, Set<Listener>>>();
 
 function createSessionsStoreState(): SessionsStoreState {
   return {
@@ -79,6 +80,38 @@ function emitSessionChange(scopeKey: string) {
   }
 }
 
+function getSessionRecordListeners(scopeKey: string, sessionId: string): Set<Listener> {
+  let listenersBySession = sessionRecordListenersByScope.get(scopeKey);
+  if (!listenersBySession) {
+    listenersBySession = new Map();
+    sessionRecordListenersByScope.set(scopeKey, listenersBySession);
+  }
+
+  let listeners = listenersBySession.get(sessionId);
+  if (!listeners) {
+    listeners = new Set();
+    listenersBySession.set(sessionId, listeners);
+  }
+  return listeners;
+}
+
+function emitSessionRecordChanges(scopeKey: string, sessionIds: Iterable<string>) {
+  const listenersBySession = sessionRecordListenersByScope.get(scopeKey);
+  if (!listenersBySession) {
+    return;
+  }
+
+  for (const sessionId of new Set(sessionIds)) {
+    const listeners = listenersBySession.get(sessionId);
+    if (!listeners) {
+      continue;
+    }
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+}
+
 function sortSessionIdsByCreatedAt(sessionsById: Map<string, DashboardSession>): string[] {
   return [...sessionsById.values()]
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
@@ -119,7 +152,14 @@ function mapSnapshotSession(session: SSESnapshotSession): DashboardSession {
 
 function applySessionEvent(scopeKey: string, event: SSESessionEvent) {
   const store = getSessionsStore(scopeKey);
+  const affectedSessionIds = new Set<string>();
   if (event.type === "snapshot") {
+    for (const sessionId of store.sessionsById.keys()) {
+      affectedSessionIds.add(sessionId);
+    }
+    for (const session of event.sessions) {
+      affectedSessionIds.add(session.id);
+    }
     commitSessionsState(scopeKey, new Map(
       event.sessions.map((session) => {
         const mapped = mapSnapshotSession(session);
@@ -131,15 +171,18 @@ function applySessionEvent(scopeKey: string, event: SSESessionEvent) {
     for (const session of event.sessions) {
       const mapped = mapSnapshotSession(session);
       nextSessions.set(mapped.id, mapped);
+      affectedSessionIds.add(mapped.id);
     }
     for (const sessionId of event.removedSessionIds ?? []) {
       nextSessions.delete(sessionId);
+      affectedSessionIds.add(sessionId);
     }
     commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
   }
   store.loading = false;
   store.error = null;
   emitSessionChange(scopeKey);
+  emitSessionRecordChanges(scopeKey, affectedSessionIds);
 }
 
 function normalizeSessionsPayload(json: unknown): DashboardSession[] {
@@ -159,6 +202,7 @@ async function refreshSessionsStore(scopeKey: string, bridgeId?: string | null):
   }
 
   const load = (async () => {
+    const affectedSessionIds = new Set<string>(store.sessionsById.keys());
     try {
       const response = await fetch(withBridgeQuery("/api/sessions", bridgeId), { cache: "no-store" });
       if (!response.ok) {
@@ -166,6 +210,9 @@ async function refreshSessionsStore(scopeKey: string, bridgeId?: string | null):
         throw new Error(payload?.error ?? payload?.reason ?? `Failed to fetch sessions: ${response.status}`);
       }
       const payload = normalizeSessionsPayload(await response.json().catch(() => null));
+      for (const session of payload) {
+        affectedSessionIds.add(session.id);
+      }
       const sessionsById = new Map(payload.map((session) => [session.id, session] as const));
       commitSessionsState(scopeKey, sessionsById, sortSessionIdsByCreatedAt(sessionsById));
       store.error = null;
@@ -174,6 +221,7 @@ async function refreshSessionsStore(scopeKey: string, bridgeId?: string | null):
     } finally {
       store.loading = false;
       emitSessionChange(scopeKey);
+      emitSessionRecordChanges(scopeKey, affectedSessionIds);
     }
   })();
 
@@ -313,6 +361,23 @@ function subscribeSessions(scopeKey: string, listener: Listener): () => void {
   };
 }
 
+function subscribeSessionRecord(scopeKey: string, sessionId: string, listener: Listener): () => void {
+  const listeners = getSessionRecordListeners(scopeKey, sessionId);
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size > 0) {
+      return;
+    }
+
+    const listenersBySession = sessionRecordListenersByScope.get(scopeKey);
+    listenersBySession?.delete(sessionId);
+    if (listenersBySession && listenersBySession.size === 0) {
+      sessionRecordListenersByScope.delete(scopeKey);
+    }
+  };
+}
+
 async function refreshSessionRecord(
   id: string,
   scopeKey: string,
@@ -329,7 +394,6 @@ async function refreshSessionRecord(
       nextSessions.delete(id);
       commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
       store.error = null;
-      emitSessionChange(scopeKey);
       return null;
     }
     if (!response.ok) {
@@ -349,6 +413,7 @@ async function refreshSessionRecord(
   } finally {
     store.loading = false;
     emitSessionChange(scopeKey);
+    emitSessionRecordChanges(scopeKey, [id]);
   }
 }
 
@@ -368,6 +433,7 @@ export function primeSessionStore(scopeKey: string, session: DashboardSession | 
   commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
   store.loading = false;
   emitSessionChange(scopeKey);
+  emitSessionRecordChanges(scopeKey, [session.id]);
 }
 
 function filterProjectSessions(scopeKey: string, projectId?: string | null): DashboardSession[] {
@@ -456,7 +522,7 @@ export function useSharedSession(
     if (!enabled || normalizedId === null) {
       return undefined;
     }
-    return subscribeSessions(scopeKey, () => forceRender());
+    return subscribeSessionRecord(scopeKey, normalizedId, () => forceRender());
   }, [enabled, normalizedId, scopeKey]);
 
   useEffect(() => {

@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
+  type CSSProperties,
   type ChangeEvent,
   memo,
   useCallback,
@@ -98,6 +99,10 @@ import {
 
 const DEFAULT_AGENT = "claude-code";
 const SESSION_DETAIL_KEEPALIVE_LIMIT = 1;
+const DEFAULT_DISPATCHER_PANEL_WIDTH = 405;
+const MIN_DISPATCHER_PANEL_WIDTH = 320;
+const MAX_DISPATCHER_PANEL_WIDTH = 720;
+const DISPATCHER_PANEL_WIDTH_STORAGE_KEY = "conductor-board-dispatcher-panel-width";
 type DashboardWorkspaceView = "direct" | "board";
 
 function normalizeDashboardQueryValue(value: string | null): string | null {
@@ -108,6 +113,17 @@ function normalizeDashboardQueryValue(value: string | null): string | null {
 function resolveDashboardWorkspaceView(value: string | null): DashboardWorkspaceView {
   if (value === "board" || value === "chat") return "board";
   return "direct";
+}
+
+function clampDispatcherPanelWidth(width: number, viewportWidth: number): number {
+  const safeViewportWidth = Number.isFinite(viewportWidth) && viewportWidth > 0
+    ? viewportWidth
+    : MAX_DISPATCHER_PANEL_WIDTH;
+  const maxWidth = Math.min(
+    MAX_DISPATCHER_PANEL_WIDTH,
+    Math.max(MIN_DISPATCHER_PANEL_WIDTH, Math.floor(safeViewportWidth * 0.55)),
+  );
+  return Math.min(maxWidth, Math.max(MIN_DISPATCHER_PANEL_WIDTH, Math.round(width)));
 }
 
 const SessionDetail = dynamic(
@@ -986,6 +1002,8 @@ export default function DashboardClient({
   const [mountedSessionIds, setMountedSessionIds] = useState<string[]>(() => selectedSessionId ? [selectedSessionId] : []);
   const [compactTerminalChrome, setCompactTerminalChrome] = useState(false);
   const [dispatcherCollapsed, setDispatcherCollapsed] = useState(false);
+  const [dispatcherPanelWidth, setDispatcherPanelWidth] = useState(DEFAULT_DISPATCHER_PANEL_WIDTH);
+  const [dispatcherPanelResizing, setDispatcherPanelResizing] = useState(false);
   const launchpadSessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -1009,6 +1027,64 @@ export default function DashboardClient({
       mediaQuery?.removeEventListener?.("change", syncCompactTerminalChrome);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      const stored = window.localStorage.getItem(DISPATCHER_PANEL_WIDTH_STORAGE_KEY);
+      const parsed = stored ? Number.parseInt(stored, 10) : Number.NaN;
+      if (Number.isFinite(parsed)) {
+        setDispatcherPanelWidth(clampDispatcherPanelWidth(parsed, window.innerWidth));
+      }
+    } catch {
+      // Ignore invalid persisted width values.
+    }
+
+    const handleResize = () => {
+      setDispatcherPanelWidth((current) => clampDispatcherPanelWidth(current, window.innerWidth));
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!dispatcherPanelResizing) {
+      return;
+    }
+
+    const handlePointerMove = (event: MouseEvent) => {
+      const viewportWidth = window.innerWidth;
+      const nextWidth = clampDispatcherPanelWidth(viewportWidth - event.clientX, viewportWidth);
+      setDispatcherPanelWidth(nextWidth);
+    };
+
+    const handlePointerUp = () => {
+      setDispatcherPanelResizing(false);
+    };
+
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("mouseup", handlePointerUp);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    return () => {
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("mouseup", handlePointerUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      try {
+        window.localStorage.setItem(DISPATCHER_PANEL_WIDTH_STORAGE_KEY, String(dispatcherPanelWidth));
+      } catch {
+        // Ignore storage write failures.
+      }
+    };
+  }, [dispatcherPanelResizing, dispatcherPanelWidth]);
 
 
   useEffect(() => {
@@ -1923,11 +1999,9 @@ export default function DashboardClient({
           bridgeId={effectiveBridgeId}
           defaultAgent={resolvedCodingAgent}
           agentOptions={agentOptions}
-          modelAccess={resolvedPreferences.modelAccess}
           projectSessions={selectedProjectSessions}
           projectLabel={selectedProject?.id ?? selectedProjectId}
           headerAccessory={projectViewToggle}
-          showAgenticPanel={false}
           onOpenSession={handleSelectSession}
         />
       );
@@ -1992,17 +2066,38 @@ export default function DashboardClient({
     if (!selectedProject) return workspaceMainPanel;
 
     if (workspaceView === "board") {
+      const boardPaneStyle = {
+        "--dispatcher-panel-width": `${dispatcherPanelWidth}px`,
+      } as CSSProperties;
+      const boardPaneExpandedClass = "flex-1 min-h-[min(360px,50dvh)] xl:w-[var(--dispatcher-panel-width)] xl:flex-none xl:min-h-0";
+      const showBoardSidePaneResizeHandle = selectedSessionId !== null || !dispatcherCollapsed;
+
       return (
-        <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden xl:flex-row">
+        <div
+          style={boardPaneStyle}
+          className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden xl:flex-row"
+        >
           <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
             {workspaceMainPanel}
           </div>
+          {showBoardSidePaneResizeHandle ? (
+            <div
+              className="absolute bottom-0 right-[var(--dispatcher-panel-width)] top-0 z-20 hidden w-2 translate-x-1/2 cursor-col-resize xl:block"
+              onMouseDown={(event) => {
+                event.preventDefault();
+                setDispatcherPanelResizing(true);
+              }}
+              aria-hidden="true"
+            >
+              <div className="mx-auto h-full w-px bg-transparent transition-colors hover:bg-[var(--vk-border)]" />
+            </div>
+          ) : null}
           <div className={`flex flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0 ${
             selectedSessionId
-              ? "flex-1 min-h-[min(360px,50dvh)] xl:w-[405px] xl:flex-none xl:min-h-0"
+              ? boardPaneExpandedClass
               : dispatcherCollapsed
                 ? "h-[33px] max-h-[33px] shrink-0 xl:h-auto xl:max-h-none xl:w-[56px] xl:min-h-0"
-                : "flex-1 min-h-[min(360px,50dvh)] xl:w-[405px] xl:flex-none xl:min-h-0"
+                : boardPaneExpandedClass
           }`}>
             {selectedSessionId ? (
               dockedBoardSession ? (
@@ -2021,7 +2116,8 @@ export default function DashboardClient({
                 projectId={selectedProject.id}
                 bridgeId={effectiveBridgeId}
                 defaultAgent={resolvedCodingAgent}
-                projectSessions={selectedProjectSessions}
+                modelAccess={resolvedPreferences.modelAccess}
+                runtimeModelCatalogs={runtimeModelCatalogs}
                 collapsed={dispatcherCollapsed}
                 onToggleCollapsed={handleToggleDispatcherCollapsed}
               />
@@ -2074,6 +2170,7 @@ export default function DashboardClient({
     );
   }, [
     dispatcherCollapsed,
+    dispatcherPanelWidth,
     dockedBoardSession,
     effectiveBridgeId,
     handleToggleDispatcherCollapsed,

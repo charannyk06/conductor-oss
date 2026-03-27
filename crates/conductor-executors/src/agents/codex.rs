@@ -209,7 +209,30 @@ impl Executor for CodexExecutor {
                         }
                         return ExecutorOutput::Stdout(String::new());
                     }
-                    "thread.started" | "turn.started" | "turn.completed" | "task.started" => {
+                    "thread.started" => {
+                        if let Some(thread_id) = value
+                            .get("thread_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                        {
+                            let mut metadata = HashMap::new();
+                            metadata.insert(
+                                "eventKind".to_string(),
+                                Value::String("thread_started".to_string()),
+                            );
+                            metadata.insert(
+                                "codexThreadId".to_string(),
+                                Value::String(thread_id.to_string()),
+                            );
+                            return ExecutorOutput::StructuredStatus {
+                                text: String::new(),
+                                metadata,
+                            };
+                        }
+                        return ExecutorOutput::Stdout(String::new());
+                    }
+                    "turn.started" | "turn.completed" | "task.started" => {
                         return ExecutorOutput::Stdout(String::new());
                     }
                     "item.started" => {
@@ -517,6 +540,26 @@ mod tests {
         assert_eq!(
             metadata.get("toolKind").and_then(Value::as_str),
             Some("read_text_file")
+        );
+    }
+
+    #[test]
+    fn parse_thread_started_emits_resume_target_metadata() {
+        let executor = CodexExecutor::new(PathBuf::from("/usr/bin/codex"));
+        let output =
+            executor.parse_output(r#"{"type":"thread.started","thread_id":"session-123"}"#);
+
+        let ExecutorOutput::StructuredStatus { text, metadata } = output else {
+            panic!("expected structured status");
+        };
+        assert!(text.is_empty());
+        assert_eq!(
+            metadata.get("eventKind").and_then(Value::as_str),
+            Some("thread_started")
+        );
+        assert_eq!(
+            metadata.get("codexThreadId").and_then(Value::as_str),
+            Some("session-123")
         );
     }
 

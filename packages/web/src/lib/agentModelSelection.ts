@@ -1,5 +1,9 @@
 import {
+  getAvailableAgentModels,
+  getAvailableAgentReasoningEfforts,
   getAgentModelCatalog,
+  getDefaultAgentModel,
+  getDefaultAgentReasoningEffort,
   resolveAgentModelAccess,
   type AgentModelOption,
   type AgentReasoningOption,
@@ -78,7 +82,7 @@ export function getSelectableAgentModels(
     return merged;
   }
 
-  return [];
+  return getAvailableAgentModels(agent, modelAccess);
 }
 
 export function getSelectableAgentReasoningOptions(
@@ -94,7 +98,7 @@ export function getSelectableAgentReasoningOptions(
     return getRuntimeCatalogReasoningOptions(runtimeCatalog, model, access);
   }
 
-  return [];
+  return getAvailableAgentReasoningEfforts(agent, modelAccess);
 }
 
 export function getSelectableDefaultAgentModel(
@@ -111,7 +115,7 @@ export function getSelectableDefaultAgentModel(
       ?? "";
   }
 
-  return "";
+  return getDefaultAgentModel(agent, modelAccess) ?? "";
 }
 
 export function getSelectableDefaultReasoningEffort(
@@ -127,7 +131,7 @@ export function getSelectableDefaultReasoningEffort(
     return getRuntimeCatalogDefaultReasoning(runtimeCatalog, model, access) ?? "";
   }
 
-  return "";
+  return getDefaultAgentReasoningEffort(agent, modelAccess) ?? "";
 }
 
 export function getSelectableModelPlaceholder(

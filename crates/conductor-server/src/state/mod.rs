@@ -12,6 +12,13 @@ mod terminal_hosts;
 pub mod types;
 mod workspace;
 
+pub(crate) use acp_dispatcher::{
+    dispatcher_implementation_agent_options, dispatcher_implementation_model_options,
+    dispatcher_implementation_reasoning_options, dispatcher_preferred_implementation_agent,
+    dispatcher_preferred_implementation_model,
+    dispatcher_preferred_implementation_reasoning_effort, CreateDispatcherThreadOptions,
+    DispatcherRuntimeHandle, DispatcherSelectOption, DispatcherTurnRequest,
+};
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};
 pub(crate) use bridge_registry::{BridgeConnectionRecord, BridgeConnectionStatus};
@@ -53,7 +60,7 @@ use std::time::{Duration, Instant};
 use terminal_hosts::TerminalHostRegistry;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify, RwLock};
 
 pub(crate) struct DevServerRecord {
     pub pid: u32,
@@ -88,6 +95,7 @@ struct FeedPayloadCacheEntry {
 }
 
 const RUNTIME_STATUS_CACHE_TTL: Duration = Duration::from_millis(1500);
+const SESSION_FLUSH_DEBOUNCE_INTERVAL: Duration = Duration::from_millis(125);
 const TERMINAL_CAPTURE_BUFFER_CAPACITY: usize = 64 * 1024;
 const TERMINAL_CAPTURE_FLUSH_INTERVAL: Duration = Duration::from_millis(32);
 const TERMINAL_CAPTURE_FORCE_FLUSH_BYTES: usize = 64 * 1024;
@@ -102,6 +110,15 @@ pub(crate) fn ttyd_binary_available(workspace_path: &Path) -> bool {
     detached::ttyd_launcher::resolve_ttyd_binary(workspace_path).is_some()
 }
 
+pub(crate) fn is_project_dispatcher_session(session: &SessionRecord) -> bool {
+    session.metadata.get("sessionKind").map(String::as_str) == Some("project_dispatcher")
+}
+
+pub(crate) fn is_dashboard_hidden_session(session: &SessionRecord) -> bool {
+    session.metadata.get("dashboardHidden").map(String::as_str) == Some("true")
+        || is_project_dispatcher_session(session)
+}
+
 /// Shared application state for the HTTP server.
 pub struct AppState {
     pub config_path: PathBuf,
@@ -110,11 +127,14 @@ pub struct AppState {
     pub db: Database,
     pub executors: RwLock<HashMap<AgentKind, Arc<dyn Executor>>>,
     pub sessions: RwLock<HashMap<String, SessionRecord>>,
+    pub dispatcher_threads: RwLock<HashMap<String, SessionRecord>>,
     terminal_hosts: TerminalHostRegistry,
     bridge_registry: RwLock<HashMap<String, BridgeConnectionRecord>>,
     pub event_snapshots: broadcast::Sender<String>,
     /// Sends (session_id, delta_line) for incremental output updates.
     pub output_updates: broadcast::Sender<(String, String)>,
+    pub feed_updates: broadcast::Sender<String>,
+    pub dispatcher_updates: broadcast::Sender<String>,
     pub app_update_config: AppUpdateConfig,
     app_update: Mutex<app_update::AppUpdateRuntime>,
     pub started_at: DateTime<Utc>,
@@ -125,6 +145,10 @@ pub struct AppState {
     runtime_status_cache: Mutex<HashMap<String, RuntimeStatusCacheEntry>>,
     dashboard_snapshot_cache: Mutex<DashboardSnapshotCache>,
     feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
+    pending_session_flushes: Mutex<HashSet<String>>,
+    session_flush_notify: Arc<Notify>,
+    dispatcher_feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
+    dispatcher_runtimes: Mutex<HashMap<String, DispatcherRuntimeHandle>>,
     pub active_session_skills: Mutex<HashMap<String, Vec<String>>>,
 }
 
@@ -133,6 +157,8 @@ impl AppState {
         let workspace_path = resolve_workspace_path(&config_path, &config.workspace);
         let (event_snapshots, _) = broadcast::channel(256);
         let (output_updates, _) = broadcast::channel(512);
+        let (feed_updates, _) = broadcast::channel(512);
+        let (dispatcher_updates, _) = broadcast::channel(256);
         let app_update_config = AppUpdateConfig::from_env();
         let app_update_state = app_update::AppUpdateRuntime::new(&app_update_config);
         let state = Arc::new(Self {
@@ -142,10 +168,13 @@ impl AppState {
             db,
             executors: RwLock::new(HashMap::new()),
             sessions: RwLock::new(HashMap::new()),
+            dispatcher_threads: RwLock::new(HashMap::new()),
             terminal_hosts: TerminalHostRegistry::default(),
             bridge_registry: RwLock::new(HashMap::new()),
             event_snapshots,
             output_updates,
+            feed_updates,
+            dispatcher_updates,
             app_update: Mutex::new(app_update_state),
             app_update_config,
             started_at: Utc::now(),
@@ -155,11 +184,18 @@ impl AppState {
             runtime_status_cache: Mutex::new(HashMap::new()),
             dashboard_snapshot_cache: Mutex::new(DashboardSnapshotCache::default()),
             feed_payload_cache: Mutex::new(HashMap::new()),
+            pending_session_flushes: Mutex::new(HashSet::new()),
+            session_flush_notify: Arc::new(Notify::new()),
+            dispatcher_feed_payload_cache: Mutex::new(HashMap::new()),
+            dispatcher_runtimes: Mutex::new(HashMap::new()),
             active_session_skills: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
+        state.ensure_dispatcher_store();
         state.load_sessions_from_disk().await;
+        state.load_dispatchers_from_disk().await;
         state.load_board_collaboration_from_disk().await;
+        state.start_session_flush_watchdog();
         state
     }
 
@@ -239,7 +275,9 @@ impl AppState {
         let sessions = self.sessions.read().await;
         let mut list: Vec<SessionRecord> = sessions
             .values()
-            .filter(|session| session.status != SessionStatus::Archived)
+            .filter(|session| {
+                session.status != SessionStatus::Archived && !is_dashboard_hidden_session(session)
+            })
             .cloned()
             .collect();
         list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
@@ -357,24 +395,33 @@ impl AppState {
         list
     }
 
+    pub async fn latest_project_dispatcher_session(
+        &self,
+        project_id: &str,
+        bridge_id: Option<&str>,
+    ) -> Option<SessionRecord> {
+        self.all_sessions()
+            .await
+            .into_iter()
+            .filter(|session| session.project_id == project_id)
+            .filter(is_project_dispatcher_session)
+            .filter(|session| !session.status.is_terminal())
+            .filter(|session| match bridge_id {
+                Some(expected) => session.bridge_id.as_deref() == Some(expected),
+                None => session.bridge_id.is_none(),
+            })
+            .max_by(|left, right| {
+                left.last_activity_at
+                    .cmp(&right.last_activity_at)
+                    .then(left.created_at.cmp(&right.created_at))
+            })
+    }
+
     pub async fn get_session(&self, session_id: &str) -> Option<SessionRecord> {
         self.sessions.read().await.get(session_id).cloned()
     }
 
     pub async fn dashboard_session(&self, session_id: &str) -> Option<Value> {
-        let _ = self.refresh_dashboard_snapshot_cache().await;
-        let cached = {
-            let cache = self.dashboard_snapshot_cache.lock().await;
-            cache
-                .sessions_by_id
-                .get(session_id)
-                .map(|entry| entry.value.clone())
-        };
-
-        if cached.is_some() {
-            return cached;
-        }
-
         match self.get_session(session_id).await {
             Some(session) => Some(self.serialize_dashboard_session(&session).await),
             None => None,
@@ -407,8 +454,41 @@ impl AppState {
     }
 
     pub(crate) async fn invalidate_session_caches(&self, session_id: &str) {
+        self.invalidate_runtime_status_cache(session_id).await;
+        self.invalidate_feed_payload_cache(session_id).await;
+    }
+
+    pub(crate) async fn invalidate_runtime_status_cache(&self, session_id: &str) {
         self.runtime_status_cache.lock().await.remove(session_id);
+    }
+
+    pub(crate) async fn invalidate_feed_payload_cache(&self, session_id: &str) {
         self.feed_payload_cache.lock().await.remove(session_id);
+    }
+
+    pub(crate) fn publish_feed_update(&self, session_id: &str) {
+        let _ = self.feed_updates.send(session_id.to_string());
+    }
+
+    pub(crate) async fn queue_session_flush(&self, session_id: &str) {
+        self.pending_session_flushes
+            .lock()
+            .await
+            .insert(session_id.to_string());
+        self.session_flush_notify.notify_one();
+    }
+
+    pub(crate) async fn queue_hot_path_session_update(
+        &self,
+        session_id: &str,
+        invalidate_runtime_status: bool,
+    ) {
+        if invalidate_runtime_status {
+            self.invalidate_runtime_status_cache(session_id).await;
+        }
+        self.invalidate_feed_payload_cache(session_id).await;
+        self.publish_feed_update(session_id);
+        self.queue_session_flush(session_id).await;
     }
 
     pub(crate) async fn cached_feed_payload(
@@ -449,6 +529,56 @@ impl AppState {
                     _ = state.terminal_hosts.wait_for_flush_request() => {}
                 }
                 state.maintain_terminal_hosts().await;
+            }
+        });
+    }
+
+    fn start_session_flush_watchdog(self: &Arc<Self>) {
+        let notify = Arc::clone(&self.session_flush_notify);
+        let state = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+
+                loop {
+                    tokio::time::sleep(SESSION_FLUSH_DEBOUNCE_INTERVAL).await;
+
+                    let Some(app_state) = state.upgrade() else {
+                        return;
+                    };
+                    let pending_ids = {
+                        let mut pending = app_state.pending_session_flushes.lock().await;
+                        if pending.is_empty() {
+                            Vec::new()
+                        } else {
+                            pending.drain().collect::<Vec<_>>()
+                        }
+                    };
+
+                    if pending_ids.is_empty() {
+                        break;
+                    }
+
+                    let pending_sessions = {
+                        let sessions = app_state.sessions.read().await;
+                        pending_ids
+                            .iter()
+                            .filter_map(|session_id| sessions.get(session_id).cloned())
+                            .collect::<Vec<_>>()
+                    };
+
+                    for session in pending_sessions {
+                        if let Err(err) = app_state.persist_session_snapshot(&session).await {
+                            tracing::debug!(
+                                session_id = %session.id,
+                                error = %err,
+                                "Failed to persist queued session snapshot"
+                            );
+                        }
+                    }
+
+                    app_state.publish_snapshot().await;
+                }
             }
         });
     }
@@ -939,7 +1069,7 @@ impl AppState {
             return;
         }
 
-        self.invalidate_session_caches(session_id).await;
+        self.publish_feed_update(session_id);
         self.publish_snapshot().await;
     }
 

@@ -5,7 +5,6 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use conductor_core::support::resolve_project_path;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -18,7 +17,7 @@ use tokio_stream::{self as stream, StreamExt};
 
 use crate::error_logger::{categories, ErrorContext};
 use crate::routes::boards::{
-    resolve_board_path_for_project, resolve_board_task_record, update_board_task_attempt_ref,
+    board_task_prefers_worktree, resolve_board_task_record, update_board_task_attempt_ref,
 };
 use crate::routes::terminal::resolve_terminal_keys;
 use crate::state::{
@@ -41,72 +40,6 @@ const PROJECT_DISPATCHER_SESSION_KIND: &str = "project_dispatcher";
 
 static SPAWN_RATE_COUNT: AtomicU64 = AtomicU64::new(0);
 static SPAWN_RATE_WINDOW_START: AtomicU64 = AtomicU64::new(0);
-
-fn display_workspace_path(workspace_root: &std::path::Path, path: &std::path::Path) -> String {
-    path.strip_prefix(workspace_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn build_project_dispatcher_prompt(
-    project_id: &str,
-    repo_display: &str,
-    board_display: &str,
-    default_branch: &str,
-    user_prompt: &str,
-) -> String {
-    let mut prompt = format!(
-        concat!(
-            "You are the Conductor ACP dispatcher for project `{}`.\n\n",
-            "This is a long-lived orchestration chat, not a coding run. You are the master puppeteer for the project.\n\n",
-            "Core responsibilities:\n",
-            "- Maintain and refine the board at `{}`\n",
-            "- Turn rough requests into a few high-signal tasks\n",
-            "- Prefer meaningful parent tasks plus internal checklists over noisy child-task spam\n",
-            "- Maintain ACP long-term memory for stable directives, architecture constraints, and repeated preferences\n",
-            "- Maintain ACP short-term session memory for the latest decisions, blockers, live context, and next actions\n",
-            "- Keep track of heartbeat-style follow-ups so deferred work surfaces again instead of getting lost in chat\n",
-            "- Create or update board tasks so dedicated coding sessions can be launched separately\n",
-            "- Use native Conductor MCP tools when available to inspect the board, create tasks, update task state, and inspect task attempt lifecycles\n",
-            "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n",
-            "- Prefer handing implementation to dedicated `codex`, `claude-code`, or `gemini` sessions\n\n",
-            "Project context:\n",
-            "- Repo path: `{}`\n",
-            "- Board path: `{}`\n",
-            "- Default branch: `{}`\n\n",
-            "Operating rules:\n",
-            "- Operate against the main project workspace and board context; do not create isolated implementation branches or worktrees from this ACP session\n",
-            "- Default to planning mode: inspect the repo and board, then produce the finalized plan before making board changes\n",
-            "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
-            "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
-            "- Keep the conversation stateful and use the board as the shared execution surface\n",
-            "- Every task you create should carry the minimum viable implementation packet: problem statement, exact files or surfaces to inspect, relevant skills or constraints, and the recommended agent (`codex`, `claude-code`, or `gemini`)\n",
-            "- Before any board mutation, first present: the proposed plan, the exact board/task mutations, the intended tool calls, and the recommended implementation agent per task\n",
-            "- Do not create or update board tasks until the user explicitly approves the proposal\n",
-            "- If the user asks for revisions, revise the proposal and ask for approval again\n",
-            "- After explicit approval, execute only the approved board/task mutations and then report the exact task refs or titles you created or updated\n",
-            "- When proposing tasks, use a compact task packet for each item: title, target board role, recommended agent, objective, exact files or surfaces to inspect, required skills or constraints, dependencies, and acceptance shape\n",
-            "- When creating tasks after approval, keep the board task title concise and put the implementation packet into the task description or notes so a dedicated coding session can execute without reopening planning\n",
-            "- If you defer work, create an explicit follow-up task instead of burying it in chat, such as a Phase 2 heartbeat or memory integration item\n",
-            "- If you create tasks, assign the best-fit implementation agent (`codex`, `claude-code`, or `gemini`) and reference the exact task refs or titles you created so the user can launch coding sessions from them\n"
-        ),
-        project_id,
-        board_display,
-        repo_display,
-        board_display,
-        default_branch,
-    );
-
-    let trimmed = user_prompt.trim();
-    if !trimmed.is_empty() {
-        prompt.push_str("\n## User request\n");
-        prompt.push_str(trimmed);
-        prompt.push('\n');
-    }
-
-    prompt
-}
 
 fn spawn_rate_check() -> bool {
     let now = std::time::SystemTime::now()
@@ -226,62 +159,17 @@ fn task_id_for_session(session: &SessionRecord) -> String {
         .unwrap_or_else(|| format!("t-{}", session.id))
 }
 
-fn session_snapshot_signature(payload: &Value, session_id: &str) -> Option<String> {
-    if payload
-        .get("removedSessionIds")
-        .and_then(Value::as_array)
-        .is_some_and(|removed| {
-            removed
-                .iter()
-                .any(|candidate| candidate.as_str() == Some(session_id))
-        })
-    {
-        return Some("missing".to_string());
-    }
-
-    let sessions = payload.get("sessions")?.as_array()?;
-    let matching = sessions
-        .iter()
-        .find(|session| session.get("id").and_then(Value::as_str) == Some(session_id));
-
-    match matching {
-        Some(session) => Some(format!(
-            "{}:{}:{}:{}:{}:{}:{}:{}",
-            session
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            session
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            session
-                .get("activity")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            session
-                .get("lastActivityAt")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            session
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            session
-                .get("parserState")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            session
-                .get("runtimeStatus")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            session
-                .get("source")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        )),
-        None => Some("missing".to_string()),
-    }
+fn missing_feed_payload(session_id: &str, window_limit: usize) -> Value {
+    json!({
+        "entries": [],
+        "totalEntries": 0,
+        "windowLimit": window_limit,
+        "truncated": false,
+        "sessionStatus": Value::Null,
+        "parserState": Value::Null,
+        "runtimeStatus": Value::Null,
+        "error": format!("Session {session_id} not found"),
+    })
 }
 
 fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
@@ -327,6 +215,10 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
 #[derive(Debug, Deserialize)]
 struct ListQuery {
     project: Option<String>,
+    #[serde(rename = "sessionKind")]
+    session_kind: Option<String>,
+    #[serde(rename = "includeHidden")]
+    include_hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,19 +232,68 @@ fn resolve_feed_window_limit(limit: Option<usize>) -> usize {
         .clamp(1, MAX_FEED_WINDOW_LIMIT)
 }
 
+fn session_matches_list_filters(
+    session: &SessionRecord,
+    project_filter: Option<&str>,
+    session_kind_filter: Option<&str>,
+) -> bool {
+    if let Some(project_id) = project_filter {
+        if session.project_id != project_id {
+            return false;
+        }
+    }
+    if let Some(session_kind) = session_kind_filter {
+        if session.metadata.get("sessionKind").map(String::as_str) != Some(session_kind) {
+            return false;
+        }
+    }
+    true
+}
+
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListQuery>,
 ) -> ApiResponse {
-    let mut sessions = state.snapshot_sessions().await;
-    if let Some(project_id) = query
+    let project_filter = query
         .project
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        sessions.retain(|session| session["projectId"] == project_id);
-    }
+        .filter(|value| !value.is_empty());
+    let session_kind_filter = query
+        .session_kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let include_hidden = query.include_hidden.unwrap_or(false);
+
+    let sessions = if include_hidden {
+        let mut records = state.all_sessions().await;
+        records.retain(|session| {
+            session_matches_list_filters(session, project_filter, session_kind_filter)
+        });
+
+        let mut payload = Vec::with_capacity(records.len());
+        for session in records {
+            payload.push(state.serialize_dashboard_session(&session).await);
+        }
+        payload
+    } else {
+        let mut payload = state.snapshot_sessions().await;
+        if let Some(project_id) = project_filter {
+            payload.retain(|session| session["projectId"] == project_id);
+        }
+        if let Some(session_kind) = session_kind_filter {
+            payload.retain(|session| {
+                session
+                    .get("metadata")
+                    .and_then(Value::as_object)
+                    .and_then(|metadata| metadata.get("sessionKind"))
+                    .and_then(Value::as_str)
+                    == Some(session_kind)
+            });
+        }
+        payload
+    };
 
     let stats = json!({
         "totalSessions": sessions.len(),
@@ -413,6 +354,12 @@ async fn spawn_session(
     let session_kind = body.session_kind.clone();
     let is_board_planning = session_kind.as_deref() == Some(BOARD_PLANNING_SESSION_KIND);
     let is_project_dispatcher = session_kind.as_deref() == Some(PROJECT_DISPATCHER_SESSION_KIND);
+    if is_project_dispatcher {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "project_dispatcher no longer uses /api/sessions. Use /api/projects/:project_id/dispatcher instead.",
+        );
+    }
     let permission_mode = body.permission_mode.clone().or_else(|| {
         if is_board_planning || is_project_dispatcher {
             Some("plan".to_string())
@@ -433,33 +380,9 @@ async fn spawn_session(
     let mut brief_path = None;
     let mut task_id = None;
     let mut task_ref = None;
+    let mut task_use_worktree = None;
 
-    if is_project_dispatcher {
-        let config = state.config.read().await.clone();
-        let Some(project) = config.projects.get(&project_id).cloned() else {
-            return error(
-                StatusCode::BAD_REQUEST,
-                format!("Unknown project: {project_id}"),
-            );
-        };
-        let repo_path = resolve_project_path(&state.workspace_path, &project.path);
-        let board_path = match resolve_board_path_for_project(&state, &project_id).await {
-            Ok(path) => path,
-            Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
-        };
-        let repo_display = display_workspace_path(&state.workspace_path, &repo_path);
-        let board_display = display_workspace_path(&state.workspace_path, &board_path);
-        if !attachments.contains(&board_display) {
-            attachments.push(board_display.clone());
-        }
-        prompt = build_project_dispatcher_prompt(
-            &project_id,
-            &repo_display,
-            &board_display,
-            &project.default_branch,
-            &user_prompt,
-        );
-    } else if let Some(task_link_key) = issue_id
+    if let Some(task_link_key) = issue_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -494,6 +417,7 @@ async fn spawn_session(
             task_id = Some(linked_task.id.clone());
             task_ref = linked_task.task_ref.clone();
             brief_path = Some(context.repo_brief_path.clone());
+            task_use_worktree = board_task_prefers_worktree(&linked_task);
 
             let task_attachments = context.attachments;
             let additional_attachments = attachments
@@ -525,7 +449,7 @@ async fn spawn_session(
             use_worktree: if is_board_planning || is_project_dispatcher {
                 Some(false)
             } else {
-                body.use_worktree
+                task_use_worktree.or(body.use_worktree)
             },
             permission_mode,
             model: body.model,
@@ -678,80 +602,37 @@ async fn feed_stream(
     Query(query): Query<FeedQuery>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
     let window_limit = resolve_feed_window_limit(query.limit);
-    let initial_signature = state
-        .get_session(&id)
-        .await
-        .map(|session| {
-            [
-                session.id,
-                session.status.as_str().to_string(),
-                session.activity.unwrap_or_default(),
-                session.last_activity_at,
-                session.summary.unwrap_or_default(),
-            ]
-            .join(":")
-        })
-        .unwrap_or_else(|| "missing".to_string());
     let initial_payload = match state.get_session(&id).await {
         Some(session) => session_feed_payload(&state, &session, window_limit).await,
-        None => {
-            json!({
-                "entries": [],
-                "totalEntries": 0,
-                "windowLimit": window_limit,
-                "truncated": false,
-                "sessionStatus": Value::Null,
-                "parserState": Value::Null,
-                "runtimeStatus": Value::Null,
-                "error": format!("Session {id} not found"),
-            })
-        }
+        None => missing_feed_payload(&id, window_limit),
     };
     let initial_stream = stream::iter(vec![Ok(
         SseEvent::default().data(initial_payload.to_string())
     )]);
 
-    let feed_state = Arc::new(Mutex::new((initial_signature, initial_payload.clone())));
+    let feed_state = Arc::new(Mutex::new(initial_payload.clone()));
     let event_state = state.clone();
     let event_session_id = id.clone();
-    let updates = BroadcastStream::new(state.event_snapshots.subscribe())
+    let updates = BroadcastStream::new(state.feed_updates.subscribe())
         .then(move |result| {
             let state = event_state.clone();
             let session_id = event_session_id.clone();
             let feed_state = feed_state.clone();
             async move {
                 match result {
-                    Ok(snapshot_json) => {
-                        let Ok(payload) = serde_json::from_str::<Value>(&snapshot_json) else {
-                            return Some(Ok(SseEvent::default().event("refresh").data(
-                                json!({ "type": "refresh", "sessionId": session_id }).to_string(),
-                            )));
-                        };
-                        let next_signature = session_snapshot_signature(&payload, &session_id)?;
+                    Ok(changed_session_id) if changed_session_id == session_id => {
                         let mut feed_state = feed_state.lock().await;
-                        if next_signature == feed_state.0 {
-                            return None;
-                        }
-                        feed_state.0 = next_signature;
                         let next_payload = match state.get_session(&session_id).await {
                             Some(session) => {
                                 session_feed_payload(&state, &session, window_limit).await
                             }
-                            None => json!({
-                                "entries": [],
-                                "totalEntries": 0,
-                                "windowLimit": window_limit,
-                                "truncated": false,
-                                "sessionStatus": Value::Null,
-                                "parserState": Value::Null,
-                                "runtimeStatus": Value::Null,
-                                "error": format!("Session {session_id} not found"),
-                            }),
+                            None => missing_feed_payload(&session_id, window_limit),
                         };
-                        let delta = build_feed_delta_event(&feed_state.1, &next_payload);
-                        feed_state.1 = next_payload;
+                        let delta = build_feed_delta_event(&feed_state, &next_payload);
+                        *feed_state = next_payload;
                         Some(Ok(SseEvent::default().data(delta.to_string())))
                     }
+                    Ok(_) => None,
                     Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(
                         count,
                     )) => {
@@ -1055,7 +936,9 @@ async fn retry_session(
             prompt: source.prompt.clone(),
             issue_id: source.issue_id.clone(),
             agent: body.agent.or_else(|| Some(source.agent.clone())),
-            use_worktree: Some(!is_board_planning && !is_project_dispatcher && source_uses_worktree),
+            use_worktree: Some(
+                !is_board_planning && !is_project_dispatcher && source_uses_worktree,
+            ),
             permission_mode: None,
             model: body.model.or_else(|| source.model.clone()),
             reasoning_effort: body
@@ -1278,7 +1161,10 @@ async fn send_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_feed_delta_event, resolve_feed_window_limit, session_cleanup_eligible};
+    use super::{
+        build_feed_delta_event, resolve_feed_window_limit, session_cleanup_eligible,
+        session_matches_list_filters,
+    };
     use crate::state::{SessionRecord, SessionStatus};
     use serde_json::json;
 
@@ -1326,6 +1212,41 @@ mod tests {
     fn cleanup_skips_active_working_sessions() {
         let session = build_session("working", SessionStatus::Working, Some("active"));
         assert!(!session_cleanup_eligible(&session));
+    }
+
+    #[test]
+    fn project_dispatcher_sessions_are_hidden_from_dashboard_inventory() {
+        let mut session = build_session("dispatcher", SessionStatus::Idle, Some("idle"));
+        session
+            .metadata
+            .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+
+        assert!(crate::state::is_dashboard_hidden_session(&session));
+    }
+
+    #[test]
+    fn session_list_filters_match_project_and_session_kind() {
+        let mut session = build_session("dispatcher", SessionStatus::Idle, Some("idle"));
+        session.project_id = "alpha".to_string();
+        session
+            .metadata
+            .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+
+        assert!(session_matches_list_filters(
+            &session,
+            Some("alpha"),
+            Some("project_dispatcher")
+        ));
+        assert!(!session_matches_list_filters(
+            &session,
+            Some("beta"),
+            Some("project_dispatcher")
+        ));
+        assert!(!session_matches_list_filters(
+            &session,
+            Some("alpha"),
+            Some("task")
+        ));
     }
 
     #[test]

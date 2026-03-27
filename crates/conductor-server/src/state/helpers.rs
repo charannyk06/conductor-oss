@@ -1,7 +1,9 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::iter::Peekable;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use conductor_core::support::resolve_project_path;
 
 use super::types::{
     SessionRecord, SessionStatus, DEFAULT_OUTPUT_LIMIT_BYTES, DEFAULT_SESSION_HISTORY_LIMIT,
@@ -22,7 +24,14 @@ const LEGACY_TMUX_RUNTIME_SUMMARY: &str = "Archived legacy tmux session after tm
 fn dashboard_metadata_allowlist() -> &'static [&'static str] {
     &[
         "agent",
+        "acpHeartbeatState",
+        "acpImplementationAgent",
+        "acpImplementationModel",
+        "acpImplementationReasoningEffort",
+        "acpNextHeartbeatAt",
         "acpPlanApprovalState",
+        "acpProjectMemoryPath",
+        "acpSessionMemoryPath",
         "bridgeStatus",
         "agentCwd",
         "briefPath",
@@ -134,34 +143,61 @@ pub fn resolve_board_file(
     board_dir: &str,
     project_path: Option<&str>,
 ) -> String {
+    let project_root = project_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| resolve_project_path(workspace_path, value));
+    let project_name = project_root
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+
     let mut candidates = Vec::new();
     let trimmed = board_dir.trim();
     if !trimmed.is_empty() {
         if trimmed.ends_with(".md") {
-            candidates.push(trimmed.to_string());
-            candidates.push(format!("projects/{trimmed}"));
+            candidates.push(PathBuf::from(trimmed));
+            candidates.push(PathBuf::from("projects").join(trimmed));
         } else {
-            candidates.push(format!("{trimmed}/CONDUCTOR.md"));
-            candidates.push(format!("projects/{trimmed}/CONDUCTOR.md"));
+            candidates.push(PathBuf::from(trimmed).join("CONDUCTOR.md"));
+            candidates.push(PathBuf::from("projects").join(trimmed).join("CONDUCTOR.md"));
         }
     }
-    if let Some(project_path_value) = project_path {
-        let path = Path::new(project_path_value);
-        if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
-            candidates.push(format!("{name}/CONDUCTOR.md"));
-            candidates.push(format!("projects/{name}/CONDUCTOR.md"));
-        }
+
+    if let Some(project_root) = project_root.as_ref() {
+        candidates.push(project_root.join("CONDUCTOR.md"));
     }
-    candidates.push("CONDUCTOR.md".to_string());
+
+    if let Some(name) = project_name.as_deref() {
+        candidates.push(PathBuf::from(name).join("CONDUCTOR.md"));
+        candidates.push(PathBuf::from("projects").join(name).join("CONDUCTOR.md"));
+    }
+
+    candidates.push(PathBuf::from("CONDUCTOR.md"));
+
     for candidate in &candidates {
-        if workspace_path.join(candidate).exists() {
-            return candidate.clone();
+        let resolved = if candidate.is_absolute() {
+            candidate.clone()
+        } else {
+            workspace_path.join(candidate)
+        };
+        if resolved.exists() {
+            return candidate.to_string_lossy().replace('\\', "/");
         }
     }
+
     candidates
         .into_iter()
         .next()
-        .unwrap_or_else(|| "CONDUCTOR.md".to_string())
+        .unwrap_or_else(|| {
+            project_root
+                .map(|path| path.join("CONDUCTOR.md"))
+                .unwrap_or_else(|| PathBuf::from("CONDUCTOR.md"))
+        })
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 pub fn trim_lines_tail(output: &str, lines: usize) -> String {
@@ -284,7 +320,7 @@ fn is_command_like_line(line: &str) -> bool {
     )
 }
 
-pub(super) fn is_runtime_status_line(line: &str) -> bool {
+pub(crate) fn is_runtime_status_line(line: &str) -> bool {
     let normalized = line.trim();
     if normalized.is_empty() {
         return false;
@@ -308,7 +344,7 @@ fn is_failed_session_status(status: &SessionStatus) -> bool {
     )
 }
 
-pub(super) fn runtime_tool_metadata(line: &str) -> Option<Value> {
+pub(crate) fn runtime_tool_metadata(line: &str) -> Option<Value> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
@@ -436,7 +472,7 @@ pub(super) fn runtime_tool_metadata(line: &str) -> Option<Value> {
     None
 }
 
-pub(super) fn merge_assistant_fragment(current: &mut String, fragment: &str) {
+pub(crate) fn merge_assistant_fragment(current: &mut String, fragment: &str) {
     let trimmed = fragment.trim();
     if trimmed.is_empty() {
         return;
@@ -864,6 +900,35 @@ fn build_session_status_entry(session: &SessionRecord, runtime_entries: &[Value]
     }))
 }
 
+fn is_acp_dispatcher_session(session: &SessionRecord) -> bool {
+    session.metadata.get("sessionKind").map(String::as_str) == Some("project_dispatcher")
+}
+
+fn normalized_entry_attachments(
+    session: &SessionRecord,
+    entry: &super::ConversationEntry,
+) -> Vec<String> {
+    if entry.kind != "user_message" || !is_acp_dispatcher_session(session) {
+        return entry.attachments.clone();
+    }
+
+    let hidden = [
+        "acpProjectMemoryPath",
+        "acpSessionMemoryPath",
+        "acpBoardPath",
+    ]
+    .iter()
+    .filter_map(|key| session.metadata.get(*key))
+    .collect::<Vec<_>>();
+
+    entry
+        .attachments
+        .iter()
+        .filter(|attachment| !hidden.contains(attachment))
+        .cloned()
+        .collect()
+}
+
 pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let mut feed = Vec::new();
     let is_streaming = is_streaming_status(&session.status);
@@ -941,7 +1006,7 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
             "label": label,
             "text": entry.text,
             "createdAt": entry.created_at,
-            "attachments": entry.attachments,
+            "attachments": normalized_entry_attachments(session, entry),
             "source": entry.source,
             "streaming": entry.kind == "assistant_message"
                 && entry.source == "runtime"
@@ -1259,6 +1324,13 @@ mod tests {
     use crate::state::ConversationEntry;
     use chrono::Utc;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn temp_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("conductor-board-path-{label}-{}", Uuid::new_v4()))
+    }
 
     #[test]
     fn sanitize_terminal_text_strips_ansi_and_control_sequences() {
@@ -1473,6 +1545,113 @@ mod tests {
     }
 
     #[test]
+    fn build_normalized_chat_feed_hides_acp_runtime_context_attachments_from_user_entries() {
+        let mut session = SessionRecord::new(
+            "session-acp-attachments".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            Some("/tmp/demo".to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session
+            .metadata
+            .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+        session.metadata.insert(
+            "acpProjectMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/project-memory.md".to_string(),
+        );
+        session.metadata.insert(
+            "acpSessionMemoryPath".to_string(),
+            ".conductor/rust-backend/acp/session-memory.md".to_string(),
+        );
+        session.metadata.insert(
+            "acpBoardPath".to_string(),
+            "projects/demo/CONDUCTOR.md".to_string(),
+        );
+        session.conversation.push(ConversationEntry {
+            id: "user-message".to_string(),
+            kind: "user_message".to_string(),
+            text: "add two tasks".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            source: "follow_up".to_string(),
+            attachments: vec![
+                ".conductor/rust-backend/acp/project-memory.md".to_string(),
+                ".conductor/rust-backend/acp/session-memory.md".to_string(),
+                "projects/demo/CONDUCTOR.md".to_string(),
+                "notes/spec.md".to_string(),
+            ],
+            metadata: HashMap::new(),
+        });
+
+        let feed = build_normalized_chat_feed(&session);
+        let attachments = feed
+            .iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some("user-message"))
+            .and_then(|entry| entry.get("attachments"))
+            .and_then(Value::as_array)
+            .expect("user entry should be present");
+
+        assert_eq!(
+            attachments,
+            &vec![Value::String("notes/spec.md".to_string())]
+        );
+    }
+
+    #[test]
+    fn resolve_board_file_prefers_external_project_repo_board() {
+        let workspace = temp_path("workspace");
+        let repo = temp_path("repo");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(workspace.join("CONDUCTOR.md"), "# workspace board\n").unwrap();
+        fs::write(repo.join("CONDUCTOR.md"), "# repo board\n").unwrap();
+
+        let resolved = resolve_board_file(
+            &workspace,
+            repo.file_name().and_then(|value| value.to_str()).unwrap(),
+            Some(repo.to_string_lossy().as_ref()),
+        );
+
+        assert_eq!(
+            resolved,
+            repo.join("CONDUCTOR.md")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn resolve_board_file_keeps_workspace_board_dir_precedence() {
+        let workspace = temp_path("workspace-shared");
+        let repo = temp_path("repo-shared");
+        let board_dir = "shared-board";
+        fs::create_dir_all(workspace.join(board_dir)).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            workspace.join(board_dir).join("CONDUCTOR.md"),
+            "# workspace shared board\n",
+        )
+        .unwrap();
+        fs::write(repo.join("CONDUCTOR.md"), "# repo board\n").unwrap();
+
+        let resolved =
+            resolve_board_file(&workspace, board_dir, Some(repo.to_string_lossy().as_ref()));
+
+        assert_eq!(resolved, format!("{board_dir}/CONDUCTOR.md"));
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn normalize_loaded_session_requeues_recoverable_spawning_sessions() {
         let mut session = SessionRecord::new(
             "session-1".to_string(),
@@ -1512,6 +1691,14 @@ mod tests {
         let oversized = "x".repeat(DASHBOARD_METADATA_MAX_VALUE_BYTES + 128);
         let mut metadata = HashMap::from([
             ("agent".to_string(), "codex".to_string()),
+            (
+                "acpImplementationAgent".to_string(),
+                "claude-code".to_string(),
+            ),
+            (
+                "acpProjectMemoryPath".to_string(),
+                ".conductor/rust-backend/acp/alpha/project-memory.md".to_string(),
+            ),
             ("sessionKind".to_string(), "board_planning".to_string()),
             ("summary".to_string(), oversized),
             (
@@ -1527,6 +1714,14 @@ mod tests {
         assert_eq!(
             filtered.get("sessionKind").map(String::as_str),
             Some("board_planning")
+        );
+        assert_eq!(
+            filtered.get("acpImplementationAgent").map(String::as_str),
+            Some("claude-code")
+        );
+        assert_eq!(
+            filtered.get("acpProjectMemoryPath").map(String::as_str),
+            Some(".conductor/rust-backend/acp/alpha/project-memory.md")
         );
         assert_eq!(filtered.get("taskId").map(String::as_str), Some("task-123"));
         assert!(!filtered.contains_key("spawnRequest"));

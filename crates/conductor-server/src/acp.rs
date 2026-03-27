@@ -9,12 +9,18 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration, Instant};
+use uuid::Uuid;
 
 use crate::acp_prompt::{
-    acp_approval_decision, acp_dispatcher_turn_prefix, rewrite_acp_dispatcher_command,
-    AcpApprovalDecision,
+    acp_approval_decision, rewrite_acp_dispatcher_command, AcpApprovalDecision,
 };
-use crate::state::{resolve_board_file, AppState, SessionRecord, SessionStatus, SpawnRequest};
+use crate::state::{
+    dispatcher_implementation_agent_options, dispatcher_implementation_model_options,
+    dispatcher_implementation_reasoning_options, dispatcher_preferred_implementation_agent,
+    dispatcher_preferred_implementation_model,
+    dispatcher_preferred_implementation_reasoning_effort, AppState, CreateDispatcherThreadOptions,
+    DispatcherSelectOption, DispatcherTurnRequest, SessionRecord, SessionStatus,
+};
 
 const ACP_SERVER_NAME: &str = "conductor-acp";
 const ACP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -22,7 +28,8 @@ const ACP_PROTOCOL_VERSION: u64 = 1;
 const ACP_SESSION_KIND: &str = "project_dispatcher";
 const ACP_MODE_DISPATCHER: &str = "dispatcher";
 const ACP_CONFIG_IMPLEMENTATION_AGENT: &str = "implementation_agent";
-const ACP_CONFIG_REASONING_EFFORT: &str = "reasoning_effort";
+const ACP_CONFIG_MODEL: &str = "model";
+const ACP_CONFIG_THOUGHT_LEVEL: &str = "thought_level";
 const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
 const ACP_APPROVAL_REQUIRED: &str = "approval_required";
 const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
@@ -178,7 +185,7 @@ impl AcpServer {
         let filter_cwd = params.cwd.as_deref().map(PathBuf::from);
         let mut sessions = self
             .state
-            .all_sessions()
+            .all_dispatcher_threads()
             .await
             .into_iter()
             .filter(is_acp_dispatcher_session)
@@ -207,85 +214,61 @@ impl AcpServer {
         }
         ensure_supported_mcp_servers(&params.mcp_servers)?;
         let session_meta = parse_conductor_meta(params.meta.as_ref());
-        let (project_id, project) = self.resolve_project_from_cwd(&cwd, session_meta.project_id.as_deref()).await?;
-        let session = self
-            .state
-            .enqueue_session_spawn_deferred(SpawnRequest {
-                project_id: project_id.clone(),
-                bridge_id: None,
-                prompt: build_project_dispatcher_prompt_for_acp(
-                    &self.state,
-                    &project_id,
-                    &project,
-                    "",
-                ),
-                issue_id: None,
-                agent: session_meta.dispatcher_agent.clone().or_else(|| project.agent.clone()),
-                use_worktree: Some(false),
-                permission_mode: Some("plan".to_string()),
-                model: session_meta.model.clone(),
-                reasoning_effort: session_meta.reasoning_effort.clone(),
-                branch: None,
-                base_branch: None,
-                task_id: None,
-                task_ref: None,
-                attempt_id: None,
-                parent_task_id: None,
-                retry_of_session_id: None,
-                profile: None,
-                session_kind: Some(ACP_SESSION_KIND.to_string()),
-                brief_path: None,
-                attachments: Vec::new(),
-                source: "acp".to_string(),
-            })
+        let dispatcher_model = session_meta.model.clone();
+        let dispatcher_reasoning_effort = session_meta.reasoning_effort.clone();
+        let (project_id, _project) = self
+            .resolve_project_from_cwd(&cwd, session_meta.project_id.as_deref())
             .await?;
-        let mut updated = session.clone();
-        updated.status = SessionStatus::Idle;
-        updated.activity = Some("idle".to_string());
+        let mut updated = self
+            .state
+            .create_project_dispatcher_thread(
+                &project_id,
+                CreateDispatcherThreadOptions {
+                    bridge_id: None,
+                    dispatcher_agent: session_meta.dispatcher_agent,
+                    implementation_agent: session_meta.implementation_agent,
+                    dispatcher_model,
+                    dispatcher_reasoning_effort,
+                    implementation_model: session_meta.model,
+                    implementation_reasoning_effort: session_meta.reasoning_effort,
+                    force_new: true,
+                },
+            )
+            .await?;
         updated.workspace_path = Some(cwd.to_string_lossy().to_string());
         updated
             .metadata
             .insert("agentCwd".to_string(), cwd.to_string_lossy().to_string());
-        updated.summary = Some("ACP session created".to_string());
+        updated.summary = Some("ACP dispatcher created".to_string());
         updated
             .metadata
-            .insert("summary".to_string(), "ACP session created".to_string());
-        updated
-            .metadata
-            .insert("launchState".to_string(), "deferred".to_string());
-        updated.metadata.insert(
-            ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
-            ACP_APPROVAL_REQUIRED.to_string(),
-        );
+            .insert("summary".to_string(), "ACP dispatcher created".to_string());
         updated.conversation.clear();
-        if let Some(implementation_agent) = session_meta.implementation_agent {
-            updated
-                .metadata
-                .insert("acpImplementationAgent".to_string(), implementation_agent);
-        }
-        updated
-            .metadata
-            .insert("acpMode".to_string(), ACP_MODE_DISPATCHER.to_string());
-        self.state.replace_session(updated.clone()).await?;
+        self.state
+            .replace_dispatcher_thread(updated.clone())
+            .await?;
         if let Err(err) = self.state.sync_acp_dispatcher_state(&updated).await {
             tracing::warn!(session_id = %updated.id, error = %err, "failed to sync ACP dispatcher after session/new");
         }
         Ok(json!({
             "sessionId": updated.id,
-            "approvalState": approval_state(&updated),
             "configOptions": session_config_options(&updated),
             "modes": dispatcher_mode_state(),
+            "_meta": dispatcher_response_meta(&updated),
         }))
     }
 
     async fn load_session(&self, params: LoadSessionRequest) -> Result<(SessionRecord, Value)> {
         let session = self
             .state
-            .get_session(&params.session_id)
+            .get_dispatcher_thread(&params.session_id)
             .await
             .with_context(|| format!("Unknown ACP session {}", params.session_id))?;
         if !is_acp_dispatcher_session(&session) {
-            bail!("Session {} is not an ACP dispatcher session", params.session_id);
+            bail!(
+                "Session {} is not an ACP dispatcher session",
+                params.session_id
+            );
         }
         let cwd = PathBuf::from(&params.cwd);
         if !cwd.is_absolute() {
@@ -295,58 +278,57 @@ impl AcpServer {
         Ok((
             session.clone(),
             json!({
-                "approvalState": approval_state(&session),
                 "configOptions": session_config_options(&session),
                 "modes": dispatcher_mode_state(),
+                "_meta": dispatcher_response_meta(&session),
             }),
         ))
     }
 
     async fn set_config_option(&self, params: SetSessionConfigOptionRequest) -> Result<Value> {
-        let mut session = self
+        let session = self
             .state
-            .get_session(&params.session_id)
+            .get_dispatcher_thread(&params.session_id)
             .await
             .with_context(|| format!("Unknown ACP session {}", params.session_id))?;
         if !is_acp_dispatcher_session(&session) {
-            bail!("Session {} is not an ACP dispatcher session", params.session_id);
+            bail!(
+                "Session {} is not an ACP dispatcher session",
+                params.session_id
+            );
         }
 
-        match params.config_id.as_str() {
+        let session = match params.config_id.as_str() {
             ACP_CONFIG_IMPLEMENTATION_AGENT => {
-                if !matches!(
-                    params.value.as_str(),
-                    "codex" | "claude-code" | "gemini"
-                ) {
-                    bail!(
-                        "Unsupported implementation agent `{}`. Expected codex, claude-code, or gemini",
-                        params.value
-                    );
-                }
-                session
-                    .metadata
-                    .insert("acpImplementationAgent".to_string(), params.value);
+                self.state
+                    .update_dispatcher_preferences(
+                        &params.session_id,
+                        Some(params.value),
+                        None,
+                        None,
+                    )
+                    .await?
             }
-            ACP_CONFIG_REASONING_EFFORT => {
-                if !matches!(params.value.as_str(), "low" | "medium" | "high") {
-                    bail!(
-                        "Unsupported reasoning effort `{}`. Expected low, medium, or high",
-                        params.value
-                    );
-                }
-                session.reasoning_effort = Some(params.value.clone());
-                session
-                    .metadata
-                    .insert("reasoningEffort".to_string(), params.value);
+            ACP_CONFIG_MODEL => {
+                self.state
+                    .update_dispatcher_runtime_preferences(
+                        &params.session_id,
+                        Some(params.value),
+                        None,
+                    )
+                    .await?
+            }
+            ACP_CONFIG_THOUGHT_LEVEL => {
+                self.state
+                    .update_dispatcher_runtime_preferences(
+                        &params.session_id,
+                        None,
+                        Some(params.value),
+                    )
+                    .await?
             }
             other => bail!("Unsupported ACP config option `{other}`"),
-        }
-
-        session.last_activity_at = chrono::Utc::now().to_rfc3339();
-        self.state.replace_session(session.clone()).await?;
-        if let Err(err) = self.state.sync_acp_dispatcher_state(&session).await {
-            tracing::warn!(session_id = %session.id, error = %err, "failed to sync ACP dispatcher after config update");
-        }
+        };
         Ok(json!({
             "configOptions": session_config_options(&session)
         }))
@@ -362,31 +344,28 @@ impl AcpServer {
         }
         let mut session = self
             .state
-            .get_session(&params.session_id)
+            .get_dispatcher_thread(&params.session_id)
             .await
             .with_context(|| format!("Unknown ACP session {}", params.session_id))?;
         if !is_acp_dispatcher_session(&session) {
-            bail!("Session {} is not an ACP dispatcher session", params.session_id);
+            bail!(
+                "Session {} is not an ACP dispatcher session",
+                params.session_id
+            );
         }
         session
             .metadata
             .insert("acpMode".to_string(), ACP_MODE_DISPATCHER.to_string());
         session.last_activity_at = chrono::Utc::now().to_rfc3339();
-        self.state.replace_session(session).await?;
+        self.state.replace_dispatcher_thread(session).await?;
         Ok(())
     }
 
     async fn cancel_session(&self, session_id: &str) -> Result<()> {
-        if let Some(flag) = self
-            .in_flight_prompts
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-        {
+        if let Some(flag) = self.in_flight_prompts.lock().await.get(session_id).cloned() {
             flag.store(true, Ordering::SeqCst);
         }
-        if let Err(err) = self.state.interrupt_session(session_id).await {
+        if let Err(err) = self.state.interrupt_dispatcher(session_id).await {
             tracing::debug!(session_id, error = %err, "ACP cancel could not interrupt live session");
         }
         Ok(())
@@ -402,17 +381,23 @@ impl AcpServer {
     {
         let params = deserialize_params::<PromptRequest>(&request)?;
         let session = self
-            .wait_for_session_record(&params.session_id, ACP_SESSION_READY_TIMEOUT)
+            .wait_for_dispatcher_thread(&params.session_id, ACP_SESSION_READY_TIMEOUT)
             .await
             .with_context(|| format!("ACP session {} is not ready", params.session_id))?;
         if !is_acp_dispatcher_session(&session) {
-            bail!("Session {} is not an ACP dispatcher session", params.session_id);
+            bail!(
+                "Session {} is not an ACP dispatcher session",
+                params.session_id
+            );
         }
 
         let cancel_flag = {
             let mut in_flight = self.in_flight_prompts.lock().await;
             if in_flight.contains_key(&params.session_id) {
-                bail!("ACP session {} already has a prompt in flight", params.session_id);
+                bail!(
+                    "ACP session {} already has a prompt in flight",
+                    params.session_id
+                );
             }
             let flag = Arc::new(AtomicBool::new(false));
             in_flight.insert(params.session_id.clone(), flag.clone());
@@ -443,8 +428,15 @@ impl AcpServer {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let prompt_meta = parse_conductor_meta(params.meta.as_ref());
-        let (raw_prompt_message, attachments) = prompt_from_blocks(&params.prompt)?;
-        let prompt_message = rewrite_acp_dispatcher_command(&raw_prompt_message);
+        let prompt = parse_prompt_blocks(&params.prompt)?;
+        let user_message_id = params
+            .message_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let raw_prompt_message = prompt.user_message.clone();
         let approval_decision = acp_approval_decision(&raw_prompt_message);
         let mut approval_state = approval_state(&session).to_string();
         match approval_decision {
@@ -461,62 +453,47 @@ impl AcpServer {
             AcpApprovalDecision::None => {}
         }
         let turn_is_approved = approval_state == ACP_APPROVAL_GRANTED;
-        let preferred_implementation_agent = session
-            .metadata
-            .get("acpImplementationAgent")
-            .cloned()
-            .unwrap_or_else(|| "codex".to_string());
-        let user_message = if prompt_message.trim().is_empty() {
-            "Review the current dispatcher state, summarize the plan status, and respond according to the ACP approval gate.".to_string()
-        } else {
-            prompt_message
-        };
-        let effective_message = format!(
-            "{}\n\nACP dispatcher preference: prefer `{preferred_implementation_agent}` for newly created implementation tasks unless the user explicitly wants another agent.\n\n{}",
-            acp_dispatcher_turn_prefix(turn_is_approved),
-            user_message
-        );
+        let dispatch_message = dispatcher_message_from_prompt_content(&prompt);
         let effective_model = prompt_meta.model.or_else(|| session.model.clone());
         let effective_reasoning = prompt_meta
             .reasoning_effort
             .or_else(|| session.reasoning_effort.clone());
-        let mut cursor = PromptStreamCursor::from_session(&session);
-        stream_static_session_updates(writer, &params.session_id, &approval_state, &mut cursor)
-            .await?;
+        let turn_request = DispatcherTurnRequest {
+            message: raw_prompt_message.clone(),
+            runtime_message: Some(dispatch_message),
+            source: "acp".to_string(),
+            entry_id: Some(user_message_id.clone()),
+            recorded_attachments: Vec::new(),
+            runtime_attachments: prompt.runtime_attachments.clone(),
+            runtime_context: prompt.runtime_context.clone(),
+            model: effective_model.clone(),
+            reasoning_effort: effective_reasoning.clone(),
+            metadata: HashMap::new(),
+        };
+        let initial_session = self
+            .state
+            .get_dispatcher_thread(&params.session_id)
+            .await
+            .unwrap_or_else(|| session.clone());
+        let mut cursor = PromptStreamCursor::from_session(&initial_session);
+        stream_static_session_updates(writer, &initial_session, &mut cursor).await?;
         let initial_plan_stage = if turn_is_approved {
             "approved_execution"
         } else {
             "planning"
         };
-        stream_plan_update(
-            writer,
-            &params.session_id,
-            plan_entries(initial_plan_stage),
-        )
-        .await?;
+        stream_plan_update(writer, &params.session_id, plan_entries(initial_plan_stage)).await?;
         let launched_session = self
-            .ensure_prompt_runtime(
-                &session,
-                &effective_message,
-                attachments.clone(),
-                effective_model.clone(),
-                effective_reasoning.clone(),
-            )
+            .ensure_prompt_runtime(&params.session_id, turn_request.clone())
             .await?;
         if let Some(launched_session) = launched_session {
             cursor = PromptStreamCursor::from_session(&launched_session);
             cursor.commands_sent = true;
+            cursor.config_sent = true;
             cursor.mode_sent = true;
         } else {
             self.state
-                .send_to_session(
-                    &params.session_id,
-                    effective_message,
-                    attachments,
-                    effective_model,
-                    effective_reasoning,
-                    "acp",
-                )
+                .send_to_dispatcher_thread(&params.session_id, turn_request)
                 .await?;
         }
 
@@ -525,9 +502,14 @@ impl AcpServer {
         loop {
             let current = self
                 .state
-                .get_session(&params.session_id)
+                .get_dispatcher_thread(&params.session_id)
                 .await
-                .with_context(|| format!("ACP session {} disappeared during prompt", params.session_id))?;
+                .with_context(|| {
+                    format!(
+                        "ACP session {} disappeared during prompt",
+                        params.session_id
+                    )
+                })?;
             stream_prompt_delta(writer, &current, &mut cursor).await?;
 
             if cancel_flag.load(Ordering::SeqCst) {
@@ -565,19 +547,18 @@ impl AcpServer {
         if turn_is_approved {
             self.update_approval_state(&params.session_id, ACP_APPROVAL_REQUIRED)
                 .await?;
-            stream_static_session_updates(
-                writer,
-                &params.session_id,
-                ACP_APPROVAL_REQUIRED,
-                &mut cursor,
-            )
-            .await?;
+            if let Some(updated_session) =
+                self.state.get_dispatcher_thread(&params.session_id).await
+            {
+                stream_static_session_updates(writer, &updated_session, &mut cursor).await?;
+            }
         }
 
         make_success_response(
             request,
             json!({
-                "stopReason": stop_reason
+                "stopReason": stop_reason,
+                "userMessageId": user_message_id,
             }),
         )
     }
@@ -588,7 +569,10 @@ impl AcpServer {
         requested_project_id: Option<&str>,
     ) -> Result<(String, ProjectConfig)> {
         let config = self.state.config.read().await.clone();
-        if let Some(project_id) = requested_project_id.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(project_id) = requested_project_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             let project = config
                 .projects
                 .get(project_id)
@@ -638,20 +622,22 @@ impl AcpServer {
         ))
     }
 
-    async fn wait_for_session_record(
+    async fn wait_for_dispatcher_thread(
         &self,
         session_id: &str,
         timeout: Duration,
     ) -> Option<SessionRecord> {
         let started_at = Instant::now();
         loop {
-            if let Some(session) = self.state.get_session(session_id).await {
-                if session.status != SessionStatus::Queued && session.status != SessionStatus::Spawning {
+            if let Some(session) = self.state.get_dispatcher_thread(session_id).await {
+                if session.status != SessionStatus::Queued
+                    && session.status != SessionStatus::Spawning
+                {
                     return Some(session);
                 }
             }
             if started_at.elapsed() >= timeout {
-                return self.state.get_session(session_id).await;
+                return self.state.get_dispatcher_thread(session_id).await;
             }
             sleep(ACP_PROMPT_POLL_INTERVAL).await;
         }
@@ -659,50 +645,22 @@ impl AcpServer {
 
     async fn ensure_prompt_runtime(
         &self,
-        session: &SessionRecord,
-        effective_message: &str,
-        attachments: Vec<String>,
-        model: Option<String>,
-        reasoning_effort: Option<String>,
+        session_id: &str,
+        request: DispatcherTurnRequest,
     ) -> Result<Option<SessionRecord>> {
-        if self.state.ensure_session_live(&session.id).await? {
+        if self.state.dispatcher_runtime_attached(session_id).await {
             return Ok(None);
         }
-
-        let spawn_request = session
-            .metadata
-            .get("spawnRequest")
-            .cloned()
-            .with_context(|| format!("ACP session {} is missing spawn request metadata", session.id))?;
-        let mut request: SpawnRequest = serde_json::from_str(&spawn_request)
-            .with_context(|| format!("ACP session {} has invalid spawn request metadata", session.id))?;
-        request.prompt = merge_dispatcher_prompt_with_user(&request.prompt, effective_message);
-        request.attachments = attachments;
-        request.model = model;
-        request.reasoning_effort = reasoning_effort;
-        let mut spawned = self.state
-            .spawn_session_now(request, Some(session.id.clone()))
+        self.state
+            .send_to_dispatcher_thread(session_id, request)
             .await?;
-        if let Some(entry) = spawned.conversation.first_mut() {
-            if entry.kind == "user_message" && entry.source == "acp" {
-                entry.metadata.insert(
-                    "acpInternalBootstrap".to_string(),
-                    Value::Bool(true),
-                );
-            }
-        }
-        self.state.replace_session(spawned.clone()).await?;
-        Ok(Some(spawned))
+        Ok(self.state.get_dispatcher_thread(session_id).await)
     }
 
-    async fn update_approval_state(
-        &self,
-        session_id: &str,
-        approval_state: &str,
-    ) -> Result<()> {
+    async fn update_approval_state(&self, session_id: &str, approval_state: &str) -> Result<()> {
         let mut session = self
             .state
-            .get_session(session_id)
+            .get_dispatcher_thread(session_id)
             .await
             .with_context(|| format!("Unknown ACP session {session_id}"))?;
         session.metadata.insert(
@@ -710,7 +668,7 @@ impl AcpServer {
             approval_state.to_string(),
         );
         session.last_activity_at = chrono::Utc::now().to_rfc3339();
-        self.state.replace_session(session).await
+        self.state.replace_dispatcher_thread(session).await
     }
 }
 
@@ -722,9 +680,7 @@ fn ensure_supported_mcp_servers(value: &Value) -> Result<()> {
         _ => true,
     };
     if unsupported {
-        bail!(
-            "ACP external MCP server requests are not supported by this Conductor build yet"
-        );
+        bail!("ACP external MCP server requests are not supported by this Conductor build yet");
     }
     Ok(())
 }
@@ -769,90 +725,21 @@ fn session_title(session: &SessionRecord) -> String {
         .unwrap_or_else(|| format!("ACP / {}", session.project_id))
 }
 
-fn build_project_dispatcher_prompt_for_acp(
-    state: &Arc<AppState>,
-    project_id: &str,
-    project: &ProjectConfig,
-    user_prompt: &str,
-) -> String {
-    let repo_path = state.resolve_project_path(project);
-    let board_dir = project
-        .board_dir
-        .clone()
-        .unwrap_or_else(|| project_id.to_string());
-    let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
-    let board_path = state.workspace_path.join(board_relative);
-    let repo_display = display_path(&state.workspace_path, &repo_path);
-    let board_display = display_path(&state.workspace_path, &board_path);
-
-    let mut prompt = format!(
-        concat!(
-            "You are the Conductor ACP dispatcher for project `{}`.\n\n",
-            "This is a long-lived orchestration chat, not a coding run. You are the master puppeteer for the project.\n\n",
-            "Core responsibilities:\n",
-            "- Maintain and refine the board at `{}`\n",
-            "- Turn rough requests into a few high-signal tasks\n",
-            "- Prefer meaningful parent tasks plus internal checklists over noisy child-task spam\n",
-            "- Maintain ACP long-term memory for stable directives, architecture constraints, and repeated preferences\n",
-            "- Maintain ACP short-term session memory for the latest decisions, blockers, live context, and next actions\n",
-            "- Keep track of heartbeat-style follow-ups so deferred work surfaces again instead of getting lost in chat\n",
-            "- Create or update board tasks so dedicated coding sessions can be launched separately\n",
-            "- Use native Conductor MCP tools when available to inspect the board, create tasks, update task state, and inspect task attempt lifecycles\n",
-            "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n",
-            "- Prefer handing implementation to dedicated `codex`, `claude-code`, or `gemini` sessions\n\n",
-            "Project context:\n",
-            "- Repo path: `{}`\n",
-            "- Board path: `{}`\n",
-            "- Default branch: `{}`\n\n",
-            "Operating rules:\n",
-            "- Operate against the main project workspace and board context; do not create isolated implementation branches or worktrees from this ACP session\n",
-            "- Default to planning mode: inspect the repo and board, then produce the finalized plan before making board changes\n",
-            "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
-            "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
-            "- Keep the conversation stateful and use the board as the shared execution surface\n",
-            "- Every task you create should carry the minimum viable implementation packet: problem statement, exact files or surfaces to inspect, relevant skills or constraints, and the recommended agent (`codex`, `claude-code`, or `gemini`)\n",
-            "- Before any board mutation, first present: the proposed plan, the exact board/task mutations, the intended tool calls, and the recommended implementation agent per task\n",
-            "- Do not create or update board tasks until the user explicitly approves the proposal\n",
-            "- If the user asks for revisions, revise the proposal and ask for approval again\n",
-            "- After explicit approval, execute only the approved board/task mutations and then report the exact task refs or titles you created or updated\n",
-            "- When proposing tasks, use a compact task packet for each item: title, target board role, recommended agent, objective, exact files or surfaces to inspect, required skills or constraints, dependencies, and acceptance shape\n",
-            "- When creating tasks after approval, keep the board task title concise and put the implementation packet into the task description or notes so a dedicated coding session can execute without reopening planning\n",
-            "- If you defer work, create an explicit follow-up task instead of burying it in chat, such as a Phase 2 heartbeat or memory integration item\n",
-            "- If you create tasks, assign the best-fit implementation agent (`codex`, `claude-code`, or `gemini`) and reference the exact task refs or titles you created so the user can launch coding sessions from them\n"
-        ),
-        project_id,
-        board_display,
-        repo_display,
-        board_display,
-        project.default_branch,
-    );
-
-    let trimmed = user_prompt.trim();
-    if !trimmed.is_empty() {
-        prompt.push_str("\n## User request\n");
-        prompt.push_str(trimmed);
-        prompt.push('\n');
+fn prompt_turn_dispatch_message(raw_prompt_message: &str) -> String {
+    if raw_prompt_message.trim().is_empty() {
+        rewrite_acp_dispatcher_command(raw_prompt_message)
+    } else {
+        raw_prompt_message.to_string()
     }
-
-    prompt
 }
 
-fn merge_dispatcher_prompt_with_user(dispatcher_prompt: &str, user_prompt: &str) -> String {
-    let trimmed = user_prompt.trim();
-    if trimmed.is_empty() {
-        return dispatcher_prompt.to_string();
+fn dispatcher_message_from_prompt_content(prompt: &ParsedPromptBlocks) -> String {
+    if prompt.user_message.trim().is_empty() && prompt.has_non_text_content {
+        "Review the provided ACP context and respond according to the ACP approval gate."
+            .to_string()
+    } else {
+        prompt_turn_dispatch_message(&prompt.user_message)
     }
-    if dispatcher_prompt.contains("\n## User request\n") {
-        return dispatcher_prompt.to_string();
-    }
-    format!("{dispatcher_prompt}\n\n## User request\n{trimmed}\n")
-}
-
-fn display_path(workspace_root: &Path, path: &Path) -> String {
-    path.strip_prefix(workspace_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 fn dispatcher_mode_state() -> Value {
@@ -868,67 +755,113 @@ fn dispatcher_mode_state() -> Value {
     })
 }
 
-fn session_config_options(session: &SessionRecord) -> Value {
-    let implementation_agent = session
-        .metadata
-        .get("acpImplementationAgent")
-        .cloned()
-        .unwrap_or_else(|| "codex".to_string());
-    let reasoning_effort = session
-        .reasoning_effort
-        .clone()
-        .unwrap_or_else(|| "medium".to_string());
-
+fn select_option_value(option: DispatcherSelectOption) -> Value {
     json!({
-        ACP_CONFIG_IMPLEMENTATION_AGENT: {
+        "value": option.value,
+        "name": option.name,
+        "description": option.description,
+    })
+}
+
+fn config_options_with_current(
+    options: &'static [DispatcherSelectOption],
+    current_value: &str,
+    fallback_name: &str,
+    fallback_description: &str,
+) -> Vec<Value> {
+    let normalized_current = current_value.trim();
+    let mut values = options
+        .iter()
+        .copied()
+        .map(select_option_value)
+        .collect::<Vec<_>>();
+    if !normalized_current.is_empty()
+        && !options
+            .iter()
+            .any(|option| option.value == normalized_current)
+    {
+        values.insert(
+            0,
+            json!({
+                "value": normalized_current,
+                "name": fallback_name,
+                "description": fallback_description,
+            }),
+        );
+    }
+    values
+}
+
+fn dispatcher_response_meta(session: &SessionRecord) -> Value {
+    json!({
+        "approvalState": approval_state(session),
+        "requiresApproval": approval_state(session) != ACP_APPROVAL_GRANTED,
+        "sessionKind": ACP_SESSION_KIND,
+        "implementationAgent": dispatcher_preferred_implementation_agent(session),
+        "implementationModel": dispatcher_preferred_implementation_model(session),
+        "implementationReasoningEffort": dispatcher_preferred_implementation_reasoning_effort(session),
+    })
+}
+
+fn session_config_options(session: &SessionRecord) -> Value {
+    let dispatcher_agent = session.agent.trim().to_ascii_lowercase();
+    let dispatcher_model = session.model.clone().unwrap_or_default();
+    let dispatcher_reasoning = session.reasoning_effort.clone().unwrap_or_default();
+    let implementation_agent = dispatcher_preferred_implementation_agent(session);
+    let model_options = dispatcher_implementation_model_options(&dispatcher_agent);
+    let reasoning_options = dispatcher_implementation_reasoning_options(&dispatcher_agent);
+
+    let mut config_options = Vec::new();
+
+    if !dispatcher_model.trim().is_empty() || !model_options.is_empty() {
+        config_options.push(json!({
+            "id": ACP_CONFIG_MODEL,
             "type": "select",
-            "category": "other",
-            "name": "Implementation Agent",
-            "description": "Preferred coding agent for board tasks created by the ACP dispatcher.",
-            "currentValue": implementation_agent,
-            "options": [
-                {
-                    "value": "codex",
-                    "name": "Codex",
-                    "description": "Route implementation work to Codex sessions."
-                },
-                {
-                    "value": "claude-code",
-                    "name": "Claude Code",
-                    "description": "Route implementation work to Claude Code sessions."
-                },
-                {
-                    "value": "gemini",
-                    "name": "Gemini",
-                    "description": "Route implementation work to Gemini sessions."
-                }
-            ]
-        },
-        ACP_CONFIG_REASONING_EFFORT: {
+            "category": "model",
+            "name": "Model",
+            "description": "Model for the dispatcher session.",
+            "currentValue": dispatcher_model,
+            "options": config_options_with_current(
+                model_options,
+                &dispatcher_model,
+                dispatcher_model.trim(),
+                "Current stored dispatcher model.",
+            ),
+        }));
+    }
+
+    if !dispatcher_reasoning.trim().is_empty() || !reasoning_options.is_empty() {
+        config_options.push(json!({
+            "id": ACP_CONFIG_THOUGHT_LEVEL,
             "type": "select",
             "category": "thought_level",
-            "name": "Reasoning Effort",
-            "description": "Reasoning level for future ACP dispatcher turns.",
-            "currentValue": reasoning_effort,
-            "options": [
-                {
-                    "value": "low",
-                    "name": "Low",
-                    "description": "Faster, lighter reasoning."
-                },
-                {
-                    "value": "medium",
-                    "name": "Medium",
-                    "description": "Balanced reasoning for normal dispatcher work."
-                },
-                {
-                    "value": "high",
-                    "name": "High",
-                    "description": "Deeper reasoning for complex planning and task shaping."
-                }
-            ]
-        }
-    })
+            "name": "Thinking",
+            "description": "Reasoning level for the dispatcher session.",
+            "currentValue": dispatcher_reasoning,
+            "options": config_options_with_current(
+                reasoning_options,
+                &dispatcher_reasoning,
+                dispatcher_reasoning.trim(),
+                "Current stored dispatcher reasoning level.",
+            ),
+        }));
+    }
+
+    config_options.push(json!({
+        "id": ACP_CONFIG_IMPLEMENTATION_AGENT,
+        "type": "select",
+        "category": "other",
+        "name": "Coding Agent",
+        "description": "Preferred coding agent for board tasks created by the ACP dispatcher.",
+        "currentValue": implementation_agent,
+        "options": dispatcher_implementation_agent_options()
+            .iter()
+            .copied()
+            .map(select_option_value)
+            .collect::<Vec<_>>(),
+    }));
+
+    json!(config_options)
 }
 
 fn session_info_value(state: &Arc<AppState>, session: &SessionRecord) -> Value {
@@ -937,7 +870,7 @@ fn session_info_value(state: &Arc<AppState>, session: &SessionRecord) -> Value {
         "cwd": session_cwd(state, session).unwrap_or_default(),
         "title": session_title(session),
         "updatedAt": session.last_activity_at.clone(),
-        "approvalState": approval_state(session),
+        "_meta": dispatcher_response_meta(session),
     })
 }
 
@@ -970,9 +903,7 @@ fn prompt_stop_reason(session: &SessionRecord) -> String {
 }
 
 fn parse_conductor_meta(meta: Option<&Value>) -> ConductorMeta {
-    let conductor = meta
-        .and_then(|value| value.get("conductor"))
-        .or(meta);
+    let conductor = meta.and_then(|value| value.get("conductor")).or(meta);
     ConductorMeta {
         project_id: meta_string(conductor, "projectId"),
         dispatcher_agent: meta_string(conductor, "agent"),
@@ -987,12 +918,22 @@ fn meta_string(meta: Option<&Value>, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+        .map(str::to_string)
 }
 
-fn prompt_from_blocks(blocks: &[Value]) -> Result<(String, Vec<String>)> {
-    let mut parts = Vec::new();
-    let mut attachments = Vec::new();
+#[derive(Debug, Clone, Default)]
+struct ParsedPromptBlocks {
+    user_message: String,
+    runtime_attachments: Vec<String>,
+    runtime_context: Option<String>,
+    has_non_text_content: bool,
+}
+
+fn parse_prompt_blocks(blocks: &[Value]) -> Result<ParsedPromptBlocks> {
+    let mut text_parts = Vec::new();
+    let mut runtime_attachments = Vec::new();
+    let mut runtime_context_sections = Vec::new();
+    let mut has_non_text_content = false;
 
     for block in blocks {
         let Some(block_type) = block.get("type").and_then(Value::as_str) else {
@@ -1006,7 +947,7 @@ fn prompt_from_blocks(blocks: &[Value]) -> Result<(String, Vec<String>)> {
                     .map(str::trim)
                     .filter(|text| !text.is_empty())
                 {
-                    parts.push(text.to_string());
+                    text_parts.push(text.to_string());
                 }
             }
             "resource_link" => {
@@ -1016,34 +957,83 @@ fn prompt_from_blocks(blocks: &[Value]) -> Result<(String, Vec<String>)> {
                     .map(str::trim)
                     .filter(|uri| !uri.is_empty())
                 {
-                    attachments.push(uri.to_string());
+                    push_unique_string(&mut runtime_attachments, uri);
+                    has_non_text_content = true;
                 }
             }
             "resource" => {
                 if let Some(resource) = block.get("resource") {
-                    if let Some(uri) = resource
-                        .get("uri")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|uri| !uri.is_empty())
-                    {
-                        attachments.push(uri.to_string());
+                    if let Some(section) = render_embedded_resource_for_runtime(resource) {
+                        runtime_context_sections.push(section);
                     }
-                    if let Some(text) = resource
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|text| !text.is_empty())
-                    {
-                        parts.push(text.to_string());
-                    }
+                    has_non_text_content = true;
                 }
             }
             _ => {}
         }
     }
 
-    Ok((parts.join("\n\n"), attachments))
+    Ok(ParsedPromptBlocks {
+        user_message: text_parts.join("\n\n"),
+        runtime_attachments,
+        runtime_context: render_prompt_runtime_context(&runtime_context_sections),
+        has_non_text_content,
+    })
+}
+
+fn push_unique_string(items: &mut Vec<String>, value: &str) {
+    if !items.iter().any(|item| item == value) {
+        items.push(value.to_string());
+    }
+}
+
+fn render_embedded_resource_for_runtime(resource: &Value) -> Option<String> {
+    let uri = resource
+        .get("uri")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("embedded-resource");
+    let mime_type = resource
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(text) = resource
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let mut header = format!("<resource uri=\"{uri}\"");
+        if let Some(mime_type) = mime_type {
+            header.push_str(&format!(" mimeType=\"{mime_type}\""));
+        }
+        header.push('>');
+        return Some(format!("{header}\n{text}\n</resource>"));
+    }
+
+    resource
+        .get("blob")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|blob| {
+            let mut header = format!("<resource uri=\"{uri}\"");
+            if let Some(mime_type) = mime_type {
+                header.push_str(&format!(" mimeType=\"{mime_type}\""));
+            }
+            header.push('>');
+            format!(
+                "{header}\nBinary embedded content omitted from transcript adaptation ({} base64 chars).\n</resource>",
+                blob.len()
+            )
+        })
+}
+
+fn render_prompt_runtime_context(sections: &[String]) -> Option<String> {
+    (!sections.is_empty()).then(|| format!("ACP embedded context:\n{}", sections.join("\n\n")))
 }
 
 async fn stream_full_session_history<W>(
@@ -1054,8 +1044,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let mut cursor = PromptStreamCursor::default();
-    stream_static_session_updates(writer, &session.id, approval_state(session), &mut cursor)
-        .await?;
+    stream_static_session_updates(writer, session, &mut cursor).await?;
     stream_prompt_delta(writer, session, &mut cursor).await
 }
 
@@ -1067,7 +1056,7 @@ async fn stream_prompt_delta<W>(
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    stream_static_session_updates(writer, &session.id, approval_state(session), cursor).await?;
+    stream_static_session_updates(writer, session, cursor).await?;
     let current_title = session_title(session);
     if cursor.last_title.as_ref() != Some(&current_title)
         || cursor.last_updated_at.as_ref() != Some(&session.last_activity_at)
@@ -1079,10 +1068,7 @@ where
                 "sessionUpdate": "session_info_update",
                 "title": current_title,
                 "updatedAt": session.last_activity_at.clone(),
-                "_meta": {
-                    "approvalState": approval_state(session),
-                    "requiresApproval": approval_state(session) != ACP_APPROVAL_GRANTED,
-                }
+                "_meta": dispatcher_response_meta(session)
             }),
         )
         .await?;
@@ -1167,12 +1153,7 @@ fn updates_for_entry(entry: &conductor_core::types::ConversationEntry, delta: &s
             "_meta": meta,
         })],
         "status_message" => {
-            if entry
-                .metadata
-                .get("toolKind")
-                .and_then(Value::as_str)
-                == Some("thinking")
-            {
+            if entry.metadata.get("toolKind").and_then(Value::as_str) == Some("thinking") {
                 vec![json!({
                     "sessionUpdate": "agent_thought_chunk",
                     "content": text_content,
@@ -1195,7 +1176,11 @@ fn updates_for_entry(entry: &conductor_core::types::ConversationEntry, delta: &s
     }
 }
 
-fn tool_call_event(entry: &conductor_core::types::ConversationEntry, delta: &str, event_type: &str) -> Value {
+fn tool_call_event(
+    entry: &conductor_core::types::ConversationEntry,
+    delta: &str,
+    event_type: &str,
+) -> Value {
     let text_content = json!([{
         "type": "text",
         "text": delta,
@@ -1263,17 +1248,19 @@ where
 
 async fn stream_static_session_updates<W>(
     writer: &Arc<Mutex<W>>,
-    session_id: &str,
-    approval_state: &str,
+    session: &SessionRecord,
     cursor: &mut PromptStreamCursor,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let approval_state = approval_state(session);
+    let config_options = session_config_options(session);
+    let config_signature = config_options.to_string();
     if !cursor.commands_sent {
         send_session_update(
             writer,
-            session_id,
+            &session.id,
             json!({
                 "sessionUpdate": "available_commands_update",
                 "availableCommands": available_commands_value(),
@@ -1286,10 +1273,28 @@ where
         .await?;
         cursor.commands_sent = true;
     }
+    if !cursor.config_sent || cursor.config_signature.as_deref() != Some(config_signature.as_str())
+    {
+        send_session_update(
+            writer,
+            &session.id,
+            json!({
+                "sessionUpdate": "config_option_update",
+                "configOptions": config_options,
+                "_meta": {
+                    "approvalState": approval_state,
+                    "requiresApproval": approval_state != ACP_APPROVAL_GRANTED,
+                }
+            }),
+        )
+        .await?;
+        cursor.config_sent = true;
+        cursor.config_signature = Some(config_signature);
+    }
     if !cursor.mode_sent || cursor.approval_state.as_deref() != Some(approval_state) {
         send_session_update(
             writer,
-            session_id,
+            &session.id,
             json!({
                 "sessionUpdate": "current_mode_update",
                 "currentModeId": ACP_MODE_DISPATCHER,
@@ -1401,10 +1406,34 @@ fn available_commands_value() -> Value {
 
 fn plan_entries(stage: &str) -> Value {
     let (review, inspect, proposal, approval, memory) = match stage {
-        "completed" => ("completed", "completed", "completed", "completed", "completed"),
-        "awaiting_approval" => ("completed", "completed", "completed", "in_progress", "completed"),
-        "approved_execution" => ("completed", "completed", "completed", "completed", "in_progress"),
-        "cancelled" => ("completed", "completed", "in_progress", "pending", "pending"),
+        "completed" => (
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+        ),
+        "awaiting_approval" => (
+            "completed",
+            "completed",
+            "completed",
+            "in_progress",
+            "completed",
+        ),
+        "approved_execution" => (
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "in_progress",
+        ),
+        "cancelled" => (
+            "completed",
+            "completed",
+            "in_progress",
+            "pending",
+            "pending",
+        ),
         _ => ("in_progress", "pending", "pending", "pending", "pending"),
     };
     json!([
@@ -1496,8 +1525,7 @@ where
         .params
         .clone()
         .ok_or_else(|| anyhow!("Missing params for {}", request.method))?;
-    serde_json::from_value(params)
-        .with_context(|| format!("Invalid params for {}", request.method))
+    serde_json::from_value(params).with_context(|| format!("Invalid params for {}", request.method))
 }
 
 fn make_success_response(request: &JsonRpcRequest, result: Value) -> Result<JsonRpcResponse> {
@@ -1525,7 +1553,11 @@ fn make_error_response(
     Ok(JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
-        payload: JsonRpcPayload::Error(JsonRpcError { code, message, data }),
+        payload: JsonRpcPayload::Error(JsonRpcError {
+            code,
+            message,
+            data,
+        }),
     })
 }
 
@@ -1535,14 +1567,17 @@ struct PromptStreamCursor {
     last_title: Option<String>,
     last_updated_at: Option<String>,
     approval_state: Option<String>,
+    config_signature: Option<String>,
     announced_tool_calls: HashSet<String>,
     open_tool_call_id: Option<String>,
     commands_sent: bool,
+    config_sent: bool,
     mode_sent: bool,
 }
 
 impl PromptStreamCursor {
     fn from_session(session: &SessionRecord) -> Self {
+        let config_options = session_config_options(session);
         Self {
             sent_lengths: session
                 .conversation
@@ -1552,6 +1587,7 @@ impl PromptStreamCursor {
             last_title: Some(session_title(session)),
             last_updated_at: Some(session.last_activity_at.clone()),
             approval_state: Some(approval_state(session).to_string()),
+            config_signature: Some(config_options.to_string()),
             ..Self::default()
         }
     }
@@ -1604,6 +1640,8 @@ struct LoadSessionRequest {
 #[serde(rename_all = "camelCase")]
 struct PromptRequest {
     session_id: String,
+    #[serde(default)]
+    message_id: Option<String>,
     prompt: Vec<Value>,
     #[serde(default, rename = "_meta")]
     meta: Option<Value>,
@@ -1666,4 +1704,189 @@ pub struct JsonRpcError {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        dispatcher_message_from_prompt_content, parse_prompt_blocks, prompt_turn_dispatch_message,
+        session_config_options, updates_for_entry, ACP_CONFIG_IMPLEMENTATION_AGENT,
+        ACP_CONFIG_MODEL, ACP_CONFIG_THOUGHT_LEVEL,
+    };
+    use crate::state::{ConversationEntry, SessionRecord};
+    use serde_json::{json, Value};
+    use std::collections::HashMap;
+
+    fn test_dispatcher_session(
+        agent: &str,
+        model: Option<&str>,
+        reasoning_effort: Option<&str>,
+    ) -> SessionRecord {
+        let mut session = SessionRecord::builder(
+            "session-1".to_string(),
+            "project-1".to_string(),
+            agent.to_string(),
+            "prompt".to_string(),
+        )
+        .model(model.map(str::to_string))
+        .reasoning_effort(reasoning_effort.map(str::to_string))
+        .build();
+        session
+            .metadata
+            .insert("sessionKind".to_string(), "project_dispatcher".to_string());
+        session
+    }
+
+    #[test]
+    fn session_config_options_follow_zed_order_and_use_dispatcher_runtime_model() {
+        let mut session =
+            test_dispatcher_session("claude-code", Some("claude-opus-4-6"), Some("medium"));
+        session
+            .metadata
+            .insert("acpImplementationAgent".to_string(), "codex".to_string());
+        session
+            .metadata
+            .insert("acpImplementationModel".to_string(), "gpt-5.4".to_string());
+        session.metadata.insert(
+            "acpImplementationReasoningEffort".to_string(),
+            "high".to_string(),
+        );
+
+        let config_options = session_config_options(&session);
+        let items = config_options.as_array().expect("config options array");
+
+        assert_eq!(items[0]["id"], Value::String(ACP_CONFIG_MODEL.to_string()));
+        assert_eq!(items[0]["category"], Value::String("model".to_string()));
+        assert_eq!(
+            items[0]["currentValue"],
+            Value::String("claude-opus-4-6".to_string())
+        );
+        assert_eq!(
+            items[1]["id"],
+            Value::String(ACP_CONFIG_THOUGHT_LEVEL.to_string())
+        );
+        assert_eq!(
+            items[1]["currentValue"],
+            Value::String("medium".to_string())
+        );
+        assert_eq!(
+            items[2]["id"],
+            Value::String(ACP_CONFIG_IMPLEMENTATION_AGENT.to_string())
+        );
+        assert_eq!(items[2]["currentValue"], Value::String("codex".to_string()));
+    }
+
+    #[test]
+    fn session_config_options_keep_unknown_dispatcher_model_visible() {
+        let session = test_dispatcher_session("codex", Some("gpt-5.4-preview"), None);
+        let config_options = session_config_options(&session);
+        let items = config_options.as_array().expect("config options array");
+        let model_options = items[0]["options"].as_array().expect("model options array");
+
+        assert_eq!(
+            model_options[0]["value"],
+            Value::String("gpt-5.4-preview".to_string())
+        );
+    }
+
+    #[test]
+    fn prompt_turn_dispatch_message_preserves_explicit_commands() {
+        assert_eq!(prompt_turn_dispatch_message("approve"), "approve");
+        assert_eq!(prompt_turn_dispatch_message("/board"), "/board");
+        assert_eq!(
+            prompt_turn_dispatch_message("   "),
+            "Review the current dispatcher state, summarize the plan status, and respond according to the ACP approval gate."
+        );
+    }
+
+    #[test]
+    fn parse_prompt_blocks_keeps_embedded_context_out_of_user_message_text() {
+        let parsed = parse_prompt_blocks(&[
+            json!({
+                "type": "text",
+                "text": "Investigate why dispatcher turns are leaking context.",
+            }),
+            json!({
+                "type": "resource_link",
+                "uri": "file:///repo/CONDUCTOR.md",
+                "name": "CONDUCTOR.md",
+            }),
+            json!({
+                "type": "resource",
+                "resource": {
+                    "uri": "zed:///buffer/123",
+                    "mimeType": "text/plain",
+                    "text": "dispatcher turn payload",
+                }
+            }),
+        ])
+        .expect("prompt should parse");
+
+        assert_eq!(
+            parsed.user_message,
+            "Investigate why dispatcher turns are leaking context."
+        );
+        assert_eq!(
+            parsed.runtime_attachments,
+            vec!["file:///repo/CONDUCTOR.md".to_string()]
+        );
+        let runtime_context = parsed
+            .runtime_context
+            .expect("embedded resource should be rendered for runtime");
+        assert!(runtime_context.contains("ACP embedded context:"));
+        assert!(runtime_context.contains("zed:///buffer/123"));
+        assert!(runtime_context.contains("dispatcher turn payload"));
+    }
+
+    #[test]
+    fn dispatcher_message_uses_context_fallback_for_context_only_prompt() {
+        let prompt = parse_prompt_blocks(&[json!({
+            "type": "resource",
+            "resource": {
+                "uri": "zed:///buffer/only-context",
+                "mimeType": "text/plain",
+                "text": "selected code",
+            }
+        })])
+        .expect("prompt should parse");
+
+        assert_eq!(
+            dispatcher_message_from_prompt_content(&prompt),
+            "Review the provided ACP context and respond according to the ACP approval gate."
+        );
+    }
+
+    #[test]
+    fn updates_for_entry_emit_plain_user_text_without_context_attachments() {
+        let mut metadata = HashMap::new();
+        metadata.insert("custom".to_string(), Value::String("kept".to_string()));
+        let entry = ConversationEntry {
+            id: "msg-1".to_string(),
+            kind: "user_message".to_string(),
+            source: "acp".to_string(),
+            text: "Please inspect this file.".to_string(),
+            created_at: "2026-03-27T00:00:00Z".to_string(),
+            attachments: Vec::new(),
+            metadata,
+        };
+
+        let updates = updates_for_entry(&entry, "Please inspect this file.");
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0]["sessionUpdate"],
+            Value::String("user_message_chunk".to_string())
+        );
+        assert_eq!(
+            updates[0]["content"],
+            json!({
+                "type": "text",
+                "text": "Please inspect this file.",
+            })
+        );
+        assert_eq!(
+            updates[0]["_meta"]["runtime"]["custom"],
+            Value::String("kept".to_string())
+        );
+    }
 }
