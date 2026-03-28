@@ -1116,7 +1116,11 @@ where
 {
     let mut cursor = PromptStreamCursor::default();
     stream_static_session_updates(writer, wire_format, session, &mut cursor).await?;
-    stream_prompt_delta(writer, wire_format, session, &mut cursor).await
+    stream_prompt_delta(writer, wire_format, session, &mut cursor).await?;
+    if let Some(status) = historical_tool_call_final_status(session) {
+        finalize_open_tool_call(writer, wire_format, &session.id, &mut cursor, status).await?;
+    }
+    Ok(())
 }
 
 async fn stream_prompt_delta<W>(
@@ -1248,6 +1252,20 @@ fn updates_for_entry(entry: &conductor_core::types::ConversationEntry, delta: &s
         })],
         _ => Vec::new(),
     }
+}
+
+fn historical_tool_call_final_status(session: &SessionRecord) -> Option<&'static str> {
+    if matches!(
+        session.status,
+        SessionStatus::Working | SessionStatus::Spawning | SessionStatus::Queued
+    ) {
+        return None;
+    }
+
+    Some(match session.status {
+        SessionStatus::Errored | SessionStatus::Killed | SessionStatus::Terminated => "failed",
+        _ => "completed",
+    })
 }
 
 fn tool_call_event(
@@ -1846,7 +1864,8 @@ mod tests {
     use super::{
         approval_state, dispatcher_message_from_prompt_content, parse_prompt_blocks,
         prompt_turn_dispatch_message, read_jsonrpc_request, session_config_options,
-        tool_call_event, updates_for_entry, write_jsonrpc_message, AcpServer,
+        stream_full_session_history, tool_call_event, updates_for_entry, write_jsonrpc_message,
+        AcpServer,
         CreateDispatcherThreadOptions, JsonRpcNotification, JsonRpcWireFormat, LoadSessionRequest,
         ACP_APPROVAL_GRANTED, ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL,
         ACP_CONFIG_THOUGHT_LEVEL,
@@ -2178,6 +2197,95 @@ mod tests {
                 },
             }])
         );
+    }
+
+    #[tokio::test]
+    async fn stream_full_session_history_closes_last_tool_call_for_inactive_sessions() {
+        let mut metadata = HashMap::new();
+        metadata.insert("toolKind".to_string(), Value::String("bash".to_string()));
+        metadata.insert(
+            "toolStatus".to_string(),
+            Value::String("running".to_string()),
+        );
+        metadata.insert("toolTitle".to_string(), Value::String("Bash".to_string()));
+        let mut session = test_dispatcher_session("codex", None, None);
+        session.status = SessionStatus::NeedsInput;
+        session.conversation.push(ConversationEntry {
+            id: "tool-1".to_string(),
+            kind: "status_message".to_string(),
+            source: "runtime".to_string(),
+            text: "ls -la".to_string(),
+            created_at: "2026-03-27T00:00:00Z".to_string(),
+            attachments: Vec::new(),
+            metadata,
+        });
+
+        let (mut client, writer_stream) = duplex(16 * 1024);
+        let writer = Arc::new(Mutex::new(writer_stream));
+
+        stream_full_session_history(&writer, JsonRpcWireFormat::ContentLength, &session)
+            .await
+            .expect("session history replay should succeed");
+        {
+            let mut guard = writer.lock().await;
+            guard.shutdown().await.expect("writer should shut down");
+        }
+
+        let mut output = Vec::new();
+        client
+            .read_to_end(&mut output)
+            .await
+            .expect("reader should capture session updates");
+        let output = String::from_utf8(output).expect("ACP notifications should be utf8");
+
+        assert!(output.contains("\"sessionUpdate\":\"tool_call\""));
+        assert!(output.contains("\"toolCallId\":\"tool-1\""));
+        assert!(output.contains("\"sessionUpdate\":\"tool_call_update\""));
+        assert!(output.contains("\"status\":\"completed\""));
+    }
+
+    #[tokio::test]
+    async fn stream_full_session_history_keeps_last_tool_call_open_for_active_sessions() {
+        let mut metadata = HashMap::new();
+        metadata.insert("toolKind".to_string(), Value::String("bash".to_string()));
+        metadata.insert(
+            "toolStatus".to_string(),
+            Value::String("running".to_string()),
+        );
+        metadata.insert("toolTitle".to_string(), Value::String("Bash".to_string()));
+        let mut session = test_dispatcher_session("codex", None, None);
+        session.status = SessionStatus::Working;
+        session.conversation.push(ConversationEntry {
+            id: "tool-1".to_string(),
+            kind: "status_message".to_string(),
+            source: "runtime".to_string(),
+            text: "ls -la".to_string(),
+            created_at: "2026-03-27T00:00:00Z".to_string(),
+            attachments: Vec::new(),
+            metadata,
+        });
+
+        let (mut client, writer_stream) = duplex(16 * 1024);
+        let writer = Arc::new(Mutex::new(writer_stream));
+
+        stream_full_session_history(&writer, JsonRpcWireFormat::ContentLength, &session)
+            .await
+            .expect("session history replay should succeed");
+        {
+            let mut guard = writer.lock().await;
+            guard.shutdown().await.expect("writer should shut down");
+        }
+
+        let mut output = Vec::new();
+        client
+            .read_to_end(&mut output)
+            .await
+            .expect("reader should capture session updates");
+        let output = String::from_utf8(output).expect("ACP notifications should be utf8");
+
+        assert!(output.contains("\"sessionUpdate\":\"tool_call\""));
+        assert!(!output.contains("\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"tool-1\",\"status\":\"completed\""));
+        assert!(!output.contains("\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"tool-1\",\"status\":\"failed\""));
     }
 
     #[tokio::test]
