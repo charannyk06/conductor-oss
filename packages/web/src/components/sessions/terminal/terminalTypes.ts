@@ -16,7 +16,6 @@ export interface SessionTerminalProps {
 
 export type TerminalConnectionInfo = {
   terminalUrl: string | null;
-  websocketUrl: string | null;
   interactive: boolean;
   reason: string | null;
   expiresInSeconds?: number | null;
