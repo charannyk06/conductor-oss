@@ -114,8 +114,9 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">Sign in</p>
           <h2 className="mt-3 text-2xl font-semibold text-[var(--text-strong)]">Connect to your paired runtime</h2>
           <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
-            GitHub is the fastest path. Email stays available if you prefer. After sign-in, Clerk returns you
-            to the dashboard or active bridge claim flow inside the same local workflow.
+            Use Google or any other provider you enable in Clerk. Email stays available if you keep it enabled.
+            After sign-in, Clerk returns you to the dashboard or active bridge claim flow inside the same local
+            workflow.
           </p>
 
           <div className="mt-6">

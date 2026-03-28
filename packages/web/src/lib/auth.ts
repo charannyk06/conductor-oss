@@ -17,7 +17,7 @@ import {
   buildSignInPath,
   resolvePostSignInRedirectTarget,
 } from "@/lib/authRedirect";
-import { resolveClerkConfiguration, resolveRequestHostname } from "@/lib/clerkConfig";
+import { resolveClerkConfiguration, resolveRequestBaseUrl, resolveRequestHostname } from "@/lib/clerkConfig";
 import { verifyTrustedEdgeIdentity } from "@/lib/edgeAuth";
 import { sanitizeRedirectTarget } from "@/lib/redirectTarget";
 
@@ -358,6 +358,39 @@ async function currentHost(request?: Request): Promise<string> {
   return resolveRequestHostname(headerStore);
 }
 
+async function resolveCurrentClerkConfiguration(request?: Request) {
+  if (request) {
+    try {
+      const requestUrl = new URL(request.url);
+      return resolveClerkConfiguration(requestUrl.hostname, requestUrl.origin);
+    } catch {
+      return resolveClerkConfiguration(
+        resolveRequestHostname(request.headers),
+        resolveRequestBaseUrl(request.headers),
+      );
+    }
+  }
+
+  const headerStore = await currentHeaders();
+  return resolveClerkConfiguration(
+    resolveRequestHostname(headerStore),
+    resolveRequestBaseUrl(headerStore),
+  );
+}
+
+export async function buildPreferredSignInPath(
+  redirectTarget?: string | null,
+  defaultRedirectTarget?: string | null,
+  request?: Request,
+): Promise<string> {
+  const clerkConfiguration = await resolveCurrentClerkConfiguration(request);
+  if (clerkConfiguration.hostedSignInUrl) {
+    return buildHostedSignInPath(redirectTarget, defaultRedirectTarget);
+  }
+
+  return buildSignInPath(redirectTarget, defaultRedirectTarget);
+}
+
 function resolveRoleForAuthenticatedEmail(
   email: string,
   access: DashboardAccessConfig | null,
@@ -633,7 +666,7 @@ export async function resolveDashboardPageRedirect(
 
   const nextPath = sanitizeRedirectTarget(currentPath);
   if (access.provider === "clerk" && !access.authenticated) {
-    return buildSignInPath(nextPath);
+    return buildPreferredSignInPath(nextPath);
   }
 
   const params = new URLSearchParams({ error: "unavailable" });
