@@ -114,10 +114,14 @@ async fn main() -> Result<()> {
     if use_json {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
+            .with_writer(std::io::stderr)
             .json()
             .init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
     }
 
     let cli = Cli::parse();

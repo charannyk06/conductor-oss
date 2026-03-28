@@ -39,6 +39,12 @@ const ACP_PROMPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ACP_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const ACP_CANCEL_GRACE_PERIOD: Duration = Duration::from_secs(3);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonRpcWireFormat {
+    ContentLength,
+    NewlineDelimited,
+}
+
 #[derive(Clone)]
 struct AcpServer {
     state: Arc<AppState>,
@@ -57,6 +63,7 @@ impl AcpServer {
         self: &Arc<Self>,
         request: JsonRpcRequest,
         writer: &Arc<Mutex<W>>,
+        wire_format: JsonRpcWireFormat,
     ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send + 'static,
@@ -65,7 +72,7 @@ impl AcpServer {
             "authenticate" => {
                 let _ = deserialize_params::<AuthenticateRequest>(&request)?;
                 let response = make_success_response(&request, json!({}))?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "initialize" => {
                 let response = make_success_response(
@@ -100,11 +107,11 @@ impl AcpServer {
                         "authMethods": []
                     }),
                 )?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "ping" => {
                 let response = make_success_response(&request, json!({}))?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "session/list" => {
                 let params = deserialize_params::<ListSessionsRequest>(&request)?;
@@ -116,32 +123,32 @@ impl AcpServer {
                         "nextCursor": Value::Null
                     }),
                 )?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "session/new" => {
                 let params = deserialize_params::<NewSessionRequest>(&request)?;
                 let response_payload = self.new_session(params).await?;
                 let response = make_success_response(&request, response_payload)?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "session/load" => {
                 let params = deserialize_params::<LoadSessionRequest>(&request)?;
                 let (session, payload) = self.load_session(params).await?;
-                stream_full_session_history(writer, &session).await?;
+                stream_full_session_history(writer, wire_format, &session).await?;
                 let response = make_success_response(&request, payload)?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "session/set_config_option" => {
                 let params = deserialize_params::<SetSessionConfigOptionRequest>(&request)?;
                 let payload = self.set_config_option(params).await?;
                 let response = make_success_response(&request, payload)?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "session/set_mode" => {
                 let params = deserialize_params::<SetSessionModeRequest>(&request)?;
                 self.set_mode(params).await?;
                 let response = make_success_response(&request, json!({}))?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
             "session/cancel" => {
                 let params = deserialize_params::<CancelNotification>(&request)?;
@@ -152,7 +159,10 @@ impl AcpServer {
                 let writer = Arc::clone(writer);
                 let request_id = request.id.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = server.handle_prompt_request(request, writer.clone()).await {
+                    if let Err(err) = server
+                        .handle_prompt_request(request, writer.clone(), wire_format)
+                        .await
+                    {
                         tracing::warn!(error = %err, "ACP prompt request failed");
                         if let Some(id) = request_id {
                             let response = JsonRpcResponse {
@@ -164,7 +174,7 @@ impl AcpServer {
                                     data: None,
                                 }),
                             };
-                            let _ = write_jsonrpc_message(&writer, &response).await;
+                            let _ = write_jsonrpc_message(&writer, wire_format, &response).await;
                         }
                     }
                 });
@@ -176,7 +186,7 @@ impl AcpServer {
                     format!("Unknown ACP method: {other}"),
                     None,
                 )?;
-                write_jsonrpc_message(writer, &response).await?;
+                write_jsonrpc_message(writer, wire_format, &response).await?;
             }
         }
 
@@ -408,6 +418,7 @@ impl AcpServer {
         self: Arc<Self>,
         request: JsonRpcRequest,
         writer: Arc<Mutex<W>>,
+        wire_format: JsonRpcWireFormat,
     ) -> Result<()>
     where
         W: AsyncWrite + Unpin + Send + 'static,
@@ -438,14 +449,21 @@ impl AcpServer {
         };
 
         let response = self
-            .run_prompt_turn(&request, &params, session, cancel_flag.clone(), &writer)
+            .run_prompt_turn(
+                &request,
+                &params,
+                session,
+                cancel_flag.clone(),
+                &writer,
+                wire_format,
+            )
             .await;
         self.in_flight_prompts
             .lock()
             .await
             .remove(&params.session_id);
         let response = response?;
-        write_jsonrpc_message(&writer, &response).await?;
+        write_jsonrpc_message(&writer, wire_format, &response).await?;
         Ok(())
     }
 
@@ -456,6 +474,7 @@ impl AcpServer {
         session: SessionRecord,
         cancel_flag: Arc<AtomicBool>,
         writer: &Arc<Mutex<W>>,
+        wire_format: JsonRpcWireFormat,
     ) -> Result<JsonRpcResponse>
     where
         W: AsyncWrite + Unpin + Send + 'static,
@@ -504,13 +523,19 @@ impl AcpServer {
             .await
             .unwrap_or_else(|| session.clone());
         let mut cursor = PromptStreamCursor::from_session(&initial_session);
-        stream_static_session_updates(writer, &initial_session, &mut cursor).await?;
+        stream_static_session_updates(writer, wire_format, &initial_session, &mut cursor).await?;
         let initial_plan_stage = if turn_is_approved {
             "approved_execution"
         } else {
             "planning"
         };
-        stream_plan_update(writer, &params.session_id, plan_entries(initial_plan_stage)).await?;
+        stream_plan_update(
+            writer,
+            wire_format,
+            &params.session_id,
+            plan_entries(initial_plan_stage),
+        )
+        .await?;
         let launched_session = self
             .ensure_prompt_runtime(&params.session_id, turn_request.clone())
             .await?;
@@ -524,7 +549,7 @@ impl AcpServer {
             None => self.state.get_dispatcher_thread(&params.session_id).await,
         };
         if let Some(current) = current_session {
-            stream_prompt_delta(writer, &current, &mut cursor).await?;
+            stream_prompt_delta(writer, wire_format, &current, &mut cursor).await?;
         }
 
         let started_at = Instant::now();
@@ -540,7 +565,7 @@ impl AcpServer {
                         params.session_id
                     )
                 })?;
-            stream_prompt_delta(writer, &current, &mut cursor).await?;
+            stream_prompt_delta(writer, wire_format, &current, &mut cursor).await?;
 
             if cancel_flag.load(Ordering::SeqCst) {
                 stop_reason = "cancelled".to_string();
@@ -557,6 +582,7 @@ impl AcpServer {
 
         finalize_open_tool_call(
             writer,
+            wire_format,
             &params.session_id,
             &mut cursor,
             if stop_reason == "refusal" || stop_reason == "cancelled" {
@@ -573,7 +599,13 @@ impl AcpServer {
         } else {
             "cancelled"
         };
-        stream_plan_update(writer, &params.session_id, plan_entries(plan_state)).await?;
+        stream_plan_update(
+            writer,
+            wire_format,
+            &params.session_id,
+            plan_entries(plan_state),
+        )
+        .await?;
 
         make_success_response(
             request,
@@ -706,8 +738,8 @@ where
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
 
-    while let Some(request) = read_jsonrpc_request(&mut reader).await? {
-        server.handle_request(request, &writer).await?;
+    while let Some((request, wire_format)) = read_jsonrpc_request(&mut reader).await? {
+        server.handle_request(request, &writer, wire_format).await?;
     }
 
     Ok(())
@@ -1076,31 +1108,34 @@ fn render_prompt_runtime_context(sections: &[String]) -> Option<String> {
 
 async fn stream_full_session_history<W>(
     writer: &Arc<Mutex<W>>,
+    wire_format: JsonRpcWireFormat,
     session: &SessionRecord,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let mut cursor = PromptStreamCursor::default();
-    stream_static_session_updates(writer, session, &mut cursor).await?;
-    stream_prompt_delta(writer, session, &mut cursor).await
+    stream_static_session_updates(writer, wire_format, session, &mut cursor).await?;
+    stream_prompt_delta(writer, wire_format, session, &mut cursor).await
 }
 
 async fn stream_prompt_delta<W>(
     writer: &Arc<Mutex<W>>,
+    wire_format: JsonRpcWireFormat,
     session: &SessionRecord,
     cursor: &mut PromptStreamCursor,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    stream_static_session_updates(writer, session, cursor).await?;
+    stream_static_session_updates(writer, wire_format, session, cursor).await?;
     let current_title = session_title(session);
     if cursor.last_title.as_ref() != Some(&current_title)
         || cursor.last_updated_at.as_ref() != Some(&session.last_activity_at)
     {
         send_session_update(
             writer,
+            wire_format,
             &session.id,
             json!({
                 "sessionUpdate": "session_info_update",
@@ -1124,7 +1159,8 @@ where
         if let Some(tool_kind) = entry.metadata.get("toolKind").and_then(Value::as_str) {
             if tool_kind != "thinking" {
                 if cursor.open_tool_call_id.as_ref() != Some(&entry.id) {
-                    finalize_open_tool_call(writer, &session.id, cursor, "completed").await?;
+                    finalize_open_tool_call(writer, wire_format, &session.id, cursor, "completed")
+                        .await?;
                 }
                 let tool_call_id = entry.id.clone();
                 let update = if cursor.announced_tool_calls.insert(tool_call_id.clone()) {
@@ -1133,16 +1169,16 @@ where
                 } else {
                     tool_call_event(entry, &delta, "tool_call_update")
                 };
-                send_session_update(writer, &session.id, update).await?;
+                send_session_update(writer, wire_format, &session.id, update).await?;
             } else {
                 for update in updates_for_entry(entry, &delta) {
-                    send_session_update(writer, &session.id, update).await?;
+                    send_session_update(writer, wire_format, &session.id, update).await?;
                 }
             }
         } else {
-            finalize_open_tool_call(writer, &session.id, cursor, "completed").await?;
+            finalize_open_tool_call(writer, wire_format, &session.id, cursor, "completed").await?;
             for update in updates_for_entry(entry, &delta) {
-                send_session_update(writer, &session.id, update).await?;
+                send_session_update(writer, wire_format, &session.id, update).await?;
             }
         }
         cursor.sent_lengths.insert(entry.id.clone(), total_chars);
@@ -1265,6 +1301,7 @@ fn tool_call_event(
 
 async fn finalize_open_tool_call<W>(
     writer: &Arc<Mutex<W>>,
+    wire_format: JsonRpcWireFormat,
     session_id: &str,
     cursor: &mut PromptStreamCursor,
     status: &str,
@@ -1277,6 +1314,7 @@ where
     };
     send_session_update(
         writer,
+        wire_format,
         session_id,
         json!({
             "sessionUpdate": "tool_call_update",
@@ -1289,6 +1327,7 @@ where
 
 async fn stream_static_session_updates<W>(
     writer: &Arc<Mutex<W>>,
+    wire_format: JsonRpcWireFormat,
     session: &SessionRecord,
     cursor: &mut PromptStreamCursor,
 ) -> Result<()>
@@ -1301,6 +1340,7 @@ where
     if !cursor.commands_sent {
         send_session_update(
             writer,
+            wire_format,
             &session.id,
             json!({
                 "sessionUpdate": "available_commands_update",
@@ -1318,6 +1358,7 @@ where
     {
         send_session_update(
             writer,
+            wire_format,
             &session.id,
             json!({
                 "sessionUpdate": "config_option_update",
@@ -1335,6 +1376,7 @@ where
     if !cursor.mode_sent || cursor.approval_state.as_deref() != Some(approval_state) {
         send_session_update(
             writer,
+            wire_format,
             &session.id,
             json!({
                 "sessionUpdate": "current_mode_update",
@@ -1354,6 +1396,7 @@ where
 
 async fn stream_plan_update<W>(
     writer: &Arc<Mutex<W>>,
+    wire_format: JsonRpcWireFormat,
     session_id: &str,
     entries: Value,
 ) -> Result<()>
@@ -1362,6 +1405,7 @@ where
 {
     send_session_update(
         writer,
+        wire_format,
         session_id,
         json!({
             "sessionUpdate": "plan",
@@ -1373,6 +1417,7 @@ where
 
 async fn send_session_update<W>(
     writer: &Arc<Mutex<W>>,
+    wire_format: JsonRpcWireFormat,
     session_id: &str,
     update: Value,
 ) -> Result<()>
@@ -1387,7 +1432,7 @@ where
             "update": update,
         }),
     };
-    write_jsonrpc_message(writer, &notification).await
+    write_jsonrpc_message(writer, wire_format, &notification).await
 }
 
 fn normalize_tool_kind(tool_kind: &str) -> &str {
@@ -1510,11 +1555,12 @@ fn plan_entries(stage: &str) -> Value {
     ])
 }
 
-async fn read_jsonrpc_request<R>(reader: &mut BufReader<R>) -> Result<Option<JsonRpcRequest>>
+async fn read_jsonrpc_request<R>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<(JsonRpcRequest, JsonRpcWireFormat)>>
 where
     R: AsyncRead + Unpin,
 {
-    let mut content_length = None;
     let mut line = String::new();
 
     loop {
@@ -1524,10 +1570,18 @@ where
             return Ok(None);
         }
 
-        if line == "\r\n" || line == "\n" {
-            break;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
 
+        if trimmed.starts_with('{') {
+            let request = serde_json::from_str(trimmed)
+                .context("Failed to decode newline-delimited ACP JSON-RPC request")?;
+            return Ok(Some((request, JsonRpcWireFormat::NewlineDelimited)));
+        }
+
+        let mut content_length = None;
         if let Some((name, value)) = line.split_once(':') {
             if name.eq_ignore_ascii_case("Content-Length") {
                 content_length = Some(
@@ -1538,26 +1592,61 @@ where
                 );
             }
         }
-    }
 
-    let length = content_length.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
-    let mut payload = vec![0u8; length];
-    reader.read_exact(&mut payload).await?;
-    serde_json::from_slice(&payload)
-        .context("Failed to decode ACP JSON-RPC request")
-        .map(Some)
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line).await?;
+            if read == 0 {
+                return Ok(None);
+            }
+
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("Content-Length") {
+                    content_length = Some(
+                        value
+                            .trim()
+                            .parse::<usize>()
+                            .context("Invalid Content-Length header")?,
+                    );
+                }
+            }
+        }
+
+        let length = content_length.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
+        let mut payload = vec![0u8; length];
+        reader.read_exact(&mut payload).await?;
+        let request =
+            serde_json::from_slice(&payload).context("Failed to decode ACP JSON-RPC request")?;
+        return Ok(Some((request, JsonRpcWireFormat::ContentLength)));
+    }
 }
 
-async fn write_jsonrpc_message<W, T>(writer: &Arc<Mutex<W>>, message: &T) -> Result<()>
+async fn write_jsonrpc_message<W, T>(
+    writer: &Arc<Mutex<W>>,
+    wire_format: JsonRpcWireFormat,
+    message: &T,
+) -> Result<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
     T: Serialize,
 {
     let body = serde_json::to_vec(message)?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
     let mut writer = writer.lock().await;
-    writer.write_all(header.as_bytes()).await?;
-    writer.write_all(&body).await?;
+    match wire_format {
+        JsonRpcWireFormat::ContentLength => {
+            let header = format!("Content-Length: {}\r\n\r\n", body.len());
+            writer.write_all(header.as_bytes()).await?;
+            writer.write_all(&body).await?;
+        }
+        JsonRpcWireFormat::NewlineDelimited => {
+            writer.write_all(&body).await?;
+            writer.write_all(b"\n").await?;
+        }
+    }
     writer.flush().await?;
     Ok(())
 }
@@ -1737,9 +1826,10 @@ struct JsonRpcNotification {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
 pub enum JsonRpcPayload {
+    #[serde(rename = "result")]
     Result(Value),
+    #[serde(rename = "error")]
     Error(JsonRpcError),
 }
 
@@ -1755,9 +1845,11 @@ pub struct JsonRpcError {
 mod tests {
     use super::{
         approval_state, dispatcher_message_from_prompt_content, parse_prompt_blocks,
-        prompt_turn_dispatch_message, session_config_options, tool_call_event, updates_for_entry,
-        AcpServer, CreateDispatcherThreadOptions, LoadSessionRequest, ACP_APPROVAL_GRANTED,
-        ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL, ACP_CONFIG_THOUGHT_LEVEL,
+        prompt_turn_dispatch_message, read_jsonrpc_request, session_config_options,
+        tool_call_event, updates_for_entry, write_jsonrpc_message, AcpServer,
+        CreateDispatcherThreadOptions, JsonRpcNotification, JsonRpcWireFormat, LoadSessionRequest,
+        ACP_APPROVAL_GRANTED, ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL,
+        ACP_CONFIG_THOUGHT_LEVEL,
     };
     use crate::mcp::{AppStateMcpBackend, CreateBoardTaskArgs, McpBackend};
     use crate::state::{
@@ -2089,6 +2181,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acp_write_jsonrpc_message_supports_newline_delimited_jsonrpc() {
+        let notification = JsonRpcNotification {
+            jsonrpc: "2.0".to_string(),
+            method: "session/update".to_string(),
+            params: json!({ "sessionId": "demo", "update": { "ok": true } }),
+        };
+        let (mut client, writer_stream) = duplex(1024);
+        let writer = Arc::new(Mutex::new(writer_stream));
+
+        write_jsonrpc_message(&writer, JsonRpcWireFormat::NewlineDelimited, &notification)
+            .await
+            .expect("newline-delimited write should succeed");
+        {
+            let mut guard = writer.lock().await;
+            guard.shutdown().await.expect("writer should shut down");
+        }
+
+        let mut output = String::new();
+        client.read_to_string(&mut output).await.unwrap();
+        assert!(output.starts_with("{\"jsonrpc\":\"2.0\""));
+        assert!(output.ends_with('\n'));
+        let value: Value = serde_json::from_str(output.trim()).expect("output should be json");
+        assert_eq!(value["method"], "session/update");
+    }
+
+    #[tokio::test]
+    async fn acp_read_jsonrpc_request_supports_newline_delimited_jsonrpc() {
+        let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{}}\n";
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(request.as_bytes()));
+
+        let parsed = read_jsonrpc_request(&mut reader)
+            .await
+            .expect("newline-delimited read should succeed")
+            .expect("request should be present");
+
+        assert_eq!(parsed.1, JsonRpcWireFormat::NewlineDelimited);
+        assert_eq!(parsed.0.method, "ping");
+        assert_eq!(parsed.0.id, Some(json!(1)));
+    }
+
+    #[tokio::test]
     async fn load_session_clears_stale_session_mcp_servers_when_none_are_requested() {
         let (root, state) = build_test_state("acp-load-session-mcp-clear").await;
         let server = AcpServer::new(Arc::clone(&state));
@@ -2175,6 +2308,7 @@ mod tests {
                 session,
                 Arc::new(AtomicBool::new(false)),
                 &writer,
+                JsonRpcWireFormat::ContentLength,
             )
             .await
             .expect("prompt turn should succeed");
@@ -2248,6 +2382,7 @@ mod tests {
                 session.clone(),
                 Arc::new(AtomicBool::new(false)),
                 &writer,
+                JsonRpcWireFormat::ContentLength,
             )
             .await
             .expect("prompt turn should succeed");
