@@ -967,6 +967,12 @@ pub(crate) async fn resolve_board_path_for_project(
         .projects
         .get(project_id)
         .ok_or_else(|| anyhow!("Unknown project: {project_id}"))?;
+    let project_root = state.resolve_project_path(project);
+    let repo_board = project_root.join("CONDUCTOR.md");
+    if repo_board.exists() && !repo_board.starts_with(&state.workspace_path) {
+        return Ok(repo_board);
+    }
+
     let board_dir = project
         .board_dir
         .clone()

@@ -154,7 +154,16 @@ pub fn resolve_board_file(
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
 
+    let project_repo_board = project_root.as_ref().map(|path| path.join("CONDUCTOR.md"));
+    let external_project_repo_board = project_repo_board.as_ref().filter(|path| {
+        path.exists() && !path.starts_with(workspace_path)
+    });
+
     let mut candidates = Vec::new();
+    if let Some(path) = external_project_repo_board {
+        candidates.push(path.clone());
+    }
+
     let trimmed = board_dir.trim();
     if !trimmed.is_empty() {
         if trimmed.ends_with(".md") {
@@ -167,7 +176,10 @@ pub fn resolve_board_file(
     }
 
     if let Some(project_root) = project_root.as_ref() {
-        candidates.push(project_root.join("CONDUCTOR.md"));
+        let repo_board = project_root.join("CONDUCTOR.md");
+        if external_project_repo_board != Some(&repo_board) {
+            candidates.push(repo_board);
+        }
     }
 
     if let Some(name) = project_name.as_deref() {
@@ -1622,6 +1634,33 @@ mod tests {
             repo.file_name().and_then(|value| value.to_str()).unwrap(),
             Some(repo.to_string_lossy().as_ref()),
         );
+
+        assert_eq!(
+            resolved,
+            repo.join("CONDUCTOR.md")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn resolve_board_file_prefers_external_repo_board_over_workspace_shadow_board() {
+        let workspace = temp_path("workspace-shadow");
+        let repo = temp_path("repo-shadow");
+        let board_dir = repo.file_name().and_then(|value| value.to_str()).unwrap();
+        fs::create_dir_all(workspace.join("projects").join(board_dir)).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            workspace.join("projects").join(board_dir).join("CONDUCTOR.md"),
+            "# stale workspace shadow board\n",
+        )
+        .unwrap();
+        fs::write(repo.join("CONDUCTOR.md"), "# repo board\n").unwrap();
+
+        let resolved = resolve_board_file(&workspace, board_dir, Some(repo.to_string_lossy().as_ref()));
 
         assert_eq!(
             resolved,
