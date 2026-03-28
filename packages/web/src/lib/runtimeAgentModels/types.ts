@@ -31,6 +31,8 @@ export type CodexCacheModel = {
 export type ClaudeSettings = {
   model?: unknown;
   alwaysThinkingEnabled?: unknown;
+  effortLevel?: unknown;
+  availableModels?: unknown;
 };
 
 export type ClaudeStatsCache = {

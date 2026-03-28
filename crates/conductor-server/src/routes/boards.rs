@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::dispatcher_task_lifecycle::{
+    create_dispatcher_task, update_dispatcher_task, DispatcherTaskCreateInput,
+    DispatcherTaskMutationContext, DispatcherTaskUpdateInput,
+};
 use crate::routes::config::resolve_access_identity;
 use crate::state::{resolve_board_file, AppState};
 use crate::task_context::ensure_task_brief;
@@ -189,67 +193,45 @@ async fn add_board_task(
     if body.project_id.trim().is_empty() || body.title.trim().is_empty() {
         return error(StatusCode::BAD_REQUEST, "projectId and title are required");
     }
-
-    let config = state.config.read().await.clone();
-    let Some(project) = config.projects.get(&body.project_id) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            format!("Unknown project: {}", body.project_id),
-        );
-    };
-    let board_dir = project
-        .board_dir
-        .clone()
-        .unwrap_or_else(|| body.project_id.clone());
-    let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
-    let board_path = state.workspace_path.join(&board_relative);
-    let board = parse_board(&board_path, &body.project_id);
-
-    let role = normalize_role(body.role.as_deref().unwrap_or("intake"));
-    let task = BoardTaskRecord {
-        id: Uuid::new_v4().to_string(),
-        text: build_task_text(body.title.trim(), body.description.as_deref()),
-        checked: false,
-        agent: body.agent.filter(|value| !value.trim().is_empty()),
-        model: trim_string(body.model),
-        reasoning_effort: trim_string(body.reasoning_effort)
-            .map(|value| value.to_ascii_lowercase()),
-        project: Some(body.project_id.clone()),
-        task_type: body.r#type.filter(|value| !value.trim().is_empty()),
-        priority: body.priority.filter(|value| !value.trim().is_empty()),
-        task_ref: Some(next_human_task_ref(&board, &body.project_id)),
-        attempt_ref: None,
-        issue_id: body.issue_id.filter(|value| !value.trim().is_empty()),
-        github_item_id: None,
-        attachments: sanitize_string_list(body.attachments),
-        notes: body.context_notes.filter(|value| !value.trim().is_empty()),
-        packet: BoardTaskPacket {
-            objective: trim_string(body.objective),
-            execution_mode: normalize_execution_mode_option(body.execution_mode),
-            surfaces: sanitize_string_list(body.surfaces),
-            constraints: sanitize_string_list(body.constraints),
-            dependencies: sanitize_string_list(body.dependencies),
-            acceptance: sanitize_string_list(body.acceptance),
-            skills: sanitize_string_list(body.skills),
-            review_refs: sanitize_string_list(body.review_refs),
-            deliverables: sanitize_string_list(body.deliverables),
+    match create_dispatcher_task(
+        &state,
+        DispatcherTaskMutationContext {
+            activity_source: "board",
+            ..DispatcherTaskMutationContext::default()
         },
-    };
-
-    if let Err(err) = insert_task_into_board(&board_path, role, &task, &body.project_id) {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-    }
-    state
-        .push_board_activity(&body.project_id, "board", "created task", task.text.clone())
-        .await;
-    state.publish_snapshot().await;
-
-    match load_board_response(&state, &body.project_id).await {
-        Ok(mut payload) => {
-            payload["createdTaskId"] = Value::String(task.id.clone());
+        DispatcherTaskCreateInput {
+            project: Some(body.project_id),
+            title: body.title,
+            description: body.description,
+            context_notes: body.context_notes,
+            attachments: body.attachments,
+            objective: body.objective,
+            execution_mode: body.execution_mode,
+            surfaces: body.surfaces,
+            constraints: body.constraints,
+            dependencies: body.dependencies,
+            acceptance: body.acceptance,
+            skills: body.skills,
+            review_refs: body.review_refs,
+            deliverables: body.deliverables,
+            agent: body.agent,
+            model: body.model,
+            reasoning_effort: body.reasoning_effort,
+            role: body.role,
+            task_type: body.r#type,
+            priority: body.priority,
+            issue_id: body.issue_id,
+            ..DispatcherTaskCreateInput::default()
+        },
+    )
+    .await
+    {
+        Ok(result) => {
+            let mut payload = result.board_payload.clone();
+            payload["createdTaskId"] = Value::String(result.task.id);
             created(payload)
         }
-        Err((status, message)) => error(status, message),
+        Err(err) => error(board_mutation_status(&err), err.to_string()),
     }
 }
 
@@ -260,70 +242,61 @@ async fn update_board_task(
     if body.project_id.trim().is_empty() || body.task_id.trim().is_empty() {
         return error(StatusCode::BAD_REQUEST, "projectId and taskId are required");
     }
-
-    let config = state.config.read().await.clone();
-    let Some(project) = config.projects.get(&body.project_id) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            format!("Unknown project: {}", body.project_id),
-        );
-    };
-    let board_dir = project
-        .board_dir
-        .clone()
-        .unwrap_or_else(|| body.project_id.clone());
-    let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
-    let board_path = state.workspace_path.join(&board_relative);
-
-    let mut board = parse_board(&board_path, &body.project_id);
-    let mut located: Option<(usize, usize, BoardTaskRecord)> = None;
-
-    for (column_index, column) in board.columns.iter_mut().enumerate() {
-        if let Some(task_index) = column.tasks.iter().position(|task| task.id == body.task_id) {
-            let task = column.tasks.remove(task_index);
-            located = Some((column_index, task_index, task));
-            break;
-        }
+    match update_dispatcher_task(
+        &state,
+        DispatcherTaskMutationContext {
+            activity_source: "board",
+            ..DispatcherTaskMutationContext::default()
+        },
+        DispatcherTaskUpdateInput {
+            project: Some(body.project_id),
+            task: Some(body.task_id),
+            role: body.role,
+            target_index: body.target_index,
+            title: body.title,
+            description: body.description,
+            context_notes: body.context_notes,
+            attachments: body.attachments,
+            objective: body.objective,
+            execution_mode: body.execution_mode,
+            surfaces: body.surfaces,
+            constraints: body.constraints,
+            dependencies: body.dependencies,
+            acceptance: body.acceptance,
+            skills: body.skills,
+            review_refs: body.review_refs,
+            deliverables: body.deliverables,
+            agent: body.agent,
+            model: body.model,
+            reasoning_effort: body.reasoning_effort,
+            task_type: body.r#type,
+            priority: body.priority,
+            task_ref: body.task_ref,
+            attempt_ref: body.attempt_ref,
+            issue_id: body.issue_id,
+            github_item_id: body.github_item_id,
+            checked: body.checked,
+        },
+    )
+    .await
+    {
+        Ok(result) => ok(result.board_payload),
+        Err(err) => error(board_mutation_status(&err), err.to_string()),
     }
+}
 
-    let Some((source_column_index, source_task_index, mut task)) = located else {
-        return error(
-            StatusCode::NOT_FOUND,
-            format!("Task {} not found", body.task_id),
-        );
-    };
-
-    let source_role = board.columns[source_column_index].role.clone();
-    apply_task_update(&mut task, &body, &body.project_id);
-    let updated_task_text = task.text.clone();
-    let target_role = body
-        .role
-        .as_deref()
-        .map(normalize_role)
-        .unwrap_or(source_role.as_str())
-        .to_string();
-
-    insert_task_at_position(
-        &mut board,
-        task,
-        &source_role,
-        source_task_index,
-        &target_role,
-        body.target_index,
-    );
-
-    if let Err(err) = write_parsed_board(&board_path, &board, &body.project_id) {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+fn board_mutation_status(error: &anyhow::Error) -> StatusCode {
+    let message = error.to_string();
+    if message.starts_with("Unknown project:") || message.contains("not found in project") {
+        return StatusCode::NOT_FOUND;
     }
-    state
-        .push_board_activity(&body.project_id, "board", "updated task", updated_task_text)
-        .await;
-    state.publish_snapshot().await;
-
-    match load_board_response(&state, &body.project_id).await {
-        Ok(payload) => ok(payload),
-        Err((status, message)) => error(status, message),
+    if message.contains("title is required")
+        || message.contains("project is required")
+        || message.contains("task is required")
+    {
+        return StatusCode::BAD_REQUEST;
     }
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 async fn add_board_comment(
@@ -985,97 +958,6 @@ fn local_author_name() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn apply_optional_text(target: &mut Option<String>, incoming: &Option<String>) {
-    let Some(value) = incoming.as_ref() else {
-        return;
-    };
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        *target = None;
-    } else {
-        *target = Some(trimmed.to_string());
-    }
-}
-
-fn apply_task_update(task: &mut BoardTaskRecord, body: &UpdateTaskBody, project_id: &str) {
-    let (mut title, mut description) = split_task_text(&task.text);
-
-    if let Some(next_title) = body.title.as_ref() {
-        let trimmed = next_title.trim();
-        if !trimmed.is_empty() {
-            title = trimmed.to_string();
-        }
-    }
-    if let Some(next_description) = body.description.as_ref() {
-        let trimmed = next_description.trim();
-        description = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-
-    task.text = build_task_text(&title, description.as_deref());
-    apply_optional_text(&mut task.agent, &body.agent);
-    apply_optional_text(&mut task.model, &body.model);
-    apply_optional_text(&mut task.reasoning_effort, &body.reasoning_effort);
-    if let Some(reasoning_effort) = task.reasoning_effort.as_mut() {
-        *reasoning_effort = reasoning_effort.to_ascii_lowercase();
-    }
-    apply_optional_text(&mut task.task_type, &body.r#type);
-    apply_optional_text(&mut task.priority, &body.priority);
-    apply_optional_text(&mut task.task_ref, &body.task_ref);
-    apply_optional_text(&mut task.attempt_ref, &body.attempt_ref);
-    apply_optional_text(&mut task.issue_id, &body.issue_id);
-    apply_optional_text(&mut task.github_item_id, &body.github_item_id);
-    apply_optional_text(&mut task.notes, &body.context_notes);
-    apply_optional_text(&mut task.packet.objective, &body.objective);
-    if let Some(value) = body.execution_mode.as_deref() {
-        task.packet.execution_mode = normalize_execution_mode(value).map(str::to_string);
-    }
-
-    if let Some(checked) = body.checked {
-        task.checked = checked;
-    }
-    if let Some(attachments) = body.attachments.as_ref() {
-        task.attachments = attachments
-            .iter()
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-    }
-    if let Some(values) = body.surfaces.as_ref() {
-        task.packet.surfaces = sanitize_string_list(Some(values.clone()));
-    }
-    if let Some(values) = body.constraints.as_ref() {
-        task.packet.constraints = sanitize_string_list(Some(values.clone()));
-    }
-    if let Some(values) = body.dependencies.as_ref() {
-        task.packet.dependencies = sanitize_string_list(Some(values.clone()));
-    }
-    if let Some(values) = body.acceptance.as_ref() {
-        task.packet.acceptance = sanitize_string_list(Some(values.clone()));
-    }
-    if let Some(values) = body.skills.as_ref() {
-        task.packet.skills = sanitize_string_list(Some(values.clone()));
-    }
-    if let Some(values) = body.review_refs.as_ref() {
-        task.packet.review_refs = sanitize_string_list(Some(values.clone()));
-    }
-    if let Some(values) = body.deliverables.as_ref() {
-        task.packet.deliverables = sanitize_string_list(Some(values.clone()));
-    }
-    if task
-        .project
-        .as_ref()
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
-    {
-        task.project = Some(project_id.to_string());
-    }
-}
-
 pub(crate) async fn resolve_board_path_for_project(
     state: &Arc<AppState>,
     project_id: &str,
@@ -1571,15 +1453,6 @@ pub(crate) fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> Strin
     line
 }
 
-fn sanitize_string_list(values: Option<Vec<String>>) -> Vec<String> {
-    values
-        .unwrap_or_default()
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect()
-}
-
 fn parse_metadata_list(value: &str) -> Vec<String> {
     let trimmed = strip_inline_tags(value).trim();
     if trimmed.starts_with('[') {
@@ -1600,12 +1473,6 @@ fn parse_metadata_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn trim_string(value: Option<String>) -> Option<String> {
-    value
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty())
-}
-
 pub(crate) fn normalize_execution_mode(value: &str) -> Option<&'static str> {
     match value
         .trim()
@@ -1620,13 +1487,6 @@ pub(crate) fn normalize_execution_mode(value: &str) -> Option<&'static str> {
         "temp" | "temp_clone" | "tempclone" | "full_clone" | "review_clone" => Some("temp_clone"),
         _ => None,
     }
-}
-
-fn normalize_execution_mode_option(value: Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .and_then(normalize_execution_mode)
-        .map(str::to_string)
 }
 
 pub(crate) fn board_task_prefers_worktree(task: &BoardTaskRecord) -> Option<bool> {

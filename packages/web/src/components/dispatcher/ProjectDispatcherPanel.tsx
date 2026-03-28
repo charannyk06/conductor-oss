@@ -179,23 +179,15 @@ export function ProjectDispatcherPanel({
       if (!response.ok) {
         throw new Error(payload?.error ?? "Failed to delete dispatcher thread");
       }
-
-      const remainingThreads = dispatcherThreads
-        .filter((candidate) => candidate.id !== threadId)
-        .sort(compareSessionsByActivity);
-      setDispatcherThreads(remainingThreads);
-      setSelectedThreadId((current) => {
-        if (current && current !== threadId && remainingThreads.some((candidate) => candidate.id === current)) {
-          return current;
-        }
-        return remainingThreads[0]?.id ?? null;
-      });
+      await loadDispatcherThreads();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete dispatcher thread");
+      const message = err instanceof Error ? err.message : "Failed to delete dispatcher thread";
+      setError(message);
+      throw err instanceof Error ? err : new Error(message);
     } finally {
       setDeletingThreadId((current) => current === threadId ? null : current);
     }
-  }, [bridgeId, dispatcherThreads, projectId]);
+  }, [bridgeId, loadDispatcherThreads, projectId]);
 
   if (collapsed) {
     return (

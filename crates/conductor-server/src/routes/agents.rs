@@ -796,6 +796,20 @@ fn format_claude_model_label(model: &str) -> String {
         .join(" ")
 }
 
+fn canonicalize_claude_model_id(model: &str) -> Option<String> {
+    let normalized = model.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    match normalized.as_str() {
+        "sonnet" => Some("claude-sonnet-4-6".to_string()),
+        "opus" => Some("claude-opus-4-6".to_string()),
+        "haiku" => Some("claude-haiku-4-5".to_string()),
+        _ => Some(normalized),
+    }
+}
+
 fn claude_access_for_model(model: &str) -> Vec<&'static str> {
     let normalized = model.trim().to_lowercase();
     if normalized == "opus" || normalized.contains("claude-opus") {
@@ -814,6 +828,107 @@ fn claude_model_option(model: &str, description: &str) -> Value {
         "description": description,
         "access": claude_access_for_model(model),
     })
+}
+
+fn default_claude_reasoning_options() -> Vec<Value> {
+    ["low", "medium", "high"]
+        .into_iter()
+        .map(reasoning_option)
+        .collect()
+}
+
+fn collect_claude_setting_models(settings: &Value) -> Vec<String> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(model) = settings.get("model").and_then(Value::as_str) {
+        if let Some(normalized) = canonicalize_claude_model_id(model) {
+            seen.insert(normalized.clone());
+            models.push(normalized);
+        }
+    }
+
+    for value in settings
+        .get("availableModels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|items| items.iter())
+        .filter_map(Value::as_str)
+    {
+        if let Some(normalized) = canonicalize_claude_model_id(value) {
+            if seen.insert(normalized.clone()) {
+                models.push(normalized);
+            }
+        }
+    }
+
+    models
+}
+
+fn supplement_claude_runtime_models(
+    discovered_models: &[String],
+    configured_models: &[String],
+) -> Vec<String> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+
+    for model in discovered_models.iter().chain(configured_models.iter()) {
+        if let Some(normalized) = canonicalize_claude_model_id(model) {
+            if seen.insert(normalized.clone()) {
+                models.push(normalized);
+            }
+        }
+    }
+
+    if models.is_empty() {
+        seen.insert("claude-sonnet-4-6".to_string());
+        models.push("claude-sonnet-4-6".to_string());
+    }
+
+    if seen.insert("claude-haiku-4-5".to_string()) {
+        models.push("claude-haiku-4-5".to_string());
+    }
+
+    models
+}
+
+fn resolve_claude_default_reasoning(settings: &Value, reasoning_options: &[Value]) -> String {
+    let supported: HashSet<String> = reasoning_options
+        .iter()
+        .filter_map(|option| option.get("id").and_then(Value::as_str))
+        .map(|value| value.trim().to_lowercase())
+        .collect();
+
+    let configured = settings
+        .get("effortLevel")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| supported.contains(value));
+
+    if let Some(value) = configured {
+        return value;
+    }
+
+    let thinking_fallback = settings
+        .get("alwaysThinkingEnabled")
+        .and_then(Value::as_bool)
+        .map(|enabled| if enabled { "high" } else { "medium" }.to_string())
+        .filter(|value| supported.contains(value));
+
+    if let Some(value) = thinking_fallback {
+        return value;
+    }
+
+    if supported.contains("medium") {
+        return "medium".to_string();
+    }
+
+    reasoning_options
+        .iter()
+        .filter_map(|option| option.get("id").and_then(Value::as_str))
+        .find(|value| !value.trim().is_empty())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "medium".to_string())
 }
 
 fn collect_claude_stats_models(stats: &Value) -> Vec<String> {
@@ -897,21 +1012,22 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
     let home_dir = user_home_dir()?;
     let settings = read_json_file(home_dir.join(".claude").join("settings.json"));
     let stats = read_json_file(home_dir.join(".claude").join("stats-cache.json"));
-    let reasoning_options = detect_claude_reasoning_options(binary_path).await;
+    let mut reasoning_options = detect_claude_reasoning_options(binary_path).await;
+    if reasoning_options.is_empty() {
+        reasoning_options = default_claude_reasoning_options();
+    }
     let discovered_models = collect_claude_stats_models(stats.as_ref().unwrap_or(&Value::Null));
+    let configured_models = settings
+        .as_ref()
+        .map(collect_claude_setting_models)
+        .unwrap_or_default();
     let configured_model = settings
         .as_ref()
         .and_then(|s| s.get("model"))
         .and_then(Value::as_str)
-        .map(|v| v.trim().to_lowercase());
+        .and_then(canonicalize_claude_model_id);
 
-    let all_models = if discovered_models.is_empty() {
-        vec![configured_model
-            .clone()
-            .unwrap_or_else(|| "sonnet".to_string())]
-    } else {
-        discovered_models.clone()
-    };
+    let all_models = supplement_claude_runtime_models(&discovered_models, &configured_models);
 
     let pro_models: Vec<_> = all_models
         .iter()
@@ -947,10 +1063,8 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
 
     let default_reasoning = settings
         .as_ref()
-        .and_then(|s| s.get("alwaysThinkingEnabled"))
-        .and_then(Value::as_bool)
-        .map(|enabled| if enabled { "high" } else { "medium" })
-        .unwrap_or("medium");
+        .map(|value| resolve_claude_default_reasoning(value, &reasoning_options))
+        .unwrap_or_else(|| resolve_claude_default_reasoning(&Value::Null, &reasoning_options));
 
     Some(json!({
         "agent": "claude-code",
@@ -961,9 +1075,9 @@ async fn build_claude_runtime_model_catalog(binary_path: &Path) -> Option<Value>
             "api": api_default,
         },
         "modelsByAccess": {
-            "pro": pro_models.iter().map(|m| claude_model_option(m, &format!("Model discovered from the local Claude Code installation ({m})."))).collect::<Vec<_>>(),
-            "max": max_models.iter().map(|m| claude_model_option(m, &format!("Model discovered from the local Claude Code installation ({m})."))).collect::<Vec<_>>(),
-            "api": api_models.iter().map(|m| claude_model_option(m, &format!("Model discovered from the local Claude Code installation ({m})."))).collect::<Vec<_>>(),
+            "pro": pro_models.iter().map(|m| claude_model_option(m, &format!("Model available in the local Claude Code installation ({m})."))).collect::<Vec<_>>(),
+            "max": max_models.iter().map(|m| claude_model_option(m, &format!("Model available in the local Claude Code installation ({m})."))).collect::<Vec<_>>(),
+            "api": api_models.iter().map(|m| claude_model_option(m, &format!("Model available in the local Claude Code installation ({m})."))).collect::<Vec<_>>(),
         },
         "defaultReasoningByAccess": {
             "pro": default_reasoning,
@@ -2074,6 +2188,40 @@ mod tests {
         assert_eq!(
             claude_access_for_model("claude-sonnet-4-6"),
             vec!["pro", "max", "api"]
+        );
+    }
+
+    #[test]
+    fn supplement_claude_runtime_models_keeps_recent_models_and_adds_haiku() {
+        let supplemented = supplement_claude_runtime_models(
+            &[
+                "claude-sonnet-4-6".to_string(),
+                "claude-opus-4-6".to_string(),
+            ],
+            &["sonnet".to_string()],
+        );
+
+        assert_eq!(
+            supplemented,
+            vec![
+                "claude-sonnet-4-6".to_string(),
+                "claude-opus-4-6".to_string(),
+                "claude-haiku-4-5".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_claude_default_reasoning_prefers_effort_level_setting() {
+        let reasoning_options = default_claude_reasoning_options();
+        let settings = json!({
+            "effortLevel": "high",
+            "alwaysThinkingEnabled": false,
+        });
+
+        assert_eq!(
+            resolve_claude_default_reasoning(&settings, &reasoning_options),
+            "high"
         );
     }
 

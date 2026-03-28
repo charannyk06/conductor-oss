@@ -14,6 +14,7 @@ import {
   detectReasoningOptionsFromHelp,
   pickRuntimeDefaultReasoning,
   readJsonFileIfPresent,
+  toReasoningOption,
   toObject,
   toRuntimeModelOption,
   uniqueModelOptions,
@@ -51,6 +52,15 @@ function getClaudeAccessForModel(model: string): AgentModelAccess[] {
   return ["pro", "max", "api"];
 }
 
+function canonicalizeClaudeModelId(model: string | null | undefined): string | null {
+  const normalized = model?.trim().toLowerCase() ?? "";
+  if (!normalized) return null;
+  if (normalized === "sonnet") return "claude-sonnet-4-6";
+  if (normalized === "opus") return "claude-opus-4-6";
+  if (normalized === "haiku") return "claude-haiku-4-5";
+  return normalized;
+}
+
 function resolveClaudeConfiguredModel(
   configuredModel: string | null,
   availableModels: AgentModelOption[],
@@ -85,17 +95,71 @@ function collectClaudeStatsModels(stats: ClaudeStatsCache | null): string[] {
   return ordered;
 }
 
+function defaultClaudeReasoningOptions() {
+  return ["low", "medium", "high"].map((effort) => toReasoningOption(effort));
+}
+
+function collectClaudeConfiguredModels(settings: ClaudeSettings | null): string[] {
+  const values: string[] = [];
+  const seen = new Set<string>();
+
+  const configuredModel = canonicalizeClaudeModelId(typeof settings?.model === "string" ? settings.model : null);
+  if (configuredModel) {
+    seen.add(configuredModel);
+    values.push(configuredModel);
+  }
+
+  if (Array.isArray(settings?.availableModels)) {
+    for (const value of settings.availableModels) {
+      if (typeof value !== "string") continue;
+      const normalized = canonicalizeClaudeModelId(value);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      values.push(normalized);
+    }
+  }
+
+  return values;
+}
+
+function supplementClaudeRuntimeModels(discoveredModels: string[], configuredModels: string[]): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+
+  for (const candidate of [...discoveredModels, ...configuredModels]) {
+    const normalized = canonicalizeClaudeModelId(candidate);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    ordered.push(normalized);
+  }
+
+  if (ordered.length === 0) {
+    seen.add("claude-sonnet-4-6");
+    ordered.push("claude-sonnet-4-6");
+  }
+
+  if (!seen.has("claude-haiku-4-5")) {
+    ordered.push("claude-haiku-4-5");
+  }
+
+  return ordered;
+}
+
 export async function buildClaudeRuntimeModelCatalog(): Promise<RuntimeAgentModelCatalog | null> {
   const settings = await readJsonFileIfPresent<ClaudeSettings>(join(homedir(), ".claude", "settings.json"));
   const stats = await readJsonFileIfPresent<ClaudeStatsCache>(join(homedir(), ".claude", "stats-cache.json"));
-  const reasoningOptions = await detectReasoningOptionsFromHelp(["claude", "claude-code", "cc"]);
+  const detectedReasoningOptions = await detectReasoningOptionsFromHelp(["claude", "claude-code", "cc"]);
+  const reasoningOptions = detectedReasoningOptions.length > 0
+    ? detectedReasoningOptions
+    : defaultClaudeReasoningOptions();
   const discoveredModels = collectClaudeStatsModels(stats);
-  const configuredModel = typeof settings?.model === "string" ? settings.model.trim().toLowerCase() : null;
+  const configuredModels = collectClaudeConfiguredModels(settings);
+  const configuredModel = canonicalizeClaudeModelId(typeof settings?.model === "string" ? settings.model : null);
 
-  const availableModels = uniqueModelOptions(discoveredModels.map((model) => {
+  const availableModels = uniqueModelOptions(supplementClaudeRuntimeModels(discoveredModels, configuredModels).map((model) => {
     return toRuntimeModelOption(
       model,
-      `Model discovered from the local Claude Code installation (${model}).`,
+      `Model available in the local Claude Code installation (${model}).`,
       getClaudeAccessForModel(model),
       formatClaudeModelLabel,
     );
@@ -146,10 +210,14 @@ export async function buildClaudeRuntimeModelCatalog(): Promise<RuntimeAgentMode
   if (maxDefault) defaultModelByAccess.max = maxDefault;
   if (apiDefault) defaultModelByAccess.api = apiDefault;
 
-  const defaultReasoning = settings?.alwaysThinkingEnabled === true ? "high" : "medium";
+  const configuredReasoning = typeof settings?.effortLevel === "string"
+    ? settings.effortLevel.trim().toLowerCase()
+    : settings?.alwaysThinkingEnabled === true
+      ? "high"
+      : "medium";
   const defaultReasoningByAccess: Partial<Record<AgentModelAccess, string>> = {};
   for (const access of ["pro", "max", "api"] as const) {
-    const resolvedDefault = pickRuntimeDefaultReasoning(reasoningOptions, defaultReasoning, defaultReasoning);
+    const resolvedDefault = pickRuntimeDefaultReasoning(reasoningOptions, configuredReasoning, "medium");
     if (resolvedDefault) {
       defaultReasoningByAccess[access] = resolvedDefault;
     }
