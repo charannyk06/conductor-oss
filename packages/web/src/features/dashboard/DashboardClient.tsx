@@ -30,6 +30,7 @@ import {
   Bot,
   BookText,
   Building2,
+  ChevronLeft,
   ChevronsRight,
   Check,
   ChevronDown,
@@ -1988,7 +1989,7 @@ export default function DashboardClient({
 
   const workspaceMainPanel = useMemo(() => {
     const projectViewToggle = selectedProject ? (
-      <div className="inline-flex w-fit rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
+      <div className="hidden w-fit rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px xl:inline-flex">
         <button
           type="button"
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
@@ -2087,6 +2088,70 @@ export default function DashboardClient({
   const projectWorkspaceContent = useMemo(() => {
     if (!selectedProject) return workspaceMainPanel;
 
+    const renderWorkspaceViewToggle = (fullWidth = false) => (
+      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] p-1`}>
+        <button
+          type="button"
+          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
+          className={`min-h-[32px] flex-1 rounded-[4px] px-3 text-[13px] ${
+            workspaceView === "direct"
+              ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          Direct launch
+        </button>
+        <button
+          type="button"
+          onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
+          className={`min-h-[32px] flex-1 rounded-[4px] px-3 text-[13px] ${
+            workspaceView === "board"
+              ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          Board view
+        </button>
+      </div>
+    );
+
+    const renderBoardPaneToggle = (fullWidth = false) => (
+      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] p-1`}>
+        <button
+          type="button"
+          onClick={() => {
+            setBoardMobilePane("board");
+            navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace");
+          }}
+          aria-pressed={workspaceView === "board" && boardMobilePane === "board"}
+          className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
+            workspaceView === "board" && boardMobilePane === "board"
+              ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          <FolderKanban className="h-3.5 w-3.5 shrink-0" />
+          <span>Board</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setBoardMobilePane("chat");
+            navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace");
+          }}
+          aria-pressed={workspaceView === "board" && boardMobilePane === "chat"}
+          className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
+            workspaceView === "board" && boardMobilePane === "chat"
+              ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
+              : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+          }`}
+        >
+          <Bot className="h-3.5 w-3.5 shrink-0" />
+          <span>Dispatcher</span>
+        </button>
+      </div>
+    );
+
     if (workspaceView === "board") {
       const boardPaneStyle = {
         "--dispatcher-panel-width": `${dispatcherPanelWidth}px`,
@@ -2096,7 +2161,6 @@ export default function DashboardClient({
       const showBoardPane = !boardSinglePane || boardMobilePane === "board";
       const showChatPane = !boardSinglePane || boardMobilePane === "chat";
       const dispatcherCollapsedOnWide = wideBoardViewport && dispatcherCollapsed && selectedSessionId === null;
-      const chatPaneLabel = selectedSessionId ? "Chat" : "Dispatcher";
       const showBoardSidePaneResizeHandle = selectedSessionId !== null || !dispatcherCollapsed;
 
       return (
@@ -2106,34 +2170,7 @@ export default function DashboardClient({
         >
           {boardSinglePane ? (
             <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 xl:hidden">
-              <div className="inline-flex w-full rounded-[6px] border border-[var(--vk-border)] p-1">
-                <button
-                  type="button"
-                  onClick={() => setBoardMobilePane("board")}
-                  aria-pressed={boardMobilePane === "board"}
-                  className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
-                    boardMobilePane === "board"
-                      ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                      : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                  }`}
-                >
-                  <FolderKanban className="h-3.5 w-3.5 shrink-0" />
-                  <span>Board</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setBoardMobilePane("chat")}
-                  aria-pressed={boardMobilePane === "chat"}
-                  className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
-                    boardMobilePane === "chat"
-                      ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                      : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                  }`}
-                >
-                  <Bot className="h-3.5 w-3.5 shrink-0" />
-                  <span>{chatPaneLabel}</span>
-                </button>
-              </div>
+              {renderWorkspaceViewToggle(true)}
             </div>
           ) : null}
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row">
@@ -2157,6 +2194,18 @@ export default function DashboardClient({
                 ? "flex-1 min-h-0 xl:h-auto xl:max-h-none xl:w-[56px] xl:flex-none xl:min-h-0"
                 : boardPaneExpandedClass
             } flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0`}>
+              {boardSinglePane && showChatPane ? (
+                <div className="flex items-center border-b border-[var(--vk-border)] px-3 py-2 xl:hidden">
+                  <button
+                    type="button"
+                    onClick={() => setBoardMobilePane("board")}
+                    className="inline-flex items-center gap-1.5 rounded-[4px] px-2 py-1 text-[12px] font-medium text-[var(--vk-text-muted)] transition-colors hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-strong)]"
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5 shrink-0" />
+                    <span>Back to board</span>
+                  </button>
+                </div>
+              ) : null}
               {selectedSessionId ? (
                 dockedBoardSession ? (
                   <SessionDetail
@@ -2203,25 +2252,11 @@ export default function DashboardClient({
               </p>
             </div>
 
-            <div className="inline-flex w-fit rounded-[6px] border border-[var(--vk-border)] p-1">
-              <button
-                type="button"
-                onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
-                className={`min-h-[32px] rounded-[4px] px-3 text-[13px] ${
-                  workspaceView === "direct"
-                    ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
-                    : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-                }`}
-              >
-                Direct launch
-              </button>
-              <button
-                type="button"
-                onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
-                className="min-h-[32px] rounded-[4px] px-3 text-[13px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
-              >
-                Board view
-              </button>
+            <div className="hidden xl:inline-flex">
+              {renderWorkspaceViewToggle()}
+            </div>
+            <div className="xl:hidden">
+              {renderBoardPaneToggle(true)}
             </div>
           </div>
         </div>
