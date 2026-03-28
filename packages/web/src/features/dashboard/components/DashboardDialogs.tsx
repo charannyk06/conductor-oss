@@ -137,6 +137,33 @@ function extractRepositoryNameFromGitUrl(value: string): string | null {
   }
 }
 
+function resolveGitCloneFolderName(
+  gitUrl: string,
+  preferredName?: string | null,
+  fallbackName?: string | null,
+): string {
+  const preferred = preferredName?.trim();
+  if (preferred) return preferred;
+
+  const repositoryName = extractRepositoryNameFromGitUrl(gitUrl);
+  if (repositoryName) return repositoryName;
+
+  const fallback = fallbackName?.trim();
+  if (fallback) return fallback;
+
+  return "workspace";
+}
+
+function joinPathSegments(basePath: string, child: string): string {
+  const trimmedBase = basePath.trim().replace(/[\\/]+$/, "");
+  const trimmedChild = child.trim().replace(/^[\\/]+/, "");
+  if (!trimmedBase) return trimmedChild;
+  if (!trimmedChild) return trimmedBase;
+
+  const separator = trimmedBase.includes("\\") && !trimmedBase.includes("/") ? "\\" : "/";
+  return `${trimmedBase}${separator}${trimmedChild}`;
+}
+
 function normalizeGitHubRepositoryUrl(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -716,7 +743,7 @@ export function NewWorkspaceDialog({
   bridgeId?: string | null;
 }) {
   const [mode, setMode] = useState<"git" | "local">("git");
-  const [step, setStep] = useState<"source" | "details">("source");
+  const [step, setStep] = useState<"source" | "details" | "review">("source");
   const [projectId, setProjectId] = useState("");
   const [projectIdTouched, setProjectIdTouched] = useState(false);
   const [gitUrl, setGitUrl] = useState("");
@@ -725,7 +752,7 @@ export function NewWorkspaceDialog({
   const [defaultBranch, setDefaultBranch] = useState("main");
   const [agent, setAgent] = useState(defaultAgent);
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
-  const [useWorktree, setUseWorktree] = useState(false);
+  const [useWorktree, setUseWorktree] = useState(true);
   const [initializeGit, setInitializeGit] = useState(true);
   const [githubRepos, setGithubRepos] = useState<GitHubRepo[]>([]);
   const [githubReposLoading, setGithubReposLoading] = useState(false);
@@ -750,7 +777,7 @@ export function NewWorkspaceDialog({
     setClonePath("");
     setDefaultBranch("main");
     setInitializeGit(true);
-    setUseWorktree(false);
+    setUseWorktree(true);
     setAgent(defaultAgent);
     setModelSelection(emptyModelSelection());
     setGithubRepos([]);
@@ -789,7 +816,7 @@ export function NewWorkspaceDialog({
   useEffect(() => {
     if (!open) return;
     const sourceReady = mode === "git" ? gitUrl.trim().length > 0 : localPath.trim().length > 0;
-    if (step === "details" && !sourceReady) {
+    if (step !== "source" && !sourceReady) {
       setStep("source");
     }
   }, [gitUrl, localPath, mode, open, step]);
@@ -825,6 +852,26 @@ export function NewWorkspaceDialog({
   const sourceReady = mode === "git"
     ? gitUrl.trim().length > 0
     : localPath.trim().length > 0;
+  const derivedProjectId = useMemo(() => {
+    const explicitId = suggestWorkspaceId(projectId);
+    if (explicitId) return explicitId;
+
+    if (mode === "git") {
+      return suggestWorkspaceId(
+        resolveGitCloneFolderName(gitUrl, selectedGitHubRepoData?.name),
+      );
+    }
+
+    return suggestWorkspaceId(extractNameFromPath(localPath) ?? "workspace");
+  }, [gitUrl, localPath, mode, projectId, selectedGitHubRepoData?.name]);
+  const cloneFolderName = useMemo(
+    () => resolveGitCloneFolderName(gitUrl, selectedGitHubRepoData?.name, derivedProjectId),
+    [derivedProjectId, gitUrl, selectedGitHubRepoData?.name],
+  );
+  const resolvedClonePath = useMemo(() => {
+    if (clonePath.trim().length === 0) return "";
+    return joinPathSegments(clonePath, cloneFolderName);
+  }, [cloneFolderName, clonePath]);
   const selectedSourceTitle = useMemo(() => {
     if (mode === "git") {
       return selectedGitHubRepoData?.fullName ?? gitUrl.trim();
@@ -1004,30 +1051,35 @@ export function NewWorkspaceDialog({
     setStep("details");
   };
 
+  const handleContinueToReview = () => {
+    if (!sourceReady || defaultBranch.trim().length === 0 || creating) return;
+    setStep("review");
+  };
+
   if (!open) return null;
 
   const canSubmit = sourceReady && defaultBranch.trim().length > 0;
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (step !== "details" || !canSubmit || creating) return;
+    if (step !== "review" || !canSubmit || creating) return;
 
     const payload: NewWorkspacePayload =
       mode === "git"
         ? {
             mode,
-            projectId: projectId.trim() || undefined,
+            projectId: derivedProjectId || undefined,
             agent,
             agentModel: resolveModelSelectionValue(modelSelection) ?? "",
             agentReasoningEffort: resolveReasoningSelectionValue(modelSelection) ?? "",
             defaultBranch: defaultBranch.trim(),
             useWorktree,
             gitUrl: gitUrl.trim(),
-            path: clonePath.trim() || undefined,
+            path: resolvedClonePath || undefined,
           }
         : {
             mode,
-            projectId: projectId.trim() || undefined,
+            projectId: derivedProjectId || undefined,
             agent,
             agentModel: resolveModelSelectionValue(modelSelection) ?? "",
             agentReasoningEffort: resolveReasoningSelectionValue(modelSelection) ?? "",
@@ -1064,21 +1116,28 @@ export function NewWorkspaceDialog({
                 <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-[18px] leading-[22px] text-[var(--vk-text-strong)]">Add Workspace</h2>
                   <span className="inline-flex rounded-full border border-[var(--vk-border)] px-2 py-0.5 text-[11px] text-[var(--vk-text-muted)]">
-                    {step === "source" ? "Step 1 of 2" : "Step 2 of 2"}
+                    {step === "source" ? "Step 1 of 3" : step === "details" ? "Step 2 of 3" : "Step 3 of 3"}
                   </span>
                 </div>
                 <p className="pt-1 text-[12px] text-[var(--vk-text-muted)]">
                   {step === "source"
                     ? "Start with the repository or folder you want Conductor to manage."
-                    : "Confirm the defaults Conductor should use when this workspace is created."}
+                    : step === "details"
+                      ? "Confirm the project defaults Conductor should use when this workspace is created."
+                      : "Review the project and destination details before Conductor adds it."}
                 </p>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   {[
                     { id: "source", label: mode === "git" ? "Repository" : "Folder" },
-                    { id: "details", label: "Defaults" },
+                    { id: "details", label: "Project" },
+                    { id: "review", label: "Review" },
                   ].map((item) => {
                     const active = step === item.id;
-                    const complete = item.id === "source" && step === "details" && sourceReady;
+                    const complete = item.id === "source"
+                      ? step !== "source" && sourceReady
+                      : item.id === "details"
+                        ? step === "review"
+                        : false;
                     return (
                       <div
                         key={item.id}
@@ -1095,7 +1154,7 @@ export function NewWorkspaceDialog({
                               ? "border-[var(--vk-orange)] text-[var(--vk-text-strong)]"
                               : "border-[var(--vk-border)]"
                         }`}>
-                          {complete ? <Check className="h-3 w-3" /> : item.id === "source" ? "1" : "2"}
+                          {complete ? <Check className="h-3 w-3" /> : item.id === "source" ? "1" : item.id === "details" ? "2" : "3"}
                         </span>
                         <span>{item.label}</span>
                       </div>
@@ -1342,7 +1401,7 @@ export function NewWorkspaceDialog({
 
                 {error ? <p className="text-[12px] text-[var(--vk-red)]">{error}</p> : null}
               </div>
-            ) : (
+            ) : step === "details" ? (
               <div className="space-y-4">
                 <div className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3 sm:p-4">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -1555,14 +1614,14 @@ export function NewWorkspaceDialog({
                     ) : (
                       <label className="block">
                         <span className="mb-1.5 block text-[12px] text-[var(--vk-text-muted)]">
-                          Clone into a specific folder
+                          Clone into parent folder
                         </span>
                         <div className="flex items-center gap-2">
                           <input
                             value={clonePath}
                             readOnly
                             onClick={() => openFolderPicker("clone")}
-                            placeholder="Leave empty to use Conductor's default workspace location"
+                            placeholder="Leave empty to use Conductor's default repo location"
                             className="h-10 w-full cursor-pointer rounded-[8px] border border-[var(--vk-border)] bg-transparent px-3 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
                           />
                           <button
@@ -1574,10 +1633,85 @@ export function NewWorkspaceDialog({
                             <FolderOpen className="h-4 w-4" />
                           </button>
                         </div>
+                        <p className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">
+                          {resolvedClonePath
+                            ? `Conductor will create ${resolvedClonePath}.`
+                            : "Conductor will create the cloned repository inside the selected parent folder."}
+                        </p>
                       </label>
                     )}
                   </div>
                 </details>
+
+                {error ? <p className="text-[12px] text-[var(--vk-red)]">{error}</p> : null}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3 sm:p-4">
+                  <p className="text-[13px] font-medium text-[var(--vk-text-strong)]">Review project</p>
+                  <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                    Conductor will add <span className="font-medium text-[var(--vk-text-normal)]">{derivedProjectId || "workspace"}</span>
+                    {" "}and sync the board plus support files for this project.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3 sm:p-4">
+                    <p className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">Project</p>
+                    <p className="mt-2 text-[15px] font-medium text-[var(--vk-text-strong)]">
+                      {derivedProjectId || "workspace"}
+                    </p>
+                    <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                      {projectId.trim().length > 0
+                        ? "Uses the custom workspace name you entered."
+                        : "Auto-derived from the selected repository or folder."}
+                    </p>
+                  </div>
+
+                  <div className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3 sm:p-4">
+                    <p className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">Source</p>
+                    <p className="mt-2 break-words text-[15px] font-medium text-[var(--vk-text-strong)]">
+                      {selectedSourceTitle}
+                    </p>
+                    <p className="mt-1 break-all text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                      {selectedSourceSubtitle}
+                    </p>
+                  </div>
+
+                  <div className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3 sm:p-4">
+                    <p className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">Destination</p>
+                    <p className="mt-2 break-all text-[15px] font-medium text-[var(--vk-text-strong)]">
+                      {mode === "git"
+                        ? (resolvedClonePath || "Conductor default repo location")
+                        : localPath}
+                    </p>
+                    <p className="mt-1 text-[12px] leading-5 text-[var(--vk-text-muted)]">
+                      {mode === "git"
+                        ? (resolvedClonePath
+                          ? `The repository will be cloned into ${resolvedClonePath}.`
+                          : "Conductor will choose the default clone location for this repository.")
+                        : "Conductor will link the selected folder directly."}
+                    </p>
+                  </div>
+
+                  <div className="rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] p-3 sm:p-4">
+                    <p className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">Runtime Defaults</p>
+                    <div className="mt-2 space-y-2 text-[13px] text-[var(--vk-text-normal)]">
+                      <p>Branch: <span className="text-[var(--vk-text-strong)]">{defaultBranch.trim() || "main"}</span></p>
+                      <p>Agent: <span className="text-[var(--vk-text-strong)]">{getAgentLabel(agent)}</span></p>
+                      <p>Isolation: <span className="text-[var(--vk-text-strong)]">{useWorktree ? "Worktree enabled" : "Runs on selected branch"}</span></p>
+                      {resolveModelSelectionValue(modelSelection) ? (
+                        <p>Model: <span className="text-[var(--vk-text-strong)]">{resolveModelSelectionValue(modelSelection)}</span></p>
+                      ) : null}
+                      {resolveReasoningSelectionValue(modelSelection) ? (
+                        <p>Reasoning: <span className="text-[var(--vk-text-strong)]">{resolveReasoningSelectionValue(modelSelection)}</span></p>
+                      ) : null}
+                      {mode === "local" ? (
+                        <p>Git init: <span className="text-[var(--vk-text-strong)]">{initializeGit ? "Enabled if needed" : "Disabled"}</span></p>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
 
                 {error ? <p className="text-[12px] text-[var(--vk-red)]">{error}</p> : null}
               </div>
@@ -1610,11 +1744,30 @@ export function NewWorkspaceDialog({
                   {mode === "local" && !sourceReady ? "Choose folder" : "Continue"}
                 </button>
               </div>
-            ) : (
+            ) : step === "details" ? (
               <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <button
                   type="button"
                   onClick={() => setStep("source")}
+                  disabled={creating}
+                  className="inline-flex h-10 items-center justify-center rounded-[8px] border border-[var(--vk-border)] px-4 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                >
+                  Back
+                </button>
+                <button
+                  type="button"
+                  onClick={handleContinueToReview}
+                  disabled={!canSubmit || creating}
+                  className="inline-flex h-10 items-center justify-center rounded-[8px] bg-[var(--vk-bg-active)] px-4 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                >
+                  Review
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <button
+                  type="button"
+                  onClick={() => setStep("details")}
                   disabled={creating}
                   className="inline-flex h-10 items-center justify-center rounded-[8px] border border-[var(--vk-border)] px-4 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
                 >
@@ -1642,10 +1795,10 @@ export function NewWorkspaceDialog({
         open={folderPickerOpen}
         bridgeId={bridgeId}
         initialPath={folderPickerTarget === "clone" ? clonePath : localPath}
-        title={folderPickerTarget === "local" ? "Select Local Repository" : "Select Clone Target Folder"}
+        title={folderPickerTarget === "local" ? "Select Local Repository" : "Select Clone Parent Folder"}
         description={folderPickerTarget === "local"
           ? "Choose the local repository folder."
-          : "Choose where the git repository should be cloned."}
+          : "Choose the parent folder where Conductor should create the cloned repository."}
         onClose={() => setFolderPickerOpen(false)}
         onSelect={(selectedPath) => {
           setFolderPickerOpen(false);

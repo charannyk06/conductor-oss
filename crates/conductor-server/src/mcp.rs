@@ -488,9 +488,9 @@ where
     let mut reader = BufReader::new(reader);
     let mut writer = writer;
 
-    while let Some(request) = read_jsonrpc_request(&mut reader).await? {
+    while let Some((request, wire_format)) = read_jsonrpc_request(&mut reader).await? {
         if let Some(response) = handle_jsonrpc_request(backend.as_ref(), request).await? {
-            write_jsonrpc_response(&mut writer, &response).await?;
+            write_jsonrpc_response(&mut writer, &response, wire_format).await?;
             writer.flush().await?;
         }
     }
@@ -498,11 +498,18 @@ where
     Ok(())
 }
 
-async fn read_jsonrpc_request<R>(reader: &mut BufReader<R>) -> Result<Option<JsonRpcRequest>>
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonRpcWireFormat {
+    ContentLength,
+    NewlineDelimited,
+}
+
+async fn read_jsonrpc_request<R>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<(JsonRpcRequest, JsonRpcWireFormat)>>
 where
     R: AsyncRead + Unpin,
 {
-    let mut content_length = None;
     let mut line = String::new();
 
     loop {
@@ -512,10 +519,18 @@ where
             return Ok(None);
         }
 
-        if line == "\r\n" || line == "\n" {
-            break;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
         }
 
+        if trimmed.starts_with('{') {
+            let request = serde_json::from_str(trimmed)
+                .context("Failed to decode newline-delimited JSON-RPC request")?;
+            return Ok(Some((request, JsonRpcWireFormat::NewlineDelimited)));
+        }
+
+        let mut content_length = None;
         if let Some((name, value)) = line.split_once(':') {
             if name.eq_ignore_ascii_case("Content-Length") {
                 content_length = Some(
@@ -526,24 +541,59 @@ where
                 );
             }
         }
-    }
 
-    let length = content_length.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
-    let mut payload = vec![0u8; length];
-    reader.read_exact(&mut payload).await?;
-    serde_json::from_slice(&payload)
-        .context("Failed to decode JSON-RPC request")
-        .map(Some)
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line).await?;
+            if read == 0 {
+                return Ok(None);
+            }
+
+            if line == "\r\n" || line == "\n" {
+                break;
+            }
+
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("Content-Length") {
+                    content_length = Some(
+                        value
+                            .trim()
+                            .parse::<usize>()
+                            .context("Invalid Content-Length header")?,
+                    );
+                }
+            }
+        }
+
+        let length = content_length.ok_or_else(|| anyhow!("Missing Content-Length header"))?;
+        let mut payload = vec![0u8; length];
+        reader.read_exact(&mut payload).await?;
+        let request =
+            serde_json::from_slice(&payload).context("Failed to decode JSON-RPC request")?;
+        return Ok(Some((request, JsonRpcWireFormat::ContentLength)));
+    }
 }
 
-async fn write_jsonrpc_response<W>(writer: &mut W, response: &JsonRpcResponse) -> Result<()>
+async fn write_jsonrpc_response<W>(
+    writer: &mut W,
+    response: &JsonRpcResponse,
+    wire_format: JsonRpcWireFormat,
+) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     let body = serde_json::to_vec(response)?;
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    writer.write_all(header.as_bytes()).await?;
-    writer.write_all(&body).await?;
+    match wire_format {
+        JsonRpcWireFormat::ContentLength => {
+            let header = format!("Content-Length: {}\r\n\r\n", body.len());
+            writer.write_all(header.as_bytes()).await?;
+            writer.write_all(&body).await?;
+        }
+        JsonRpcWireFormat::NewlineDelimited => {
+            writer.write_all(&body).await?;
+            writer.write_all(b"\n").await?;
+        }
+    }
     Ok(())
 }
 
@@ -1520,9 +1570,10 @@ pub struct JsonRpcResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
 pub enum JsonRpcPayload {
+    #[serde(rename = "result")]
     Result(Value),
+    #[serde(rename = "error")]
     Error(JsonRpcError),
 }
 
@@ -2105,7 +2156,7 @@ mod tests {
         };
         let (mut client, mut server) = duplex(1024);
 
-        write_jsonrpc_response(&mut server, &response)
+        write_jsonrpc_response(&mut server, &response, JsonRpcWireFormat::ContentLength)
             .await
             .unwrap();
         server.shutdown().await.unwrap();
@@ -2115,5 +2166,30 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.starts_with("Content-Length: "));
         assert!(output.contains("\r\n\r\n{\"jsonrpc\":\"2.0\""));
+    }
+
+    #[tokio::test]
+    async fn stdio_supports_newline_delimited_jsonrpc() {
+        let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n";
+        let input = request.as_bytes().to_vec();
+        let backend: Arc<dyn McpBackend> = Arc::new(MockBackend);
+        let (mut client, server) = duplex(4096);
+
+        let task = tokio::spawn(async move {
+            serve_stdio_streams(backend, std::io::Cursor::new(input), server)
+                .await
+                .expect("newline-delimited stdio should succeed");
+        });
+
+        let mut output = String::new();
+        client.read_to_string(&mut output).await.unwrap();
+        task.await.unwrap();
+
+        assert!(output.starts_with("{\"jsonrpc\":\"2.0\""));
+        assert!(output.ends_with('\n'));
+        let response: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("response should be valid JSON");
+        assert_eq!(response["id"], 1);
+        assert!(response["result"]["tools"].is_array());
     }
 }

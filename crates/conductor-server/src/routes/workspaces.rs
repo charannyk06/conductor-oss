@@ -165,6 +165,15 @@ async fn create_workspace(
             .map(normalize_token)
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| normalize_token(repo_name));
+        if state.config.read().await.projects.contains_key(&project_id) {
+            return error(
+                StatusCode::CONFLICT,
+                format!(
+                    "Project '{}' already exists. Choose a different workspace name before adding it again.",
+                    project_id
+                ),
+            );
+        }
         let path = body
             .path
             .as_deref()
@@ -188,12 +197,6 @@ async fn create_workspace(
             Ok(path) => path,
             Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
         };
-        let project_id = body
-            .project_id
-            .as_deref()
-            .map(normalize_token)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| normalize_token(repo_name));
         return persist_workspace(
             state,
             &project_id,
@@ -240,6 +243,15 @@ async fn create_workspace(
             .map(normalize_token)
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| normalize_token(folder_name));
+        if state.config.read().await.projects.contains_key(&project_id) {
+            return error(
+                StatusCode::CONFLICT,
+                format!(
+                    "Project '{}' already exists. Choose a different workspace name before adding it again.",
+                    project_id
+                ),
+            );
+        }
         let repo = local_repo_name(&canonical_path).await.ok();
         return persist_workspace(
             state,

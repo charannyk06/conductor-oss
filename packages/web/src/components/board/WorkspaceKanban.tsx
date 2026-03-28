@@ -301,8 +301,12 @@ const DEFAULT_BOARD_LIST_VIEW_STATE: BoardListViewState = {
   agents: [],
   sortField: "title",
   sortDir: "asc",
-  groupBy: "none",
+  groupBy: "status",
   collapsedGroups: [],
+};
+const LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE: BoardListViewState = {
+  ...DEFAULT_BOARD_LIST_VIEW_STATE,
+  groupBy: "none",
 };
 const BOARD_LIST_QUICK_FILTERS: Array<{
   label: string;
@@ -436,6 +440,27 @@ function countBoardListFilters(state: BoardListViewState): number {
   return count;
 }
 
+function normalizeBoardListGroupBy(value: unknown): BoardListGroupBy {
+  return value === "status" || value === "priority" || value === "assignee" || value === "none"
+    ? value
+    : DEFAULT_BOARD_LIST_VIEW_STATE.groupBy;
+}
+
+function isLegacyDefaultBoardListViewState(state: BoardListViewState): boolean {
+  return (
+    boardListValuesEqual(state.roles, LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE.roles)
+    && boardListValuesEqual(state.priorities, LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE.priorities)
+    && boardListValuesEqual(state.agents, LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE.agents)
+    && state.sortField === LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE.sortField
+    && state.sortDir === LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE.sortDir
+    && state.groupBy === LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE.groupBy
+    && boardListValuesEqual(
+      state.collapsedGroups,
+      LEGACY_DEFAULT_BOARD_LIST_VIEW_STATE.collapsedGroups,
+    )
+  );
+}
+
 function readBoardListViewState(storageKey: string): BoardListViewState {
   if (typeof window === "undefined") {
     return { ...DEFAULT_BOARD_LIST_VIEW_STATE };
@@ -444,7 +469,7 @@ function readBoardListViewState(storageKey: string): BoardListViewState {
     const raw = window.localStorage.getItem(storageKey);
     if (!raw) return { ...DEFAULT_BOARD_LIST_VIEW_STATE };
     const parsed = JSON.parse(raw) as Partial<BoardListViewState>;
-    return {
+    const nextState: BoardListViewState = {
       ...DEFAULT_BOARD_LIST_VIEW_STATE,
       ...parsed,
       roles: Array.isArray(parsed.roles)
@@ -458,10 +483,14 @@ function readBoardListViewState(storageKey: string): BoardListViewState {
       agents: Array.isArray(parsed.agents)
         ? parsed.agents.filter((value) => typeof value === "string")
         : [],
+      groupBy: normalizeBoardListGroupBy(parsed.groupBy),
       collapsedGroups: Array.isArray(parsed.collapsedGroups)
         ? parsed.collapsedGroups.filter((value) => typeof value === "string")
         : [],
     };
+    return isLegacyDefaultBoardListViewState(nextState)
+      ? { ...nextState, groupBy: DEFAULT_BOARD_LIST_VIEW_STATE.groupBy }
+      : nextState;
   } catch {
     return { ...DEFAULT_BOARD_LIST_VIEW_STATE };
   }
@@ -1867,6 +1896,7 @@ export function WorkspaceKanban({
     preferences?.markdownEditor?.trim() || "obsidian";
   const contextOpenLabel = getContextOpenLabel(preferredMarkdownEditor);
   const [pageVisible, setPageVisible] = useState(true);
+  const [desktopListGroupingEnabled, setDesktopListGroupingEnabled] = useState(false);
 
   const orderedAgentOptions = useMemo(() => {
     const normalized = [...new Set(agentOptions.filter(Boolean))];
@@ -1879,6 +1909,26 @@ export function WorkspaceKanban({
   useEffect(() => {
     latestBoardRef.current = board;
   }, [board]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(min-width: 640px)");
+    const syncViewport = () => {
+      setDesktopListGroupingEnabled(mediaQuery.matches);
+    };
+
+    syncViewport();
+    mediaQuery.addEventListener?.("change", syncViewport);
+    window.addEventListener("resize", syncViewport);
+
+    return () => {
+      mediaQuery.removeEventListener?.("change", syncViewport);
+      window.removeEventListener("resize", syncViewport);
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2336,6 +2386,15 @@ export function WorkspaceKanban({
         })
       );
   }, [boardListEntries, boardListView.groupBy]);
+  const collapsibleBoardListGroupKeys = useMemo(
+    () => groupedBoardListEntries
+      .filter((group) => group.label != null)
+      .map((group) => group.key),
+    [groupedBoardListEntries]
+  );
+  const allBoardListGroupsCollapsed =
+    collapsibleBoardListGroupKeys.length > 0
+    && collapsibleBoardListGroupKeys.every((key) => boardListView.collapsedGroups.includes(key));
 
   const filteredContextFiles = useMemo(() => {
     const query = contextSearch.trim().toLowerCase();
@@ -3044,6 +3103,27 @@ export function WorkspaceKanban({
                 <Plus className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">New Issue</span>
               </button>
+              {collapsibleBoardListGroupKeys.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateBoardListView({
+                      collapsedGroups: allBoardListGroupsCollapsed
+                        ? []
+                        : collapsibleBoardListGroupKeys,
+                    })
+                  }
+                  className="hidden h-[31px] w-[31px] items-center justify-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:inline-flex"
+                  aria-label={allBoardListGroupsCollapsed ? "Expand groups" : "Collapse groups"}
+                  title={allBoardListGroupsCollapsed ? "Expand groups" : "Collapse groups"}
+                >
+                  {allBoardListGroupsCollapsed ? (
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              ) : null}
 
               <label className="relative w-48 sm:w-64 md:w-80">
                 <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--vk-text-muted)]" />
@@ -3856,6 +3936,7 @@ export function WorkspaceKanban({
             <div className="space-y-4">
               {groupedBoardListEntries.map((group) => {
                 const isCollapsed =
+                  desktopListGroupingEnabled &&
                   group.label != null &&
                   boardListView.collapsedGroups.includes(group.key);
                 const composerRole =
@@ -3868,29 +3949,35 @@ export function WorkspaceKanban({
                   <section key={group.key} className="space-y-2">
                     {group.label ? (
                       <div className="flex items-center py-1.5 pl-1 pr-3">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updateBoardListView({
-                              collapsedGroups: isCollapsed
-                                ? boardListView.collapsedGroups.filter(
-                                    (key) => key !== group.key
-                                  )
-                                : [...boardListView.collapsedGroups, group.key],
-                            })
-                          }
-                          className="flex items-center gap-1.5"
-                        >
-                          <ChevronRight
-                            className={cn(
-                              "h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)] transition-transform",
-                              !isCollapsed && "rotate-90"
-                            )}
-                          />
+                        {desktopListGroupingEnabled ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateBoardListView({
+                                collapsedGroups: isCollapsed
+                                  ? boardListView.collapsedGroups.filter(
+                                      (key) => key !== group.key
+                                    )
+                                  : [...boardListView.collapsedGroups, group.key],
+                              })
+                            }
+                            className="hidden items-center gap-1.5 sm:flex"
+                          >
+                            <ChevronRight
+                              className={cn(
+                                "h-3.5 w-3.5 shrink-0 text-[var(--vk-text-muted)] transition-transform",
+                                !isCollapsed && "rotate-90"
+                              )}
+                            />
+                            <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-normal)]">
+                              {group.label}
+                            </span>
+                          </button>
+                        ) : (
                           <span className="text-[12px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-normal)]">
                             {group.label}
                           </span>
-                        </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => openComposer(composerRole)}

@@ -7,7 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
-  BrainCircuit,
+  Braces,
   Check,
   ChevronDown,
   ChevronRight,
@@ -345,6 +345,40 @@ function truncateInline(value: string, maxLength = 84): string {
   return `${collapsed.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
 
+function ExpandableInlineText({
+  value,
+  maxLength = 84,
+  className,
+}: {
+  value: string;
+  maxLength?: number;
+  className?: string;
+}) {
+  const normalized = value.trim();
+  const canExpand = normalized.length > maxLength || value.includes("\n");
+  const [expanded, setExpanded] = useState(false);
+
+  if (!canExpand) {
+    return <span className={className}>{normalized}</span>;
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setExpanded((current) => !current)}
+      aria-expanded={expanded}
+      title={expanded ? "Collapse text" : "Expand text"}
+      className={cn(
+        "max-w-full text-left transition-colors hover:bg-[rgba(255,255,255,0.08)]",
+        expanded ? "whitespace-pre-wrap break-words" : "truncate",
+        className,
+      )}
+    >
+      {expanded ? normalized : truncateInline(normalized, maxLength)}
+    </button>
+  );
+}
+
 function formatAgentName(value: string): string {
   const known = getKnownAgent(value);
   if (known?.label) {
@@ -481,7 +515,7 @@ function ToolGlyph({
   const normalizedKind = toolKind?.trim().toLowerCase() ?? "";
 
   if (normalizedKind === "thinking" || normalizedTitle === "thinking") {
-    return <BrainCircuit className={cn(className, "text-[#d7b6a5]")} />;
+    return <Braces className={cn(className, "text-[var(--vk-text-normal)]")} />;
   }
   if (
     normalizedKind === "read" ||
@@ -565,19 +599,22 @@ function SessionFeedMessage({
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-[var(--vk-text-normal)]">{toolTitle || "Tool call"}</span>
             {toolPrimary ? (
-              <span
-                className="max-w-full truncate rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
-                title={toolPrimary}
-              >
-                {truncateInline(toolPrimary, 72)}
-              </span>
+              <ExpandableInlineText
+                value={toolPrimary}
+                maxLength={72}
+                className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
+              />
             ) : null}
             {timestamp ? (
               <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
             ) : null}
           </div>
           {toolSecondary ? (
-            <p className="text-[12px] leading-5 text-[var(--vk-text-muted)]">{truncateInline(toolSecondary, 140)}</p>
+            <ExpandableInlineText
+              value={toolSecondary}
+              maxLength={140}
+              className="block rounded-[6px] bg-[rgba(255,255,255,0.03)] px-2 py-1 text-[12px] leading-5 text-[var(--vk-text-muted)]"
+            />
           ) : null}
         </div>
       </div>
@@ -588,18 +625,17 @@ function SessionFeedMessage({
     return (
       <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
         <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
-          <BrainCircuit className="h-4 w-4 animate-pulse text-[#d7b6a5]" />
+          <Braces className="h-4 w-4 text-[var(--vk-text-normal)]" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-[var(--vk-text-normal)]">Thinking</span>
             {entry.text.trim().length > 0 ? (
-              <span
-                className="max-w-full truncate rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
-                title={entry.text}
-              >
-                {truncateInline(entry.text, 96)}
-              </span>
+              <ExpandableInlineText
+                value={entry.text}
+                maxLength={96}
+                className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px] text-[var(--vk-text-muted)]"
+              />
             ) : null}
             {timestamp ? (
               <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">{timestamp}</span>
@@ -1144,7 +1180,7 @@ export function DispatcherSessionPane({
           <button
             type="button"
             onClick={onToggleCollapse}
-            className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            className="hidden h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:inline-flex"
             aria-label="Collapse dispatcher"
             title="Collapse dispatcher"
           >
@@ -1220,12 +1256,11 @@ export function DispatcherSessionPane({
                     <span>{payload.parserState.kind}</span>
                   </span>
                   {payload.parserState.command ? (
-                    <span
-                      className="max-w-full truncate rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
-                      title={payload.parserState.command}
-                    >
-                      {truncateInline(payload.parserState.command, 72)}
-                    </span>
+                    <ExpandableInlineText
+                      value={payload.parserState.command}
+                      maxLength={72}
+                      className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
+                    />
                   ) : null}
                 </>
               ) : null}

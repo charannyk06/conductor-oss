@@ -3,7 +3,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Check, ListTodo, Loader2, PencilLine } from "lucide-react";
+import { Check, ListTodo, Loader2, PencilLine, Trash2 } from "lucide-react";
 import { DispatcherPreferenceChips } from "@/components/dispatcher/DispatcherPreferenceChips";
 import { DispatcherSessionPane } from "@/components/dispatcher/DispatcherSessionPane";
 import {
@@ -24,6 +24,8 @@ type DispatcherPaneProps = {
   modelAccess?: ModelAccessPreferences;
   runtimeModelCatalogs?: Record<string, RuntimeAgentModelCatalog>;
   onSelectThread?: (threadId: string) => void;
+  onDeleteThread?: (threadId: string) => void | Promise<void>;
+  deletingThreadId?: string | null;
   onStartNewConversation?: () => void;
   creatingConversation?: boolean;
   onToggleCollapse?: () => void;
@@ -80,6 +82,8 @@ export function DispatcherPane({
   modelAccess = {} as ModelAccessPreferences,
   runtimeModelCatalogs = {},
   onSelectThread,
+  onDeleteThread,
+  deletingThreadId = null,
   onStartNewConversation,
   creatingConversation = false,
   onToggleCollapse,
@@ -98,6 +102,7 @@ export function DispatcherPane({
     [thread],
   );
   const [implementationAgent, setImplementationAgent] = useState(preferredImplementationAgent);
+  const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
     buildModelSelection(
       preferredImplementationAgent,
@@ -132,6 +137,7 @@ export function DispatcherPane({
     () => `threadId=${encodeURIComponent(thread.id)}`,
     [thread.id],
   );
+  const showThreadMenu = threads.length > 0 && (threads.length > 1 || Boolean(onDeleteThread));
 
   const persistPreferences = useCallback(
     async (nextAgent: string, nextSelection: ModelSelectionState) => {
@@ -190,14 +196,14 @@ export function DispatcherPane({
 
   const headerActions = (
     <>
-      {threads.length > 1 ? (
-        <DropdownMenu.Root>
+      {showThreadMenu ? (
+        <DropdownMenu.Root open={threadMenuOpen} onOpenChange={setThreadMenuOpen}>
           <DropdownMenu.Trigger asChild>
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-              aria-label="Switch dispatcher thread"
-              title="Switch dispatcher thread"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] sm:h-6 sm:w-6 sm:rounded-[3px]"
+              aria-label="Open dispatcher threads"
+              title="Open dispatcher threads"
             >
               <ListTodo className="h-3.5 w-3.5" />
             </button>
@@ -205,35 +211,73 @@ export function DispatcherPane({
           <DropdownMenu.Portal>
             <DropdownMenu.Content
               align="end"
+              collisionPadding={8}
               sideOffset={8}
-              className="z-50 min-w-[300px] rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
+              className="z-50 w-[calc(100vw-1rem)] max-w-[26rem] overflow-hidden rounded-[12px] border border-[rgba(255,255,255,0.08)] bg-[#1c1a19] p-2 shadow-[0_18px_50px_rgba(0,0,0,0.45)]"
             >
               <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
                 Threads
               </div>
-              {threads.map((candidate) => {
-                const selected = candidate.id === thread.id;
-                return (
-                  <DropdownMenu.Item
-                    key={candidate.id}
-                    onSelect={() => onSelectThread?.(candidate.id)}
-                    className="flex min-h-[52px] cursor-default items-start gap-3 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)]"
-                  >
-                    <span className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] text-[rgba(255,255,255,0.72)]">
-                      {selected ? <Check className="h-3 w-3" /> : <ListTodo className="h-3 w-3" />}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-medium">
-                        {summarizeThread(candidate)}
-                      </div>
-                      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[rgba(255,255,255,0.58)]">
-                        <span>{formatRelativeTimestamp(candidate.lastActivityAt)}</span>
-                        <span className="truncate">{candidate.id.slice(0, 8)}</span>
-                      </div>
+              <div className="max-h-[70vh] space-y-1 overflow-y-auto pr-1">
+                {threads.map((candidate) => {
+                  const selected = candidate.id === thread.id;
+                  const deleting = deletingThreadId === candidate.id;
+                  const summary = summarizeThread(candidate);
+                  return (
+                    <div key={candidate.id} className="flex items-stretch gap-2">
+                      <DropdownMenu.Item asChild>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectThread?.(candidate.id);
+                            setThreadMenuOpen(false);
+                          }}
+                          disabled={deleting}
+                          className="flex min-h-[64px] min-w-0 flex-1 items-start gap-3 rounded-[10px] px-3 py-3 text-left text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] text-[rgba(255,255,255,0.72)]">
+                            {selected ? <Check className="h-3 w-3" /> : <ListTodo className="h-3 w-3" />}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block break-words text-[13px] font-medium leading-5">
+                              {summary}
+                            </span>
+                            <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[rgba(255,255,255,0.58)]">
+                              <span>{formatRelativeTimestamp(candidate.lastActivityAt)}</span>
+                              <span className="truncate">{candidate.id.slice(0, 8)}</span>
+                            </span>
+                          </span>
+                        </button>
+                      </DropdownMenu.Item>
+                      {onDeleteThread ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (
+                              typeof window !== "undefined" &&
+                              !window.confirm(`Delete this dispatcher thread?\n\n${summary}`)
+                            ) {
+                              return;
+                            }
+                            setThreadMenuOpen(false);
+                            void onDeleteThread(candidate.id);
+                          }}
+                          disabled={Boolean(deletingThreadId)}
+                          className="inline-flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] text-[rgba(255,255,255,0.68)] transition hover:border-[rgba(210,81,81,0.4)] hover:bg-[rgba(210,81,81,0.12)] hover:text-[#f08b8b] disabled:cursor-not-allowed disabled:opacity-50"
+                          aria-label={`Delete thread ${summary}`}
+                          title="Delete thread"
+                        >
+                          {deleting ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                        </button>
+                      ) : null}
                     </div>
-                  </DropdownMenu.Item>
-                );
-              })}
+                  );
+                })}
+              </div>
             </DropdownMenu.Content>
           </DropdownMenu.Portal>
         </DropdownMenu.Root>
@@ -243,7 +287,7 @@ export function DispatcherPane({
           type="button"
           onClick={onStartNewConversation}
           disabled={creatingConversation}
-          className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:cursor-not-allowed disabled:opacity-60"
+          className="inline-flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] disabled:cursor-not-allowed disabled:opacity-60 sm:h-6 sm:w-6 sm:rounded-[3px]"
           aria-label="Start new dispatcher thread"
           title="Start new dispatcher thread"
         >

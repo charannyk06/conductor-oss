@@ -5,6 +5,7 @@ use axum::http::{Request, StatusCode};
 use common::{TestExecutor, TestHarness};
 use conductor_core::types::AgentKind;
 use conductor_server::state::SessionRecord;
+use serde_json::json;
 use std::sync::Arc;
 use tower::util::ServiceExt;
 
@@ -178,4 +179,36 @@ async fn smoke_all_route_modules() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn create_workspace_rejects_duplicate_project_id() {
+    let harness = TestHarness::new("conductor-api-workspace-duplicate", "ttyd").await;
+    let duplicate_repo = harness.root.join("duplicate-repo");
+    common::seed_git_repo(&duplicate_repo);
+
+    let response = harness
+        .app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/workspaces")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "mode": "local",
+                        "projectId": "demo",
+                        "path": duplicate_repo.to_string_lossy().to_string(),
+                        "defaultBranch": "main",
+                        "agent": "codex",
+                        "useWorktree": true,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }

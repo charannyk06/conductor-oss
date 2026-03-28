@@ -50,6 +50,7 @@ export function ProjectDispatcherPanel({
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [implementationAgent, setImplementationAgent] = useState(defaultAgent);
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
@@ -161,6 +162,41 @@ export function ProjectDispatcherPanel({
     }
   }, [bridgeId, implementationAgent, modelSelection.catalogModel, modelSelection.customModel, modelSelection.reasoningEffort, projectId]);
 
+  const handleDeleteThread = useCallback(async (threadId: string) => {
+    setDeletingThreadId(threadId);
+    setError(null);
+    try {
+      const response = await fetch(
+        withBridgeQuery(
+          `/api/projects/${projectId}/dispatcher?threadId=${encodeURIComponent(threadId)}`,
+          bridgeId,
+        ),
+        {
+          method: "DELETE",
+        },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to delete dispatcher thread");
+      }
+
+      const remainingThreads = dispatcherThreads
+        .filter((candidate) => candidate.id !== threadId)
+        .sort(compareSessionsByActivity);
+      setDispatcherThreads(remainingThreads);
+      setSelectedThreadId((current) => {
+        if (current && current !== threadId && remainingThreads.some((candidate) => candidate.id === current)) {
+          return current;
+        }
+        return remainingThreads[0]?.id ?? null;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete dispatcher thread");
+    } finally {
+      setDeletingThreadId((current) => current === threadId ? null : current);
+    }
+  }, [bridgeId, dispatcherThreads, projectId]);
+
   if (collapsed) {
     return (
       <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--vk-bg-panel)]">
@@ -200,7 +236,7 @@ export function ProjectDispatcherPanel({
             <button
               type="button"
               onClick={onToggleCollapsed}
-              className="inline-flex h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+              className="hidden h-6 w-6 items-center justify-center rounded-[3px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)] xl:inline-flex"
               aria-label="Collapse dispatcher"
               title="Collapse dispatcher"
             >
@@ -251,6 +287,11 @@ export function ProjectDispatcherPanel({
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-[var(--vk-bg-main)]">
+      {error ? (
+        <div className="border-b border-[var(--vk-border)] bg-[rgba(210,81,81,0.08)] px-3 py-2 text-[12px] text-[#d25151]">
+          {error}
+        </div>
+      ) : null}
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         <DispatcherPane
           thread={dispatcherSession}
@@ -260,6 +301,8 @@ export function ProjectDispatcherPanel({
           modelAccess={modelAccess}
           runtimeModelCatalogs={runtimeModelCatalogs}
           onSelectThread={setSelectedThreadId}
+          onDeleteThread={(threadId) => void handleDeleteThread(threadId)}
+          deletingThreadId={deletingThreadId}
           onStartNewConversation={() => void handleCreate(true)}
           creatingConversation={creating}
           onToggleCollapse={onToggleCollapsed}
