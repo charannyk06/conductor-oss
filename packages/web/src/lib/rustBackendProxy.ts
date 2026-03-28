@@ -40,10 +40,6 @@ type RustProxyOptions = {
   headers?: HeadersInit;
 };
 
-function isEventStreamResponse(response: Response): boolean {
-  return response.headers.get("content-type")?.toLowerCase().includes("text/event-stream") ?? false;
-}
-
 function copyResponseHeaders(response: Response): Headers {
   const headers = new Headers();
   response.headers.forEach((value, key) => {
@@ -61,62 +57,6 @@ function buildEventStreamHeaders(response: Response): Headers {
   headers.set("Connection", "keep-alive");
   headers.set("X-Accel-Buffering", "no");
   return headers;
-}
-
-function isIgnorableStreamTermination(error: unknown): boolean {
-  if (!error || typeof error !== "object") {
-    return false;
-  }
-
-  const candidate = error as {
-    name?: string;
-    code?: string;
-    message?: string;
-    cause?: unknown;
-  };
-
-  if (candidate.name === "AbortError" || candidate.code === "UND_ERR_SOCKET") {
-    return true;
-  }
-
-  if (candidate.message?.toLowerCase().includes("terminated")) {
-    return true;
-  }
-
-  return candidate.cause ? isIgnorableStreamTermination(candidate.cause) : false;
-}
-
-function wrapEventStreamBody(body: ReadableStream<Uint8Array> | null): ReadableStream<Uint8Array> | null {
-  if (!body) {
-    return null;
-  }
-
-  const reader = body.getReader();
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          controller.close();
-          return;
-        }
-        controller.enqueue(value);
-      } catch (error) {
-        if (!isIgnorableStreamTermination(error)) {
-          controller.error(error);
-          return;
-        }
-        controller.close();
-      }
-    },
-    async cancel(reason) {
-      try {
-        await reader.cancel(reason);
-      } catch {
-        // Ignore cancellations from an already-closed upstream SSE socket.
-      }
-    },
-  });
 }
 
 export async function proxyToRust(
@@ -162,7 +102,7 @@ export async function proxyToRust(
   const response = await fetch(target, init);
   const responseHeaders = copyResponseHeaders(response);
 
-  return new Response(isEventStreamResponse(response) ? wrapEventStreamBody(response.body) : response.body, {
+  return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers: responseHeaders,
@@ -213,7 +153,10 @@ export async function proxyEventStreamToRust(
     });
   }
 
-  return new Response(wrapEventStreamBody(response.body), {
+  // Pass the upstream body through directly. Wrapping SSE streams in a new
+  // ReadableStream caused standalone Next.js production builds to buffer the
+  // dispatcher feed until much later than the backend emitted each event.
+  return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers: buildEventStreamHeaders(response),

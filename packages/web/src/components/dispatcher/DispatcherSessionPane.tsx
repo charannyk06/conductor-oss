@@ -2,7 +2,7 @@
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type UIEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -34,6 +34,7 @@ import { cn } from "@/lib/cn";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildSessionHref } from "@/lib/dashboardHref";
 import { getKnownAgent, KNOWN_AGENTS } from "@/lib/knownAgents";
+import { isDispatcherFeedNearBottom } from "@/components/dispatcher/dispatcherFeedScroll";
 import type { TerminalInsertRequest } from "@/components/sessions/terminalInsert";
 import type { DashboardSession } from "@/lib/types";
 import type { SessionRuntimeStatus } from "@/lib/sessionRuntimeStatus";
@@ -974,6 +975,8 @@ export function DispatcherSessionPane({
   const [repositoryError, setRepositoryError] = useState<string | null>(null);
   const [savingAgent, setSavingAgent] = useState(false);
   const feedRef = useRef<HTMLDivElement>(null);
+  const feedContentRef = useRef<HTMLDivElement>(null);
+  const autoScrollEnabledRef = useRef(true);
   const sessionApiPaths = useMemo(() => ({
     feed: apiPaths.feed,
     stream: apiPaths.stream,
@@ -1145,12 +1148,48 @@ export function DispatcherSessionPane({
   }, [bridgeId, loadFeed, sessionApiPaths.stream]);
 
   useEffect(() => {
+    autoScrollEnabledRef.current = true;
+  }, [session.id]);
+
+  useEffect(() => {
     const node = feedRef.current;
-    if (!node) {
+    if (!node || !autoScrollEnabledRef.current) {
       return;
     }
-    node.scrollTop = node.scrollHeight;
-  }, [payload.entries.length]);
+
+    const frame = window.requestAnimationFrame(() => {
+      const nextNode = feedRef.current;
+      if (!nextNode || !autoScrollEnabledRef.current) {
+        return;
+      }
+      nextNode.scrollTo({ top: nextNode.scrollHeight });
+      autoScrollEnabledRef.current = isDispatcherFeedNearBottom(nextNode);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [payload]);
+
+  useEffect(() => {
+    const node = feedRef.current;
+    const content = feedContentRef.current;
+    if (!node || !content || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (!autoScrollEnabledRef.current) {
+        return;
+      }
+      node.scrollTo({ top: node.scrollHeight });
+      autoScrollEnabledRef.current = isDispatcherFeedNearBottom(node);
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [loading, loadingError, session.id]);
+
+  const handleFeedScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    autoScrollEnabledRef.current = isDispatcherFeedNearBottom(event.currentTarget);
+  }, []);
 
   useEffect(() => {
     if (!composerInsert) {
@@ -1279,6 +1318,7 @@ export function DispatcherSessionPane({
     )}>
       <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-muted)]">
         <span className="min-w-0 flex-1 truncate">{sessionLabel}</span>
+        {headerActions}
         {onToggleCollapse ? (
           <button
             type="button"
@@ -1290,7 +1330,6 @@ export function DispatcherSessionPane({
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
         ) : null}
-        {headerActions}
         {!hideOpenSessionAction ? (
           <button
             type="button"
@@ -1315,6 +1354,7 @@ export function DispatcherSessionPane({
 
       <div
         ref={feedRef}
+        onScroll={handleFeedScroll}
         className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 sm:px-4"
       >
         {loading ? (
@@ -1327,7 +1367,7 @@ export function DispatcherSessionPane({
             {loadingError}
           </div>
         ) : (
-          <div className="space-y-5">
+          <div ref={feedContentRef} className="space-y-5">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-[12px] text-[var(--vk-text-muted)]">
               <span className="inline-flex items-center gap-2">
                 <Wrench className="h-3.5 w-3.5" />

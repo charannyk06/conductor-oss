@@ -3,9 +3,11 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { Check, ListTodo, Loader2, PencilLine, Trash2 } from "lucide-react";
 import { DispatcherPreferenceChips } from "@/components/dispatcher/DispatcherPreferenceChips";
 import { DispatcherSessionPane } from "@/components/dispatcher/DispatcherSessionPane";
+import { Button } from "@/components/ui/Button";
 import {
   buildModelSelection,
   resolveModelSelectionValue,
@@ -60,8 +62,12 @@ function formatRelativeTimestamp(value: string): string {
   return `${Math.floor(elapsedSeconds / 86400)}d ago`;
 }
 
+function normalizeThreadSummary(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 function summarizeThread(thread: DashboardSession): string {
-  const summary = thread.summary?.trim() || thread.metadata.summary?.trim();
+  const summary = normalizeThreadSummary(thread.summary?.trim() || thread.metadata.summary?.trim() || "");
   if (summary) {
     return summary;
   }
@@ -72,6 +78,90 @@ function summarizeThread(thread: DashboardSession): string {
     return "Working";
   }
   return `Thread ${thread.id.slice(0, 8)}`;
+}
+
+type DeleteDispatcherThreadDialogProps = {
+  thread: DashboardSession;
+  deleting: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void | Promise<void>;
+};
+
+function DeleteDispatcherThreadDialog({
+  thread,
+  deleting,
+  error,
+  onCancel,
+  onConfirm,
+}: DeleteDispatcherThreadDialogProps) {
+  if (typeof document === "undefined") {
+    return null;
+  }
+
+  const summary = summarizeThread(thread);
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 px-4"
+      onClick={() => {
+        if (deleting) return;
+        onCancel();
+      }}
+    >
+      <div
+        className="surface-card w-full max-w-md rounded-[var(--radius-lg)] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] shadow-[0_28px_90px_rgba(0,0,0,0.55)]"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-dispatcher-thread-title"
+      >
+        <div className="border-b border-[var(--vk-border)] px-4 py-3">
+          <h2
+            id="delete-dispatcher-thread-title"
+            className="text-[17px] font-medium text-[var(--vk-text-strong)]"
+          >
+            Delete Dispatcher Thread
+          </h2>
+          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+            Delete thread <span className="font-medium text-[var(--vk-text-normal)]">{thread.id.slice(0, 8)}</span> from this project.
+          </p>
+        </div>
+
+        <div className="space-y-3 px-4 py-4">
+          <p className="text-[13px] leading-5 text-[var(--vk-text-normal)]">
+            This removes the dispatcher conversation and its saved thread state. Repository files on disk are not changed.
+          </p>
+
+          <div className="rounded-[var(--radius-md)] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-2">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+              Thread summary
+            </p>
+            <p className="mt-1 line-clamp-4 text-[13px] leading-5 text-[var(--vk-text-normal)]">
+              {summary}
+            </p>
+          </div>
+
+          {error ? (
+            <div className="rounded-[var(--radius-md)] border border-[var(--vk-red)]/35 bg-[color:color-mix(in_srgb,var(--vk-red)_12%,transparent)] px-3 py-2 text-[12px] text-[var(--vk-red)]">
+              {error}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-[var(--vk-border)] px-4 py-3">
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={deleting}>
+            Cancel
+          </Button>
+          <Button type="button" variant="danger" onClick={() => void onConfirm()} disabled={deleting}>
+            {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            Delete Thread
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
 }
 
 export function DispatcherPane({
@@ -103,6 +193,8 @@ export function DispatcherPane({
   );
   const [implementationAgent, setImplementationAgent] = useState(preferredImplementationAgent);
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
+  const [confirmDeleteThreadId, setConfirmDeleteThreadId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
     buildModelSelection(
       preferredImplementationAgent,
@@ -132,6 +224,18 @@ export function DispatcherPane({
     preferredImplementationReasoning,
     runtimeModelCatalogs,
   ]);
+
+  const confirmDeleteThread = useMemo(
+    () => threads.find((candidate) => candidate.id === confirmDeleteThreadId) ?? null,
+    [confirmDeleteThreadId, threads],
+  );
+
+  useEffect(() => {
+    if (confirmDeleteThreadId && !confirmDeleteThread) {
+      setConfirmDeleteThreadId(null);
+      setDeleteError(null);
+    }
+  }, [confirmDeleteThread, confirmDeleteThreadId]);
 
   const threadQuery = useMemo(
     () => `threadId=${encodeURIComponent(thread.id)}`,
@@ -194,6 +298,20 @@ export function DispatcherPane({
     [implementationAgent, persistPreferences],
   );
 
+  const handleConfirmDeleteThread = useCallback(async () => {
+    if (!confirmDeleteThread || !onDeleteThread) {
+      return;
+    }
+
+    setDeleteError(null);
+    try {
+      await onDeleteThread(confirmDeleteThread.id);
+      setConfirmDeleteThreadId(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete dispatcher thread");
+    }
+  }, [confirmDeleteThread, onDeleteThread]);
+
   const headerActions = (
     <>
       {showThreadMenu ? (
@@ -239,7 +357,7 @@ export function DispatcherPane({
                             {selected ? <Check className="h-3 w-3" /> : <ListTodo className="h-3 w-3" />}
                           </span>
                           <span className="min-w-0 flex-1">
-                            <span className="block break-words text-[13px] font-medium leading-5">
+                            <span className="block line-clamp-2 break-words text-[13px] font-medium leading-5">
                               {summary}
                             </span>
                             <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[rgba(255,255,255,0.58)]">
@@ -253,18 +371,13 @@ export function DispatcherPane({
                         <button
                           type="button"
                           onClick={() => {
-                            if (
-                              typeof window !== "undefined" &&
-                              !window.confirm(`Delete this dispatcher thread?\n\n${summary}`)
-                            ) {
-                              return;
-                            }
                             setThreadMenuOpen(false);
-                            void onDeleteThread(candidate.id);
+                            setDeleteError(null);
+                            setConfirmDeleteThreadId(candidate.id);
                           }}
                           disabled={Boolean(deletingThreadId)}
                           className="inline-flex w-11 shrink-0 items-center justify-center rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] text-[rgba(255,255,255,0.68)] transition hover:border-[rgba(210,81,81,0.4)] hover:bg-[rgba(210,81,81,0.12)] hover:text-[#f08b8b] disabled:cursor-not-allowed disabled:opacity-50"
-                          aria-label={`Delete thread ${summary}`}
+                          aria-label={`Delete dispatcher thread ${candidate.id.slice(0, 8)}`}
                           title="Delete thread"
                         >
                           {deleting ? (
@@ -314,22 +427,37 @@ export function DispatcherPane({
   ) : null;
 
   return (
-    <DispatcherSessionPane
-      session={thread}
-      bridgeId={bridgeId}
-      onToggleCollapse={onToggleCollapse}
-      className={className}
-      hideOpenSessionAction
-      hideRepositoryControls
-      hideSessionStatusBadge
-      headerActions={headerActions}
-      composerToolbar={composerToolbar}
-      apiPaths={{
-        feed: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed?limit=120&${threadQuery}`,
-        stream: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed/stream?limit=120&${threadQuery}`,
-        send: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/send?${threadQuery}`,
-        interrupt: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/interrupt?${threadQuery}`,
-      }}
-    />
+    <>
+      <DispatcherSessionPane
+        session={thread}
+        bridgeId={bridgeId}
+        onToggleCollapse={onToggleCollapse}
+        className={className}
+        hideOpenSessionAction
+        hideRepositoryControls
+        hideSessionStatusBadge
+        headerActions={headerActions}
+        composerToolbar={composerToolbar}
+        apiPaths={{
+          feed: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed?limit=120&${threadQuery}`,
+          stream: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed/stream?limit=120&${threadQuery}`,
+          send: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/send?${threadQuery}`,
+          interrupt: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/interrupt?${threadQuery}`,
+        }}
+      />
+      {confirmDeleteThread ? (
+        <DeleteDispatcherThreadDialog
+          thread={confirmDeleteThread}
+          deleting={deletingThreadId === confirmDeleteThread.id}
+          error={deleteError}
+          onCancel={() => {
+            if (deletingThreadId) return;
+            setConfirmDeleteThreadId(null);
+            setDeleteError(null);
+          }}
+          onConfirm={handleConfirmDeleteThread}
+        />
+      ) : null}
+    </>
   );
 }
