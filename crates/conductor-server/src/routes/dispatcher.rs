@@ -29,7 +29,9 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/projects/{project_id}/dispatcher",
-            get(get_dispatcher).post(create_dispatcher),
+            get(get_dispatcher)
+                .post(create_dispatcher)
+                .delete(delete_dispatcher),
         )
         .route("/api/projects/{project_id}/dispatcher/feed", get(get_feed))
         .route(
@@ -221,6 +223,35 @@ async fn create_dispatcher(
         Ok(dispatcher) => created(json!({
             "thread": serialize_dispatcher(&state, &dispatcher).await,
         })),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+async fn delete_dispatcher(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<DispatcherQuery>,
+) -> ApiResponse {
+    let bridge_id = trimmed_query_value(query.bridge_id.as_deref());
+    let dispatcher = match resolve_project_dispatcher(
+        &state,
+        &project_id,
+        bridge_id,
+        query.thread_id.as_deref(),
+    )
+    .await
+    {
+        Some(dispatcher) => dispatcher,
+        None => {
+            return error(
+                StatusCode::NOT_FOUND,
+                format!("Dispatcher thread for project {project_id} not found"),
+            );
+        }
+    };
+
+    match state.delete_dispatcher_thread(&dispatcher.id).await {
+        Ok(()) => ok(json!({ "deletedThreadId": dispatcher.id })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }

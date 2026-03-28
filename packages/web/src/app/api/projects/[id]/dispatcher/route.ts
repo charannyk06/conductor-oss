@@ -11,3 +11,8 @@ export const POST = guardedProxyParamRoute(
   ({ id }) => `/api/projects/${encodeURIComponent(id ?? "")}/dispatcher`,
   { role: "operator", requireActionGuard: true, bridgeAware: true },
 );
+
+export const DELETE = guardedProxyParamRoute(
+  ({ id }) => `/api/projects/${encodeURIComponent(id ?? "")}/dispatcher`,
+  { role: "operator", requireActionGuard: true, bridgeAware: true },
+);

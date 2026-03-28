@@ -1606,6 +1606,37 @@ impl AppState {
         Ok(())
     }
 
+    pub(crate) async fn delete_dispatcher_thread(self: &Arc<Self>, thread_id: &str) -> Result<()> {
+        let thread = self
+            .get_dispatcher_thread(thread_id)
+            .await
+            .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+
+        let _ = self.interrupt_dispatcher(thread_id).await;
+        self.clear_dispatcher_runtime(thread_id).await;
+        self.active_session_skills.lock().await.remove(thread_id);
+        {
+            let mut guard = self.dispatcher_threads.write().await;
+            guard.remove(thread_id);
+        }
+        self.invalidate_dispatcher_caches(thread_id).await;
+
+        for path in [
+            self.dispatcher_snapshot_path(thread_id),
+            self.acp_session_memory_json_path(&thread.project_id, thread_id),
+            self.acp_session_memory_markdown_path(&thread.project_id, thread_id),
+        ] {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        self.publish_dispatcher_update(thread_id).await;
+        Ok(())
+    }
+
     pub(crate) async fn publish_dispatcher_update(&self, thread_id: &str) {
         let _ = self.dispatcher_updates.send(thread_id.to_string());
     }
@@ -3508,6 +3539,59 @@ mod tests {
             .conversation
             .iter()
             .any(|entry| entry.source == "acp_heartbeat"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn delete_dispatcher_thread_removes_runtime_state_and_session_artifacts() {
+        let (root, state) = build_test_state("acp-delete-thread").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+        let project_memory = state.acp_project_memory_json_path("demo");
+        let session_json = state.acp_session_memory_json_path("demo", &thread.id);
+        let session_md = state.acp_session_memory_markdown_path("demo", &thread.id);
+        let snapshot = state.dispatcher_snapshot_path(&thread.id);
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (kill_tx, _kill_rx) = oneshot::channel();
+        state
+            .store_dispatcher_runtime(&thread.id, input_tx, kill_tx)
+            .await;
+        state
+            .active_session_skills
+            .lock()
+            .await
+            .insert(thread.id.clone(), vec!["dispatcher-skill".to_string()]);
+
+        assert!(snapshot.exists());
+        assert!(session_json.exists());
+        assert!(session_md.exists());
+        assert!(project_memory.exists());
+        assert!(state.dispatcher_runtime_attached(&thread.id).await);
+
+        state
+            .delete_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should be deleted");
+
+        assert!(state.get_dispatcher_thread(&thread.id).await.is_none());
+        assert!(state
+            .project_dispatcher_threads("demo", None)
+            .await
+            .iter()
+            .all(|candidate| candidate.id != thread.id));
+        assert!(!snapshot.exists());
+        assert!(!session_json.exists());
+        assert!(!session_md.exists());
+        assert!(project_memory.exists());
+        assert!(!state.dispatcher_runtime_attached(&thread.id).await);
+        assert!(!state
+            .active_session_skills
+            .lock()
+            .await
+            .contains_key(&thread.id));
 
         let _ = fs::remove_dir_all(root);
     }
