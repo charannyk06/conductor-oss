@@ -194,6 +194,8 @@ const PROXY_AUTHENTICATED_HEADER: &str = "x-conductor-access-authenticated";
 const PROXY_ROLE_HEADER: &str = "x-conductor-access-role";
 const PROXY_EMAIL_HEADER: &str = "x-conductor-access-email";
 const PROXY_PROVIDER_HEADER: &str = "x-conductor-access-provider";
+const PROXY_SECRET_HEADER: &str = "x-conductor-proxy-secret";
+pub(crate) const PROXY_AUTH_SECRET_ENV: &str = "CONDUCTOR_PROXY_AUTH_SECRET";
 
 #[derive(Debug, Clone)]
 struct TrustedHeaderAuthConfig {
@@ -365,11 +367,27 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 pub(crate) fn proxy_request_authorized(headers: &HeaderMap) -> bool {
-    headers
+    let authorized = headers
         .get(PROXY_AUTHORIZED_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !authorized {
+        return false;
+    }
+
+    match env::var(PROXY_AUTH_SECRET_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(expected) => headers
+            .get(PROXY_SECRET_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(|actual| constant_time_equal(actual.trim().as_bytes(), expected.as_bytes()))
+            .unwrap_or(false),
+        None => true,
+    }
 }
 
 fn resolve_proxy_access_identity(headers: &HeaderMap) -> Option<AccessIdentity> {
@@ -429,6 +447,17 @@ fn extract_email_from_claims(payload: &Value) -> Option<String> {
         .and_then(normalize_value)
         .filter(|value| value.contains('@'))
         .map(|value| value.to_ascii_lowercase())
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |acc, (lhs, rhs)| acc | (lhs ^ rhs))
+        == 0
 }
 
 fn is_supported_cloudflare_algorithm(algorithm: Algorithm) -> bool {
@@ -1378,6 +1407,7 @@ mod tests {
     use conductor_core::config::{DashboardAccessConfig, TrustedHeaderAccessConfig};
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
     use serde::Serialize;
+    use std::env;
     use std::fs;
     use std::process::Command as StdCommand;
     use std::sync::LazyLock;
@@ -1681,6 +1711,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_accepts_forwarded_proxy_identity() {
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         let access = DashboardAccessConfig {
             require_auth: true,
             ..DashboardAccessConfig::default()
@@ -1702,6 +1733,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_access_identity_defaults_missing_proxy_authenticated_to_false() {
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
         let access = DashboardAccessConfig {
             require_auth: true,
             ..DashboardAccessConfig::default()
@@ -1718,5 +1750,65 @@ mod tests {
         assert_eq!(identity.role, Some(AccessRole::Admin));
         assert_eq!(identity.email.as_deref(), Some("local"));
         assert_eq!(identity.provider.as_deref(), Some("local"));
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_rejects_forwarded_proxy_identity_when_secret_is_missing() {
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        unsafe {
+            env::set_var(super::PROXY_AUTH_SECRET_ENV, "shared-secret");
+        }
+
+        let access = DashboardAccessConfig {
+            require_auth: true,
+            ..DashboardAccessConfig::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(super::PROXY_AUTHORIZED_HEADER, "true".parse().unwrap());
+        headers.insert(super::PROXY_AUTHENTICATED_HEADER, "true".parse().unwrap());
+        headers.insert(super::PROXY_ROLE_HEADER, "admin".parse().unwrap());
+        headers.insert(super::PROXY_EMAIL_HEADER, "local".parse().unwrap());
+        headers.insert(super::PROXY_PROVIDER_HEADER, "local".parse().unwrap());
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(!identity.authenticated);
+        assert_eq!(identity.role, None);
+        assert_eq!(identity.reason.as_deref(), Some("Authentication required"));
+
+        unsafe {
+            env::remove_var(super::PROXY_AUTH_SECRET_ENV);
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_access_identity_accepts_forwarded_proxy_identity_with_matching_secret() {
+        let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        unsafe {
+            env::set_var(super::PROXY_AUTH_SECRET_ENV, "shared-secret");
+        }
+
+        let access = DashboardAccessConfig {
+            require_auth: true,
+            ..DashboardAccessConfig::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(super::PROXY_AUTHORIZED_HEADER, "true".parse().unwrap());
+        headers.insert(super::PROXY_AUTHENTICATED_HEADER, "true".parse().unwrap());
+        headers.insert(super::PROXY_ROLE_HEADER, "admin".parse().unwrap());
+        headers.insert(super::PROXY_EMAIL_HEADER, "local".parse().unwrap());
+        headers.insert(super::PROXY_PROVIDER_HEADER, "local".parse().unwrap());
+        headers.insert(super::PROXY_SECRET_HEADER, "shared-secret".parse().unwrap());
+
+        let identity = resolve_access_identity(&headers, &access).await;
+        assert!(identity.authenticated);
+        assert_eq!(identity.role, Some(AccessRole::Admin));
+        assert_eq!(identity.email.as_deref(), Some("local"));
+        assert_eq!(identity.provider.as_deref(), Some("local"));
+
+        unsafe {
+            env::remove_var(super::PROXY_AUTH_SECRET_ENV);
+        }
     }
 }

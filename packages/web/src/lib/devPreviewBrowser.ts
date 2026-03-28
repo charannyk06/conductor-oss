@@ -1,6 +1,8 @@
+import { lookup } from "node:dns/promises";
 import { execFileSync } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
+import { isIP } from "node:net";
 import { join } from "node:path";
 import puppeteer, {
   type Browser,
@@ -156,6 +158,79 @@ function normalizeNavigationInput(value: string): string {
 function isLocalHost(hostname: string): boolean {
   const normalized = normalizeNavigationHostname(hostname);
   return LOCAL_NAVIGATION_HOSTS.includes(normalized as (typeof LOCAL_NAVIGATION_HOSTS)[number]);
+}
+
+function unsafePreviewHostsAllowed(): boolean {
+  return process.env.CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS?.trim().toLowerCase() === "true";
+}
+
+function isPrivateIpv4Address(hostname: string): boolean {
+  const octets = hostname.split(".").map((segment) => Number.parseInt(segment, 10));
+  if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) {
+    return true;
+  }
+
+  const [first, second] = octets;
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
+    || (first === 198 && (second === 18 || second === 19))
+    || first >= 224;
+}
+
+export function isPrivateNetworkHostname(hostname: string): boolean {
+  const normalized = normalizeNavigationHostname(hostname);
+  const lower = normalized.toLowerCase();
+  const mappedIpv4 = lower.startsWith("::ffff:") ? lower.slice("::ffff:".length) : null;
+  return lower === "::"
+    || lower === "::1"
+    || lower.startsWith("fe8")
+    || lower.startsWith("fe9")
+    || lower.startsWith("fea")
+    || lower.startsWith("feb")
+    || lower.startsWith("fc")
+    || lower.startsWith("fd")
+    || (mappedIpv4 ? isPrivateIpv4Address(mappedIpv4) : false);
+}
+
+function hostnameResolvesToPrivateAddress(hostname: string): boolean {
+  const normalized = normalizeNavigationHostname(hostname);
+  const ipVersion = isIP(normalized);
+  if (ipVersion === 4) {
+    return isPrivateIpv4Address(normalized);
+  }
+  if (ipVersion === 6) {
+    return isPrivateNetworkHostname(normalized);
+  }
+  return false;
+}
+
+async function assertSafeDirectNavigationTarget(value: string): Promise<void> {
+  if (unsafePreviewHostsAllowed()) {
+    return;
+  }
+
+  const parsed = new URL(value);
+  if (isLocalHost(parsed.hostname)) {
+    return;
+  }
+
+  if (hostnameResolvesToPrivateAddress(parsed.hostname)) {
+    throw new Error(
+      "Preview navigation to private network hosts is blocked. Use loopback URLs for local dev servers or set CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true to override.",
+    );
+  }
+
+  const resolved = await lookup(parsed.hostname, { all: true, verbatim: true }).catch(() => []);
+  if (resolved.some((entry) => hostnameResolvesToPrivateAddress(entry.address))) {
+    throw new Error(
+      "Preview navigation resolved to a private network address and was blocked. Set CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true only if you intentionally trust that target.",
+    );
+  }
 }
 
 export type PreviewNavigationMode = "bridge" | "direct" | "blocked";
@@ -786,6 +861,9 @@ class PreviewBrowserManager {
 
       const previousUrl = page.url();
       try {
+        if (navigationMode === "direct") {
+          await assertSafeDirectNavigationTarget(candidate);
+        }
         await this.syncRequestInterception(state, page, candidate);
         await page.goto(candidate, { waitUntil: "domcontentloaded" });
         await this.syncRequestInterception(state, page);

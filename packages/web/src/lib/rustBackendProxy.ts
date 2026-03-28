@@ -6,6 +6,7 @@ const INTERNAL_ACCESS_HEADERS = [
   "x-conductor-access-role",
   "x-conductor-access-email",
   "x-conductor-access-provider",
+  "x-conductor-proxy-secret",
 ] as const;
 
 const BLOCKED_REQUEST_HEADERS = new Set<string>([

@@ -134,6 +134,21 @@ Set CONDUCTOR_UNSAFE_ALLOW_REMOTE_BACKEND=true only if you are intentionally exp
             host
         );
     }
+    if !host.is_loopback()
+        && allow_remote_backend
+        && routes::config::access_control_enabled(&config.access)
+        && std::env::var(routes::config::PROXY_AUTH_SECRET_ENV)
+            .ok()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+    {
+        anyhow::bail!(
+            "Refusing to expose the Rust backend on {} with dashboard access control enabled unless {} is configured. \
+Set the same secret in both the dashboard and backend processes so forwarded auth headers can be verified.",
+            host,
+            routes::config::PROXY_AUTH_SECRET_ENV
+        );
+    }
     let addr = SocketAddr::new(host, config.effective_port());
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(

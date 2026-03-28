@@ -95,7 +95,7 @@ The dashboard includes a Skills tab for each session. It can install curated off
 
 Skills are mapped to each agent's native folder layout, so user-scoped and workspace-scoped installs land in the right place automatically. The backend also detects custom skill folders already present on the machine and lets you activate or deactivate skills for the current session.
 
-If you run the dashboard outside `co start`, set `CONDUCTOR_BACKEND_URL` or `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` so the web app can reach the Rust backend.
+If you run the dashboard outside `co start`, set `CONDUCTOR_BACKEND_URL` or `NEXT_PUBLIC_CONDUCTOR_BACKEND_URL` so the web app can reach the Rust backend. If that backend is reachable off-host and dashboard auth is enabled, also set the same `CONDUCTOR_PROXY_AUTH_SECRET` in both processes so forwarded dashboard auth headers can be verified safely.
 
 ## Native Terminal Experience
 

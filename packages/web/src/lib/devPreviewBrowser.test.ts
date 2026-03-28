@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPreviewNavigationCandidates, resolvePreviewNavigationMode } from "./devPreviewBrowser";
+import {
+  buildPreviewNavigationCandidates,
+  isPrivateNetworkHostname,
+  resolvePreviewNavigationMode,
+} from "./devPreviewBrowser";
 
 test("buildPreviewNavigationCandidates expands localhost urls", () => {
   assert.deepEqual(buildPreviewNavigationCandidates("localhost:3000"), [
@@ -33,4 +37,10 @@ test("resolvePreviewNavigationMode bridges allowed local origins and keeps remot
   assert.equal(resolvePreviewNavigationMode("http://127.0.0.1:3000/", bridgePreview), "bridge");
   assert.equal(resolvePreviewNavigationMode("https://preview.example.com/app", bridgePreview), "direct");
   assert.equal(resolvePreviewNavigationMode("http://localhost:3000/", bridgePreview), "blocked");
+});
+
+test("isPrivateNetworkHostname blocks link-local ipv6 addresses", () => {
+  assert.equal(isPrivateNetworkHostname("fe80::1"), true);
+  assert.equal(isPrivateNetworkHostname("[fe80::1]"), true);
+  assert.equal(isPrivateNetworkHostname("2001:4860:4860::8888"), false);
 });
