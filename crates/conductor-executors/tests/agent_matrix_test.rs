@@ -195,7 +195,18 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
     let mut qwen_options = options("qwen");
     qwen_options.model = Some("qwen-max".to_string());
     let qwen = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).build_args(&qwen_options);
-    assert_contains(&qwen, &["--model", "qwen-max", "--prompt", "qwen"]);
+    assert_contains(
+        &qwen,
+        &[
+            "--model",
+            "qwen-max",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--prompt",
+            "qwen",
+        ],
+    );
     assert_filters_blocked_flags(&qwen);
 }
 
@@ -274,11 +285,15 @@ fn parse_output_handles_representative_agent_formats() {
         ExecutorOutput::Failed { ref error, exit_code: Some(1) } if error == "tool crashed"
     ));
 
-    let qwen =
-        QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).parse_output("plain qwen output");
+    let qwen = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).parse_output(
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Qwen delta"}}}"#,
+    );
+    let ExecutorOutput::Composite(qwen_events) = qwen else {
+        panic!("expected qwen composite output");
+    };
     assert!(matches!(
-        qwen,
-        ExecutorOutput::Stdout(ref text) if text == "plain qwen output"
+        qwen_events.first(),
+        Some(ExecutorOutput::Stdout(text)) if text == "Qwen delta"
     ));
 }
 

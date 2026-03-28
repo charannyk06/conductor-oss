@@ -1147,6 +1147,23 @@ fn home_dir() -> Option<PathBuf> {
         .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
+fn dispatcher_uses_headless_turns(agent_kind: &AgentKind) -> bool {
+    matches!(agent_kind, AgentKind::Codex | AgentKind::QwenCode)
+}
+
+fn dispatcher_supports_interactive_structured_output(agent_kind: &AgentKind) -> bool {
+    matches!(
+        agent_kind,
+        AgentKind::ClaudeCode
+            | AgentKind::Amp
+            | AgentKind::Ccr
+            | AgentKind::Gemini
+            | AgentKind::CursorCli
+            | AgentKind::Droid
+            | AgentKind::GithubCopilot
+    )
+}
+
 fn read_json_file(path: &Path) -> Option<Value> {
     let contents = fs::read_to_string(path).ok()?;
     serde_json::from_str(&contents).ok()
@@ -1438,7 +1455,7 @@ pub(crate) fn build_acp_dispatcher_prompt(
             "- Create or update board tasks so dedicated coding sessions can be launched separately\n",
             "- Use native Conductor MCP tools when available to inspect the board, create tasks, update task state, and inspect task attempt lifecycles\n",
             "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n",
-            "- Prefer handing implementation to dedicated `codex`, `claude-code`, or `gemini` sessions\n\n",
+            "- Prefer handing implementation to dedicated coding-agent sessions instead of doing it inside the dispatcher\n\n",
             "Project context:\n",
             "- Repo path: `{}`\n",
             "- Board path: `{}`\n",
@@ -2390,8 +2407,13 @@ impl AppState {
         } else {
             Vec::new()
         };
-        let use_headless_codex_turns = executor.kind() == AgentKind::Codex;
-        let resume_target = if use_headless_codex_turns {
+        let use_headless_turns = dispatcher_uses_headless_turns(&executor.kind());
+        let structured_output = if use_headless_turns {
+            true
+        } else {
+            dispatcher_supports_interactive_structured_output(&executor.kind())
+        };
+        let resume_target = if use_headless_turns {
             thread.metadata.get(ACP_RESUME_TARGET_METADATA_KEY).cloned()
         } else {
             None
@@ -2425,8 +2447,8 @@ impl AppState {
                     .agent_config
                     .session_timeout_secs
                     .map(std::time::Duration::from_secs),
-                interactive: !use_headless_codex_turns,
-                structured_output: use_headless_codex_turns,
+                interactive: !use_headless_turns,
+                structured_output,
                 resume_target,
             })
             .await?;
@@ -2526,14 +2548,35 @@ impl AppState {
             }
             ExecutorOutput::StructuredStatus { text, metadata } => {
                 if let Some(resume_target) = metadata
-                    .get("codexThreadId")
+                    .get("nativeResumeTarget")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        metadata
+                            .get("codexThreadId")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                    })
                 {
                     thread.metadata.insert(
                         ACP_RESUME_TARGET_METADATA_KEY.to_string(),
                         resume_target.to_string(),
+                    );
+                }
+                if metadata
+                    .get("codexThreadId")
+                    .and_then(Value::as_str)
+                    .is_some()
+                {
+                    thread.metadata.insert(
+                        "codexThreadId".to_string(),
+                        metadata
+                            .get("codexThreadId")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
                     );
                 }
                 if !thread.status.is_terminal() {
@@ -2664,12 +2707,12 @@ impl AppState {
             reasoning_effort,
             metadata,
         } = request;
-        let uses_headless_codex_turns = self
+        let uses_headless_turns = self
             .get_dispatcher_thread(thread_id)
             .await
-            .map(|thread| AgentKind::parse(&thread.agent) == AgentKind::Codex)
+            .map(|thread| dispatcher_uses_headless_turns(&AgentKind::parse(&thread.agent)))
             .unwrap_or(false);
-        if uses_headless_codex_turns && self.dispatcher_runtime_attached(thread_id).await {
+        if uses_headless_turns && self.dispatcher_runtime_attached(thread_id).await {
             return Err(anyhow!(
                 "Dispatcher is already working on the current turn. Wait for it to finish or interrupt it first."
             ));
@@ -2751,7 +2794,7 @@ impl AppState {
             .dispatcher_prompt_with_context(&updated, &runtime_message, &effective_attachments)
             .await;
 
-        if !uses_headless_codex_turns {
+        if !uses_headless_turns {
             if let Some(input_tx) = self.dispatcher_runtime_input(thread_id).await {
                 input_tx.send(ExecutorInput::Text(runtime_prompt)).await?;
             } else {
@@ -2877,6 +2920,7 @@ mod tests {
     use super::{
         codex_runtime_model_entry, codex_runtime_reasoning_supported_in_cache,
         dispatcher_context_attachment_paths, dispatcher_model_supported_for_agent,
+        dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
         CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED,
@@ -2884,7 +2928,10 @@ mod tests {
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
     use chrono::Utc;
-    use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
+    use conductor_core::{
+        config::{ConductorConfig, PreferencesConfig, ProjectConfig},
+        types::AgentKind,
+    };
     use conductor_db::Database;
     use conductor_executors::executor::ExecutorOutput;
     use serde_json::json;
@@ -2946,6 +2993,23 @@ mod tests {
         assert!(!env.contains_key("NO_COLOR"));
         assert!(!env.contains_key("FORCE_COLOR"));
         assert!(!env.contains_key("CLICOLOR_FORCE"));
+    }
+
+    #[test]
+    fn dispatcher_runtime_mode_selection_matches_agent_capabilities() {
+        assert!(dispatcher_uses_headless_turns(&AgentKind::Codex));
+        assert!(dispatcher_uses_headless_turns(&AgentKind::QwenCode));
+        assert!(!dispatcher_uses_headless_turns(&AgentKind::ClaudeCode));
+
+        assert!(dispatcher_supports_interactive_structured_output(
+            &AgentKind::ClaudeCode
+        ));
+        assert!(dispatcher_supports_interactive_structured_output(
+            &AgentKind::GithubCopilot
+        ));
+        assert!(!dispatcher_supports_interactive_structured_output(
+            &AgentKind::OpenCode
+        ));
     }
 
     #[test]

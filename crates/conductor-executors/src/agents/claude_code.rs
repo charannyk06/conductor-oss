@@ -171,11 +171,30 @@ pub(crate) fn parse_claude_stream_json_output(line: &str, default_error: &str) -
     if let Ok(value) = serde_json::from_str::<Value>(line) {
         if let Some(msg_type) = value.get("type").and_then(|t| t.as_str()) {
             match msg_type {
-                "system" | "rate_limit_event" | "user" => {
+                "system" => {
+                    if let Some(session_id) = value
+                        .get("session_id")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        return ExecutorOutput::StructuredStatus {
+                            text: String::new(),
+                            metadata: native_resume_target_metadata(session_id),
+                        };
+                    }
+                    return ExecutorOutput::Composite(Vec::new());
+                }
+                "rate_limit_event" | "user" => {
                     return ExecutorOutput::Composite(Vec::new());
                 }
                 "assistant" => {
                     return ExecutorOutput::Composite(extract_assistant_events(&value));
+                }
+                "stream_event" => {
+                    return ExecutorOutput::Composite(extract_stream_event_outputs(
+                        value.get("event").unwrap_or(&Value::Null),
+                    ));
                 }
                 "result" => {
                     if value
@@ -216,64 +235,131 @@ pub(crate) fn parse_claude_stream_json_output(line: &str, default_error: &str) -
 }
 
 fn extract_assistant_events(value: &Value) -> Vec<ExecutorOutput> {
-    let content = value
+    let Some(content) = value
         .get("message")
         .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_array());
-
-    let Some(content) = content else {
+        .and_then(|content| content.as_array())
+    else {
         return Vec::new();
     };
 
-    let mut events = Vec::new();
-    for block in content {
-        match block.get("type").and_then(|value| value.as_str()) {
-            Some("text") => {
-                if let Some(text) = block
+    extract_content_block_events(content)
+}
+
+fn extract_stream_event_outputs(event: &Value) -> Vec<ExecutorOutput> {
+    match event.get("type").and_then(|value| value.as_str()) {
+        Some("message_start") => event
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .map(|content| extract_content_block_events(content))
+            .unwrap_or_default(),
+        Some("content_block_start") => event
+            .get("content_block")
+            .map(extract_content_block_event)
+            .unwrap_or_default(),
+        Some("content_block_delta") => {
+            let Some(delta) = event.get("delta") else {
+                return Vec::new();
+            };
+            match delta.get("type").and_then(|value| value.as_str()) {
+                Some("text_delta") => delta
                     .get("text")
                     .and_then(|value| value.as_str())
-                    .map(str::trim)
                     .filter(|value| !value.is_empty())
-                {
-                    events.push(ExecutorOutput::Stdout(text.to_string()));
-                }
-            }
-            Some("thinking") => {
-                let detail = block
+                    .map(|text| vec![ExecutorOutput::Stdout(text.to_string())])
+                    .unwrap_or_default(),
+                Some("thinking_delta") => delta
                     .get("thinking")
                     .and_then(|value| value.as_str())
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .unwrap_or("Thinking");
-                events.push(ExecutorOutput::StructuredStatus {
-                    text: "Thinking".to_string(),
-                    metadata: tool_metadata(
-                        "thinking",
-                        "Thinking",
-                        "running",
-                        vec![detail.to_string()],
-                    ),
-                });
+                    .map(|detail| {
+                        vec![ExecutorOutput::StructuredStatus {
+                            text: "Thinking".to_string(),
+                            metadata: tool_metadata(
+                                "thinking",
+                                "Thinking",
+                                "running",
+                                vec![detail.to_string()],
+                            ),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
             }
-            Some("tool_use") => {
-                let name = block
-                    .get("name")
-                    .and_then(|value| value.as_str())
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("Tool");
-                let detail = tool_input_summary(block.get("input"));
-                let content = detail.into_iter().collect::<Vec<_>>();
-                events.push(ExecutorOutput::StructuredStatus {
-                    text: name.to_string(),
-                    metadata: tool_metadata(&normalize_tool_kind(name), name, "running", content),
-                });
-            }
-            _ => {}
         }
+        Some("message_delta" | "message_stop" | "content_block_stop" | "ping" | "error") => {
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn extract_content_block_events(content: &[Value]) -> Vec<ExecutorOutput> {
+    let mut events = Vec::new();
+    for block in content {
+        events.extend(extract_content_block_event(block));
     }
 
     events
+}
+
+fn extract_content_block_event(block: &Value) -> Vec<ExecutorOutput> {
+    match block.get("type").and_then(|value| value.as_str()) {
+        Some("text") => block
+            .get("text")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|text| vec![ExecutorOutput::Stdout(text.to_string())])
+            .unwrap_or_default(),
+        Some("thinking") => {
+            let detail = block
+                .get("thinking")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Thinking");
+            vec![ExecutorOutput::StructuredStatus {
+                text: "Thinking".to_string(),
+                metadata: tool_metadata(
+                    "thinking",
+                    "Thinking",
+                    "running",
+                    vec![detail.to_string()],
+                ),
+            }]
+        }
+        Some("tool_use") => {
+            let name = block
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("Tool");
+            let detail = tool_input_summary(block.get("input"));
+            let content = detail.into_iter().collect::<Vec<_>>();
+            vec![ExecutorOutput::StructuredStatus {
+                text: name.to_string(),
+                metadata: tool_metadata(&normalize_tool_kind(name), name, "running", content),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn native_resume_target_metadata(session_id: &str) -> HashMap<String, Value> {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "eventKind".to_string(),
+        Value::String("native_resume_target".to_string()),
+    );
+    metadata.insert(
+        "nativeResumeTarget".to_string(),
+        Value::String(session_id.to_string()),
+    );
+    metadata
 }
 
 fn normalize_tool_kind(name: &str) -> String {
@@ -459,5 +545,35 @@ mod tests {
         });
 
         assert_eq!(args, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn parse_stream_event_text_delta_emits_stdout() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}}"#;
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::Composite(events) = output else {
+            panic!("expected composite output");
+        };
+        assert!(matches!(
+            events.first(),
+            Some(ExecutorOutput::Stdout(text)) if text == "partial"
+        ));
+    }
+
+    #[test]
+    fn parse_system_session_start_emits_resume_target_metadata() {
+        let executor = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude"));
+        let line = r#"{"type":"system","subtype":"session_start","session_id":"session-123"}"#;
+
+        let output = executor.parse_output(line);
+        let ExecutorOutput::StructuredStatus { metadata, .. } = output else {
+            panic!("expected structured status");
+        };
+        assert_eq!(
+            metadata.get("nativeResumeTarget").and_then(Value::as_str),
+            Some("session-123")
+        );
     }
 }

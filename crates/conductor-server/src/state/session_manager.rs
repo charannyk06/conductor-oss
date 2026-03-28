@@ -35,6 +35,7 @@ use crate::acp_prompt::{
 };
 use crate::error_logger::{categories, ErrorContext};
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
+const LIVE_RUNTIME_TERMINATION_GRACE_MS: u64 = 100;
 
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
@@ -845,7 +846,10 @@ impl AppState {
         };
 
         if signaled_live_runtime {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(
+                LIVE_RUNTIME_TERMINATION_GRACE_MS,
+            ))
+            .await;
         }
 
         let mut termination_error = None;
@@ -1075,7 +1079,7 @@ impl AppState {
                 }
             }
             let protocol_context = format!(
-                "\n\nACP dispatcher state:\n- Long-term memory: {}\n- Session memory: {}\n- Board: {}\nUse these as the authoritative ACP context. Keep long-term memory stable, keep session memory current, and shape board tasks with clear context, skills, and implementation-agent handoff for codex, claude-code, and gemini.",
+                "\n\nACP dispatcher state:\n- Long-term memory: {}\n- Session memory: {}\n- Board: {}\nUse these as the authoritative ACP context. Keep long-term memory stable, keep session memory current, and shape board tasks with clear context, skills, and implementation-agent handoff for the locally available coding agents.",
                 artifacts.project_memory_display,
                 artifacts.session_memory_display,
                 artifacts.board_display,

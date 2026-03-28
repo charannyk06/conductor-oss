@@ -755,7 +755,7 @@ fn dispatcher_mode_state() -> Value {
             {
                 "id": ACP_MODE_DISPATCHER,
                 "name": "Dispatcher",
-                "description": "Long-lived ACP orchestration mode for shaping board tasks, managing memory, and dispatching codex, claude-code, and gemini implementation sessions."
+                "description": "Long-lived ACP orchestration mode for shaping board tasks, managing memory, and dispatching implementation sessions through the locally available coding agents."
             }
         ],
         "currentModeId": ACP_MODE_DISPATCHER
@@ -1189,8 +1189,11 @@ fn tool_call_event(
     event_type: &str,
 ) -> Value {
     let text_content = json!([{
-        "type": "text",
-        "text": delta,
+        "type": "content",
+        "content": {
+            "type": "text",
+            "text": delta,
+        },
     }]);
     let tool_kind = normalize_tool_kind(
         entry
@@ -1721,8 +1724,8 @@ pub struct JsonRpcError {
 mod tests {
     use super::{
         approval_state, dispatcher_message_from_prompt_content, parse_prompt_blocks,
-        prompt_turn_dispatch_message, session_config_options, updates_for_entry, AcpServer,
-        CreateDispatcherThreadOptions, LoadSessionRequest, ACP_APPROVAL_GRANTED,
+        prompt_turn_dispatch_message, session_config_options, tool_call_event, updates_for_entry,
+        AcpServer, CreateDispatcherThreadOptions, LoadSessionRequest, ACP_APPROVAL_GRANTED,
         ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL, ACP_CONFIG_THOUGHT_LEVEL,
     };
     use crate::state::{
@@ -2006,6 +2009,39 @@ mod tests {
         assert_eq!(
             updates[0]["_meta"]["runtime"]["custom"],
             Value::String("kept".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_call_event_wraps_text_in_content_blocks() {
+        let mut metadata = HashMap::new();
+        metadata.insert("toolKind".to_string(), Value::String("bash".to_string()));
+        metadata.insert(
+            "toolStatus".to_string(),
+            Value::String("running".to_string()),
+        );
+        metadata.insert("toolTitle".to_string(), Value::String("Bash".to_string()));
+        let entry = ConversationEntry {
+            id: "tool-1".to_string(),
+            kind: "status_message".to_string(),
+            source: "runtime".to_string(),
+            text: "ls -la".to_string(),
+            created_at: "2026-03-27T00:00:00Z".to_string(),
+            attachments: Vec::new(),
+            metadata,
+        };
+
+        let update = tool_call_event(&entry, "ls", "tool_call_update");
+
+        assert_eq!(
+            update["content"],
+            json!([{
+                "type": "content",
+                "content": {
+                    "type": "text",
+                    "text": "ls",
+                },
+            }])
         );
     }
 
