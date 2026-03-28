@@ -51,6 +51,10 @@ function isJsonResponse(response: Response): boolean {
   return contentType.includes("application/json");
 }
 
+function isEventStreamResponse(response: Response): boolean {
+  return response.headers.get("content-type")?.toLowerCase().includes("text/event-stream") ?? false;
+}
+
 function copyResponseHeaders(response: Response): Headers {
   const headers = new Headers();
   response.headers.forEach((value, key) => {
@@ -58,6 +62,15 @@ function copyResponseHeaders(response: Response): Headers {
       headers.set(key, value);
     }
   });
+  return headers;
+}
+
+function buildEventStreamHeaders(response: Response): Headers {
+  const headers = copyResponseHeaders(response);
+  headers.set("Content-Type", "text/event-stream");
+  headers.set("Cache-Control", "no-cache, no-transform");
+  headers.set("Connection", "keep-alive");
+  headers.set("X-Accel-Buffering", "no");
   return headers;
 }
 
@@ -154,6 +167,24 @@ export async function proxyToBridgeDevice(
   });
 }
 
+export async function proxyEventStreamToBridgeDevice(
+  request: Request,
+  bridgeId: string,
+  pathname: string,
+): Promise<Response> {
+  const response = await proxyToBridgeDevice(request, bridgeId, pathname);
+
+  if (!response.ok || !response.body || !isEventStreamResponse(response)) {
+    return response;
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: buildEventStreamHeaders(response),
+  });
+}
+
 export async function requestBridgePreview(
   bridgeId: string,
   forwardedHeaders: HeadersInit,
@@ -233,6 +264,41 @@ export async function guardAndProxyToBridgeDevice(
 
   try {
     return await proxyToBridgeDevice(request, bridgeId, pathname, options);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to reach paired device" },
+      { status: 502 },
+    );
+  }
+}
+
+export async function guardAndProxyEventStreamToBridgeDevice(
+  request: Request,
+  bridgeId: string,
+  pathname: string,
+  options: GuardOptions = {},
+): Promise<Response> {
+  const denied = await guardApiAccess(request, options.role ?? "viewer");
+  if (denied) {
+    return denied;
+  }
+
+  if (options.requireActionGuard) {
+    const deniedAction = guardApiActionAccess(request as NextRequest);
+    if (deniedAction) {
+      return deniedAction;
+    }
+  }
+
+  if (!hasBridgeRelay()) {
+    return NextResponse.json(
+      { error: "Bridge relay URL is not configured" },
+      { status: 503 },
+    );
+  }
+
+  try {
+    return await proxyEventStreamToBridgeDevice(request, bridgeId, pathname);
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to reach paired device" },

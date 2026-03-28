@@ -2,7 +2,10 @@ import type { DashboardRole } from "@conductor-oss/core/types";
 import { NextRequest } from "next/server";
 import type { DashboardAccess } from "@/lib/auth";
 import { getDashboardAccess, guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
+import {
+  proxyEventStreamToRustOrUnavailable,
+  proxyToRustOrUnavailable,
+} from "@/lib/rustBackendProxy";
 
 type ProxyOptions = {
   role?: DashboardRole;
@@ -64,6 +67,24 @@ export async function guardAndProxy(
   }
 
   return proxyToRustOrUnavailable(request, pathname, {
+    headers: await buildForwardedAccessHeaders(request),
+  });
+}
+
+export async function guardAndProxyEventStream(
+  request: Request,
+  pathname: string,
+  options: ProxyOptions = {},
+): Promise<Response> {
+  const denied = await guardApiAccess(request, options.role ?? "viewer");
+  if (denied) return denied;
+
+  if (options.requireActionGuard) {
+    const deniedAction = guardApiActionAccess(request as NextRequest);
+    if (deniedAction) return deniedAction;
+  }
+
+  return proxyEventStreamToRustOrUnavailable(request, pathname, {
     headers: await buildForwardedAccessHeaders(request),
   });
 }

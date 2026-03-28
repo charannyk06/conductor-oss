@@ -7,6 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertCircle,
+  BrainCircuit,
   Check,
   ChevronDown,
   ChevronRight,
@@ -480,7 +481,7 @@ function ToolGlyph({
   const normalizedKind = toolKind?.trim().toLowerCase() ?? "";
 
   if (normalizedKind === "thinking" || normalizedTitle === "thinking") {
-    return <LoaderCircle className={className} />;
+    return <BrainCircuit className={cn(className, "text-[#d7b6a5]")} />;
   }
   if (
     normalizedKind === "read" ||
@@ -587,7 +588,7 @@ function SessionFeedMessage({
     return (
       <div className="flex items-start gap-3 text-[13px] text-[var(--vk-text-muted)]">
         <div className="mt-[2px] flex h-5 w-5 shrink-0 items-center justify-center text-[var(--vk-text-muted)]">
-          <LoaderCircle className="h-4 w-4 animate-spin" />
+          <BrainCircuit className="h-4 w-4 animate-pulse text-[#d7b6a5]" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
