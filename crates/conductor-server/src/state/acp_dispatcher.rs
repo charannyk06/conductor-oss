@@ -44,6 +44,7 @@ const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
 const ACP_APPROVAL_REQUIRED: &str = "approval_required";
 const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
 const ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY: &str = "acpSessionMemorySyncedAt";
+pub(crate) const ACP_ACTIVE_SKILLS_METADATA_KEY: &str = "acpActiveSkills";
 pub(crate) const ACP_IMPLEMENTATION_AGENT_METADATA_KEY: &str = "acpImplementationAgent";
 pub(crate) const ACP_IMPLEMENTATION_MODEL_METADATA_KEY: &str = "acpImplementationModel";
 pub(crate) const ACP_IMPLEMENTATION_REASONING_METADATA_KEY: &str =
@@ -617,6 +618,30 @@ fn clear_parser_state(session: &mut SessionRecord) {
     session.metadata.remove(PARSER_STATE_KEY);
     session.metadata.remove(PARSER_STATE_MESSAGE_KEY);
     session.metadata.remove(PARSER_STATE_COMMAND_KEY);
+}
+
+fn update_dispatcher_active_skills_metadata(session: &mut SessionRecord, active_skills: &[String]) {
+    let mut seen = HashSet::new();
+    let sanitized = active_skills
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert((*value).to_string()))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if sanitized.is_empty() {
+        session.metadata.remove(ACP_ACTIVE_SKILLS_METADATA_KEY);
+        return;
+    }
+
+    if let Ok(serialized) = serde_json::to_string(&sanitized) {
+        session
+            .metadata
+            .insert(ACP_ACTIVE_SKILLS_METADATA_KEY.to_string(), serialized);
+    } else {
+        session.metadata.remove(ACP_ACTIVE_SKILLS_METADATA_KEY);
+    }
 }
 
 fn set_parser_state(
@@ -1468,6 +1493,8 @@ pub(crate) fn build_acp_dispatcher_prompt(
             "Operating rules:\n",
             "- Operate against the main project workspace, current checked-out branch, and board context; do not create isolated implementation branches or worktrees from this ACP session\n",
             "- Default to execution mode: inspect the repo and board first, then create or update the right board tasks in the same turn when the request is actionable\n",
+            "- Start actionable turns by inspecting the current board with `conductor_get_board`, then inspect the relevant repo files, diffs, PRs, or docs before deciding whether to create or update tasks\n",
+            "- When the request clearly requires board changes, do not stop at prose: use `conductor_create_board_task` or `conductor_update_board_task` in the same turn unless the user explicitly asked for plan-only review\n",
             "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
             "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
             "- Keep the conversation stateful and use the board as the shared execution surface\n",
@@ -1475,8 +1502,10 @@ pub(crate) fn build_acp_dispatcher_prompt(
             "- Use enough tool calls to inspect relevant files, diffs, branches, board history, and live attempts before shaping or updating tasks\n",
             "- Use the board task packet fields explicitly when creating or updating tasks: `objective`, `execution_mode`, `surfaces`, `constraints`, `dependencies`, `acceptance`, `skills`, `review_refs`, and `deliverables`\n",
             "- ACP task creation now rejects thin handoffs: every created task needs a real agent assignment, objective, execution mode, surfaces, acceptance, skills, deliverables, and concrete context through notes, dependencies, constraints, review refs, or attachments\n",
+            "- Treat `surfaces` as the task's reference files and inspection targets: list exact file paths, folders, tests, routes, APIs, docs, or product surfaces instead of generic labels\n",
+            "- Treat `skills` as required worker guidance: list the concrete domains, tools, and active skills the worker should use, not vague adjectives\n",
             "- When an implementation preference is present, persist it onto the task using `agent:<name>`, `model:<id>`, and `reasoningEffort:<level>` metadata unless the user explicitly overrides it\n",
-            "- If the current dispatcher turn includes user-provided attachments, those attachments should travel with the tasks you create unless you are intentionally narrowing to a smaller task-specific subset\n",
+            "- If the current dispatcher turn includes user-provided attachments or linked files, those attachments should travel with the tasks you create unless you are intentionally narrowing to a smaller task-specific subset\n",
             "- For implementation tasks, default `execution_mode` to `worktree` unless main-workspace or temp-clone execution is genuinely better\n",
             "- For repo review, PR review, and dispatcher shaping work, prefer `task_type=review` and `execution_mode=main_workspace` so the worker inspects the current branch directly without creating an extra repo copy\n",
             "- Use `execution_mode=temp_clone` only when the user explicitly asks for isolation or the task genuinely needs a separate full repo copy for destructive repro, cross-branch comparison, or external branch inspection\n",
@@ -1813,6 +1842,7 @@ impl AppState {
         thread
             .metadata
             .insert("acpBoardPath".to_string(), artifacts.board_display);
+        update_dispatcher_active_skills_metadata(&mut thread, &[]);
 
         self.replace_dispatcher_thread(thread.clone()).await?;
         self.sync_acp_dispatcher_state(&thread).await?;
@@ -2735,6 +2765,14 @@ impl AppState {
         let preferred_implementation_model = dispatcher_preferred_implementation_model(thread);
         let preferred_implementation_reasoning =
             dispatcher_preferred_implementation_reasoning_effort(thread);
+        let active_skills = self
+            .active_session_skills
+            .lock()
+            .await
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default();
+        update_dispatcher_active_skills_metadata(thread, &active_skills);
         let allow_board_mutations = acp_dispatcher_turn_allows_board_mutations(&message);
         thread.metadata.insert(
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
@@ -2918,13 +2956,14 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_runtime_model_entry, codex_runtime_reasoning_supported_in_cache,
-        dispatcher_context_attachment_paths, dispatcher_model_supported_for_agent,
-        dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
-        merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
-        prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
-        CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED,
-        ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL, ACP_SESSION_KIND,
+        build_acp_dispatcher_prompt, codex_runtime_model_entry,
+        codex_runtime_reasoning_supported_in_cache, dispatcher_context_attachment_paths,
+        dispatcher_model_supported_for_agent, dispatcher_supports_interactive_structured_output,
+        dispatcher_uses_headless_turns, merge_dispatcher_context_attachments,
+        normalize_loaded_dispatcher_thread, prepare_dispatcher_runtime_env, read_json,
+        AcpSessionMemoryState, AppState, CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED,
+        ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
+        ACP_SESSION_KIND,
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
     use chrono::Utc;
@@ -3010,6 +3049,30 @@ mod tests {
         assert!(!dispatcher_supports_interactive_structured_output(
             &AgentKind::OpenCode
         ));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_prompt_requires_board_inspection_and_launch_ready_packets() {
+        let (root, state) = build_test_state("acp-dispatcher-prompt-shaping").await;
+        let config = state.config.read().await.clone();
+        let project = config
+            .projects
+            .get("demo")
+            .expect("demo project should exist");
+        let prompt = build_acp_dispatcher_prompt(
+            &state,
+            "demo",
+            project,
+            "Review the dispatcher and shape the next tasks.",
+        );
+
+        assert!(prompt.contains("conductor_get_board"));
+        assert!(prompt.contains("conductor_create_board_task"));
+        assert!(prompt.contains("conductor_update_board_task"));
+        assert!(prompt.contains("Treat `surfaces` as the task's reference files"));
+        assert!(prompt.contains("Treat `skills` as required worker guidance"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

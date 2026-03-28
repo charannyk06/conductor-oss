@@ -131,6 +131,7 @@ fn normalize_amp_mode(model: Option<&str>) -> Option<&'static str> {
     match model?.trim().to_ascii_lowercase().as_str() {
         "deep" => Some("deep"),
         "free" => Some("free"),
+        "large" => Some("large"),
         "rush" => Some("rush"),
         "smart" => Some("smart"),
         _ => None,

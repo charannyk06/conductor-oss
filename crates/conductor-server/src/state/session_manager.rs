@@ -1828,6 +1828,70 @@ impl AppState {
         Ok(())
     }
 
+    pub(crate) async fn mark_session_runtime_restored(&self, session_id: &str) -> Result<()> {
+        let mut updated = None;
+        {
+            let mut sessions = self.sessions.write().await;
+            let Some(session) = sessions.get_mut(session_id) else {
+                return Ok(());
+            };
+
+            let recovery_state = session.metadata.get("recoveryState").cloned();
+            let restart_summary = session
+                .summary
+                .as_deref()
+                .is_some_and(|value| value.starts_with("Backend restarted"))
+                || session
+                    .metadata
+                    .get("summary")
+                    .is_some_and(|value| value.starts_with("Backend restarted"));
+
+            let mut changed = false;
+            if matches!(
+                recovery_state.as_deref(),
+                Some("detached_runtime" | "resume_required")
+            ) && session.status == SessionStatus::Stuck
+                && session.activity.as_deref() == Some("blocked")
+            {
+                session.status = SessionStatus::Working;
+                session.activity = Some("active".to_string());
+                session.last_activity_at = Utc::now().to_rfc3339();
+                changed = true;
+            }
+
+            if session.metadata.remove("recoveryState").is_some() {
+                changed = true;
+            }
+            if session.metadata.remove("recoveryAction").is_some() {
+                changed = true;
+            }
+
+            if restart_summary {
+                let summary = "Live terminal restored after backend restart.".to_string();
+                if session.summary.as_deref() != Some(summary.as_str()) {
+                    session.summary = Some(summary.clone());
+                    changed = true;
+                }
+                if session.metadata.get("summary").map(String::as_str) != Some(summary.as_str()) {
+                    session.metadata.insert("summary".to_string(), summary);
+                    changed = true;
+                }
+            }
+
+            if changed {
+                updated = Some(session.clone());
+            }
+        }
+
+        if let Some(session) = updated {
+            self.persist_session(&session).await?;
+            self.publish_feed_update(&session.id);
+            self.publish_snapshot().await;
+        }
+
+        Ok(())
+    }
+
     pub async fn send_to_session(
         self: &Arc<Self>,
         session_id: &str,
@@ -2682,6 +2746,70 @@ mod tests {
             }),
         );
         state
+    }
+
+    #[tokio::test]
+    async fn mark_session_runtime_restored_clears_restart_recovery_state() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-runtime-restore-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let state = build_state(&root, ProjectConfig::default(), "demo").await;
+        let mut session = SessionRecord::new(
+            "restore-session".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        session.status = SessionStatus::Stuck;
+        session.activity = Some("blocked".to_string());
+        session.summary = Some(
+            "Backend restarted while the agent may still be running. Kill or archive before resuming."
+                .to_string(),
+        );
+        session.metadata.insert(
+            "runtimeMode".to_string(),
+            crate::state::detached::TTYD_RUNTIME_MODE.to_string(),
+        );
+        session
+            .metadata
+            .insert("recoveryState".to_string(), "detached_runtime".to_string());
+        session.metadata.insert(
+            "recoveryAction".to_string(),
+            "kill_or_archive_before_resume".to_string(),
+        );
+        session.metadata.insert(
+            "summary".to_string(),
+            session.summary.clone().expect("summary should exist"),
+        );
+        state.replace_session(session).await.unwrap();
+
+        state
+            .mark_session_runtime_restored("restore-session")
+            .await
+            .unwrap();
+
+        let updated = state.get_session("restore-session").await.unwrap();
+        assert_eq!(updated.status, SessionStatus::Working);
+        assert_eq!(updated.activity.as_deref(), Some("active"));
+        assert_eq!(updated.metadata.get("recoveryState"), None);
+        assert_eq!(updated.metadata.get("recoveryAction"), None);
+        assert_eq!(
+            updated.summary.as_deref(),
+            Some("Live terminal restored after backend restart.")
+        );
+        assert_eq!(
+            updated.metadata.get("summary").map(String::as_str),
+            Some("Live terminal restored after backend restart.")
+        );
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 
     #[test]

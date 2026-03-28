@@ -45,6 +45,21 @@ fn assert_filters_blocked_flags(args: &[String]) {
         .any(|arg| { arg.eq_ignore_ascii_case("--dangerously-skip-permissions") }));
 }
 
+fn assert_has_pair(args: &[String], flag: &str, value: &str) {
+    assert!(
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value),
+        "missing `{flag} {value}` in {args:?}"
+    );
+}
+
+fn assert_no_flag(args: &[String], flag: &str) {
+    assert!(
+        !args.iter().any(|arg| arg == flag),
+        "unexpected `{flag}` in {args:?}"
+    );
+}
+
 #[test]
 fn headless_build_args_include_expected_flags_and_safe_extra_args() {
     let mut amp_options = options("amp prompt");
@@ -124,6 +139,8 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--stream",
             "on",
             "--allow-all-tools",
+            "--reasoning-effort",
+            "high",
         ],
     );
     assert_filters_blocked_flags(&copilot);
@@ -133,6 +150,7 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
     assert_contains(
         &cursor,
         &[
+            "agent",
             "--print",
             "--output-format",
             "stream-json",
@@ -208,6 +226,77 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
         ],
     );
     assert_filters_blocked_flags(&qwen);
+}
+
+#[test]
+fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
+    let mut interactive = options("launch prompt");
+    interactive.interactive = true;
+
+    let mut amp_options = interactive.clone();
+    amp_options.model = Some("rush".to_string());
+    let amp = AmpExecutor::new(PathBuf::from("/usr/bin/amp")).build_args(&amp_options);
+    assert_has_pair(&amp, "--mode", "rush");
+    assert_no_flag(&amp, "--effort");
+    assert_no_flag(&amp, "--reasoning-effort");
+    assert_no_flag(&amp, "--variant");
+
+    let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&interactive);
+    assert_has_pair(&ccr, "--model", "gpt-5");
+    assert_has_pair(&ccr, "--effort", "high");
+
+    let claude = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&interactive);
+    assert_has_pair(&claude, "--model", "gpt-5");
+    assert_has_pair(&claude, "--effort", "high");
+
+    let codex = CodexExecutor::new(PathBuf::from("/usr/bin/codex")).build_args(&interactive);
+    assert_has_pair(&codex, "--model", "gpt-5");
+    assert!(codex
+        .iter()
+        .any(|arg| arg == "model_reasoning_effort=\"high\""));
+
+    let copilot = CopilotExecutor::new(PathBuf::from("/usr/bin/copilot")).build_args(&interactive);
+    assert_has_pair(&copilot, "--model", "gpt-5");
+    assert_no_flag(&copilot, "--effort");
+    assert_has_pair(&copilot, "--reasoning-effort", "high");
+
+    let cursor =
+        CursorExecutor::new(PathBuf::from("/usr/bin/cursor-agent")).build_args(&interactive);
+    assert_has_pair(&cursor, "--model", "gpt-5");
+    assert_no_flag(&cursor, "--effort");
+    assert_no_flag(&cursor, "--reasoning-effort");
+    assert_no_flag(&cursor, "--variant");
+
+    let droid = DroidExecutor::new(PathBuf::from("/usr/bin/droid")).build_args(&interactive);
+    assert_has_pair(&droid, "--model", "gpt-5");
+    assert_has_pair(&droid, "--reasoning-effort", "high");
+
+    let gemini = GeminiExecutor::new(PathBuf::from("/usr/bin/gemini")).build_args(&interactive);
+    assert_has_pair(&gemini, "--model", "gpt-5");
+    assert_no_flag(&gemini, "--effort");
+    assert_no_flag(&gemini, "--reasoning-effort");
+
+    let mut opencode_options = interactive.clone();
+    opencode_options.model = Some("openai/gpt-5".to_string());
+    opencode_options.reasoning_effort = Some("xhigh".to_string());
+    let opencode =
+        OpenCodeExecutor::new(PathBuf::from("/usr/bin/opencode")).build_args(&opencode_options);
+    assert_has_pair(&opencode, "--model", "openai/gpt-5");
+    assert_has_pair(&opencode, "--variant", "max");
+
+    let mut qwen_options = interactive.clone();
+    qwen_options.model = Some("qwen-max".to_string());
+    let qwen = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen")).build_args(&qwen_options);
+    assert_has_pair(&qwen, "--model", "qwen-max");
+    assert_no_flag(&qwen, "--effort");
+    assert_no_flag(&qwen, "--reasoning-effort");
+}
+
+#[test]
+fn cursor_wrapper_binary_uses_agent_subcommand() {
+    let args = CursorExecutor::new(PathBuf::from("/usr/bin/cursor")).build_args(&options("cursor"));
+    assert_eq!(args.first().map(String::as_str), Some("agent"));
+    assert_has_pair(&args, "--model", "gpt-5");
 }
 
 #[test]
