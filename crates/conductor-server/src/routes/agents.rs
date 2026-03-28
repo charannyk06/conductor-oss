@@ -2194,7 +2194,10 @@ mod tests {
     #[test]
     fn supplement_claude_runtime_models_keeps_recent_models_and_adds_haiku() {
         let supplemented = supplement_claude_runtime_models(
-            &["claude-sonnet-4-6".to_string(), "claude-opus-4-6".to_string()],
+            &[
+                "claude-sonnet-4-6".to_string(),
+                "claude-opus-4-6".to_string(),
+            ],
             &["sonnet".to_string()],
         );
 

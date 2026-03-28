@@ -1865,10 +1865,9 @@ mod tests {
         approval_state, dispatcher_message_from_prompt_content, parse_prompt_blocks,
         prompt_turn_dispatch_message, read_jsonrpc_request, session_config_options,
         stream_full_session_history, tool_call_event, updates_for_entry, write_jsonrpc_message,
-        AcpServer,
-        CreateDispatcherThreadOptions, JsonRpcNotification, JsonRpcWireFormat, LoadSessionRequest,
-        ACP_APPROVAL_GRANTED, ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL,
-        ACP_CONFIG_THOUGHT_LEVEL,
+        AcpServer, CreateDispatcherThreadOptions, JsonRpcNotification, JsonRpcWireFormat,
+        LoadSessionRequest, ACP_APPROVAL_GRANTED, ACP_CONFIG_IMPLEMENTATION_AGENT,
+        ACP_CONFIG_MODEL, ACP_CONFIG_THOUGHT_LEVEL,
     };
     use crate::mcp::{AppStateMcpBackend, CreateBoardTaskArgs, McpBackend};
     use crate::state::{
