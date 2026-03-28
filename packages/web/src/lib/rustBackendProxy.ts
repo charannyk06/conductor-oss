@@ -44,6 +44,25 @@ function isEventStreamResponse(response: Response): boolean {
   return response.headers.get("content-type")?.toLowerCase().includes("text/event-stream") ?? false;
 }
 
+function copyResponseHeaders(response: Response): Headers {
+  const headers = new Headers();
+  response.headers.forEach((value, key) => {
+    if (!BLOCKED_RESPONSE_HEADERS.has(key.toLowerCase())) {
+      headers.set(key, value);
+    }
+  });
+  return headers;
+}
+
+function buildEventStreamHeaders(response: Response): Headers {
+  const headers = copyResponseHeaders(response);
+  headers.set("Content-Type", "text/event-stream");
+  headers.set("Cache-Control", "no-cache, no-transform");
+  headers.set("Connection", "keep-alive");
+  headers.set("X-Accel-Buffering", "no");
+  return headers;
+}
+
 function isIgnorableStreamTermination(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
@@ -141,17 +160,63 @@ export async function proxyToRust(
   }
 
   const response = await fetch(target, init);
-  const responseHeaders = new Headers();
-  response.headers.forEach((value, key) => {
-    if (!BLOCKED_RESPONSE_HEADERS.has(key.toLowerCase())) {
-      responseHeaders.set(key, value);
-    }
-  });
+  const responseHeaders = copyResponseHeaders(response);
 
   return new Response(isEventStreamResponse(response) ? wrapEventStreamBody(response.body) : response.body, {
     status: response.status,
     statusText: response.statusText,
     headers: responseHeaders,
+  });
+}
+
+export async function proxyEventStreamToRust(
+  request: Request,
+  pathname: string,
+  options: RustProxyOptions = {},
+): Promise<Response> {
+  const backendUrl = requireRustBackendUrl();
+
+  const incomingUrl = new URL(request.url);
+  const target = new URL(pathname, backendUrl);
+  target.search = incomingUrl.search;
+
+  const headers = new Headers();
+  request.headers.forEach((value, key) => {
+    if (!BLOCKED_REQUEST_HEADERS.has(key.toLowerCase())) {
+      headers.set(key, value);
+    }
+  });
+  if (options.headers) {
+    const extraHeaders = new Headers(options.headers);
+    extraHeaders.forEach((value, key) => {
+      headers.set(key, value);
+    });
+  }
+  headers.set("Accept", "text/event-stream");
+  headers.set("Cache-Control", "no-cache");
+  headers.set("x-forwarded-proto", incomingUrl.protocol.replace(":", ""));
+  headers.set("x-forwarded-host", incomingUrl.host);
+
+  const response = await fetch(target, {
+    method: "GET",
+    headers,
+    redirect: "manual",
+    cache: "no-store",
+    signal: request.signal,
+  });
+
+  if (!response.ok || !response.body) {
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: copyResponseHeaders(response),
+    });
+  }
+
+  return new Response(wrapEventStreamBody(response.body), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: buildEventStreamHeaders(response),
   });
 }
 
@@ -169,6 +234,28 @@ export async function proxyToRustOrUnavailable(
 
   try {
     return await proxyToRust(request, pathname, options);
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to reach Rust backend" },
+      { status: 502 },
+    );
+  }
+}
+
+export async function proxyEventStreamToRustOrUnavailable(
+  request: Request,
+  pathname: string,
+  options: RustProxyOptions = {},
+): Promise<Response> {
+  if (!hasRustBackend()) {
+    return NextResponse.json(
+      { error: "Rust backend URL is not configured" },
+      { status: 503 },
+    );
+  }
+
+  try {
+    return await proxyEventStreamToRust(request, pathname, options);
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to reach Rust backend" },

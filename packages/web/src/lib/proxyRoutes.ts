@@ -2,11 +2,12 @@ import type { DashboardRole } from "@conductor-oss/core/types";
 import { NextResponse } from "next/server";
 import { getDashboardAccess, requiresPairedDeviceScope } from "@/lib/auth";
 import {
+  guardAndProxyEventStreamToBridgeDevice,
   getBridgeIdFromRequest,
   guardAndProxyToBridgeDevice,
 } from "@/lib/bridgeApiProxy";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
-import { guardAndProxy } from "@/lib/guardedRustProxy";
+import { guardAndProxy, guardAndProxyEventStream } from "@/lib/guardedRustProxy";
 import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
 
 type GuardOptions = {
@@ -75,6 +76,35 @@ export function guardedProxyParamRoute(
   };
 }
 
+export function guardedEventStreamParamRoute(
+  buildPathname: (params: RouteParams) => string,
+  options: GuardOptions = {},
+) {
+  return async function proxyEventStreamParamRoute(
+    request: Request,
+    context: RouteContext,
+  ): Promise<Response> {
+    const params = await context.params;
+    if (options.bridgeAware) {
+      const bridgeId = getBridgeIdFromRequest(request);
+      if (bridgeId) {
+        return guardAndProxyEventStreamToBridgeDevice(
+          request,
+          bridgeId,
+          buildPathname(params),
+          options,
+        );
+      }
+
+      const rejected = await rejectHostedLocalFallback(request);
+      if (rejected) {
+        return rejected;
+      }
+    }
+    return guardAndProxyEventStream(request, buildPathname(params), options);
+  };
+}
+
 export function guardedSessionProxyParamRoute(
   buildPathname: (params: RouteParams) => string,
   options: GuardOptions = {},
@@ -110,6 +140,44 @@ export function guardedSessionProxyParamRoute(
     }
 
     return guardAndProxy(request, buildPathname(params), options);
+  };
+}
+
+export function guardedSessionEventStreamParamRoute(
+  buildPathname: (params: RouteParams) => string,
+  options: GuardOptions = {},
+) {
+  return async function proxySessionEventStreamParamRoute(
+    request: Request,
+    context: RouteContext,
+  ): Promise<Response> {
+    const params = await context.params;
+    const bridgeSession = decodeBridgeSessionId(params.id);
+    if (bridgeSession) {
+      return guardAndProxyEventStreamToBridgeDevice(
+        request,
+        bridgeSession.bridgeId,
+        buildPathname({ ...params, id: bridgeSession.sessionId }),
+        options,
+      );
+    }
+
+    const bridgeId = getBridgeIdFromRequest(request);
+    if (bridgeId) {
+      return guardAndProxyEventStreamToBridgeDevice(
+        request,
+        bridgeId,
+        buildPathname(params),
+        options,
+      );
+    }
+
+    const rejected = await rejectHostedLocalFallback(request);
+    if (rejected) {
+      return rejected;
+    }
+
+    return guardAndProxyEventStream(request, buildPathname(params), options);
   };
 }
 

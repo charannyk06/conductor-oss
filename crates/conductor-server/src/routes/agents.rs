@@ -2,7 +2,7 @@ use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use regex::Regex;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -438,6 +438,31 @@ async fn read_command_help(commands: &[&str]) -> Option<String> {
     None
 }
 
+async fn read_command_output_invocations(
+    invocations: &[(String, Vec<String>)],
+    timeout_ms: u64,
+) -> Option<String> {
+    for (command, args) in invocations {
+        let result = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            Command::new(command).args(args).output(),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
+
+        if let Some(output) = result {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}\n{stderr}").trim().to_string();
+            if !combined.is_empty() {
+                return Some(combined);
+            }
+        }
+    }
+    None
+}
+
 fn extract_quoted_choices_from_help(help: &str, option_name: &str) -> Vec<String> {
     let escaped = regex::escape(option_name);
     let matcher = Regex::new(&format!(r#"{escaped}[\s\S]*?\(choices:\s*([^)]+)\)"#)).ok();
@@ -463,6 +488,89 @@ fn extract_quoted_choices_from_help(help: &str, option_name: &str) -> Vec<String
         })
         .filter(|value| !value.is_empty() && seen.insert(value.clone()))
         .collect()
+}
+
+fn preferred_choice(values: &[String], preferred: &[&str]) -> Option<String> {
+    preferred.iter().find_map(|candidate| {
+        values
+            .iter()
+            .find(|value| value.eq_ignore_ascii_case(candidate))
+            .cloned()
+    })
+}
+
+fn is_cursor_wrapper_binary(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("cursor"))
+}
+
+fn parse_cursor_models_output(output: &str) -> (Vec<Value>, Option<String>) {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current_model = None;
+    let mut default_model = None;
+
+    for raw_line in output.lines() {
+        let Some((raw_id, raw_label)) = raw_line.split_once(" - ") else {
+            continue;
+        };
+
+        let id = raw_id.trim();
+        if id.is_empty() || id.eq_ignore_ascii_case("available models") || id.contains(' ') {
+            continue;
+        }
+
+        let mut label = raw_label.trim().to_string();
+        let mut is_current = false;
+        let mut is_default = false;
+
+        loop {
+            let trimmed = label.trim_end();
+            if let Some(stripped) = trimmed.strip_suffix("(current)") {
+                is_current = true;
+                label = stripped.trim_end().to_string();
+                continue;
+            }
+            if let Some(stripped) = trimmed.strip_suffix("(default)") {
+                is_default = true;
+                label = stripped.trim_end().to_string();
+                continue;
+            }
+            break;
+        }
+
+        if !seen.insert(id.to_string()) {
+            continue;
+        }
+
+        let resolved_label = if label.trim().is_empty() {
+            format_generic_model_label(id)
+        } else {
+            label.trim().to_string()
+        };
+        models.push(model_option(
+            id,
+            &resolved_label,
+            &format!("Model exposed by the local Cursor Agent CLI ({id})."),
+            &["default"],
+        ));
+
+        if is_current {
+            current_model = Some(id.to_string());
+        }
+        if is_default {
+            default_model = Some(id.to_string());
+        }
+    }
+
+    let selected_model = current_model.or(default_model).or_else(|| {
+        models
+            .first()
+            .and_then(|model| model["id"].as_str().map(str::to_string))
+    });
+
+    (models, selected_model)
 }
 
 /// Scan a directory for files matching the given extension, up to max_depth.
@@ -1147,28 +1255,57 @@ async fn build_gemini_runtime_model_catalog() -> Option<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Amp catalog — runs amp --help, parses modes
+// Amp catalog — probes amp help, parses modes
 // ---------------------------------------------------------------------------
 
-async fn build_amp_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
-    let commands: Vec<String> = if let Some(bp) = binary_path {
-        vec![bp.display().to_string()]
-    } else {
-        vec!["amp".to_string()]
+fn parse_amp_modes_from_help(help: &str) -> Vec<String> {
+    let Ok(matcher) = Regex::new(r"Set the agent mode \(([^)]+)\)") else {
+        return Vec::new();
     };
-    let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
-
-    let help = read_command_help(&cmd_refs).await?;
-    let re = Regex::new(r"Set the agent mode \(([^)]+)\)").ok()?;
-    let caps = re.captures(&help)?;
-    let modes_str = caps.get(1)?.as_str();
+    let Some(mode_block) = matcher
+        .captures(help)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str())
+    else {
+        return Vec::new();
+    };
 
     let mut seen = HashSet::new();
-    let modes: Vec<String> = modes_str
+    mode_block
         .split(',')
-        .map(|v| v.trim().to_lowercase())
-        .filter(|v| !v.is_empty() && seen.insert(v.clone()))
-        .collect();
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty() && seen.insert(value.clone()))
+        .collect()
+}
+
+async fn build_amp_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
+    let invocations: Vec<(String, Vec<String>)> = if let Some(bp) = binary_path {
+        vec![
+            (
+                bp.display().to_string(),
+                vec![
+                    "threads".to_string(),
+                    "new".to_string(),
+                    "--help".to_string(),
+                ],
+            ),
+            (bp.display().to_string(), vec!["--help".to_string()]),
+        ]
+    } else {
+        vec![
+            (
+                "amp".to_string(),
+                vec![
+                    "threads".to_string(),
+                    "new".to_string(),
+                    "--help".to_string(),
+                ],
+            ),
+            ("amp".to_string(), vec!["--help".to_string()]),
+        ]
+    };
+    let help = read_command_output_invocations(&invocations, 3_000).await?;
+    let modes = parse_amp_modes_from_help(&help);
 
     if modes.is_empty() {
         return None;
@@ -1187,59 +1324,101 @@ async fn build_amp_runtime_model_catalog(binary_path: Option<&Path>) -> Option<V
         })
         .collect();
 
-    let default_mode = if modes.contains(&"smart".to_string()) {
-        Some("smart")
-    } else {
-        modes.first().map(String::as_str)
-    };
+    let default_mode = preferred_choice(&modes, &["smart"]);
 
-    default_access_catalog("amp", models, default_mode, default_mode, vec![], None)
+    default_access_catalog(
+        "amp",
+        models,
+        default_mode.as_deref(),
+        default_mode.as_deref(),
+        vec![],
+        None,
+    )
 }
 
 // ---------------------------------------------------------------------------
-// Cursor catalog — checks CLI, returns hardcoded models
+// Cursor catalog — reads the local Cursor Agent model list
 // ---------------------------------------------------------------------------
 
-async fn build_cursor_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
-    let commands: Vec<String> = if let Some(bp) = binary_path {
-        vec![bp.display().to_string()]
+fn read_cursor_cli_config_model() -> Option<(String, String)> {
+    let home = user_home_dir()?;
+    let config = read_json_file(home.join(".cursor/cli-config.json"))?;
+    let model = config.get("model")?;
+    let id = model
+        .get("modelId")
+        .or_else(|| model.get("displayModelId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let label = model
+        .get("displayNameShort")
+        .or_else(|| model.get("displayName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| format_generic_model_label(&id));
+    Some((id, label))
+}
+
+async fn read_cursor_models_output(binary_path: Option<&Path>) -> Option<String> {
+    let invocations: Vec<(String, Vec<String>)> = if let Some(bp) = binary_path {
+        let command = bp.display().to_string();
+        if is_cursor_wrapper_binary(bp) {
+            vec![(command, vec!["agent".to_string(), "models".to_string()])]
+        } else {
+            vec![(command, vec!["models".to_string()])]
+        }
     } else {
         vec![
-            "cursor-agent".to_string(),
-            "cursor-cli".to_string(),
-            "cursor".to_string(),
+            ("cursor-agent".to_string(), vec!["models".to_string()]),
+            ("cursor-cli".to_string(), vec!["models".to_string()]),
+            (
+                "cursor".to_string(),
+                vec!["agent".to_string(), "models".to_string()],
+            ),
         ]
     };
-    let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+    read_command_output_invocations(&invocations, 3_000).await
+}
 
-    let help = read_command_help(&cmd_refs).await?;
-    let model_ids = extract_quoted_choices_from_help(&help, "--model <model>");
-    if model_ids.is_empty() {
-        return None;
+async fn build_cursor_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
+    let output = read_cursor_models_output(binary_path).await;
+    let (mut models, mut default_model) = output
+        .as_deref()
+        .map(parse_cursor_models_output)
+        .unwrap_or_default();
+
+    let mut seen: HashSet<String> = models
+        .iter()
+        .filter_map(|value| value.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+
+    if let Some((config_model_id, config_label)) = read_cursor_cli_config_model() {
+        if seen.insert(config_model_id.clone()) {
+            models.push(model_option(
+                &config_model_id,
+                &config_label,
+                &format!("Model configured in the local Cursor CLI settings ({config_model_id})."),
+                &["default"],
+            ));
+        }
+        if default_model.is_none() {
+            default_model = Some(config_model_id);
+        }
     }
 
-    let models: Vec<Value> = model_ids
-        .iter()
-        .map(|id| {
-            model_option(
-                id,
-                &format_generic_model_label(id),
-                &format!("Model exposed by the local Cursor Agent CLI ({id})."),
-                &["default"],
-            )
-        })
-        .collect();
-    let default_model = if model_ids.iter().any(|id| id == "auto") {
-        Some("auto")
-    } else {
-        model_ids.first().map(String::as_str)
-    };
+    if models.is_empty() {
+        return None;
+    }
 
     default_access_catalog(
         "cursor-cli",
         models,
-        default_model,
-        default_model,
+        default_model.as_deref(),
+        default_model.as_deref(),
         vec![],
         None,
     )
@@ -1382,6 +1561,76 @@ async fn build_droid_runtime_model_catalog(binary_path: Option<&Path>) -> Option
 // OpenCode catalog — runs opencode models --verbose, parses output
 // ---------------------------------------------------------------------------
 
+fn parse_opencode_verbose_models(output: &str) -> Vec<(String, Map<String, Value>)> {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut entries = Vec::new();
+    let mut index = 0;
+
+    while index < lines.len() {
+        let key = lines[index].trim();
+        if key.is_empty() || !key.contains('/') {
+            index += 1;
+            continue;
+        }
+
+        let mut next = index + 1;
+        while next < lines.len() && lines[next].trim().is_empty() {
+            next += 1;
+        }
+
+        if next >= lines.len() || !lines[next].trim_start().starts_with('{') {
+            index += 1;
+            continue;
+        }
+
+        let mut buffer = String::new();
+        let mut parsed = None;
+        let mut end = next;
+        while end < lines.len() {
+            if !buffer.is_empty() {
+                buffer.push('\n');
+            }
+            buffer.push_str(lines[end]);
+            if let Ok(Value::Object(value)) = serde_json::from_str::<Value>(&buffer) {
+                parsed = Some(value);
+                break;
+            }
+            end += 1;
+        }
+
+        if let Some(value) = parsed {
+            entries.push((key.to_string(), value));
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    entries
+}
+
+fn opencode_reasoning_variant_ids(variants: Option<&Map<String, Value>>) -> Vec<String> {
+    let present: HashSet<String> = variants
+        .into_iter()
+        .flat_map(Map::keys)
+        .map(|key| key.trim().to_ascii_lowercase())
+        .filter(|key| {
+            matches!(
+                key.as_str(),
+                "minimal" | "low" | "medium" | "high" | "max" | "xhigh" | "off" | "none"
+            )
+        })
+        .collect();
+
+    [
+        "minimal", "low", "medium", "high", "max", "xhigh", "off", "none",
+    ]
+    .into_iter()
+    .filter(|key| present.contains(*key))
+    .map(str::to_string)
+    .collect()
+}
+
 async fn build_opencode_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
     let commands: Vec<String> = if let Some(bp) = binary_path {
         vec![bp.display().to_string()]
@@ -1395,26 +1644,46 @@ async fn build_opencode_runtime_model_catalog(binary_path: Option<&Path>) -> Opt
     let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
 
     let output = read_command_output(&cmd_refs, &["models", "--verbose"]).await?;
+    let entries = parse_opencode_verbose_models(&output);
 
-    // Parse model entries: look for lines with model IDs
-    let model_re = Regex::new(r"(?m)^\s*(\S+/\S+)\s*$").ok()?;
-    let mut seen = HashSet::new();
-    let models: Vec<Value> = model_re
-        .captures_iter(&output)
-        .filter_map(|cap| {
-            let id = cap.get(1)?.as_str().trim().to_string();
-            if !id.is_empty() {
-                seen.insert(id.clone());
-            }
-            let label = format_generic_model_label(&id);
-            Some(model_option(
-                &id,
-                &label,
-                &format!("Model exposed by the local OpenCode CLI ({id})."),
-                &["default"],
-            ))
-        })
-        .collect();
+    let mut models = Vec::new();
+    let mut reasoning_options_by_model = Map::new();
+    let mut default_reasoning_by_model = Map::new();
+
+    for (key, data) in entries {
+        let name = data
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format_generic_model_label(&key));
+        models.push(model_option(
+            &key,
+            &name,
+            &format!("Model exposed by the local OpenCode CLI ({key})."),
+            &["default"],
+        ));
+
+        let reasoning_ids =
+            opencode_reasoning_variant_ids(data.get("variants").and_then(Value::as_object));
+        if reasoning_ids.is_empty() {
+            continue;
+        }
+
+        reasoning_options_by_model.insert(
+            key.clone(),
+            json!(reasoning_ids
+                .iter()
+                .map(|value| reasoning_option(value))
+                .collect::<Vec<_>>()),
+        );
+        if let Some(default_reasoning) = preferred_choice(&reasoning_ids, &["medium", "high"])
+            .or_else(|| reasoning_ids.first().cloned())
+        {
+            default_reasoning_by_model.insert(key, json!(default_reasoning));
+        }
+    }
 
     if models.is_empty() {
         // Fallback: just check CLI exists via help
@@ -1427,19 +1696,82 @@ async fn build_opencode_runtime_model_catalog(binary_path: Option<&Path>) -> Opt
         .first()
         .and_then(|m| m["id"].as_str())
         .map(str::to_string);
-    default_access_catalog(
+    let mut catalog = default_access_catalog(
         "opencode",
         models,
         default_model.as_deref(),
         default_model.as_deref(),
         vec![],
         None,
-    )
+    )?;
+
+    if !reasoning_options_by_model.is_empty() {
+        catalog["reasoningOptionsByModel"] = Value::Object(reasoning_options_by_model);
+    }
+    if !default_reasoning_by_model.is_empty() {
+        catalog["defaultReasoningByModel"] = Value::Object(default_reasoning_by_model);
+    }
+
+    Some(catalog)
 }
 
 // ---------------------------------------------------------------------------
 // Copilot catalog — runs --help for model choices, reads config
 // ---------------------------------------------------------------------------
+
+fn read_copilot_config_model() -> Option<String> {
+    let home = user_home_dir()?;
+    read_json_file(home.join(".copilot/config.json"))?
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn collect_copilot_session_observations(contents: &[String]) -> (Vec<String>, Option<String>) {
+    let mut seen_models = HashSet::new();
+    let mut models = Vec::new();
+    let mut reasoning = None;
+
+    for content in contents {
+        for line in content
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+
+            let data = value.get("data").unwrap_or(&Value::Null);
+            for candidate in ["newModel", "currentModel", "model"] {
+                let Some(model_id) = data
+                    .get(candidate)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model_id| !model_id.is_empty())
+                else {
+                    continue;
+                };
+                if seen_models.insert(model_id.to_string()) {
+                    models.push(model_id.to_string());
+                }
+            }
+
+            if reasoning.is_none() {
+                reasoning = data
+                    .get("reasoningEffort")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_ascii_lowercase());
+            }
+        }
+    }
+
+    (models, reasoning)
+}
 
 async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Option<Value> {
     let commands: Vec<String> = if let Some(bp) = binary_path {
@@ -1454,25 +1786,41 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
     let cmd_refs: Vec<&str> = commands.iter().map(String::as_str).collect();
 
     let help = read_command_help(&cmd_refs).await?;
+    let config_model = read_copilot_config_model();
 
-    // Extract model choices from --model option in help text
-    let choices_re = Regex::new(r#"--model[\s\S]*?\(choices:\s*([^)]+)\)"#).ok()?;
-    let model_ids: Vec<String> = if let Some(caps) = choices_re.captures(&help) {
-        let quoted_re = Regex::new(r#""([^"]+)""#).ok()?;
-        let mut seen = HashSet::new();
-        quoted_re
-            .captures_iter(caps.get(1)?.as_str())
-            .filter_map(|c| {
-                let id = c.get(1)?.as_str().trim().to_string();
-                if !id.is_empty() {
-                    seen.insert(id.clone());
-                }
-                Some(id)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let mut seen = HashSet::new();
+    let mut model_ids = Vec::new();
+    for model_id in extract_quoted_choices_from_help(&help, "--model <model>") {
+        if seen.insert(model_id.clone()) {
+            model_ids.push(model_id);
+        }
+    }
+
+    if let Some(config_model_id) = config_model.clone() {
+        if seen.insert(config_model_id.clone()) {
+            model_ids.push(config_model_id);
+        }
+    }
+
+    let session_contents = user_home_dir()
+        .map(|home| {
+            collect_recent_file_contents(&home.join(".copilot/session-state"), &["jsonl"], 3, 16)
+        })
+        .unwrap_or_default();
+    let (observed_models, observed_reasoning) =
+        collect_copilot_session_observations(&session_contents);
+    for model_id in observed_models {
+        if seen.insert(model_id.clone()) {
+            model_ids.push(model_id);
+        }
+    }
+
+    let reasoning_ids =
+        extract_quoted_choices_from_help(&help, "--effort, --reasoning-effort <level>");
+    let reasoning_options: Vec<Value> = reasoning_ids
+        .iter()
+        .map(|reasoning_id| reasoning_option(reasoning_id))
+        .collect();
 
     if model_ids.is_empty() {
         return None;
@@ -1491,17 +1839,24 @@ async fn build_copilot_runtime_model_catalog(binary_path: Option<&Path>) -> Opti
         })
         .collect();
 
-    let default_model = models
-        .first()
-        .and_then(|m| m["id"].as_str())
-        .map(str::to_string);
+    let default_model = config_model
+        .filter(|value| model_ids.iter().any(|candidate| candidate == value))
+        .or_else(|| {
+            models
+                .first()
+                .and_then(|m| m["id"].as_str())
+                .map(str::to_string)
+        });
+    let default_reasoning = observed_reasoning
+        .as_deref()
+        .filter(|value| reasoning_ids.iter().any(|candidate| candidate == value));
     default_access_catalog(
         "github-copilot",
         models,
         default_model.as_deref(),
         default_model.as_deref(),
-        vec![],
-        None,
+        reasoning_options,
+        default_reasoning,
     )
 }
 
@@ -1735,6 +2090,100 @@ mod tests {
                 "claude-sonnet".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn parse_amp_modes_from_help_reads_large_mode() {
+        let help = r#"
+          -m, --mode <value>
+              Set the agent mode (deep, free, large, rush, smart) — controls the model
+        "#;
+        assert_eq!(
+            parse_amp_modes_from_help(help),
+            vec![
+                "deep".to_string(),
+                "free".to_string(),
+                "large".to_string(),
+                "rush".to_string(),
+                "smart".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_cursor_models_output_prefers_current_selection() {
+        let output = r#"
+Loading models…
+Available models
+
+auto - Auto
+gpt-5.4-medium - GPT-5.4 1M
+gpt-5.4-xhigh - GPT-5.4 1M Extra High (current)
+claude-4.6-opus-max-thinking - Opus 4.6 1M Max Thinking (default)
+"#;
+
+        let (models, default_model) = parse_cursor_models_output(output);
+        assert_eq!(
+            models
+                .iter()
+                .filter_map(|value| value.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![
+                "auto",
+                "gpt-5.4-medium",
+                "gpt-5.4-xhigh",
+                "claude-4.6-opus-max-thinking",
+            ]
+        );
+        assert_eq!(default_model.as_deref(), Some("gpt-5.4-xhigh"));
+    }
+
+    #[test]
+    fn parse_opencode_verbose_models_collects_reasoning_variants() {
+        let output = r#"
+opencode/gpt-5-nano
+{
+  "name": "GPT-5 Nano",
+  "variants": {
+    "minimal": {},
+    "medium": {},
+    "high": {}
+  }
+}
+"#;
+
+        let entries = parse_opencode_verbose_models(output);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "opencode/gpt-5-nano");
+        assert_eq!(
+            opencode_reasoning_variant_ids(entries[0].1.get("variants").and_then(Value::as_object)),
+            vec![
+                "minimal".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_copilot_session_observations_reads_models_and_reasoning() {
+        let contents = vec![r#"
+{"type":"session.model_change","data":{"newModel":"claude-haiku-4.5","reasoningEffort":"xhigh"}}
+{"type":"tool.execution_complete","data":{"model":"gpt-5.4"}}
+{"type":"session.shutdown","data":{"currentModel":"claude-sonnet-4.6"}}
+"#
+        .to_string()];
+
+        let (models, reasoning) = collect_copilot_session_observations(&contents);
+        assert_eq!(
+            models,
+            vec![
+                "claude-haiku-4.5".to_string(),
+                "gpt-5.4".to_string(),
+                "claude-sonnet-4.6".to_string(),
+            ]
+        );
+        assert_eq!(reasoning.as_deref(), Some("xhigh"));
     }
 
     #[test]

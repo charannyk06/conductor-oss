@@ -3,8 +3,7 @@
 import { diffLines } from "diff";
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ChevronDown,
-  ChevronRight,
+  ArrowLeft,
   CircleAlert,
   FileCode2,
   GitCompare,
@@ -13,39 +12,23 @@ import {
   Search,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
-import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { cn } from "@/lib/cn";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import { TERMINAL_STATUSES, type SSESessionEvent } from "@/lib/types";
+import {
+  type ChangedFileSummary,
+  type DiffCategory,
+  type FlattenedFileEntry,
+  type ReviewDiffSections,
+  type ReviewDiffStatus,
+  filterFlattenedEntries,
+  flattenSectionEntries,
+  summarizeFlattenedEntries,
+} from "./sessionDiffModel";
 
 type ReviewDiffSource = "working-tree" | "remote-pr" | "not-found";
-type ReviewDiffStatus =
-  | "modified"
-  | "added"
-  | "deleted"
-  | "renamed"
-  | "copy"
-  | "binary"
-  | "untracked"
-  | "unknown";
-type DiffCategory = "against-base" | "staged" | "unstaged" | "untracked";
 type DiffViewMode = "side-by-side" | "inline";
 type DiffSideKind = "context" | "add" | "remove" | "empty";
-
-interface ChangedFileSummary {
-  path: string;
-  oldPath?: string | null;
-  status: ReviewDiffStatus;
-  additions: number;
-  deletions: number;
-}
-
-interface ReviewDiffSections {
-  againstBase: ChangedFileSummary[];
-  staged: ChangedFileSummary[];
-  unstaged: ChangedFileSummary[];
-  untracked: ChangedFileSummary[];
-}
 
 interface ReviewDiffPayload {
   hasDiff: boolean;
@@ -83,12 +66,6 @@ interface FileContentsState {
 interface SessionDiffProps {
   sessionId: string;
   active: boolean;
-}
-
-interface FileEntry {
-  category: DiffCategory;
-  file: ChangedFileSummary;
-  fileKey: string;
 }
 
 interface SplitDiffRow {
@@ -144,7 +121,6 @@ const STORAGE_KEYS = {
   viewMode: "conductor-session-diff-view-mode",
   hideUnchanged: "conductor-session-diff-hide-unchanged",
 };
-const SECTION_ORDER: DiffCategory[] = ["against-base", "staged", "unstaged", "untracked"];
 const SECTION_TITLES: Record<DiffCategory, string> = {
   "against-base": "Against base",
   staged: "Staged",
@@ -223,17 +199,6 @@ function normalizeSections(payload: ReviewDiffPayload): ReviewDiffSections {
     unstaged: dedupe(unstaged),
     untracked: dedupe(untracked),
   };
-}
-
-function getSectionFiles(sections: ReviewDiffSections, category: DiffCategory): ChangedFileSummary[] {
-  if (category === "against-base") {
-    return sections.againstBase;
-  }
-  return sections[category];
-}
-
-function createFileKey(category: DiffCategory, file: ChangedFileSummary): string {
-  return `${category}:${file.oldPath ?? ""}:${file.path}`;
 }
 
 function sourceLabel(source: ReviewDiffSource): string {
@@ -514,48 +479,60 @@ function markerForInlineRow(kind: InlineDiffRow["lineKind"]): string {
   return " ";
 }
 
+function getEntryListSubtitle(entry: FlattenedFileEntry): string | null {
+  if (entry.file.oldPath) {
+    return `${entry.file.oldPath} -> ${entry.file.path}`;
+  }
+  if (entry.categories.length > 1) {
+    return entry.categories.map((category) => SECTION_TITLES[category]).join(" · ");
+  }
+  return null;
+}
+
 function SplitDiffView({ rows }: { rows: SplitDiffRow[] }) {
   return (
-    <div className="min-w-[480px] sm:min-w-[720px] overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
-      <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem_minmax(0,1fr)] sm:grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-        <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
-        <div className="border-r border-[var(--vk-border)] px-3 py-2">Before</div>
-        <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
-        <div className="px-3 py-2">After</div>
-      </div>
-      <div className="font-mono text-[11px] sm:text-[12px] leading-6">
-        {rows.map((row, index) => {
-          if (row.kind === "skip") {
+    <div className="overflow-x-auto overscroll-x-contain rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
+      <div className="min-w-[680px]">
+        <div className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)] sm:grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)]">
+          <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
+          <div className="border-r border-[var(--vk-border)] px-3 py-2">Before</div>
+          <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
+          <div className="px-3 py-2">After</div>
+        </div>
+        <div className="font-mono text-[11px] leading-6 sm:text-[12px]">
+          {rows.map((row, index) => {
+            if (row.kind === "skip") {
+              return (
+                <div
+                  key={`skip-${index}`}
+                  className="border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-center text-[11px] text-[var(--vk-text-muted)] last:border-b-0"
+                >
+                  {row.message}
+                </div>
+              );
+            }
+
             return (
               <div
-                key={`skip-${index}`}
-                className="border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-center text-[11px] text-[var(--vk-text-muted)] last:border-b-0"
+                key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
+                className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0 sm:grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)]"
               >
-                {row.message}
+                <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.oldKind))}>
+                  {row.oldLine ?? ""}
+                </div>
+                <div className={cn("min-w-0 border-r border-[var(--vk-border)] px-3 py-1 whitespace-pre", sideClasses(row.oldKind))}>
+                  {row.oldText || " "}
+                </div>
+                <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.newKind))}>
+                  {row.newLine ?? ""}
+                </div>
+                <div className={cn("min-w-0 px-3 py-1 whitespace-pre", sideClasses(row.newKind))}>
+                  {row.newText || " "}
+                </div>
               </div>
             );
-          }
-
-          return (
-            <div
-              key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
-              className="grid grid-cols-[2.5rem_minmax(0,1fr)_2.5rem_minmax(0,1fr)] sm:grid-cols-[4rem_minmax(0,1fr)_4rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0"
-            >
-              <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.oldKind))}>
-                {row.oldLine ?? ""}
-              </div>
-              <div className={cn("border-r border-[var(--vk-border)] px-3 py-1 whitespace-pre overflow-x-auto", sideClasses(row.oldKind))}>
-                {row.oldText || " "}
-              </div>
-              <div className={cn("border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]", sideClasses(row.newKind))}>
-                {row.newLine ?? ""}
-              </div>
-              <div className={cn("px-3 py-1 whitespace-pre overflow-x-auto", sideClasses(row.newKind))}>
-                {row.newText || " "}
-              </div>
-            </div>
-          );
-        })}
+          })}
+        </div>
       </div>
     </div>
   );
@@ -563,49 +540,158 @@ function SplitDiffView({ rows }: { rows: SplitDiffRow[] }) {
 
 function InlineDiffView({ rows }: { rows: InlineDiffRow[] }) {
   return (
-    <div className="overflow-hidden rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
-      <div className="grid grid-cols-[2rem_2rem_1rem_minmax(0,1fr)] sm:grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)]">
-        <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
-        <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
-        <div className="border-r border-[var(--vk-border)] px-2 py-2">Op</div>
-        <div className="px-3 py-2">Content</div>
-      </div>
-      <div className="font-mono text-[11px] sm:text-[12px] leading-6">
-        {rows.map((row, index) => {
-          if (row.kind === "skip") {
+    <div className="overflow-x-auto overscroll-x-contain rounded-[12px] border border-[var(--vk-border)] bg-[rgba(0,0,0,0.12)]">
+      <div className="min-w-[480px]">
+        <div className="grid grid-cols-[2rem_2rem_1rem_minmax(0,1fr)] border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vk-text-muted)] sm:grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)]">
+          <div className="border-r border-[var(--vk-border)] px-2 py-2">Old</div>
+          <div className="border-r border-[var(--vk-border)] px-2 py-2">New</div>
+          <div className="border-r border-[var(--vk-border)] px-2 py-2">Op</div>
+          <div className="px-3 py-2">Content</div>
+        </div>
+        <div className="font-mono text-[11px] leading-6 sm:text-[12px]">
+          {rows.map((row, index) => {
+            if (row.kind === "skip") {
+              return (
+                <div
+                  key={`skip-${index}`}
+                  className="border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-center text-[11px] text-[var(--vk-text-muted)] last:border-b-0"
+                >
+                  {row.message}
+                </div>
+              );
+            }
+
             return (
               <div
-                key={`skip-${index}`}
-                className="border-b border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-3 py-2 text-center text-[11px] text-[var(--vk-text-muted)] last:border-b-0"
+                key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
+                className={cn(
+                  "grid grid-cols-[2rem_2rem_1rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0 sm:grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)]",
+                  inlineRowClasses(row.lineKind),
+                )}
               >
-                {row.message}
+                <div className="border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]">
+                  {row.oldLine ?? ""}
+                </div>
+                <div className="border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]">
+                  {row.newLine ?? ""}
+                </div>
+                <div className="border-r border-[var(--vk-border)] px-2 py-1 text-center">
+                  {markerForInlineRow(row.lineKind)}
+                </div>
+                <div className="min-w-0 px-3 py-1 whitespace-pre">
+                  {row.text || " "}
+                </div>
               </div>
             );
-          }
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
 
-          return (
-            <div
-              key={`${row.oldLine ?? "x"}:${row.newLine ?? "y"}:${index}`}
-              className={cn(
-                "grid grid-cols-[2rem_2rem_1rem_minmax(0,1fr)] sm:grid-cols-[4rem_4rem_1.5rem_minmax(0,1fr)] border-b border-[var(--vk-border)] last:border-b-0",
-                inlineRowClasses(row.lineKind),
-              )}
+function DiffFileDetail({
+  activeBaseBranch,
+  entry,
+  inlineRows,
+  onBack,
+  selectedState,
+  splitRows,
+  viewMode,
+}: {
+  activeBaseBranch: string;
+  entry: FlattenedFileEntry;
+  inlineRows: InlineDiffRow[];
+  onBack?: () => void;
+  selectedState: FileContentsState;
+  splitRows: SplitDiffRow[];
+  viewMode: DiffViewMode;
+}) {
+  const secondaryCategories = entry.categories.filter((category) => category !== entry.category);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-[var(--vk-border)] px-4 py-3">
+        <div className="flex items-start gap-3">
+          {onBack ? (
+            <button
+              type="button"
+              onClick={onBack}
+              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
+              aria-label="Back to changed files"
             >
-              <div className="border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]">
-                {row.oldLine ?? ""}
-              </div>
-              <div className="border-r border-[var(--vk-border)] px-2 py-1 text-right text-[11px] text-[var(--vk-text-muted)]">
-                {row.newLine ?? ""}
-              </div>
-              <div className="border-r border-[var(--vk-border)] px-2 py-1 text-center">
-                {markerForInlineRow(row.lineKind)}
-              </div>
-              <div className="px-3 py-1 whitespace-pre overflow-x-auto">
-                {row.text || " "}
-              </div>
+              <ArrowLeft className="h-4 w-4" />
+            </button>
+          ) : null}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={cn("inline-flex h-[24px] items-center rounded-[6px] border px-2 text-[11px]", statusPillClass(entry.file))}>
+                {statusLabel(entry.file)}
+              </span>
+              <span className="truncate font-mono text-[13px] text-[var(--vk-text-strong)]">
+                {entry.file.path}
+              </span>
             </div>
-          );
-        })}
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--vk-text-muted)]">
+              <span>{SECTION_TITLES[entry.category]}</span>
+              {secondaryCategories.length > 0 ? (
+                <span>
+                  Also in {secondaryCategories.map((category) => SECTION_TITLES[category]).join(" · ")}
+                </span>
+              ) : null}
+              {entry.file.oldPath ? <span className="font-mono">{entry.file.oldPath} -&gt; {entry.file.path}</span> : null}
+              <span className="font-mono text-[var(--vk-green)]">+{entry.file.additions}</span>
+              <span className="font-mono text-[var(--vk-red)]">-{entry.file.deletions}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
+        {selectedState.loading ? (
+          <div className="flex h-full min-h-[240px] items-center justify-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+            <span>Loading diff...</span>
+          </div>
+        ) : null}
+
+        {selectedState.error ? (
+          <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[13px] text-[var(--status-error)]">
+            {selectedState.error}
+          </div>
+        ) : null}
+
+        {!selectedState.loading && !selectedState.error && selectedState.data?.binary ? (
+          <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[12px] text-[var(--vk-text-muted)]">
+            Binary file preview is not available for this file.
+          </div>
+        ) : null}
+
+        {!selectedState.loading && !selectedState.error && selectedState.data && !selectedState.data.binary ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-[var(--vk-text-muted)]">
+              <span>Base: {selectedState.data.baseBranch || activeBaseBranch}</span>
+              <span>Original: {formatSize(selectedState.data.originalSize)}</span>
+              <span>Modified: {formatSize(selectedState.data.modifiedSize)}</span>
+              {selectedState.data.truncated ? (
+                <span className="text-[var(--status-attention)]">Preview truncated to 1 MB.</span>
+              ) : null}
+            </div>
+            <div className="pb-4">
+              {viewMode === "side-by-side" ? (
+                <SplitDiffView rows={splitRows} />
+              ) : (
+                <InlineDiffView rows={inlineRows} />
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        {!selectedState.loading && !selectedState.error && !selectedState.data ? (
+          <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[12px] text-[var(--vk-text-muted)]">
+            No diff content available for this file.
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -619,14 +705,10 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
   const [viewMode, setViewMode] = useState<DiffViewMode>(() => readStoredViewMode());
   const [hideUnchangedRegions, setHideUnchangedRegions] = useState(() => readStoredHideUnchanged());
   const [fileSearch, setFileSearch] = useState("");
-  const [collapsedSections, setCollapsedSections] = useState<Record<DiffCategory, boolean>>({
-    "against-base": false,
-    staged: false,
-    unstaged: false,
-    untracked: true,
-  });
   const [selectedFileKey, setSelectedFileKey] = useState<string | null>(null);
   const [fileContents, setFileContents] = useState<Record<string, FileContentsState>>({});
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
 
   const mountedRef = useRef(true);
   const payloadSignatureRef = useRef<string>("");
@@ -701,7 +783,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
     }
   }, [encodedSessionId]);
 
-  const loadFileContents = useCallback(async (entry: FileEntry, baseBranch: string) => {
+  const loadFileContents = useCallback(async (entry: FlattenedFileEntry, baseBranch: string) => {
     const { category, file, fileKey } = entry;
 
     setFileContents((current) => {
@@ -857,93 +939,51 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
   }, [hideUnchangedRegions]);
 
   useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mediaQuery = window.matchMedia("(max-width: 1023px)");
+    const updateViewport = () => setIsMobileViewport(mediaQuery.matches);
+
+    updateViewport();
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", updateViewport);
+      return () => mediaQuery.removeEventListener("change", updateViewport);
+    }
+
+    mediaQuery.addListener(updateViewport);
+    return () => mediaQuery.removeListener(updateViewport);
+  }, []);
+
+  useEffect(() => {
     setLoading(true);
     setError(null);
     payloadSignatureRef.current = "";
     setFileSearch("");
     setSelectedFileKey(null);
     setFileContents({});
-    setCollapsedSections({
-      "against-base": false,
-      staged: false,
-      unstaged: false,
-      untracked: true,
-    });
+    setMobilePreviewOpen(false);
   }, [sessionId]);
 
   const sections = useMemo(() => normalizeSections(payload), [payload]);
-  const filteredSections = useMemo(() => {
-    if (!deferredFileSearch) {
-      return sections;
-    }
+  const allEntries = useMemo(() => flattenSectionEntries(sections), [sections]);
+  const visibleEntries = useMemo(
+    () => filterFlattenedEntries(allEntries, deferredFileSearch),
+    [allEntries, deferredFileSearch],
+  );
+  const totals = useMemo(() => summarizeFlattenedEntries(allEntries), [allEntries]);
 
-    const filterFiles = (files: ChangedFileSummary[]) =>
-      files.filter((file) => {
-        const oldPath = file.oldPath ?? "";
-        return file.path.toLowerCase().includes(deferredFileSearch) || oldPath.toLowerCase().includes(deferredFileSearch);
-      });
-
-    return {
-      againstBase: filterFiles(sections.againstBase),
-      staged: filterFiles(sections.staged),
-      unstaged: filterFiles(sections.unstaged),
-      untracked: filterFiles(sections.untracked),
-    };
-  }, [deferredFileSearch, sections]);
-
-  const totals = useMemo(() => {
-    const fileMap = new Map<string, ChangedFileSummary>();
-    for (const category of SECTION_ORDER) {
-      for (const file of getSectionFiles(sections, category)) {
-        const key = createFileKey(category, file);
-        if (!fileMap.has(key)) {
-          fileMap.set(key, file);
-        }
-      }
-    }
-
-    let additions = 0;
-    let deletions = 0;
-    for (const file of fileMap.values()) {
-      additions += file.additions;
-      deletions += file.deletions;
-    }
-
-    return {
-      files: fileMap.size,
-      additions,
-      deletions,
-    };
-  }, [sections]);
-
-  const visibleEntries = useMemo(() => {
-    const entries: FileEntry[] = [];
-    for (const category of SECTION_ORDER) {
-      for (const file of getSectionFiles(filteredSections, category)) {
-        entries.push({
-          category,
-          file,
-          fileKey: createFileKey(category, file),
-        });
-      }
+  const allEntriesByKey = useMemo(() => {
+    const entries = new Map<string, FlattenedFileEntry>();
+    for (const entry of allEntries) {
+      entries.set(entry.fileKey, entry);
     }
     return entries;
-  }, [filteredSections]);
-
-  const allEntries = useMemo(() => {
-    const entries = new Map<string, FileEntry>();
-    for (const category of SECTION_ORDER) {
-      for (const file of getSectionFiles(sections, category)) {
-        const fileKey = createFileKey(category, file);
-        entries.set(fileKey, { category, file, fileKey });
-      }
-    }
-    return entries;
-  }, [sections]);
+  }, [allEntries]);
 
   useEffect(() => {
     if (visibleEntries.length === 0) {
       setSelectedFileKey(null);
+      setMobilePreviewOpen(false);
       return;
     }
 
@@ -954,10 +994,17 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
     ));
   }, [visibleEntries]);
 
-  const selectedEntry = selectedFileKey ? allEntries.get(selectedFileKey) ?? null : null;
+  useEffect(() => {
+    if (!isMobileViewport) {
+      setMobilePreviewOpen(false);
+    }
+  }, [isMobileViewport]);
+
+  const selectedEntry = selectedFileKey ? allEntriesByKey.get(selectedFileKey) ?? null : null;
   const selectedState = selectedEntry ? (fileContents[selectedEntry.fileKey] ?? EMPTY_FILE_STATE) : EMPTY_FILE_STATE;
   const hasVisibleChanges = visibleEntries.length > 0;
   const activeBaseBranch = payload.defaultBranch?.trim() || "main";
+  const effectiveViewMode: DiffViewMode = isMobileViewport ? "inline" : viewMode;
 
   useEffect(() => {
     if (!active || !selectedEntry) return;
@@ -977,18 +1024,93 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
 
   const inlineRows = useMemo(() => toInlineRows(splitRows), [splitRows]);
 
-  const handleToggleSection = useCallback((category: DiffCategory) => {
-    setCollapsedSections((current) => ({
-      ...current,
-      [category]: !current[category],
-    }));
-  }, []);
+  const openFilePreview = useCallback((fileKey: string) => {
+    setSelectedFileKey(fileKey);
+    if (isMobileViewport) {
+      setMobilePreviewOpen(true);
+    }
+  }, [isMobileViewport]);
+
+  const listPane = (
+    <div className="min-h-0 overflow-y-auto overscroll-contain lg:border-r lg:border-[var(--vk-border)]">
+      <div className="py-1">
+        {visibleEntries.map((entry) => {
+          const isSelected = entry.fileKey === selectedFileKey;
+          const subtitle = getEntryListSubtitle(entry);
+          return (
+            <button
+              key={entry.fileKey}
+              type="button"
+              onClick={() => openFilePreview(entry.fileKey)}
+              className={cn(
+                "flex w-full items-start gap-2 border-l-2 px-3 py-2.5 text-left transition",
+                isSelected
+                  ? "border-l-[var(--status-working)] bg-[rgba(108,168,255,0.08)]"
+                  : "border-l-transparent hover:bg-[var(--vk-bg-hover)]",
+              )}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-[12px] text-[var(--vk-text-strong)]">
+                  {entry.file.path}
+                </span>
+                <span className="mt-0.5 flex flex-wrap items-center gap-2">
+                  <span className={cn("inline-flex h-[20px] items-center rounded-[6px] border px-1.5 text-[10px]", statusPillClass(entry.file))}>
+                    {statusLabel(entry.file)}
+                  </span>
+                  {subtitle ? (
+                    <span className="truncate font-mono text-[10px] text-[var(--vk-text-muted)]">
+                      {subtitle}
+                    </span>
+                  ) : null}
+                </span>
+              </span>
+              <span className="shrink-0 font-mono text-[11px]">
+                {entry.file.additions > 0 ? <span className="block text-right text-[var(--vk-green)]">+{entry.file.additions}</span> : null}
+                {entry.file.deletions > 0 ? <span className="block text-right text-[var(--vk-red)]">-{entry.file.deletions}</span> : null}
+                {entry.file.additions === 0 && entry.file.deletions === 0 ? (
+                  <span className="block text-right text-[var(--vk-text-muted)]">0</span>
+                ) : null}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  const desktopDetailPane = selectedEntry ? (
+    <DiffFileDetail
+      activeBaseBranch={activeBaseBranch}
+      entry={selectedEntry}
+      inlineRows={inlineRows}
+      selectedState={selectedState}
+      splitRows={splitRows}
+      viewMode={effectiveViewMode}
+    />
+  ) : (
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+      <FileCode2 className="h-8 w-8 text-[var(--vk-text-muted)]" />
+      <p className="text-[13px] text-[var(--vk-text-muted)]">Select a file to inspect its diff.</p>
+    </div>
+  );
+
+  const mobileDetailPane = selectedEntry ? (
+    <DiffFileDetail
+      activeBaseBranch={activeBaseBranch}
+      entry={selectedEntry}
+      inlineRows={inlineRows}
+      onBack={() => setMobilePreviewOpen(false)}
+      selectedState={selectedState}
+      splitRows={splitRows}
+      viewMode={effectiveViewMode}
+    />
+  ) : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)]">
       <div className="flex min-h-[42px] shrink-0 items-center gap-2 border-b border-[var(--vk-border)] px-3">
         <GitCompare className="h-[15px] w-[15px] text-[var(--vk-text-muted)]" />
-        <span className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">Review Diff</span>
+        <span className="truncate text-[13px] font-medium text-[var(--vk-text-strong)]">Changed Files</span>
         <Badge variant="outline">{sourceLabel(payload.source)}</Badge>
         {payload.branch ? <Badge variant="outline">{payload.branch}</Badge> : null}
         {payload.defaultBranch ? <Badge variant="outline">base {payload.defaultBranch}</Badge> : null}
@@ -1008,7 +1130,10 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
         </div>
       </div>
 
-      <div className="sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2.5">
+      <div className={cn(
+        "sticky top-0 z-10 flex shrink-0 items-center gap-3 border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2.5",
+        mobilePreviewOpen && "hidden lg:flex",
+      )}>
         <div className="flex min-w-0 flex-1 items-center gap-3 text-[12px] text-[var(--vk-text-muted)]">
           <span>{totals.files} files</span>
           <span className="font-mono text-[var(--vk-green)]">+{totals.additions}</span>
@@ -1020,7 +1145,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
             type="button"
             onClick={() => setViewMode("side-by-side")}
             className={cn(
-              "rounded-[6px] px-2 py-1 text-[11px]",
+              "hidden rounded-[6px] px-2 py-1 text-[11px] lg:inline-flex",
               viewMode === "side-by-side"
                 ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
                 : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
@@ -1055,7 +1180,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
         </div>
       </div>
 
-      <div className="shrink-0 border-b border-[var(--vk-border)] p-2">
+      <div className={cn("shrink-0 border-b border-[var(--vk-border)] p-2", mobilePreviewOpen && "hidden lg:block")}>
         <label className="flex items-center gap-2 rounded-[8px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-2.5 py-2">
           <Search className="h-4 w-4 text-[var(--vk-text-muted)]" />
           <input
@@ -1068,7 +1193,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
         </label>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {loading && !payload.hasDiff && !error ? (
           <div className="flex h-full items-center justify-center p-8 text-[13px] text-[var(--vk-text-muted)]">
             Loading session diff...
@@ -1091,152 +1216,19 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
         ) : null}
 
         {!error && hasVisibleChanges ? (
-          <div className="grid h-full min-h-0 grid-rows-[minmax(10rem,14rem)_minmax(0,1fr)] sm:grid-rows-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[320px_minmax(0,1fr)] lg:grid-rows-1">
-            <div className="min-h-0 overflow-y-auto border-b border-[var(--vk-border)] lg:border-b-0 lg:border-r">
-              {SECTION_ORDER.map((category) => {
-                const files = getSectionFiles(filteredSections, category);
-                if (files.length === 0) {
-                  return null;
-                }
-
-                const collapsed = collapsedSections[category];
-                return (
-                  <section key={category} className="border-b border-[var(--vk-border)] last:border-b-0">
-                    <button
-                      type="button"
-                      onClick={() => handleToggleSection(category)}
-                      className="sticky top-0 z-[5] flex w-full items-center gap-2 bg-[var(--vk-bg-panel)] px-3 py-2 text-left text-[12px] text-[var(--vk-text-muted)]"
-                    >
-                      {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                      <span className="font-medium text-[var(--vk-text-normal)]">{SECTION_TITLES[category]}</span>
-                      <span className="font-mono text-[var(--vk-text-muted)]">{files.length}</span>
-                    </button>
-                    {!collapsed ? (
-                      <div className="py-1">
-                        {files.map((file) => {
-                          const fileKey = createFileKey(category, file);
-                          const isSelected = fileKey === selectedFileKey;
-                          return (
-                            <button
-                              key={fileKey}
-                              type="button"
-                              onClick={() => setSelectedFileKey(fileKey)}
-                              className={cn(
-                                "flex w-full items-start gap-2 border-l-2 px-3 py-2.5 text-left transition",
-                                isSelected
-                                  ? "border-l-[var(--status-working)] bg-[rgba(108,168,255,0.08)]"
-                                  : "border-l-transparent hover:bg-[var(--vk-bg-hover)]",
-                              )}
-                            >
-                              <span className="min-w-0 flex-1">
-                                <span className="block truncate font-mono text-[12px] text-[var(--vk-text-strong)]">
-                                  {file.path}
-                                </span>
-                                <span className="mt-0.5 flex items-center gap-2">
-                                  <span className={cn("inline-flex h-[20px] items-center rounded-[6px] border px-1.5 text-[10px]", statusPillClass(file))}>
-                                    {statusLabel(file)}
-                                  </span>
-                                  {file.oldPath ? (
-                                    <span className="truncate font-mono text-[10px] text-[var(--vk-text-muted)]">
-                                      {file.oldPath}
-                                    </span>
-                                  ) : (
-                                    <span className="text-[10px] text-[var(--vk-text-muted)]">{SECTION_TITLES[category]}</span>
-                                  )}
-                                </span>
-                              </span>
-                              <span className="shrink-0 font-mono text-[11px]">
-                                {file.additions > 0 ? <span className="block text-right text-[var(--vk-green)]">+{file.additions}</span> : null}
-                                {file.deletions > 0 ? <span className="block text-right text-[var(--vk-red)]">-{file.deletions}</span> : null}
-                                {file.additions === 0 && file.deletions === 0 ? (
-                                  <span className="block text-right text-[var(--vk-text-muted)]">0</span>
-                                ) : null}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </section>
-                );
-              })}
+          <>
+            {mobilePreviewOpen && selectedEntry ? (
+              <div className="flex h-full min-h-0 flex-col overflow-hidden lg:hidden">
+                {mobileDetailPane}
+              </div>
+            ) : null}
+            <div className={cn("h-full min-h-0 overflow-hidden lg:grid lg:grid-cols-[320px_minmax(0,1fr)]", mobilePreviewOpen && "hidden lg:grid")}>
+              {listPane}
+              <div className="hidden min-h-0 overflow-hidden lg:block">
+                {desktopDetailPane}
+              </div>
             </div>
-
-            <div className="min-h-0 overflow-y-auto overscroll-contain">
-              {!selectedEntry ? (
-                <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
-                  <FileCode2 className="h-8 w-8 text-[var(--vk-text-muted)]" />
-                  <p className="text-[13px] text-[var(--vk-text-muted)]">Select a file to inspect its diff.</p>
-                </div>
-              ) : (
-                <div className="flex h-full min-h-0 flex-col">
-                  <div className="border-b border-[var(--vk-border)] px-4 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className={cn("inline-flex h-[24px] items-center rounded-[6px] border px-2 text-[11px]", statusPillClass(selectedEntry.file))}>
-                        {statusLabel(selectedEntry.file)}
-                      </span>
-                      <span className="truncate font-mono text-[13px] text-[var(--vk-text-strong)]">
-                        {selectedEntry.file.path}
-                      </span>
-                    </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--vk-text-muted)]">
-                      <span>{SECTION_TITLES[selectedEntry.category]}</span>
-                      {selectedEntry.file.oldPath ? <span className="font-mono">{selectedEntry.file.oldPath} -&gt; {selectedEntry.file.path}</span> : null}
-                      <span className="font-mono text-[var(--vk-green)]">+{selectedEntry.file.additions}</span>
-                      <span className="font-mono text-[var(--vk-red)]">-{selectedEntry.file.deletions}</span>
-                    </div>
-                  </div>
-
-                  <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
-                    {selectedState.loading ? (
-                      <div className="flex h-full min-h-[240px] items-center justify-center gap-2 text-[13px] text-[var(--vk-text-muted)]">
-                        <LoaderCircle className="h-4 w-4 animate-spin" />
-                        <span>Loading diff...</span>
-                      </div>
-                    ) : null}
-
-                    {selectedState.error ? (
-                      <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[13px] text-[var(--status-error)]">
-                        {selectedState.error}
-                      </div>
-                    ) : null}
-
-                    {!selectedState.loading && !selectedState.error && selectedState.data?.binary ? (
-                      <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[12px] text-[var(--vk-text-muted)]">
-                        Binary file preview is not available for {getDisplaySessionId(sessionId).slice(0, 6)}.
-                      </div>
-                    ) : null}
-
-                    {!selectedState.loading && !selectedState.error && selectedState.data && !selectedState.data.binary ? (
-                      <div className="space-y-3">
-                        <div className="flex flex-wrap items-center gap-3 text-[11px] text-[var(--vk-text-muted)]">
-                          <span>Base: {selectedState.data.baseBranch || activeBaseBranch}</span>
-                          <span>Original: {formatSize(selectedState.data.originalSize)}</span>
-                          <span>Modified: {formatSize(selectedState.data.modifiedSize)}</span>
-                          {selectedState.data.truncated ? (
-                            <span className="text-[var(--status-attention)]">Preview truncated to 1 MB.</span>
-                          ) : null}
-                        </div>
-                        <div className="overflow-auto pb-4">
-                          {viewMode === "side-by-side" ? (
-                            <SplitDiffView rows={splitRows} />
-                          ) : (
-                            <InlineDiffView rows={inlineRows} />
-                          )}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {!selectedState.loading && !selectedState.error && !selectedState.data ? (
-                      <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[12px] text-[var(--vk-text-muted)]">
-                        No diff content available for this file.
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
+          </>
         ) : null}
       </div>
     </div>

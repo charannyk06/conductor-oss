@@ -19,6 +19,7 @@ pub(crate) use acp_dispatcher::{
     dispatcher_preferred_implementation_model,
     dispatcher_preferred_implementation_reasoning_effort, CreateDispatcherThreadOptions,
     DispatcherRuntimeHandle, DispatcherSelectOption, DispatcherTurnRequest,
+    ACP_ACTIVE_SKILLS_METADATA_KEY,
 };
 pub use app_update::{AppInstallMode, AppUpdateConfig, AppUpdateJobStatus, AppUpdateStatus};
 pub use board_collaboration::{BoardActivityRecord, BoardCommentRecord, WebhookDeliveryRecord};

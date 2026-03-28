@@ -86,6 +86,7 @@ impl Executor for CopilotExecutor {
                 args.push("--model".to_string());
                 args.push(model.clone());
             }
+            push_reasoning_effort_arg(&mut args, options.reasoning_effort.as_deref());
 
             args.extend(options.sanitized_extra_args());
 
@@ -109,6 +110,7 @@ impl Executor for CopilotExecutor {
             args.push("--model".to_string());
             args.push(model.clone());
         }
+        push_reasoning_effort_arg(&mut args, options.reasoning_effort.as_deref());
         if options.skip_permissions {
             args.push("--allow-all".to_string());
         }
@@ -209,6 +211,18 @@ impl Executor for CopilotExecutor {
             _ => ExecutorOutput::Composite(Vec::new()),
         }
     }
+}
+
+fn push_reasoning_effort_arg(args: &mut Vec<String>, reasoning_effort: Option<&str>) {
+    let Some(reasoning_effort) = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    args.push("--reasoning-effort".to_string());
+    args.push(reasoning_effort.to_ascii_lowercase());
 }
 
 fn extract_copilot_text(data: &Value) -> Option<String> {

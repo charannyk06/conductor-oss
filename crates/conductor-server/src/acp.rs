@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration, Instant};
+use url::Url;
 use uuid::Uuid;
 
 use crate::acp_prompt::{
@@ -490,7 +491,7 @@ impl AcpServer {
             runtime_message: Some(dispatch_message),
             source: "acp".to_string(),
             entry_id: Some(user_message_id.clone()),
-            recorded_attachments: Vec::new(),
+            recorded_attachments: prompt.recorded_attachments.clone(),
             runtime_attachments: prompt.runtime_attachments.clone(),
             runtime_context: prompt.runtime_context.clone(),
             model: effective_model.clone(),
@@ -931,6 +932,7 @@ fn meta_string(meta: Option<&Value>, key: &str) -> Option<String> {
 #[derive(Debug, Clone, Default)]
 struct ParsedPromptBlocks {
     user_message: String,
+    recorded_attachments: Vec<String>,
     runtime_attachments: Vec<String>,
     runtime_context: Option<String>,
     has_non_text_content: bool,
@@ -938,6 +940,7 @@ struct ParsedPromptBlocks {
 
 fn parse_prompt_blocks(blocks: &[Value]) -> Result<ParsedPromptBlocks> {
     let mut text_parts = Vec::new();
+    let mut recorded_attachments = Vec::new();
     let mut runtime_attachments = Vec::new();
     let mut runtime_context_sections = Vec::new();
     let mut has_non_text_content = false;
@@ -964,12 +967,25 @@ fn parse_prompt_blocks(blocks: &[Value]) -> Result<ParsedPromptBlocks> {
                     .map(str::trim)
                     .filter(|uri| !uri.is_empty())
                 {
+                    if prompt_attachment_should_be_recorded(uri) {
+                        push_unique_string(&mut recorded_attachments, uri);
+                    }
                     push_unique_string(&mut runtime_attachments, uri);
                     has_non_text_content = true;
                 }
             }
             "resource" => {
                 if let Some(resource) = block.get("resource") {
+                    if let Some(uri) = resource
+                        .get("uri")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|uri| !uri.is_empty())
+                    {
+                        if prompt_attachment_should_be_recorded(uri) {
+                            push_unique_string(&mut recorded_attachments, uri);
+                        }
+                    }
                     if let Some(section) = render_embedded_resource_for_runtime(resource) {
                         runtime_context_sections.push(section);
                     }
@@ -982,10 +998,25 @@ fn parse_prompt_blocks(blocks: &[Value]) -> Result<ParsedPromptBlocks> {
 
     Ok(ParsedPromptBlocks {
         user_message: text_parts.join("\n\n"),
+        recorded_attachments,
         runtime_attachments,
         runtime_context: render_prompt_runtime_context(&runtime_context_sections),
         has_non_text_content,
     })
+}
+
+fn prompt_attachment_should_be_recorded(uri: &str) -> bool {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if !trimmed.contains("://") {
+        return true;
+    }
+    matches!(
+        Url::parse(trimmed).ok().as_ref().map(Url::scheme),
+        Some("file")
+    )
 }
 
 fn push_unique_string(items: &mut Vec<String>, value: &str) {
@@ -1728,8 +1759,10 @@ mod tests {
         AcpServer, CreateDispatcherThreadOptions, LoadSessionRequest, ACP_APPROVAL_GRANTED,
         ACP_CONFIG_IMPLEMENTATION_AGENT, ACP_CONFIG_MODEL, ACP_CONFIG_THOUGHT_LEVEL,
     };
+    use crate::mcp::{AppStateMcpBackend, CreateBoardTaskArgs, McpBackend};
     use crate::state::{
-        AppState, ConversationEntry, SessionRecord, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
+        AppState, ConversationEntry, SessionRecord, SessionStatus,
+        ACP_SESSION_MCP_SERVERS_METADATA_KEY,
     };
     use anyhow::Result;
     use async_trait::async_trait;
@@ -1743,11 +1776,12 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::sync::{atomic::AtomicBool, OnceLock};
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{mpsc, oneshot, Mutex};
     use tokio::time::{sleep, Duration};
+    use url::Url;
     use uuid::Uuid;
 
     struct PromptCompletionExecutor;
@@ -1859,6 +1893,11 @@ mod tests {
         session
     }
 
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn session_config_options_follow_zed_order_and_use_dispatcher_runtime_model() {
         let mut session =
@@ -1947,6 +1986,10 @@ mod tests {
         assert_eq!(
             parsed.user_message,
             "Investigate why dispatcher turns are leaking context."
+        );
+        assert_eq!(
+            parsed.recorded_attachments,
+            vec!["file:///repo/CONDUCTOR.md".to_string()]
         );
         assert_eq!(
             parsed.runtime_attachments,
@@ -2153,6 +2196,108 @@ mod tests {
         assert!(output.contains("\"sessionUpdate\":\"user_message_chunk\""));
         assert!(output.contains("Plan the next board change."));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn acp_prompt_file_links_are_recorded_for_board_task_handoffs() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_test_state("acp-prompt-attachment-handoff").await;
+        let server = AcpServer::new(Arc::clone(&state));
+        let session = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        let docs_dir = root.join("repo").join("docs");
+        fs::create_dir_all(&docs_dir).expect("docs dir should exist");
+        let attachment_path = docs_dir.join("dispatcher-audit.md");
+        fs::write(&attachment_path, "# Dispatcher audit\n").expect("attachment should exist");
+        let attachment_uri = Url::from_file_path(&attachment_path)
+            .expect("attachment should convert to file uri")
+            .to_string();
+
+        let request = super::JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "session/prompt".to_string(),
+            params: Some(json!({})),
+        };
+        let params = super::PromptRequest {
+            session_id: session.id.clone(),
+            message_id: Some("user-turn-attachment".to_string()),
+            prompt: vec![
+                json!({
+                    "type": "text",
+                    "text": "Review the attached audit and create a launch-ready task.",
+                }),
+                json!({
+                    "type": "resource_link",
+                    "uri": attachment_uri,
+                    "name": "dispatcher-audit.md",
+                }),
+            ],
+            meta: None,
+        };
+        let (_client, writer_stream) = duplex(16 * 1024);
+        let writer = Arc::new(Mutex::new(writer_stream));
+        server
+            .run_prompt_turn(
+                &request,
+                &params,
+                session.clone(),
+                Arc::new(AtomicBool::new(false)),
+                &writer,
+            )
+            .await
+            .expect("prompt turn should succeed");
+
+        let persisted = state
+            .get_dispatcher_thread(&session.id)
+            .await
+            .expect("dispatcher thread should persist");
+        let recorded = persisted
+            .conversation
+            .iter()
+            .rev()
+            .find(|entry| entry.kind == "user_message")
+            .expect("prompt turn should record a user message");
+        assert_eq!(recorded.attachments, vec![attachment_uri.clone()]);
+
+        let mut active = persisted.clone();
+        active.status = SessionStatus::Working;
+        state
+            .replace_dispatcher_thread(active)
+            .await
+            .expect("dispatcher thread should persist");
+
+        std::env::set_var("CONDUCTOR_SESSION_ID", &session.id);
+        std::env::set_var("CONDUCTOR_PROJECT_ID", "demo");
+
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+        let payload = backend
+            .create_board_task(CreateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                title: "Review dispatcher audit".to_string(),
+                objective: Some(
+                    "Turn the attached dispatcher audit into an actionable worker task."
+                        .to_string(),
+                ),
+                execution_mode: Some("worktree".to_string()),
+                surfaces: Some(vec!["docs/dispatcher-audit.md".to_string()]),
+                acceptance: Some(vec!["Task packet preserves the attached audit.".to_string()]),
+                skills: Some(vec!["rust".to_string(), "dispatcher review".to_string()]),
+                deliverables: Some(vec!["launch-ready task brief".to_string()]),
+                role: Some("intake".to_string()),
+                ..CreateBoardTaskArgs::default()
+            })
+            .await
+            .expect("recorded ACP prompt attachments should satisfy task context");
+
+        assert_eq!(payload["task"]["attachments"], json!([attachment_uri]));
+
+        std::env::remove_var("CONDUCTOR_SESSION_ID");
+        std::env::remove_var("CONDUCTOR_PROJECT_ID");
         let _ = fs::remove_dir_all(root);
     }
 }

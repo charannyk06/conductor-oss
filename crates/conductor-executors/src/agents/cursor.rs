@@ -21,7 +21,9 @@ impl CursorExecutor {
     }
 
     pub fn discover() -> Option<Self> {
-        discover_binary(&["cursor", "cursor-cli", "cursor-agent"]).map(Self::new)
+        // Prefer the dedicated agent binary over the Cursor IDE shim. The
+        // `cursor` launcher can exist without a usable agent runtime.
+        discover_binary(&["cursor-agent", "cursor-cli", "cursor"]).map(Self::new)
     }
 }
 
@@ -68,9 +70,9 @@ impl Executor for CursorExecutor {
     }
 
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
-        if options.interactive {
-            let mut args = Vec::new();
+        let mut args = cursor_wrapper_prefix_args(&self.binary);
 
+        if options.interactive {
             if options.structured_output {
                 args.push("--output-format".to_string());
                 args.push("stream-json".to_string());
@@ -93,11 +95,11 @@ impl Executor for CursorExecutor {
             return args;
         }
 
-        let mut args = vec![
+        args.extend([
             "--print".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
-        ];
+        ]);
         if let Some(model) = &options.model {
             args.push("--model".to_string());
             args.push(model.clone());
@@ -188,6 +190,21 @@ impl Executor for CursorExecutor {
             _ => ExecutorOutput::Stdout(String::new()),
         }
     }
+}
+
+fn cursor_wrapper_prefix_args(binary: &Path) -> Vec<String> {
+    if is_cursor_wrapper_binary(binary) {
+        vec!["agent".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn is_cursor_wrapper_binary(binary: &Path) -> bool {
+    binary
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("cursor"))
 }
 
 fn is_cursor_auth_prompt(line: &str) -> bool {

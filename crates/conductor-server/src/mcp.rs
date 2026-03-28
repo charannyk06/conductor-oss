@@ -2,8 +2,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use url::Url;
 
 use crate::routes::boards::{
     build_task_text, default_heading_for_role, insert_task_into_board, load_board_response,
@@ -14,7 +16,7 @@ use crate::routes::boards::{
 use crate::state::{
     dispatcher_preferred_implementation_agent, dispatcher_preferred_implementation_model,
     dispatcher_preferred_implementation_reasoning_effort, AppState, SessionRecord, SessionStatus,
-    SpawnRequest,
+    SpawnRequest, ACP_ACTIVE_SKILLS_METADATA_KEY,
 };
 
 const MCP_SERVER_NAME: &str = "conductor";
@@ -233,11 +235,11 @@ impl McpBackend for AppStateMcpBackend {
         let board_path = resolve_board_path_for_project(&self.state, &project_id).await?;
         let board = parse_board(&board_path, &project_id);
         let role = normalize_role(args.role.as_deref().unwrap_or("intake"));
-        let attachments = merge_dispatcher_turn_attachments(
+        let mut attachments = merge_dispatcher_turn_attachments(
             caller_session.as_ref(),
             args.attachments.unwrap_or_default(),
         );
-        let notes = trimmed_option(args.context_notes);
+        let mut notes = trimmed_option(args.context_notes);
         let task_type = trimmed_option(args.task_type);
         let agent = effective_dispatcher_task_agent(caller_session.as_ref(), args.agent);
         let model = effective_dispatcher_task_model(caller_session.as_ref(), args.model);
@@ -245,7 +247,7 @@ impl McpBackend for AppStateMcpBackend {
             caller_session.as_ref(),
             args.reasoning_effort,
         );
-        let packet = BoardTaskPacket {
+        let mut packet = BoardTaskPacket {
             objective: trimmed_option(args.objective),
             execution_mode: args
                 .execution_mode
@@ -260,6 +262,16 @@ impl McpBackend for AppStateMcpBackend {
             review_refs: sanitize_string_list(args.review_refs.unwrap_or_default()),
             deliverables: sanitize_string_list(args.deliverables.unwrap_or_default()),
         };
+        enrich_dispatcher_task_handoff(
+            &self.state,
+            &project_id,
+            caller_session.as_ref(),
+            task_type.as_deref(),
+            &mut notes,
+            &mut attachments,
+            &mut packet,
+        )
+        .await;
         validate_dispatcher_task_handoff(
             caller_session.as_ref(),
             &title,
@@ -306,6 +318,7 @@ impl McpBackend for AppStateMcpBackend {
     async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value> {
         let project_id = self.resolve_project_id(args.project.as_deref()).await?;
         self.ensure_board_mutation_allowed(&project_id).await?;
+        let caller_session = self.caller_session().await?;
         let task_lookup = args
             .task
             .as_deref()
@@ -338,6 +351,27 @@ impl McpBackend for AppStateMcpBackend {
 
         let source_role = board.columns[source_column_index].role.clone();
         apply_board_task_update(&mut task, &args, &project_id);
+        task.attachments =
+            merge_dispatcher_turn_attachments(caller_session.as_ref(), task.attachments.clone());
+        enrich_dispatcher_task_handoff(
+            &self.state,
+            &project_id,
+            caller_session.as_ref(),
+            task.task_type.as_deref(),
+            &mut task.notes,
+            &mut task.attachments,
+            &mut task.packet,
+        )
+        .await;
+        validate_dispatcher_task_handoff(
+            caller_session.as_ref(),
+            split_task_text(&task.text).0.as_str(),
+            task.task_type.as_deref(),
+            task.notes.as_deref(),
+            &task.attachments,
+            &task.packet,
+            task.agent.as_deref(),
+        )?;
         let target_role = args
             .role
             .as_deref()
@@ -720,7 +754,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_GET_BOARD.to_string(),
-            description: "Get the current Conductor board snapshot for a project, including lifecycle columns and tasks".to_string(),
+            description: "Get the current Conductor board snapshot for a project, including lifecycle columns and tasks. ACP dispatchers should inspect this before deciding whether to create or update board tasks.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -730,22 +764,22 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_CREATE_BOARD_TASK.to_string(),
-            description: "Create a new task directly on the Conductor board for a project. ACP dispatcher turns must provide a launch-ready handoff packet, and current-turn attachments are inherited automatically.".to_string(),
+            description: "Create a new task directly on the Conductor board for a project. ACP dispatcher turns must provide a launch-ready handoff packet, current-turn file attachments are inherited automatically, and `surfaces` plus `skills` should name the exact reference files and worker guidance required to execute the task.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "project": { "type": "string", "description": "Optional project ID; defaults to the first configured project" },
                     "title": { "type": "string", "description": "Task title" },
                     "description": { "type": "string", "description": "Optional task description" },
-                    "context_notes": { "type": "string", "description": "Optional orchestration notes for the task" },
+                    "context_notes": { "type": "string", "description": "Optional orchestration notes for the task, including key context that is not obvious from the title" },
                     "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional attachment paths. ACP dispatcher turns also inherit the current turn's recorded attachments." },
                     "objective": { "type": "string", "description": "Explicit objective for the task brief and worker handoff" },
                     "execution_mode": { "type": "string", "description": "Execution mode for spawned work: worktree, main_workspace, or temp_clone" },
-                    "surfaces": { "type": "array", "items": { "type": "string" }, "description": "Exact files, folders, APIs, or product surfaces to inspect" },
+                    "surfaces": { "type": "array", "items": { "type": "string" }, "description": "Exact reference files, folders, APIs, tests, routes, or product surfaces to inspect" },
                     "constraints": { "type": "array", "items": { "type": "string" }, "description": "Non-negotiable constraints, guardrails, or rules" },
                     "dependencies": { "type": "array", "items": { "type": "string" }, "description": "Upstream tasks, context, or blockers this task depends on" },
                     "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Acceptance criteria for completion or review sign-off" },
-                    "skills": { "type": "array", "items": { "type": "string" }, "description": "Suggested skills, domains, or tools the worker should lean on" },
+                    "skills": { "type": "array", "items": { "type": "string" }, "description": "Suggested skills, domains, installed skill IDs, or tools the worker should lean on" },
                     "review_refs": { "type": "array", "items": { "type": "string" }, "description": "PR URLs, issue URLs, commits, or branch refs to review" },
                     "deliverables": { "type": "array", "items": { "type": "string" }, "description": "Expected outputs such as code patch, review report, migration, or checklist update" },
                     "agent": { "type": "string", "description": "Preferred coding agent" },
@@ -936,6 +970,144 @@ fn latest_dispatcher_turn_attachments(session: &SessionRecord) -> Vec<String> {
         .find(|entry| entry.kind == "user_message")
         .map(|entry| sanitize_string_list(entry.attachments.clone()))
         .unwrap_or_default()
+}
+
+fn latest_dispatcher_turn_text(session: &SessionRecord) -> Option<String> {
+    session
+        .conversation
+        .iter()
+        .rev()
+        .find(|entry| entry.kind == "user_message")
+        .and_then(|entry| trimmed_option(Some(entry.text.clone())))
+}
+
+fn dispatcher_active_skills(session: &SessionRecord) -> Vec<String> {
+    session
+        .metadata
+        .get(ACP_ACTIVE_SKILLS_METADATA_KEY)
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+        .map(sanitize_string_list)
+        .unwrap_or_default()
+}
+
+fn attachment_looks_like_url(value: &str) -> bool {
+    matches!(
+        Url::parse(value).ok().as_ref().map(Url::scheme),
+        Some("http" | "https")
+    )
+}
+
+fn normalize_attachment_surface(
+    workspace_root: &Path,
+    project_root: &Path,
+    attachment: &str,
+) -> Option<String> {
+    let trimmed = attachment.trim();
+    if trimmed.is_empty() || attachment_looks_like_url(trimmed) {
+        return None;
+    }
+
+    let candidate = if trimmed.starts_with("file://") {
+        Url::parse(trimmed).ok()?.to_file_path().ok()?
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    if !candidate.is_absolute() {
+        return Some(trimmed.replace('\\', "/"));
+    }
+
+    let display = candidate
+        .strip_prefix(project_root)
+        .or_else(|_| candidate.strip_prefix(workspace_root))
+        .map(|value| value.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| candidate.to_string_lossy().replace('\\', "/"));
+
+    (!display.trim().is_empty()).then_some(display)
+}
+
+fn attachment_review_ref(
+    workspace_root: &Path,
+    project_root: &Path,
+    attachment: &str,
+) -> Option<String> {
+    let trimmed = attachment.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if attachment_looks_like_url(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    normalize_attachment_surface(workspace_root, project_root, trimmed)
+}
+
+async fn enrich_dispatcher_task_handoff(
+    state: &AppState,
+    project_id: &str,
+    caller_session: Option<&SessionRecord>,
+    task_type: Option<&str>,
+    notes: &mut Option<String>,
+    attachments: &mut Vec<String>,
+    packet: &mut BoardTaskPacket,
+) {
+    let Some(session) = caller_session.filter(|session| is_acp_dispatcher_session(session)) else {
+        return;
+    };
+
+    if notes.is_none() {
+        *notes = latest_dispatcher_turn_text(session);
+    }
+
+    let config = state.config.read().await.clone();
+    let Some(project) = config.projects.get(project_id) else {
+        if packet.skills.is_empty() {
+            packet.skills = dispatcher_active_skills(session);
+        } else {
+            packet.skills = sanitize_string_list(packet.skills.clone());
+        }
+        return;
+    };
+    let project_root = state.resolve_project_path(project);
+
+    let inferred_surfaces = attachments
+        .iter()
+        .filter_map(|attachment| {
+            normalize_attachment_surface(&state.workspace_path, &project_root, attachment)
+        })
+        .collect::<Vec<_>>();
+    let inferred_review_refs = attachments
+        .iter()
+        .filter_map(|attachment| {
+            attachment_review_ref(&state.workspace_path, &project_root, attachment)
+        })
+        .collect::<Vec<_>>();
+
+    if !inferred_surfaces.is_empty() {
+        let mut merged = packet.surfaces.clone();
+        merged.extend(inferred_surfaces);
+        packet.surfaces = sanitize_string_list(merged);
+    } else {
+        packet.surfaces = sanitize_string_list(packet.surfaces.clone());
+    }
+
+    if task_type
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("review"))
+    {
+        let mut merged = packet.review_refs.clone();
+        merged.extend(inferred_review_refs);
+        packet.review_refs = sanitize_string_list(merged);
+    } else {
+        packet.review_refs = sanitize_string_list(packet.review_refs.clone());
+    }
+
+    if packet.skills.is_empty() {
+        packet.skills = dispatcher_active_skills(session);
+    } else {
+        packet.skills = sanitize_string_list(packet.skills.clone());
+    }
+
+    *attachments = sanitize_string_list(attachments.clone());
 }
 
 fn merge_dispatcher_turn_attachments(
@@ -1741,6 +1913,113 @@ mod tests {
         let board_contents = fs::read_to_string(root.join("repo").join("CONDUCTOR.md"))
             .expect("board should be readable");
         assert!(board_contents.contains("attachments:docs/incidents/dispatcher-audit.md"));
+
+        std::env::remove_var(MCP_CALLER_SESSION_ENV);
+        std::env::remove_var(MCP_CALLER_PROJECT_ENV);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn acp_dispatcher_create_task_enriches_handoff_from_turn_context() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_app_state("mcp-acp-enriched-handoff").await;
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join("docs").join("incidents"))
+            .expect("docs dir should be created");
+        fs::write(
+            repo.join("docs")
+                .join("incidents")
+                .join("dispatcher-audit.md"),
+            "# Dispatcher audit\n",
+        )
+        .expect("attachment should exist");
+
+        let mut dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        dispatcher.status = SessionStatus::Working;
+        dispatcher.metadata.insert(
+            ACP_ACTIVE_SKILLS_METADATA_KEY.to_string(),
+            serde_json::to_string(&vec!["rust".to_string(), "dispatcher-review".to_string()])
+                .expect("skills should serialize"),
+        );
+        dispatcher
+            .conversation
+            .push(crate::state::ConversationEntry {
+                id: Uuid::new_v4().to_string(),
+                kind: "user_message".to_string(),
+                source: "dispatcher_ui".to_string(),
+                text: "Review the dispatcher audit and turn it into a concrete board task."
+                    .to_string(),
+                created_at: Utc::now().to_rfc3339(),
+                attachments: vec![
+                    "docs/incidents/dispatcher-audit.md".to_string(),
+                    "https://github.com/acme/conductor/pull/42".to_string(),
+                ],
+                metadata: HashMap::new(),
+            });
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        std::env::set_var(MCP_CALLER_SESSION_ENV, &dispatcher.id);
+        std::env::set_var(MCP_CALLER_PROJECT_ENV, "demo");
+
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+        let payload = backend
+            .create_board_task(CreateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                title: "Review dispatcher audit findings".to_string(),
+                objective: Some(
+                    "Capture the concrete dispatcher gaps found in the audit.".to_string(),
+                ),
+                execution_mode: Some("main_workspace".to_string()),
+                acceptance: Some(vec![
+                    "The worker can review the audit without reopening dispatcher chat."
+                        .to_string(),
+                ]),
+                deliverables: Some(vec![
+                    "review findings".to_string(),
+                    "recommended fixes".to_string(),
+                ]),
+                task_type: Some("review".to_string()),
+                role: Some("review".to_string()),
+                ..CreateBoardTaskArgs::default()
+            })
+            .await
+            .expect("dispatcher context should enrich the handoff packet");
+
+        assert_eq!(
+            payload["task"]["attachments"],
+            json!([
+                "docs/incidents/dispatcher-audit.md",
+                "https://github.com/acme/conductor/pull/42"
+            ])
+        );
+        assert_eq!(
+            payload["task"]["notes"],
+            "Review the dispatcher audit and turn it into a concrete board task."
+        );
+        assert_eq!(
+            payload["task"]["packet"]["surfaces"],
+            json!(["docs/incidents/dispatcher-audit.md"])
+        );
+        assert_eq!(
+            payload["task"]["packet"]["reviewRefs"],
+            json!([
+                "docs/incidents/dispatcher-audit.md",
+                "https://github.com/acme/conductor/pull/42"
+            ])
+        );
+        assert_eq!(
+            payload["task"]["packet"]["skills"],
+            json!(["rust", "dispatcher-review"])
+        );
 
         std::env::remove_var(MCP_CALLER_SESSION_ENV);
         std::env::remove_var(MCP_CALLER_PROJECT_ENV);

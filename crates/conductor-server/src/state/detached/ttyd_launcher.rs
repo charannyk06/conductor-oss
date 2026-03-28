@@ -532,6 +532,7 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
             timeout: None,
         },
     );
+    state.mark_session_runtime_restored(session_id).await?;
 
     Ok(())
 }
@@ -598,7 +599,15 @@ async fn run_ttyd_session_owner(
                         }
                     }
                 }
-                Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Ping(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {}
+                Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {}
+                Some(Ok(WsMessage::Ping(payload))) => {
+                    // ttyd actively pings idle clients. If the backend-owned
+                    // owner websocket does not answer, the live PTY session
+                    // gets torn down even though the user only stepped away.
+                    w.send(WsMessage::Pong(payload))
+                        .await
+                        .context("ttyd session owner pong send failed")?;
+                }
                 Some(Ok(WsMessage::Close(_))) | None => break,
                 Some(Err(err)) => return Err(err.into()),
             },
