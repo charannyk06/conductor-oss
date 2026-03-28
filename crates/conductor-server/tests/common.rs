@@ -290,6 +290,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::filesystem::router())
         .merge(routes::context_files::router())
         .merge(routes::boards::router())
+        .merge(routes::dispatcher::router())
         .merge(routes::github::router())
         .merge(routes::attachments::router())
         .merge(routes::notifications::router())

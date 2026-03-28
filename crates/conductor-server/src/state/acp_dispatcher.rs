@@ -27,6 +27,8 @@ use crate::acp_prompt::{
     acp_dispatcher_preference_note, acp_dispatcher_turn_allows_board_mutations,
     acp_dispatcher_turn_prefix, rewrite_acp_dispatcher_command,
 };
+use crate::dispatcher_task_lifecycle::DispatcherTaskOperation;
+use crate::routes::boards::{default_heading_for_role, split_task_text, BoardTaskRecord};
 use crate::task_context::{attachment_allowed_roots, attachment_context_sections};
 use conductor_core::types::DEFAULT_SESSION_HISTORY_LIMIT;
 
@@ -1478,7 +1480,7 @@ pub(crate) fn build_acp_dispatcher_prompt(
             "- Maintain ACP short-term session memory for the latest decisions, blockers, live context, and next actions\n",
             "- Keep track of heartbeat-style follow-ups so deferred work surfaces again instead of getting lost in chat\n",
             "- Create or update board tasks so dedicated coding sessions can be launched separately\n",
-            "- Use native Conductor MCP tools when available to inspect the board, create tasks, update task state, and inspect task attempt lifecycles\n",
+            "- Use native Conductor MCP tools when available to inspect the board, create dispatcher tasks, update them, hand them off explicitly, and inspect task attempt lifecycles\n",
             "- Do not do the main implementation work in this dispatcher unless the user explicitly asks for that\n",
             "- Prefer handing implementation to dedicated coding-agent sessions instead of doing it inside the dispatcher\n\n",
             "Project context:\n",
@@ -1493,8 +1495,8 @@ pub(crate) fn build_acp_dispatcher_prompt(
             "Operating rules:\n",
             "- Operate against the main project workspace, current checked-out branch, and board context; do not create isolated implementation branches or worktrees from this ACP session\n",
             "- Default to execution mode: inspect the repo and board first, then create or update the right board tasks in the same turn when the request is actionable\n",
-            "- Start actionable turns by inspecting the current board with `conductor_get_board`, then inspect the relevant repo files, diffs, PRs, or docs before deciding whether to create or update tasks\n",
-            "- When the request clearly requires board changes, do not stop at prose: use `conductor_create_board_task` or `conductor_update_board_task` in the same turn unless the user explicitly asked for plan-only review\n",
+            "- Start actionable turns by inspecting the current board with `conductor_get_board`, then inspect the relevant repo files, diffs, PRs, or docs before deciding whether to create, update, or hand off tasks\n",
+            "- When the request clearly requires board changes, do not stop at prose: use `conductor_dispatcher_create_task`, `conductor_dispatcher_update_task`, or `conductor_dispatcher_handoff_task` in the same turn unless the user explicitly asked for plan-only review\n",
             "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
             "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
             "- Keep the conversation stateful and use the board as the shared execution surface\n",
@@ -1639,6 +1641,120 @@ impl AppState {
 
     pub(crate) async fn publish_dispatcher_update(&self, thread_id: &str) {
         let _ = self.dispatcher_updates.send(thread_id.to_string());
+    }
+
+    pub(crate) async fn record_dispatcher_task_lifecycle_event(
+        &self,
+        thread_id: &str,
+        operation: DispatcherTaskOperation,
+        task: &BoardTaskRecord,
+        role: &str,
+    ) -> Result<()> {
+        let mut threads = self.dispatcher_threads.write().await;
+        let thread = threads
+            .get_mut(thread_id)
+            .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+
+        let (title, description) = split_task_text(&task.text);
+        let task_ref = task
+            .task_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(task.id.as_str())
+            .to_string();
+        let role_label = default_heading_for_role(role).to_string();
+        let event_type = match operation {
+            DispatcherTaskOperation::Create => "dispatcher_task_created",
+            DispatcherTaskOperation::Update => "dispatcher_task_updated",
+            DispatcherTaskOperation::Handoff => "dispatcher_task_handed_off",
+        };
+        let summary_line = match operation {
+            DispatcherTaskOperation::Create => {
+                format!("Created `{task_ref}` in `{role_label}`.")
+            }
+            DispatcherTaskOperation::Update => {
+                format!("Updated `{task_ref}` in `{role_label}`.")
+            }
+            DispatcherTaskOperation::Handoff => {
+                format!("Handed off `{task_ref}` to `{role_label}`.")
+            }
+        };
+
+        let mut details = vec![format!("- Task: {title}")];
+        if let Some(description) = description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("- Description: {description}"));
+        }
+        if let Some(agent) = task
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("- Agent: {agent}"));
+        }
+        if let Some(task_type) = task
+            .task_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            details.push(format!("- Type: {task_type}"));
+        }
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "eventType".to_string(),
+            Value::String(event_type.to_string()),
+        );
+        metadata.insert(
+            "operation".to_string(),
+            Value::String(operation.as_str().to_string()),
+        );
+        metadata.insert(
+            "projectId".to_string(),
+            Value::String(
+                task.project
+                    .clone()
+                    .unwrap_or_else(|| thread.project_id.clone()),
+            ),
+        );
+        metadata.insert("taskId".to_string(), Value::String(task.id.clone()));
+        metadata.insert("taskRef".to_string(), Value::String(task_ref.clone()));
+        metadata.insert("taskTitle".to_string(), Value::String(title.clone()));
+        metadata.insert("taskRole".to_string(), Value::String(role.to_string()));
+        metadata.insert(
+            "taskRoleLabel".to_string(),
+            Value::String(role_label.clone()),
+        );
+        if let Some(agent) = task.agent.clone() {
+            metadata.insert("taskAgent".to_string(), Value::String(agent));
+        }
+        if let Some(task_type) = task.task_type.clone() {
+            metadata.insert("taskType".to_string(), Value::String(task_type));
+        }
+
+        thread.last_activity_at = Utc::now().to_rfc3339();
+        thread.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "system_message".to_string(),
+            source: "dispatcher_task_lifecycle".to_string(),
+            text: format!("{summary_line}\n\n{}", details.join("\n")),
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata,
+        });
+        enforce_conversation_limit(thread);
+        let updated = thread.clone();
+        drop(threads);
+
+        self.persist_dispatcher_thread(&updated).await?;
+        self.sync_acp_dispatcher_state(&updated).await?;
+        self.publish_dispatcher_update(thread_id).await;
+        Ok(())
     }
 
     pub(crate) async fn invalidate_dispatcher_caches(&self, thread_id: &str) {
@@ -3098,8 +3214,9 @@ mod tests {
         );
 
         assert!(prompt.contains("conductor_get_board"));
-        assert!(prompt.contains("conductor_create_board_task"));
-        assert!(prompt.contains("conductor_update_board_task"));
+        assert!(prompt.contains("conductor_dispatcher_create_task"));
+        assert!(prompt.contains("conductor_dispatcher_update_task"));
+        assert!(prompt.contains("conductor_dispatcher_handoff_task"));
         assert!(prompt.contains("Treat `surfaces` as the task's reference files"));
         assert!(prompt.contains("Treat `skills` as required worker guidance"));
 

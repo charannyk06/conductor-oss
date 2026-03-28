@@ -2,22 +2,16 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use url::Url;
 
-use crate::routes::boards::{
-    build_task_text, default_heading_for_role, insert_task_into_board, load_board_response,
-    next_human_task_ref, normalize_execution_mode, normalize_role, parse_board,
-    resolve_board_path_for_project, resolve_board_task_record, split_task_text, write_parsed_board,
-    BoardTaskPacket, BoardTaskRecord, ParsedBoard, ParsedBoardColumn,
+use crate::dispatcher_task_lifecycle::{
+    create_dispatcher_task, handoff_dispatcher_task, update_dispatcher_task,
+    DispatcherTaskCreateInput, DispatcherTaskHandoffInput, DispatcherTaskMutationContext,
+    DispatcherTaskUpdateInput,
 };
-use crate::state::{
-    dispatcher_preferred_implementation_agent, dispatcher_preferred_implementation_model,
-    dispatcher_preferred_implementation_reasoning_effort, AppState, SessionRecord, SessionStatus,
-    SpawnRequest, ACP_ACTIVE_SKILLS_METADATA_KEY,
-};
+use crate::routes::boards::{load_board_response, resolve_board_task_record, split_task_text};
+use crate::state::{AppState, SessionRecord, SessionStatus, SpawnRequest};
 
 const MCP_SERVER_NAME: &str = "conductor";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,8 +21,11 @@ const TOOL_LIST_SESSIONS: &str = "conductor_list_sessions";
 const TOOL_SESSION_STATUS: &str = "conductor_session_status";
 const TOOL_LIST_PROJECTS: &str = "conductor_list_projects";
 const TOOL_GET_BOARD: &str = "conductor_get_board";
-const TOOL_CREATE_BOARD_TASK: &str = "conductor_create_board_task";
-const TOOL_UPDATE_BOARD_TASK: &str = "conductor_update_board_task";
+const TOOL_DISPATCHER_CREATE_TASK: &str = "conductor_dispatcher_create_task";
+const TOOL_DISPATCHER_UPDATE_TASK: &str = "conductor_dispatcher_update_task";
+const TOOL_DISPATCHER_HANDOFF_TASK: &str = "conductor_dispatcher_handoff_task";
+const LEGACY_TOOL_CREATE_BOARD_TASK: &str = "conductor_create_board_task";
+const LEGACY_TOOL_UPDATE_BOARD_TASK: &str = "conductor_update_board_task";
 const TOOL_TASK_GRAPH: &str = "conductor_task_graph";
 const MCP_CALLER_SESSION_ENV: &str = "CONDUCTOR_SESSION_ID";
 const MCP_CALLER_PROJECT_ENV: &str = "CONDUCTOR_PROJECT_ID";
@@ -43,8 +40,9 @@ pub trait McpBackend: Send + Sync {
     async fn session_status(&self, session_id: &str) -> Result<Option<McpSessionSummary>>;
     async fn list_projects(&self) -> Result<Vec<McpProjectSummary>>;
     async fn get_board(&self, args: GetBoardArgs) -> Result<Value>;
-    async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value>;
-    async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value>;
+    async fn create_dispatcher_task(&self, args: DispatcherTaskCreateInput) -> Result<Value>;
+    async fn update_dispatcher_task(&self, args: DispatcherTaskUpdateInput) -> Result<Value>;
+    async fn handoff_dispatcher_task(&self, args: DispatcherTaskHandoffInput) -> Result<Value>;
     async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value>;
 }
 
@@ -223,181 +221,85 @@ impl McpBackend for AppStateMcpBackend {
             .map_err(|(_, message)| anyhow!(message))
     }
 
-    async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value> {
+    async fn create_dispatcher_task(&self, args: DispatcherTaskCreateInput) -> Result<Value> {
         let project_id = self.resolve_project_id(args.project.as_deref()).await?;
         self.ensure_board_mutation_allowed(&project_id).await?;
         let caller_session = self.caller_session().await?;
-        let title = args.title.trim().to_string();
-        if title.is_empty() {
-            bail!("title is required");
-        }
-
-        let board_path = resolve_board_path_for_project(&self.state, &project_id).await?;
-        let board = parse_board(&board_path, &project_id);
-        let role = normalize_role(args.role.as_deref().unwrap_or("intake"));
-        let mut attachments = merge_dispatcher_turn_attachments(
-            caller_session.as_ref(),
-            args.attachments.unwrap_or_default(),
-        );
-        let mut notes = trimmed_option(args.context_notes);
-        let task_type = trimmed_option(args.task_type);
-        let agent = effective_dispatcher_task_agent(caller_session.as_ref(), args.agent);
-        let model = effective_dispatcher_task_model(caller_session.as_ref(), args.model);
-        let reasoning_effort = effective_dispatcher_task_reasoning_effort(
-            caller_session.as_ref(),
-            args.reasoning_effort,
-        );
-        let mut packet = BoardTaskPacket {
-            objective: trimmed_option(args.objective),
-            execution_mode: args
-                .execution_mode
-                .as_deref()
-                .and_then(normalize_execution_mode)
-                .map(str::to_string),
-            surfaces: sanitize_string_list(args.surfaces.unwrap_or_default()),
-            constraints: sanitize_string_list(args.constraints.unwrap_or_default()),
-            dependencies: sanitize_string_list(args.dependencies.unwrap_or_default()),
-            acceptance: sanitize_string_list(args.acceptance.unwrap_or_default()),
-            skills: sanitize_string_list(args.skills.unwrap_or_default()),
-            review_refs: sanitize_string_list(args.review_refs.unwrap_or_default()),
-            deliverables: sanitize_string_list(args.deliverables.unwrap_or_default()),
+        let activity_source = if caller_session
+            .as_ref()
+            .is_some_and(is_acp_dispatcher_session)
+        {
+            "dispatcher"
+        } else {
+            "mcp"
         };
-        enrich_dispatcher_task_handoff(
+        let mut args = args;
+        args.project = Some(project_id);
+        let result = create_dispatcher_task(
             &self.state,
-            &project_id,
-            caller_session.as_ref(),
-            task_type.as_deref(),
-            &mut notes,
-            &mut attachments,
-            &mut packet,
+            DispatcherTaskMutationContext {
+                activity_source,
+                caller_session,
+                dispatcher_thread_id: None,
+            },
+            args,
         )
-        .await;
-        validate_dispatcher_task_handoff(
-            caller_session.as_ref(),
-            &title,
-            task_type.as_deref(),
-            notes.as_deref(),
-            &attachments,
-            &packet,
-            agent.as_deref(),
-        )?;
-
-        let task = BoardTaskRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            text: build_task_text(&title, args.description.as_deref()),
-            checked: args.checked.unwrap_or(false),
-            agent,
-            model,
-            reasoning_effort,
-            project: Some(project_id.clone()),
-            task_type,
-            priority: trimmed_option(args.priority),
-            task_ref: Some(next_human_task_ref(&board, &project_id)),
-            attempt_ref: trimmed_option(args.attempt_ref),
-            issue_id: trimmed_option(args.issue_id),
-            github_item_id: trimmed_option(args.github_item_id),
-            attachments,
-            notes,
-            packet,
-        };
-
-        insert_task_into_board(&board_path, role, &task, &project_id)?;
-        self.state
-            .push_board_activity(&project_id, "mcp", "created task", task.text.clone())
-            .await;
-        self.state.publish_snapshot().await;
-
-        let mut payload = load_board_response(&self.state, &project_id)
-            .await
-            .map_err(|(_, message)| anyhow!(message))?;
-        payload["createdTaskId"] = Value::String(task.id.clone());
-        payload["task"] = board_task_value(&task, role);
-        Ok(payload)
+        .await?;
+        Ok(result.response_payload())
     }
 
-    async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value> {
+    async fn update_dispatcher_task(&self, args: DispatcherTaskUpdateInput) -> Result<Value> {
         let project_id = self.resolve_project_id(args.project.as_deref()).await?;
         self.ensure_board_mutation_allowed(&project_id).await?;
         let caller_session = self.caller_session().await?;
-        let task_lookup = args
-            .task
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow!("task is required"))?;
-        let existing = resolve_board_task_record(&self.state, &project_id, task_lookup)
-            .await
-            .ok_or_else(|| {
-                anyhow!("Board task \"{task_lookup}\" not found in project \"{project_id}\"")
-            })?;
-        let board_path = resolve_board_path_for_project(&self.state, &project_id).await?;
-        let mut board = parse_board(&board_path, &project_id);
-
-        let mut located: Option<(usize, usize, BoardTaskRecord)> = None;
-        for (column_index, column) in board.columns.iter_mut().enumerate() {
-            if let Some(task_index) = column.tasks.iter().position(|task| task.id == existing.id) {
-                let task = column.tasks.remove(task_index);
-                located = Some((column_index, task_index, task));
-                break;
-            }
-        }
-
-        let Some((source_column_index, source_task_index, mut task)) = located else {
-            bail!(
-                "Board task \"{}\" could not be updated because it disappeared from the board",
-                existing.id
-            );
+        let activity_source = if caller_session
+            .as_ref()
+            .is_some_and(is_acp_dispatcher_session)
+        {
+            "dispatcher"
+        } else {
+            "mcp"
         };
-
-        let source_role = board.columns[source_column_index].role.clone();
-        apply_board_task_update(&mut task, &args, &project_id);
-        task.attachments =
-            merge_dispatcher_turn_attachments(caller_session.as_ref(), task.attachments.clone());
-        enrich_dispatcher_task_handoff(
+        let mut args = args;
+        args.project = Some(project_id);
+        let result = update_dispatcher_task(
             &self.state,
-            &project_id,
-            caller_session.as_ref(),
-            task.task_type.as_deref(),
-            &mut task.notes,
-            &mut task.attachments,
-            &mut task.packet,
+            DispatcherTaskMutationContext {
+                activity_source,
+                caller_session,
+                dispatcher_thread_id: None,
+            },
+            args,
         )
-        .await;
-        validate_dispatcher_task_handoff(
-            caller_session.as_ref(),
-            split_task_text(&task.text).0.as_str(),
-            task.task_type.as_deref(),
-            task.notes.as_deref(),
-            &task.attachments,
-            &task.packet,
-            task.agent.as_deref(),
-        )?;
-        let target_role = args
-            .role
-            .as_deref()
-            .map(normalize_role)
-            .unwrap_or(source_role.as_str())
-            .to_string();
-        insert_board_task_at_position(
-            &mut board,
-            task.clone(),
-            &source_role,
-            source_task_index,
-            &target_role,
-            args.target_index,
-        );
-        write_parsed_board(&board_path, &board, &project_id)?;
-        self.state
-            .push_board_activity(&project_id, "mcp", "updated task", task.text.clone())
-            .await;
-        self.state.publish_snapshot().await;
+        .await?;
+        Ok(result.response_payload())
+    }
 
-        let mut payload = load_board_response(&self.state, &project_id)
-            .await
-            .map_err(|(_, message)| anyhow!(message))?;
-        payload["updatedTaskId"] = Value::String(task.id.clone());
-        payload["task"] = board_task_value(&task, &target_role);
-        Ok(payload)
+    async fn handoff_dispatcher_task(&self, args: DispatcherTaskHandoffInput) -> Result<Value> {
+        let project_id = self.resolve_project_id(args.project.as_deref()).await?;
+        self.ensure_board_mutation_allowed(&project_id).await?;
+        let caller_session = self.caller_session().await?;
+        let activity_source = if caller_session
+            .as_ref()
+            .is_some_and(is_acp_dispatcher_session)
+        {
+            "dispatcher"
+        } else {
+            "mcp"
+        };
+        let mut args = args;
+        args.project = Some(project_id);
+        let result = handoff_dispatcher_task(
+            &self.state,
+            DispatcherTaskMutationContext {
+                activity_source,
+                caller_session,
+                dispatcher_thread_id: None,
+            },
+            args,
+        )
+        .await?;
+        Ok(result.response_payload())
     }
 
     async fn task_graph(&self, args: TaskGraphArgs) -> Result<Value> {
@@ -703,24 +605,39 @@ async fn handle_tool_call(backend: &dyn McpBackend, params: Value) -> Result<Val
             },
             Err(err) => Ok(tool_error(format!("Invalid get_board arguments: {err}"))),
         },
-        TOOL_CREATE_BOARD_TASK => match serde_json::from_value::<CreateBoardTaskArgs>(arguments) {
-            Ok(args) => match backend.create_board_task(args).await {
-                Ok(payload) => Ok(tool_success(payload)),
-                Err(err) => Ok(tool_error(err.to_string())),
-            },
-            Err(err) => Ok(tool_error(format!(
-                "Invalid create_board_task arguments: {err}"
-            ))),
-        },
-        TOOL_UPDATE_BOARD_TASK => match serde_json::from_value::<UpdateBoardTaskArgs>(arguments) {
-            Ok(args) => match backend.update_board_task(args).await {
-                Ok(payload) => Ok(tool_success(payload)),
-                Err(err) => Ok(tool_error(err.to_string())),
-            },
-            Err(err) => Ok(tool_error(format!(
-                "Invalid update_board_task arguments: {err}"
-            ))),
-        },
+        TOOL_DISPATCHER_CREATE_TASK | LEGACY_TOOL_CREATE_BOARD_TASK => {
+            match serde_json::from_value::<DispatcherTaskCreateInput>(arguments) {
+                Ok(args) => match backend.create_dispatcher_task(args).await {
+                    Ok(payload) => Ok(tool_success(payload)),
+                    Err(err) => Ok(tool_error(err.to_string())),
+                },
+                Err(err) => Ok(tool_error(format!(
+                    "Invalid dispatcher_create_task arguments: {err}"
+                ))),
+            }
+        }
+        TOOL_DISPATCHER_UPDATE_TASK | LEGACY_TOOL_UPDATE_BOARD_TASK => {
+            match serde_json::from_value::<DispatcherTaskUpdateInput>(arguments) {
+                Ok(args) => match backend.update_dispatcher_task(args).await {
+                    Ok(payload) => Ok(tool_success(payload)),
+                    Err(err) => Ok(tool_error(err.to_string())),
+                },
+                Err(err) => Ok(tool_error(format!(
+                    "Invalid dispatcher_update_task arguments: {err}"
+                ))),
+            }
+        }
+        TOOL_DISPATCHER_HANDOFF_TASK => {
+            match serde_json::from_value::<DispatcherTaskHandoffInput>(arguments) {
+                Ok(args) => match backend.handoff_dispatcher_task(args).await {
+                    Ok(payload) => Ok(tool_success(payload)),
+                    Err(err) => Ok(tool_error(err.to_string())),
+                },
+                Err(err) => Ok(tool_error(format!(
+                    "Invalid dispatcher_handoff_task arguments: {err}"
+                ))),
+            }
+        }
         TOOL_TASK_GRAPH => match serde_json::from_value::<TaskGraphArgs>(arguments) {
             Ok(args) => match backend.task_graph(args).await {
                 Ok(payload) => Ok(tool_success(payload)),
@@ -813,8 +730,8 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: TOOL_CREATE_BOARD_TASK.to_string(),
-            description: "Create a new task directly on the Conductor board for a project. ACP dispatcher turns must provide a launch-ready handoff packet, current-turn file attachments are inherited automatically, and `surfaces` plus `skills` should name the exact reference files and worker guidance required to execute the task.".to_string(),
+            name: TOOL_DISPATCHER_CREATE_TASK.to_string(),
+            description: "Create a new first-class dispatcher task for a project. The board remains the projection surface, but ACP dispatchers must provide a launch-ready handoff packet, current-turn file attachments are inherited automatically, and `surfaces` plus `skills` should name the exact reference files and worker guidance required to execute the task.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -846,14 +763,51 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: TOOL_UPDATE_BOARD_TASK.to_string(),
-            description: "Update an existing Conductor board task by task ID, task ref, or linked issue ID".to_string(),
+            name: TOOL_DISPATCHER_UPDATE_TASK.to_string(),
+            description: "Update an existing first-class dispatcher task by task ID, task ref, or linked issue ID. The updated task is then projected back onto the Conductor board.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "project": { "type": "string", "description": "Optional project ID; defaults to the first configured project" },
                     "task": { "type": "string", "description": "Board task ID, taskRef, or linked issue ID" },
                     "role": { "type": "string", "description": "Optional target lifecycle column" },
+                    "target_index": { "type": "integer", "description": "Optional insertion index in the target column" },
+                    "title": { "type": "string", "description": "Optional replacement title" },
+                    "description": { "type": "string", "description": "Optional replacement description" },
+                    "context_notes": { "type": "string", "description": "Optional replacement notes" },
+                    "attachments": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement attachment paths" },
+                    "objective": { "type": "string", "description": "Optional replacement objective for the task brief" },
+                    "execution_mode": { "type": "string", "description": "Optional execution mode override: worktree, main_workspace, or temp_clone" },
+                    "surfaces": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement surfaces list" },
+                    "constraints": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement constraints list" },
+                    "dependencies": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement dependencies list" },
+                    "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement acceptance criteria list" },
+                    "skills": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement skills list" },
+                    "review_refs": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement review references list" },
+                    "deliverables": { "type": "array", "items": { "type": "string" }, "description": "Optional replacement deliverables list" },
+                    "agent": { "type": "string", "description": "Optional preferred coding agent" },
+                    "model": { "type": "string", "description": "Optional preferred coding model" },
+                    "reasoning_effort": { "type": "string", "description": "Optional preferred coding reasoning level" },
+                    "task_type": { "type": "string", "description": "Optional task type label" },
+                    "priority": { "type": "string", "description": "Optional priority label" },
+                    "task_ref": { "type": "string", "description": "Optional replacement human task ref" },
+                    "attempt_ref": { "type": "string", "description": "Optional linked session or attempt ref" },
+                    "issue_id": { "type": "string", "description": "Optional linked issue ID" },
+                    "github_item_id": { "type": "string", "description": "Optional linked GitHub item ID" },
+                    "checked": { "type": "boolean", "description": "Optional checkbox state" }
+                },
+                "required": ["task"]
+            }),
+        },
+        ToolDefinition {
+            name: TOOL_DISPATCHER_HANDOFF_TASK.to_string(),
+            description: "Explicitly hand off an existing dispatcher task for execution. This validates the execution packet, updates the task, and by default moves it into the ready column so it can be launched from the card.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project ID; defaults to the first configured project" },
+                    "task": { "type": "string", "description": "Board task ID, taskRef, or linked issue ID" },
+                    "role": { "type": "string", "description": "Optional target lifecycle column. Defaults to ready for handoff." },
                     "target_index": { "type": "integer", "description": "Optional insertion index in the target column" },
                     "title": { "type": "string", "description": "Optional replacement title" },
                     "description": { "type": "string", "description": "Optional replacement description" },
@@ -920,66 +874,8 @@ pub struct GetBoardArgs {
     pub project: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CreateBoardTaskArgs {
-    pub project: Option<String>,
-    pub title: String,
-    pub description: Option<String>,
-    pub context_notes: Option<String>,
-    pub attachments: Option<Vec<String>>,
-    pub objective: Option<String>,
-    pub execution_mode: Option<String>,
-    pub surfaces: Option<Vec<String>>,
-    pub constraints: Option<Vec<String>>,
-    pub dependencies: Option<Vec<String>>,
-    pub acceptance: Option<Vec<String>>,
-    pub skills: Option<Vec<String>>,
-    pub review_refs: Option<Vec<String>>,
-    pub deliverables: Option<Vec<String>>,
-    pub agent: Option<String>,
-    pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
-    pub role: Option<String>,
-    #[serde(alias = "type")]
-    pub task_type: Option<String>,
-    pub priority: Option<String>,
-    pub issue_id: Option<String>,
-    pub attempt_ref: Option<String>,
-    pub github_item_id: Option<String>,
-    pub checked: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UpdateBoardTaskArgs {
-    pub project: Option<String>,
-    pub task: Option<String>,
-    pub role: Option<String>,
-    pub target_index: Option<usize>,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub context_notes: Option<String>,
-    pub attachments: Option<Vec<String>>,
-    pub objective: Option<String>,
-    pub execution_mode: Option<String>,
-    pub surfaces: Option<Vec<String>>,
-    pub constraints: Option<Vec<String>>,
-    pub dependencies: Option<Vec<String>>,
-    pub acceptance: Option<Vec<String>>,
-    pub skills: Option<Vec<String>>,
-    pub review_refs: Option<Vec<String>>,
-    pub deliverables: Option<Vec<String>>,
-    pub agent: Option<String>,
-    pub model: Option<String>,
-    pub reasoning_effort: Option<String>,
-    #[serde(alias = "type")]
-    pub task_type: Option<String>,
-    pub priority: Option<String>,
-    pub task_ref: Option<String>,
-    pub attempt_ref: Option<String>,
-    pub issue_id: Option<String>,
-    pub github_item_id: Option<String>,
-    pub checked: Option<bool>,
-}
+pub type CreateBoardTaskArgs = DispatcherTaskCreateInput;
+pub type UpdateBoardTaskArgs = DispatcherTaskUpdateInput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TaskGraphArgs {
@@ -992,488 +888,8 @@ pub struct SessionStatusArgs {
     pub session_id: String,
 }
 
-fn trimmed_option(value: Option<String>) -> Option<String> {
-    value
-        .map(|item| item.trim().to_string())
-        .filter(|item| !item.is_empty())
-}
-
-fn sanitize_string_list(values: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .filter(|value| seen.insert(value.clone()))
-        .collect()
-}
-
 fn is_acp_dispatcher_session(session: &SessionRecord) -> bool {
     session.metadata.get("sessionKind").map(String::as_str) == Some(ACP_SESSION_KIND)
-}
-
-fn latest_dispatcher_turn_attachments(session: &SessionRecord) -> Vec<String> {
-    session
-        .conversation
-        .iter()
-        .rev()
-        .find(|entry| entry.kind == "user_message")
-        .map(|entry| sanitize_string_list(entry.attachments.clone()))
-        .unwrap_or_default()
-}
-
-fn latest_dispatcher_turn_text(session: &SessionRecord) -> Option<String> {
-    session
-        .conversation
-        .iter()
-        .rev()
-        .find(|entry| entry.kind == "user_message")
-        .and_then(|entry| trimmed_option(Some(entry.text.clone())))
-}
-
-fn dispatcher_active_skills(session: &SessionRecord) -> Vec<String> {
-    session
-        .metadata
-        .get(ACP_ACTIVE_SKILLS_METADATA_KEY)
-        .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
-        .map(sanitize_string_list)
-        .unwrap_or_default()
-}
-
-fn attachment_looks_like_url(value: &str) -> bool {
-    matches!(
-        Url::parse(value).ok().as_ref().map(Url::scheme),
-        Some("http" | "https")
-    )
-}
-
-fn normalize_attachment_surface(
-    workspace_root: &Path,
-    project_root: &Path,
-    attachment: &str,
-) -> Option<String> {
-    let trimmed = attachment.trim();
-    if trimmed.is_empty() || attachment_looks_like_url(trimmed) {
-        return None;
-    }
-
-    let candidate = if trimmed.starts_with("file://") {
-        Url::parse(trimmed).ok()?.to_file_path().ok()?
-    } else {
-        PathBuf::from(trimmed)
-    };
-
-    if !candidate.is_absolute() {
-        return Some(trimmed.replace('\\', "/"));
-    }
-
-    let display = candidate
-        .strip_prefix(project_root)
-        .or_else(|_| candidate.strip_prefix(workspace_root))
-        .map(|value| value.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| candidate.to_string_lossy().replace('\\', "/"));
-
-    (!display.trim().is_empty()).then_some(display)
-}
-
-fn attachment_review_ref(
-    workspace_root: &Path,
-    project_root: &Path,
-    attachment: &str,
-) -> Option<String> {
-    let trimmed = attachment.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if attachment_looks_like_url(trimmed) {
-        return Some(trimmed.to_string());
-    }
-    normalize_attachment_surface(workspace_root, project_root, trimmed)
-}
-
-async fn enrich_dispatcher_task_handoff(
-    state: &AppState,
-    project_id: &str,
-    caller_session: Option<&SessionRecord>,
-    task_type: Option<&str>,
-    notes: &mut Option<String>,
-    attachments: &mut Vec<String>,
-    packet: &mut BoardTaskPacket,
-) {
-    let Some(session) = caller_session.filter(|session| is_acp_dispatcher_session(session)) else {
-        return;
-    };
-
-    if notes.is_none() {
-        *notes = latest_dispatcher_turn_text(session);
-    }
-
-    let config = state.config.read().await.clone();
-    let Some(project) = config.projects.get(project_id) else {
-        if packet.skills.is_empty() {
-            packet.skills = dispatcher_active_skills(session);
-        } else {
-            packet.skills = sanitize_string_list(packet.skills.clone());
-        }
-        return;
-    };
-    let project_root = state.resolve_project_path(project);
-
-    let inferred_surfaces = attachments
-        .iter()
-        .filter_map(|attachment| {
-            normalize_attachment_surface(&state.workspace_path, &project_root, attachment)
-        })
-        .collect::<Vec<_>>();
-    let inferred_review_refs = attachments
-        .iter()
-        .filter_map(|attachment| {
-            attachment_review_ref(&state.workspace_path, &project_root, attachment)
-        })
-        .collect::<Vec<_>>();
-
-    if !inferred_surfaces.is_empty() {
-        let mut merged = packet.surfaces.clone();
-        merged.extend(inferred_surfaces);
-        packet.surfaces = sanitize_string_list(merged);
-    } else {
-        packet.surfaces = sanitize_string_list(packet.surfaces.clone());
-    }
-
-    if task_type
-        .map(str::trim)
-        .is_some_and(|value| value.eq_ignore_ascii_case("review"))
-    {
-        let mut merged = packet.review_refs.clone();
-        merged.extend(inferred_review_refs);
-        packet.review_refs = sanitize_string_list(merged);
-    } else {
-        packet.review_refs = sanitize_string_list(packet.review_refs.clone());
-    }
-
-    if packet.skills.is_empty() {
-        packet.skills = dispatcher_active_skills(session);
-    } else {
-        packet.skills = sanitize_string_list(packet.skills.clone());
-    }
-
-    *attachments = sanitize_string_list(attachments.clone());
-}
-
-fn merge_dispatcher_turn_attachments(
-    caller_session: Option<&SessionRecord>,
-    attachments: Vec<String>,
-) -> Vec<String> {
-    let mut effective = sanitize_string_list(attachments);
-    let Some(session) = caller_session.filter(|session| is_acp_dispatcher_session(session)) else {
-        return effective;
-    };
-
-    for attachment in latest_dispatcher_turn_attachments(session) {
-        if !effective.iter().any(|item| item == &attachment) {
-            effective.push(attachment);
-        }
-    }
-
-    effective
-}
-
-fn effective_dispatcher_task_agent(
-    caller_session: Option<&SessionRecord>,
-    agent: Option<String>,
-) -> Option<String> {
-    trimmed_option(agent).or_else(|| {
-        caller_session
-            .filter(|session| is_acp_dispatcher_session(session))
-            .map(dispatcher_preferred_implementation_agent)
-    })
-}
-
-fn effective_dispatcher_task_model(
-    caller_session: Option<&SessionRecord>,
-    model: Option<String>,
-) -> Option<String> {
-    trimmed_option(model).or_else(|| {
-        caller_session
-            .filter(|session| is_acp_dispatcher_session(session))
-            .and_then(dispatcher_preferred_implementation_model)
-    })
-}
-
-fn effective_dispatcher_task_reasoning_effort(
-    caller_session: Option<&SessionRecord>,
-    reasoning_effort: Option<String>,
-) -> Option<String> {
-    trimmed_option(reasoning_effort)
-        .map(|value| value.to_ascii_lowercase())
-        .or_else(|| {
-            caller_session
-                .filter(|session| is_acp_dispatcher_session(session))
-                .and_then(dispatcher_preferred_implementation_reasoning_effort)
-                .map(|value| value.to_ascii_lowercase())
-        })
-}
-
-fn validate_dispatcher_task_handoff(
-    caller_session: Option<&SessionRecord>,
-    title: &str,
-    task_type: Option<&str>,
-    notes: Option<&str>,
-    attachments: &[String],
-    packet: &BoardTaskPacket,
-    agent: Option<&str>,
-) -> Result<()> {
-    if !caller_session.is_some_and(is_acp_dispatcher_session) {
-        return Ok(());
-    }
-
-    let mut missing = Vec::new();
-    if agent
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        missing.push("agent");
-    }
-    if packet
-        .objective
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none()
-    {
-        missing.push("objective");
-    }
-    if packet.execution_mode.is_none() {
-        missing.push("execution_mode");
-    }
-    if packet.acceptance.is_empty() {
-        missing.push("acceptance");
-    }
-    if packet.skills.is_empty() {
-        missing.push("skills");
-    }
-    if packet.deliverables.is_empty() {
-        missing.push("deliverables");
-    }
-
-    let review_task = task_type
-        .map(str::trim)
-        .is_some_and(|value| value.eq_ignore_ascii_case("review"));
-    if review_task {
-        if packet.review_refs.is_empty() {
-            missing.push("review_refs");
-        }
-        if packet.surfaces.is_empty() {
-            missing.push("surfaces");
-        }
-    } else if packet.surfaces.is_empty() {
-        missing.push("surfaces");
-    }
-
-    let has_context = notes
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_some()
-        || !attachments.is_empty()
-        || !packet.constraints.is_empty()
-        || !packet.dependencies.is_empty()
-        || !packet.review_refs.is_empty();
-    if !has_context {
-        missing.push("context_notes/attachments/dependencies/constraints/review_refs");
-    }
-
-    if missing.is_empty() {
-        return Ok(());
-    }
-
-    let task_kind = if review_task {
-        "review"
-    } else {
-        "implementation"
-    };
-    bail!(
-        "ACP dispatcher task \"{title}\" is missing a launch-ready {task_kind} handoff packet. Missing: {}.",
-        missing.join(", ")
-    );
-}
-
-fn insert_board_task_at_position(
-    board: &mut ParsedBoard,
-    task: BoardTaskRecord,
-    source_role: &str,
-    source_task_index: usize,
-    target_role: &str,
-    target_index: Option<usize>,
-) {
-    if source_role == target_role {
-        if let Some(source_column) = board
-            .columns
-            .iter_mut()
-            .find(|column| column.role == source_role)
-        {
-            let insert_at = target_index
-                .unwrap_or(source_task_index)
-                .min(source_column.tasks.len());
-            source_column.tasks.insert(insert_at, task);
-        } else {
-            board.columns.push(ParsedBoardColumn {
-                role: target_role.to_string(),
-                heading: default_heading_for_role(target_role).to_string(),
-                tasks: vec![task],
-            });
-        }
-        return;
-    }
-
-    if let Some(target_column) = board
-        .columns
-        .iter_mut()
-        .find(|column| column.role == target_role)
-    {
-        let insert_at = target_index.unwrap_or(0).min(target_column.tasks.len());
-        target_column.tasks.insert(insert_at, task);
-    } else {
-        board.columns.push(ParsedBoardColumn {
-            role: target_role.to_string(),
-            heading: default_heading_for_role(target_role).to_string(),
-            tasks: vec![task],
-        });
-    }
-}
-
-fn apply_board_task_update(
-    task: &mut BoardTaskRecord,
-    args: &UpdateBoardTaskArgs,
-    project_id: &str,
-) {
-    let (mut title, mut description) = split_task_text(&task.text);
-
-    if let Some(next_title) = args
-        .title
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        title = next_title.to_string();
-    }
-    if let Some(next_description) = args.description.as_ref() {
-        let trimmed = next_description.trim();
-        description = if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        };
-    }
-
-    task.text = build_task_text(&title, description.as_deref());
-    if let Some(value) = args.agent.as_ref() {
-        task.agent = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.model.as_ref() {
-        task.model = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.reasoning_effort.as_ref() {
-        task.reasoning_effort =
-            trimmed_option(Some(value.clone())).map(|item| item.to_ascii_lowercase());
-    }
-    if let Some(value) = args.task_type.as_ref() {
-        task.task_type = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.priority.as_ref() {
-        task.priority = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.task_ref.as_ref() {
-        task.task_ref = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.attempt_ref.as_ref() {
-        task.attempt_ref = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.issue_id.as_ref() {
-        task.issue_id = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.github_item_id.as_ref() {
-        task.github_item_id = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.context_notes.as_ref() {
-        task.notes = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.objective.as_ref() {
-        task.packet.objective = trimmed_option(Some(value.clone()));
-    }
-    if let Some(value) = args.execution_mode.as_deref() {
-        task.packet.execution_mode = normalize_execution_mode(value).map(str::to_string);
-    }
-    if let Some(checked) = args.checked {
-        task.checked = checked;
-    }
-    if let Some(attachments) = args.attachments.as_ref() {
-        task.attachments = sanitize_string_list(attachments.clone());
-    }
-    if let Some(values) = args.surfaces.as_ref() {
-        task.packet.surfaces = sanitize_string_list(values.clone());
-    }
-    if let Some(values) = args.constraints.as_ref() {
-        task.packet.constraints = sanitize_string_list(values.clone());
-    }
-    if let Some(values) = args.dependencies.as_ref() {
-        task.packet.dependencies = sanitize_string_list(values.clone());
-    }
-    if let Some(values) = args.acceptance.as_ref() {
-        task.packet.acceptance = sanitize_string_list(values.clone());
-    }
-    if let Some(values) = args.skills.as_ref() {
-        task.packet.skills = sanitize_string_list(values.clone());
-    }
-    if let Some(values) = args.review_refs.as_ref() {
-        task.packet.review_refs = sanitize_string_list(values.clone());
-    }
-    if let Some(values) = args.deliverables.as_ref() {
-        task.packet.deliverables = sanitize_string_list(values.clone());
-    }
-    if task
-        .project
-        .as_ref()
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
-    {
-        task.project = Some(project_id.to_string());
-    }
-}
-
-fn board_task_value(task: &BoardTaskRecord, role: &str) -> Value {
-    let (title, description) = split_task_text(&task.text);
-    json!({
-        "id": task.id,
-        "role": role,
-        "title": title,
-        "description": description,
-        "text": task.text,
-        "checked": task.checked,
-        "agent": task.agent,
-        "model": task.model,
-        "reasoningEffort": task.reasoning_effort,
-        "project": task.project,
-        "type": task.task_type,
-        "priority": task.priority,
-        "taskRef": task.task_ref,
-        "attemptRef": task.attempt_ref,
-        "issueId": task.issue_id,
-        "githubItemId": task.github_item_id,
-        "attachments": task.attachments,
-        "notes": task.notes,
-        "packet": {
-            "objective": task.packet.objective.clone(),
-            "executionMode": task.packet.execution_mode.clone(),
-            "surfaces": task.packet.surfaces.clone(),
-            "constraints": task.packet.constraints.clone(),
-            "dependencies": task.packet.dependencies.clone(),
-            "acceptance": task.packet.acceptance.clone(),
-            "skills": task.packet.skills.clone(),
-            "reviewRefs": task.packet.review_refs.clone(),
-            "deliverables": task.packet.deliverables.clone(),
-        },
-    })
 }
 
 fn find_board_task_role(board_payload: &Value, task_id: &str) -> Option<String> {
@@ -1715,8 +1131,9 @@ mod tests {
             }))
         }
 
-        async fn create_board_task(&self, args: CreateBoardTaskArgs) -> Result<Value> {
+        async fn create_dispatcher_task(&self, args: DispatcherTaskCreateInput) -> Result<Value> {
             Ok(json!({
+                "operation": "create",
                 "createdTaskId": "task-1",
                 "task": {
                     "title": args.title,
@@ -1724,11 +1141,23 @@ mod tests {
             }))
         }
 
-        async fn update_board_task(&self, args: UpdateBoardTaskArgs) -> Result<Value> {
+        async fn update_dispatcher_task(&self, args: DispatcherTaskUpdateInput) -> Result<Value> {
             Ok(json!({
+                "operation": "update",
                 "updatedTaskId": "task-1",
                 "task": {
                     "task": args.task,
+                }
+            }))
+        }
+
+        async fn handoff_dispatcher_task(&self, args: DispatcherTaskHandoffInput) -> Result<Value> {
+            Ok(json!({
+                "operation": "handoff",
+                "handedOffTaskId": "task-1",
+                "task": {
+                    "task": args.task,
+                    "role": args.role.unwrap_or_else(|| "ready".to_string()),
                 }
             }))
         }
@@ -1744,7 +1173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_exposes_eight_tools() {
+    async fn tools_list_exposes_nine_tools() {
         let response = handle_jsonrpc_request(
             &MockBackend,
             JsonRpcRequest {
@@ -1761,7 +1190,7 @@ mod tests {
         let JsonRpcPayload::Result(result) = response.payload else {
             panic!("expected tools/list result payload");
         };
-        assert_eq!(result["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(result["tools"].as_array().unwrap().len(), 9);
     }
 
     #[tokio::test]
@@ -1820,7 +1249,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_call_create_board_task_returns_task_payload() {
+    async fn tools_call_dispatcher_create_task_returns_task_payload() {
         let response = handle_jsonrpc_request(
             &MockBackend,
             JsonRpcRequest {
@@ -1828,7 +1257,7 @@ mod tests {
                 id: Some(json!(4)),
                 method: "tools/call".to_string(),
                 params: Some(json!({
-                    "name": TOOL_CREATE_BOARD_TASK,
+                    "name": TOOL_DISPATCHER_CREATE_TASK,
                     "arguments": {
                         "project": "demo",
                         "title": "Phase 2 heartbeat integration"
@@ -1848,6 +1277,37 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Phase 2 heartbeat integration"));
+    }
+
+    #[tokio::test]
+    async fn tools_call_dispatcher_handoff_task_returns_task_payload() {
+        let response = handle_jsonrpc_request(
+            &MockBackend,
+            JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: Some(json!(41)),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": TOOL_DISPATCHER_HANDOFF_TASK,
+                    "arguments": {
+                        "project": "demo",
+                        "task": "DEM-123"
+                    }
+                })),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let JsonRpcPayload::Result(result) = response.payload else {
+            panic!("expected tools/call result payload");
+        };
+        assert_eq!(result["isError"], false);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"operation\": \"handoff\""));
     }
 
     #[tokio::test]
@@ -1872,7 +1332,7 @@ mod tests {
 
         let backend = AppStateMcpBackend::new(Arc::clone(&state));
         let payload = backend
-            .create_board_task(CreateBoardTaskArgs {
+            .create_dispatcher_task(CreateBoardTaskArgs {
                 project: Some("demo".to_string()),
                 title: "Dispatcher created task".to_string(),
                 objective: Some("Create the implementation handoff task on the board.".to_string()),
@@ -1932,7 +1392,7 @@ mod tests {
 
         let backend = AppStateMcpBackend::new(Arc::clone(&state));
         let payload = backend
-            .create_board_task(CreateBoardTaskArgs {
+            .create_dispatcher_task(CreateBoardTaskArgs {
                 project: Some("demo".to_string()),
                 title: "Dispatcher attachment handoff".to_string(),
                 objective: Some(
@@ -1994,7 +1454,7 @@ mod tests {
             .expect("dispatcher thread should be created");
         dispatcher.status = SessionStatus::Working;
         dispatcher.metadata.insert(
-            ACP_ACTIVE_SKILLS_METADATA_KEY.to_string(),
+            crate::state::ACP_ACTIVE_SKILLS_METADATA_KEY.to_string(),
             serde_json::to_string(&vec!["rust".to_string(), "dispatcher-review".to_string()])
                 .expect("skills should serialize"),
         );
@@ -2023,7 +1483,7 @@ mod tests {
 
         let backend = AppStateMcpBackend::new(Arc::clone(&state));
         let payload = backend
-            .create_board_task(CreateBoardTaskArgs {
+            .create_dispatcher_task(CreateBoardTaskArgs {
                 project: Some("demo".to_string()),
                 title: "Review dispatcher audit findings".to_string(),
                 objective: Some(
@@ -2078,6 +1538,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acp_dispatcher_can_update_and_handoff_existing_tasks_deterministically() {
+        let _env_guard = env_lock().lock().await;
+        let (root, state) = build_app_state("mcp-acp-update-handoff").await;
+        let mut dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .expect("dispatcher thread should be created");
+        dispatcher.status = SessionStatus::Working;
+        state
+            .replace_dispatcher_thread(dispatcher.clone())
+            .await
+            .expect("dispatcher thread should persist");
+
+        std::env::set_var(MCP_CALLER_SESSION_ENV, &dispatcher.id);
+        std::env::set_var(MCP_CALLER_PROJECT_ENV, "demo");
+
+        let backend = AppStateMcpBackend::new(Arc::clone(&state));
+        let create_payload = backend
+            .create_dispatcher_task(CreateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                title: "Dispatcher lifecycle seed".to_string(),
+                context_notes: Some(
+                    "Seed task for deterministic lifecycle assertions.".to_string(),
+                ),
+                objective: Some("Create a seed dispatcher task.".to_string()),
+                execution_mode: Some("worktree".to_string()),
+                surfaces: Some(vec!["crates/conductor-server/src/mcp.rs".to_string()]),
+                acceptance: Some(vec!["A seed task exists on the board.".to_string()]),
+                skills: Some(vec![
+                    "rust".to_string(),
+                    "dispatcher orchestration".to_string(),
+                ]),
+                deliverables: Some(vec!["seed task".to_string()]),
+                role: Some("intake".to_string()),
+                ..CreateBoardTaskArgs::default()
+            })
+            .await
+            .expect("dispatcher should create a seed task");
+        let task_ref = create_payload["task"]["taskRef"]
+            .as_str()
+            .expect("task ref should be present")
+            .to_string();
+
+        let update_payload = backend
+            .update_dispatcher_task(UpdateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                task: Some(task_ref.clone()),
+                title: Some("Dispatcher lifecycle review".to_string()),
+                context_notes: Some("Expand the seed task into a review task.".to_string()),
+                role: Some("review".to_string()),
+                task_type: Some("review".to_string()),
+                execution_mode: Some("main_workspace".to_string()),
+                surfaces: Some(vec![
+                    "crates/conductor-server/src/mcp.rs".to_string(),
+                    "crates/conductor-server/src/state/acp_dispatcher.rs".to_string(),
+                ]),
+                review_refs: Some(vec!["docs/dispatcher-audit.md".to_string()]),
+                acceptance: Some(vec!["The review task stays launch-ready.".to_string()]),
+                skills: Some(vec!["rust".to_string(), "dispatcher review".to_string()]),
+                deliverables: Some(vec!["review memo".to_string()]),
+                ..UpdateBoardTaskArgs::default()
+            })
+            .await
+            .expect("dispatcher should update the task");
+        assert_eq!(update_payload["task"]["taskRef"], task_ref);
+        assert_eq!(update_payload["task"]["role"], "review");
+
+        let handoff_payload = backend
+            .handoff_dispatcher_task(UpdateBoardTaskArgs {
+                project: Some("demo".to_string()),
+                task: Some(task_ref.clone()),
+                context_notes: Some("Ready for worker execution.".to_string()),
+                task_type: Some("feature".to_string()),
+                execution_mode: Some("worktree".to_string()),
+                surfaces: Some(vec![
+                    "crates/conductor-server/src/state/acp_dispatcher.rs".to_string()
+                ]),
+                acceptance: Some(vec![
+                    "Worker can start directly from the ready card.".to_string()
+                ]),
+                skills: Some(vec![
+                    "rust".to_string(),
+                    "dispatcher orchestration".to_string(),
+                ]),
+                deliverables: Some(vec!["implemented dispatcher lifecycle".to_string()]),
+                ..UpdateBoardTaskArgs::default()
+            })
+            .await
+            .expect("dispatcher should hand off the task");
+        assert_eq!(handoff_payload["task"]["taskRef"], task_ref);
+        assert_eq!(handoff_payload["task"]["role"], "ready");
+
+        let persisted = state
+            .get_dispatcher_thread(&dispatcher.id)
+            .await
+            .expect("dispatcher thread should still exist");
+        let lifecycle_events = persisted
+            .conversation
+            .iter()
+            .filter_map(|entry| entry.metadata.get("eventType").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            lifecycle_events,
+            vec![
+                "dispatcher_task_created",
+                "dispatcher_task_updated",
+                "dispatcher_task_handed_off"
+            ]
+        );
+
+        std::env::remove_var(MCP_CALLER_SESSION_ENV);
+        std::env::remove_var(MCP_CALLER_PROJECT_ENV);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn acp_dispatcher_rejects_incomplete_task_handoff_packets() {
         let _env_guard = env_lock().lock().await;
         let (root, state) = build_app_state("mcp-acp-reject-thin-task").await;
@@ -2099,7 +1678,7 @@ mod tests {
 
         let backend = AppStateMcpBackend::new(Arc::clone(&state));
         let err = backend
-            .create_board_task(CreateBoardTaskArgs {
+            .create_dispatcher_task(CreateBoardTaskArgs {
                 project: Some("demo".to_string()),
                 title: "Thin dispatcher task".to_string(),
                 role: Some("intake".to_string()),

@@ -2411,7 +2411,7 @@ mod tests {
 
         let backend = AppStateMcpBackend::new(Arc::clone(&state));
         let payload = backend
-            .create_board_task(CreateBoardTaskArgs {
+            .create_dispatcher_task(CreateBoardTaskArgs {
                 project: Some("demo".to_string()),
                 title: "Review dispatcher audit".to_string(),
                 objective: Some(

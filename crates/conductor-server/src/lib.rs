@@ -1,5 +1,6 @@
 pub mod acp;
 mod acp_prompt;
+mod dispatcher_task_lifecycle;
 pub mod error_logger;
 pub mod mcp;
 pub mod notifier;

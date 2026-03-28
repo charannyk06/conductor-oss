@@ -564,6 +564,64 @@ function ToolGlyph({
   return <Wrench className={className} />;
 }
 
+type DispatcherLifecycleEvent = {
+  operation: "create" | "update" | "handoff";
+  taskId: string;
+  taskRef: string;
+  taskTitle: string;
+  taskRoleLabel: string | null;
+  taskAgent: string | null;
+  taskType: string | null;
+};
+
+function readDispatcherLifecycleEvent(entry: SessionFeedEntry): DispatcherLifecycleEvent | null {
+  if (entry.kind !== "system") {
+    return null;
+  }
+
+  const eventType = readString(entry.metadata.eventType);
+  let operation: DispatcherLifecycleEvent["operation"] | null = null;
+  if (eventType === "dispatcher_task_created") {
+    operation = "create";
+  } else if (eventType === "dispatcher_task_updated") {
+    operation = "update";
+  } else if (eventType === "dispatcher_task_handed_off") {
+    operation = "handoff";
+  }
+
+  if (!operation) {
+    return null;
+  }
+
+  const taskId = readString(entry.metadata.taskId);
+  const taskRef = readString(entry.metadata.taskRef) ?? taskId;
+  const taskTitle = readString(entry.metadata.taskTitle);
+  if (!taskId || !taskRef || !taskTitle) {
+    return null;
+  }
+
+  return {
+    operation,
+    taskId,
+    taskRef,
+    taskTitle,
+    taskRoleLabel: readString(entry.metadata.taskRoleLabel),
+    taskAgent: readString(entry.metadata.taskAgent),
+    taskType: readString(entry.metadata.taskType),
+  };
+}
+
+function dispatcherLifecycleHeadline(operation: DispatcherLifecycleEvent["operation"]): string {
+  switch (operation) {
+    case "create":
+      return "Task created";
+    case "update":
+      return "Task updated";
+    case "handoff":
+      return "Task handed off";
+  }
+}
+
 function SessionFeedMessage({
   entry,
   session,
@@ -588,6 +646,7 @@ function SessionFeedMessage({
   const toolSecondary = toolContent[1] ?? null;
   const isRuntimeThinking = entry.kind === "assistant" && entry.source === "runtime";
   const isSessionStatus = entry.kind === "status" && entry.source === "session-status";
+  const lifecycleEvent = readDispatcherLifecycleEvent(entry);
 
   if (entry.kind === "tool") {
     return (
@@ -616,6 +675,50 @@ function SessionFeedMessage({
               className="block rounded-[6px] bg-[rgba(255,255,255,0.03)] px-2 py-1 text-[12px] leading-5 text-[var(--vk-text-muted)]"
             />
           ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  if (lifecycleEvent) {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 text-[12px] text-[var(--vk-text-muted)]">
+          <ListTodo className="h-3.5 w-3.5" />
+          <span>{dispatcherLifecycleHeadline(lifecycleEvent.operation)}</span>
+          {timestamp ? <span className="ml-auto text-[11px]">{timestamp}</span> : null}
+        </div>
+        <div className="rounded-[12px] border border-[rgba(129,101,83,0.35)] bg-[rgba(62,47,40,0.72)] px-4 py-3 text-[15px] leading-6 text-[#efe4dc]">
+          <div className="flex flex-wrap items-start gap-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-[12px] font-medium uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
+                {dispatcherLifecycleHeadline(lifecycleEvent.operation)}
+              </p>
+              <p className="mt-1 break-words text-[16px] font-semibold text-[#fff5ee]">
+                {lifecycleEvent.taskTitle}
+              </p>
+            </div>
+            <span className="rounded-full border border-[rgba(255,255,255,0.12)] bg-[rgba(255,255,255,0.06)] px-2.5 py-1 text-[11px] font-medium text-[#fff5ee]">
+              {lifecycleEvent.taskRef}
+            </span>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2 text-[11px] text-[rgba(255,255,255,0.72)]">
+            {lifecycleEvent.taskRoleLabel ? (
+              <span className="rounded-full bg-[rgba(255,255,255,0.08)] px-2.5 py-1">
+                {lifecycleEvent.taskRoleLabel}
+              </span>
+            ) : null}
+            {lifecycleEvent.taskAgent ? (
+              <span className="rounded-full bg-[rgba(255,255,255,0.08)] px-2.5 py-1">
+                {formatAgentName(lifecycleEvent.taskAgent)}
+              </span>
+            ) : null}
+            {lifecycleEvent.taskType ? (
+              <span className="rounded-full bg-[rgba(255,255,255,0.08)] px-2.5 py-1">
+                {lifecycleEvent.taskType}
+              </span>
+            ) : null}
+          </div>
         </div>
       </div>
     );

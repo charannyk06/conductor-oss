@@ -11,6 +11,10 @@ use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{self as stream, StreamExt};
 
+use crate::dispatcher_task_lifecycle::{
+    create_dispatcher_task, handoff_dispatcher_task, update_dispatcher_task,
+    DispatcherTaskCreateInput, DispatcherTaskMutationContext, DispatcherTaskUpdateInput,
+};
 use crate::state::{
     build_normalized_chat_feed, is_project_dispatcher_session, AppState,
     CreateDispatcherThreadOptions, SessionRecord,
@@ -41,6 +45,18 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/projects/{project_id}/dispatcher/preferences",
             patch(update_dispatcher_preferences),
+        )
+        .route(
+            "/api/projects/{project_id}/dispatcher/tasks",
+            post(create_dispatcher_task_route),
+        )
+        .route(
+            "/api/projects/{project_id}/dispatcher/tasks/{task_lookup}",
+            patch(update_dispatcher_task_route),
+        )
+        .route(
+            "/api/projects/{project_id}/dispatcher/tasks/{task_lookup}/handoff",
+            post(handoff_dispatcher_task_route),
         )
         .route(
             "/api/projects/{project_id}/dispatcher/send",
@@ -294,6 +310,80 @@ async fn update_dispatcher_preferences(
         })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
+}
+
+async fn dispatcher_task_context(
+    state: &Arc<AppState>,
+    project_id: &str,
+    query: &DispatcherQuery,
+) -> DispatcherTaskMutationContext {
+    let bridge_id = trimmed_query_value(query.bridge_id.as_deref());
+    let dispatcher =
+        resolve_project_dispatcher(state, project_id, bridge_id, query.thread_id.as_deref()).await;
+    DispatcherTaskMutationContext {
+        activity_source: "dispatcher",
+        caller_session: dispatcher.clone(),
+        dispatcher_thread_id: dispatcher.map(|thread| thread.id),
+    }
+}
+
+async fn create_dispatcher_task_route(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<DispatcherQuery>,
+    Json(mut body): Json<DispatcherTaskCreateInput>,
+) -> ApiResponse {
+    let context = dispatcher_task_context(&state, &project_id, &query).await;
+    body.project = Some(project_id);
+    match create_dispatcher_task(&state, context, body).await {
+        Ok(result) => created(result.response_payload()),
+        Err(err) => error(dispatcher_task_status(&err), err.to_string()),
+    }
+}
+
+async fn update_dispatcher_task_route(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, task_lookup)): Path<(String, String)>,
+    Query(query): Query<DispatcherQuery>,
+    Json(mut body): Json<DispatcherTaskUpdateInput>,
+) -> ApiResponse {
+    let context = dispatcher_task_context(&state, &project_id, &query).await;
+    body.project = Some(project_id);
+    body.task = Some(task_lookup);
+    match update_dispatcher_task(&state, context, body).await {
+        Ok(result) => ok(result.response_payload()),
+        Err(err) => error(dispatcher_task_status(&err), err.to_string()),
+    }
+}
+
+async fn handoff_dispatcher_task_route(
+    State(state): State<Arc<AppState>>,
+    Path((project_id, task_lookup)): Path<(String, String)>,
+    Query(query): Query<DispatcherQuery>,
+    Json(mut body): Json<DispatcherTaskUpdateInput>,
+) -> ApiResponse {
+    let context = dispatcher_task_context(&state, &project_id, &query).await;
+    body.project = Some(project_id);
+    body.task = Some(task_lookup);
+    match handoff_dispatcher_task(&state, context, body).await {
+        Ok(result) => ok(result.response_payload()),
+        Err(err) => error(dispatcher_task_status(&err), err.to_string()),
+    }
+}
+
+fn dispatcher_task_status(error: &anyhow::Error) -> StatusCode {
+    let message = error.to_string();
+    if message.starts_with("Unknown project:") || message.contains("not found in project") {
+        return StatusCode::NOT_FOUND;
+    }
+    if message.contains("title is required")
+        || message.contains("project is required")
+        || message.contains("task is required")
+        || message.contains("launch-ready")
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+    StatusCode::INTERNAL_SERVER_ERROR
 }
 
 async fn dispatcher_feed_payload(

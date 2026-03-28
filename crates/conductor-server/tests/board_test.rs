@@ -11,6 +11,7 @@ use conductor_core::event::Event;
 use conductor_core::types::AgentKind;
 use conductor_core::types::SessionStatus;
 use conductor_core::EventBus;
+use serde_json::json;
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -20,6 +21,202 @@ use uuid::Uuid;
 
 fn temp_path(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("conductor-board-route-{label}-{}", Uuid::new_v4()))
+}
+
+#[tokio::test]
+async fn dispatcher_task_routes_create_update_and_handoff_deterministically() {
+    let harness = TestHarness::new("dispatcher-task-lifecycle-route-test", "ttyd").await;
+    fs::write(
+        &harness.board_path,
+        ["## To do", "", "## Ready", "", "## In review", ""].join("\n"),
+    )
+    .unwrap();
+    let app = build_app(harness.state.clone());
+    let dispatcher_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "forceNew": false,
+                        "implementationAgent": "codex"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(dispatcher_response.status(), StatusCode::CREATED);
+    let dispatcher_body = axum::body::to_bytes(dispatcher_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let dispatcher_payload: Value = serde_json::from_slice(&dispatcher_body).unwrap();
+    let thread_id = dispatcher_payload["thread"]["id"]
+        .as_str()
+        .expect("dispatcher thread id should be present")
+        .to_string();
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/tasks?threadId={}",
+                    thread_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "title": "Phase 2 heartbeat integration",
+                        "contextNotes": "Heartbeat follow-up should stay visible on the board.",
+                        "objective": "Create the next dispatcher follow-up task explicitly.",
+                        "executionMode": "worktree",
+                        "surfaces": ["crates/conductor-server/src/state/acp_dispatcher.rs"],
+                        "acceptance": ["A ready-to-launch follow-up task exists on the board."],
+                        "skills": ["rust", "dispatcher orchestration"],
+                        "deliverables": ["launch-ready follow-up task"],
+                        "role": "intake"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let create_status = create_response.status();
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(create_status, StatusCode::CREATED);
+    let create_payload: Value = serde_json::from_slice(&create_body).unwrap();
+    assert_eq!(create_payload["operation"], "create");
+    let created_task_ref = create_payload["task"]["taskRef"]
+        .as_str()
+        .expect("task ref should be present")
+        .to_string();
+
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/tasks/{}?threadId={}",
+                    created_task_ref, thread_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "title": "Phase 2 heartbeat follow-up",
+                        "contextNotes": "Keep the heartbeat contract explicit and board-visible.",
+                        "role": "review",
+                        "taskType": "review",
+                        "executionMode": "main_workspace",
+                        "surfaces": [
+                            "crates/conductor-server/src/state/acp_dispatcher.rs",
+                            "crates/conductor-server/src/mcp.rs"
+                        ],
+                        "reviewRefs": ["docs/dispatcher-audit.md"],
+                        "acceptance": ["The review task preserves the heartbeat-style follow-up contract."],
+                        "skills": ["rust", "dispatcher review"],
+                        "deliverables": ["review notes", "handoff recommendation"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let update_body = axum::body::to_bytes(update_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let update_payload: Value = serde_json::from_slice(&update_body).unwrap();
+    assert_eq!(update_payload["operation"], "update");
+    assert_eq!(update_payload["task"]["taskRef"], created_task_ref);
+    assert_eq!(update_payload["task"]["role"], "review");
+
+    let handoff_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/tasks/{}/handoff?threadId={}",
+                    created_task_ref, thread_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "contextNotes": "Ready to hand off to an implementation worker.",
+                        "taskType": "feature",
+                        "executionMode": "worktree",
+                        "surfaces": ["crates/conductor-server/src/state/acp_dispatcher.rs"],
+                        "acceptance": ["Worker can launch directly from the card without reopening dispatcher chat."],
+                        "skills": ["rust", "dispatcher orchestration"],
+                        "deliverables": ["implemented heartbeat lifecycle task"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handoff_response.status(), StatusCode::OK);
+    let handoff_body = axum::body::to_bytes(handoff_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let handoff_payload: Value = serde_json::from_slice(&handoff_body).unwrap();
+    assert_eq!(handoff_payload["operation"], "handoff");
+    assert_eq!(handoff_payload["task"]["taskRef"], created_task_ref);
+    assert_eq!(handoff_payload["task"]["role"], "ready");
+
+    let feed_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/feed?threadId={}",
+                    thread_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(feed_response.status(), StatusCode::OK);
+    let feed_body = axum::body::to_bytes(feed_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let feed_payload: Value = serde_json::from_slice(&feed_body).unwrap();
+    let lifecycle_events = feed_payload["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry["metadata"]["eventType"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle_events,
+        vec![
+            "dispatcher_task_created",
+            "dispatcher_task_updated",
+            "dispatcher_task_handed_off"
+        ]
+    );
+
+    let board_contents = fs::read_to_string(&harness.board_path).unwrap();
+    assert!(board_contents.contains("taskRef:"));
+    assert!(board_contents.contains("Phase 2 heartbeat follow-up"));
+    let ready_block = board_contents
+        .split("## Ready")
+        .nth(1)
+        .expect("ready block should exist");
+    assert!(ready_block.contains(&created_task_ref));
 }
 
 #[tokio::test]
