@@ -983,6 +983,7 @@ export default function DashboardClient({
   const [launchModelSelection, setLaunchModelSelection] = useState<ModelSelectionState>(emptyModelSelection());
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [workspaceActionError, setWorkspaceActionError] = useState<string | null>(null);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [newWorkspaceError, setNewWorkspaceError] = useState<string | null>(null);
@@ -1692,9 +1693,10 @@ export default function DashboardClient({
 
   const openWorkspaceDialog = useCallback(() => {
     if (requiresPairedDeviceScope && !effectiveBridgeId) {
-      setCreateError("Pair or reconnect a laptop before adding a workspace.");
+      setWorkspaceActionError("Pair or reconnect a laptop before adding a workspace.");
       return;
     }
+    setWorkspaceActionError(null);
     setNewWorkspaceError(null);
     setCreateError(null);
     setNewWorkspaceOpen(true);
@@ -1706,6 +1708,12 @@ export default function DashboardClient({
     setPendingWorkspaceSetup(false);
     openWorkspaceDialog();
   }, [pendingWorkspaceSetup, preferencesDialogOpen]);
+
+  useEffect(() => {
+    if (!requiresPairedDeviceScope || effectiveBridgeId) {
+      setWorkspaceActionError(null);
+    }
+  }, [effectiveBridgeId, requiresPairedDeviceScope]);
 
   const handleCreateSession = useCallback(async (options?: CreateSessionOptions): Promise<boolean> => {
     const trimmedPrompt = prompt.trim();
@@ -2088,12 +2096,18 @@ export default function DashboardClient({
   const projectWorkspaceContent = useMemo(() => {
     if (!selectedProject) return workspaceMainPanel;
 
-    const renderWorkspaceViewToggle = (fullWidth = false) => (
-      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] p-1`}>
+    const renderWorkspaceViewToggle = ({
+      fullWidth = false,
+      compact = false,
+    }: {
+      fullWidth?: boolean;
+      compact?: boolean;
+    } = {}) => (
+      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] ${compact ? "p-0.5" : "p-1"}`}>
         <button
           type="button"
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "direct" }, "replace")}
-          className={`min-h-[32px] flex-1 rounded-[4px] px-3 text-[13px] ${
+          className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
             workspaceView === "direct"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
@@ -2104,7 +2118,7 @@ export default function DashboardClient({
         <button
           type="button"
           onClick={() => navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace")}
-          className={`min-h-[32px] flex-1 rounded-[4px] px-3 text-[13px] ${
+          className={`${compact ? "min-h-[30px] px-3 text-[12px]" : "min-h-[32px] px-3 text-[13px]"} flex-1 rounded-[4px] ${
             workspaceView === "board"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
@@ -2115,8 +2129,14 @@ export default function DashboardClient({
       </div>
     );
 
-    const renderBoardPaneToggle = (fullWidth = false) => (
-      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] p-1`}>
+    const renderBoardPaneToggle = ({
+      fullWidth = false,
+      compact = false,
+    }: {
+      fullWidth?: boolean;
+      compact?: boolean;
+    } = {}) => (
+      <div className={`inline-flex ${fullWidth ? "w-full" : "w-fit"} rounded-[6px] border border-[var(--vk-border)] ${compact ? "p-0.5" : "p-1"}`}>
         <button
           type="button"
           onClick={() => {
@@ -2124,13 +2144,15 @@ export default function DashboardClient({
             navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace");
           }}
           aria-pressed={workspaceView === "board" && boardMobilePane === "board"}
-          className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
+          className={`inline-flex flex-1 items-center justify-center rounded-[4px] font-medium transition-colors ${
+            compact ? "min-h-[30px] gap-1 px-2.5 text-[11px]" : "min-h-[34px] gap-1.5 px-3 text-[12px]"
+          } ${
             workspaceView === "board" && boardMobilePane === "board"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
           }`}
         >
-          <FolderKanban className="h-3.5 w-3.5 shrink-0" />
+          <FolderKanban className={`${compact ? "h-3 w-3" : "h-3.5 w-3.5"} shrink-0`} />
           <span>Board</span>
         </button>
         <button
@@ -2140,13 +2162,15 @@ export default function DashboardClient({
             navigateDashboard({ projectId: selectedProject.id, workspaceView: "board" }, "replace");
           }}
           aria-pressed={workspaceView === "board" && boardMobilePane === "chat"}
-          className={`inline-flex min-h-[34px] flex-1 items-center justify-center gap-1.5 rounded-[4px] px-3 text-[12px] font-medium transition-colors ${
+          className={`inline-flex flex-1 items-center justify-center rounded-[4px] font-medium transition-colors ${
+            compact ? "min-h-[30px] gap-1 px-2.5 text-[11px]" : "min-h-[34px] gap-1.5 px-3 text-[12px]"
+          } ${
             workspaceView === "board" && boardMobilePane === "chat"
               ? "bg-[var(--vk-bg-active)] text-[var(--vk-text-strong)]"
               : "text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]"
           }`}
         >
-          <Bot className="h-3.5 w-3.5 shrink-0" />
+          <Bot className={`${compact ? "h-3 w-3" : "h-3.5 w-3.5"} shrink-0`} />
           <span>Dispatcher</span>
         </button>
       </div>
@@ -2160,6 +2184,7 @@ export default function DashboardClient({
       const boardSinglePane = !wideBoardViewport;
       const showBoardPane = !boardSinglePane || boardMobilePane === "board";
       const showChatPane = !boardSinglePane || boardMobilePane === "chat";
+      const showMobileBoardPaneToggle = boardSinglePane && selectedSessionId === null;
       const dispatcherCollapsedOnWide = wideBoardViewport && dispatcherCollapsed && selectedSessionId === null;
       const showBoardSidePaneResizeHandle = selectedSessionId !== null || !dispatcherCollapsed;
 
@@ -2170,7 +2195,10 @@ export default function DashboardClient({
         >
           {boardSinglePane ? (
             <div className="border-b border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-2 xl:hidden">
-              {renderWorkspaceViewToggle(true)}
+              <div className="flex flex-col gap-1.5">
+                {renderWorkspaceViewToggle({ fullWidth: true, compact: true })}
+                {showMobileBoardPaneToggle ? renderBoardPaneToggle({ fullWidth: true, compact: true }) : null}
+              </div>
             </div>
           ) : null}
           <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden xl:flex-row">
@@ -2194,7 +2222,7 @@ export default function DashboardClient({
                 ? "flex-1 min-h-0 xl:h-auto xl:max-h-none xl:w-[56px] xl:flex-none xl:min-h-0"
                 : boardPaneExpandedClass
             } flex-col overflow-hidden border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] xl:border-l xl:border-t-0`}>
-              {boardSinglePane && showChatPane ? (
+              {boardSinglePane && showChatPane && selectedSessionId !== null ? (
                 <div className="flex items-center border-b border-[var(--vk-border)] px-3 py-2 xl:hidden">
                   <button
                     type="button"
@@ -2256,7 +2284,7 @@ export default function DashboardClient({
               {renderWorkspaceViewToggle()}
             </div>
             <div className="xl:hidden">
-              {renderBoardPaneToggle(true)}
+              {renderWorkspaceViewToggle({ fullWidth: true, compact: true })}
             </div>
           </div>
         </div>
@@ -2394,6 +2422,21 @@ export default function DashboardClient({
         )}
 
         <div className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${immersiveMobileMode ? "bg-[#060404]" : ""}`}>
+          {workspaceActionError ? (
+            <div className="border-b border-[var(--vk-red)]/35 bg-[color:color-mix(in_srgb,var(--vk-red)_12%,var(--vk-bg-panel))] px-3 py-2 text-[13px] text-[var(--vk-red)] sm:px-4">
+              <div className="flex items-start gap-2">
+                <p className="min-w-0 flex-1">{workspaceActionError}</p>
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceActionError(null)}
+                  className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-red)]/80 hover:bg-[var(--vk-red)]/10 hover:text-[var(--vk-red)]"
+                  aria-label="Dismiss workspace action error"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          ) : null}
           {workspaceContent}
         </div>
       </AppShell>
@@ -2726,7 +2769,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
     selectedTask?.taskRef?.trim()
     || selectedTask?.issueId?.trim()
     || selectedTask?.id
-    || "Link task";
+    || "";
   const selectedTaskSubtitle = selectedTask ? getLinkedTaskTitle(selectedTask.text) : "Choose a task, bug, or issue from this project's board";
   const launchPayloadProjectId = selectedProject?.id ?? effectiveProjectId ?? null;
   const launchAttachments = useCallback(
@@ -2859,71 +2902,78 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
         ) : null}
 
         <div className="mx-auto w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-px">
-          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--vk-border)] px-2 pb-[9px] pt-2">
-            <AgentTileIcon seed={{ label: selectedAgent }} className="h-[25px] w-[25px] border-none bg-transparent" />
-            <DropdownMenu.Root>
-              <DropdownMenu.Trigger asChild>
-                <button
-                  type="button"
-                  className="inline-flex h-[31px] max-w-[70vw] items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)] sm:max-w-none"
-                  aria-label="Select agent"
-                >
-                  <span className="truncate pr-1">{selectedAgentLabel}</span>
-                  <ChevronDown className="h-3 w-3 text-[var(--vk-text-muted)]" />
-                </button>
-              </DropdownMenu.Trigger>
+          <div className="flex flex-col gap-2 border-b border-[var(--vk-border)] px-2 pb-[9px] pt-2 sm:flex-row sm:items-center">
+            <div className="flex min-w-0 items-center gap-2 sm:flex-1">
+              <AgentTileIcon seed={{ label: selectedAgent }} className="h-[25px] w-[25px] shrink-0 border-none bg-transparent" />
+              <DropdownMenu.Root>
+                <DropdownMenu.Trigger asChild>
+                  <button
+                    type="button"
+                    className="inline-flex h-[31px] min-w-0 max-w-full items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] data-[state=open]:bg-[var(--vk-bg-hover)] sm:max-w-[280px]"
+                    aria-label="Select agent"
+                  >
+                    <span className="min-w-0 flex-1 truncate pr-1 text-left">{selectedAgentLabel}</span>
+                    <ChevronDown className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
+                  </button>
+                </DropdownMenu.Trigger>
 
-              <DropdownMenu.Portal>
-                <DropdownMenu.Content
-                  align="start"
-                  sideOffset={6}
-                  className={scrollMenuClass}
-                >
-                  <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
-                    Agents
-                  </p>
+                <DropdownMenu.Portal>
+                  <DropdownMenu.Content
+                    align="start"
+                    sideOffset={6}
+                    className={scrollMenuClass}
+                  >
+                    <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
+                      Agents
+                    </p>
 
-                  {orderedAgentOptions.map((agent) => {
-                    const isSelected = agent === selectedAgent;
-                    const agentState = agentStates[normalizeAgentName(agent)] ?? null;
-                    return (
-                      <DropdownMenu.Item
-                        key={agent}
-                        onSelect={() => setSelectedAgent(agent)}
-                        className={lightMenuItemClass}
-                      >
-                        <AgentTileIcon seed={{ label: agent }} className="h-6 w-6 border-none bg-transparent" />
-                        <div className="min-w-0 flex-1">
-                          <div>{getAgentLabel(agent)}</div>
-                          {!agentState?.ready ? (
-                            <div className="truncate text-[12px] leading-[16px] text-[var(--vk-text-muted)]">
-                              {agentState?.installed ? "Setup required" : "Not installed"}
-                            </div>
-                          ) : null}
-                        </div>
-                        <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
-                          {isSelected ? <Check className="h-4 w-4" /> : null}
-                        </span>
-                      </DropdownMenu.Item>
-                    );
-                  })}
-                </DropdownMenu.Content>
-              </DropdownMenu.Portal>
-            </DropdownMenu.Root>
+                    {orderedAgentOptions.map((agent) => {
+                      const isSelected = agent === selectedAgent;
+                      const agentState = agentStates[normalizeAgentName(agent)] ?? null;
+                      return (
+                        <DropdownMenu.Item
+                          key={agent}
+                          onSelect={() => setSelectedAgent(agent)}
+                          className={lightMenuItemClass}
+                        >
+                          <AgentTileIcon seed={{ label: agent }} className="h-6 w-6 border-none bg-transparent" />
+                          <div className="min-w-0 flex-1">
+                            <div>{getAgentLabel(agent)}</div>
+                            {!agentState?.ready ? (
+                              <div className="truncate text-[12px] leading-[16px] text-[var(--vk-text-muted)]">
+                                {agentState?.installed ? "Setup required" : "Not installed"}
+                              </div>
+                            ) : null}
+                          </div>
+                          <span className="ml-auto inline-flex h-4 w-4 items-center justify-center text-[var(--vk-text-strong)]">
+                            {isSelected ? <Check className="h-4 w-4" /> : null}
+                          </span>
+                        </DropdownMenu.Item>
+                      );
+                    })}
+                  </DropdownMenu.Content>
+                </DropdownMenu.Portal>
+              </DropdownMenu.Root>
+            </div>
 
             <DropdownMenu.Root onOpenChange={setTaskMenuOpen}>
               <DropdownMenu.Trigger asChild>
                 <button
                   type="button"
                   disabled={!effectiveProjectId}
-                  className="ml-auto flex h-[31px] min-w-[220px] items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-left disabled:cursor-not-allowed disabled:opacity-50 sm:ml-0 sm:w-[286px]"
-                  aria-label="Link task"
+                  className="flex h-[31px] w-full min-w-0 items-center rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-[9px] py-[5px] text-left disabled:cursor-not-allowed disabled:opacity-50 sm:w-[240px] sm:shrink-0"
+                  aria-label="Select task"
                 >
-                  <span className="pr-2 text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">Task</span>
-                  <span className="min-w-0 flex-1 truncate text-[14px] leading-[21px] text-[var(--vk-text-normal)]">
-                    {selectedTaskLabel}
+                  <span
+                    className={`min-w-0 flex-1 truncate text-[14px] leading-[21px] ${
+                      selectedTaskLabel
+                        ? "text-[var(--vk-text-normal)]"
+                        : "text-[var(--vk-text-muted)]"
+                    }`}
+                  >
+                    {selectedTaskLabel || "No task"}
                   </span>
-                  <ChevronDown className="h-3 w-3 text-[var(--vk-text-muted)]" />
+                  <ChevronDown className="h-3 w-3 shrink-0 text-[var(--vk-text-muted)]" />
                 </button>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
@@ -2934,7 +2984,7 @@ const CreateWorkspacePanel = memo(function CreateWorkspacePanel({
                   className={scrollMenuClass}
                 >
                   <p className="px-3 pb-1 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-muted)]">
-                    Link task
+                    Tasks
                   </p>
                   <p className="px-3 pb-2 text-[12px] leading-[16px] text-[var(--text-faint)]">
                     {selectedTaskSubtitle}
