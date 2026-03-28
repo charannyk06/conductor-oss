@@ -1,10 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use conductor_core::types::AgentKind;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+use super::claude_code::parse_claude_stream_json_output;
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::{spawn_process_no_stdin_with_env_removals, spawn_process_with_env_removals};
@@ -96,12 +98,21 @@ impl Executor for QwenCodeExecutor {
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
         if options.interactive {
             let mut args = vec![];
+            if options.structured_output {
+                args.push("--output-format".to_string());
+                args.push("stream-json".to_string());
+                args.push("--include-partial-messages".to_string());
+            }
             if options.skip_permissions {
                 args.push("--yolo".to_string());
             }
             if let Some(model) = &options.model {
                 args.push("--model".to_string());
                 args.push(model.clone());
+            }
+            if let Some(resume_target) = &options.resume_target {
+                args.push("--resume".to_string());
+                args.push(resume_target.clone());
             }
             args.extend(options.sanitized_extra_args());
             if !options.prompt.trim().is_empty() {
@@ -119,6 +130,13 @@ impl Executor for QwenCodeExecutor {
             args.push("--model".to_string());
             args.push(model.clone());
         }
+        args.push("--output-format".to_string());
+        args.push("stream-json".to_string());
+        args.push("--include-partial-messages".to_string());
+        if let Some(resume_target) = &options.resume_target {
+            args.push("--resume".to_string());
+            args.push(resume_target.clone());
+        }
         args.extend(options.sanitized_extra_args());
         args.push("--prompt".to_string());
         args.push(options.prompt.clone());
@@ -126,8 +144,50 @@ impl Executor for QwenCodeExecutor {
     }
 
     fn parse_output(&self, line: &str) -> ExecutorOutput {
-        ExecutorOutput::Stdout(line.to_string())
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return ExecutorOutput::Stdout(String::new());
+        }
+
+        if is_qwen_login_prompt(trimmed) {
+            return ExecutorOutput::NeedsInput(
+                "Qwen Code authentication required. Run `qwen login` or finish the CLI sign-in flow, then retry."
+                    .to_string(),
+            );
+        }
+
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            if value.get("type").and_then(Value::as_str) == Some("result")
+                && value
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                let error = value
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("Qwen Code failed");
+                if is_qwen_login_prompt(error) {
+                    return ExecutorOutput::NeedsInput(
+                        "Qwen Code authentication required. Run `qwen login` or finish the CLI sign-in flow, then retry."
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        parse_claude_stream_json_output(trimmed, "Qwen Code failed")
     }
+}
+
+fn is_qwen_login_prompt(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("login required")
+        || lower.contains("authentication required")
+        || lower.contains("please login")
+        || lower.contains("run `qwen login`")
 }
 
 #[cfg(test)]
@@ -169,6 +229,29 @@ mod tests {
     }
 
     #[test]
+    fn build_args_interactive_structured_output_includes_stream_json_flags() {
+        let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "review the workspace".to_string(),
+            model: Some("qwen-max".to_string()),
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: true,
+            structured_output: true,
+            resume_target: None,
+        });
+
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
+    }
+
+    #[test]
     fn build_args_headless_uses_prompt_flag() {
         let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
         let args = executor.build_args(&SpawnOptions {
@@ -191,6 +274,35 @@ mod tests {
                 .find(|pair| pair[0] == "--prompt")
                 .map(|pair| pair[1].as_str()),
             Some("generate a plan")
+        );
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--include-partial-messages".to_string()));
+    }
+
+    #[test]
+    fn build_args_headless_resume_includes_resume_target() {
+        let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "continue the task".to_string(),
+            model: Some("qwen-max".to_string()),
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: true,
+            resume_target: Some("session-123".to_string()),
+        });
+
+        assert_eq!(
+            args.windows(2)
+                .find(|pair| pair[0] == "--resume")
+                .map(|pair| pair[1].as_str()),
+            Some("session-123")
         );
     }
 
@@ -283,5 +395,21 @@ mod tests {
         });
 
         assert!(env_remove.is_empty());
+    }
+
+    #[test]
+    fn parse_stream_json_text_delta_emits_stdout() {
+        let executor = QwenCodeExecutor::new(PathBuf::from("/usr/bin/qwen"));
+        let output = executor.parse_output(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}}"#,
+        );
+
+        let ExecutorOutput::Composite(events) = output else {
+            panic!("expected composite output");
+        };
+        assert!(matches!(
+            events.first(),
+            Some(ExecutorOutput::Stdout(text)) if text == "partial"
+        ));
     }
 }

@@ -72,6 +72,7 @@ import { shouldUseCompactTerminalChrome } from "@/components/sessions/sessionTer
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { archiveSession } from "@/lib/sessionArchive";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { decodeBridgeSessionId, normalizeBridgeId } from "@/lib/bridgeSessionIds";
 import {
@@ -1805,37 +1806,20 @@ export default function DashboardClient({
   ]);
 
   const handleArchiveSession = useCallback(async (sessionId: string) => {
-    let res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
-      method: "POST",
-    });
-    let data = (await res.json().catch(() => null)) as
-      | { ok?: boolean; error?: string }
-      | null;
-
-    if (res.status === 404) {
-      res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "archive" }),
-      });
-      data = (await res.json().catch(() => null)) as
-        | { ok?: boolean; error?: string }
-        | null;
-    }
-
-    if (!res.ok) {
-      throw new Error(data?.error ?? `Failed to archive session: ${res.status}`);
-    }
+    await archiveSession(sessionId, { bridgeId: effectiveBridgeId });
 
     if (selectedSessionId === sessionId) {
       navigateDashboard(
         { projectId: null, sessionId: null, workspaceView: null, tab: null },
         "replace",
       );
+      return;
     }
 
-    await refreshSessions();
-  }, [navigateDashboard, refreshSessions, selectedSessionId]);
+    if (effectiveBridgeId) {
+      void refreshSessions();
+    }
+  }, [effectiveBridgeId, navigateDashboard, refreshSessions, selectedSessionId]);
 
   const handleCreateWorkspace = useCallback(async (payload: NewWorkspacePayload) => {
     if (requiresPairedDeviceScope && !effectiveBridgeId) {

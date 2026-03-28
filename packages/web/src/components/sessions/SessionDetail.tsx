@@ -15,6 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/Tabs";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { useSession } from "@/hooks/useSession";
+import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { getDefaultSessionPrimaryTab, isProjectDispatcherSession } from "@/lib/sessionKinds";
 import type { DashboardSession } from "@/lib/types";
 import { SessionOverview } from "./SessionOverview";
@@ -272,6 +273,10 @@ export function SessionDetail({
   const immersiveTerminalActive = active && immersiveMobileMode && activeTab === "terminal";
   const previewTabActive = active && activeTab === "preview";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
+  const compactDisplaySessionId = useMemo(
+    () => getDisplaySessionId(sessionId).slice(0, 7),
+    [sessionId],
+  );
 
   const sessionTabs = (
     <TabsList className="flex w-full overflow-x-auto sm:w-fit sm:inline-flex">
@@ -333,7 +338,7 @@ export function SessionDetail({
               <div className="flex min-w-0 flex-1 items-center gap-1.5">
                 <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
                 <span className="text-[12px] font-medium text-[#efe8e1]">{compactStatusLabel}</span>
-                <span className="font-mono text-[10px] text-[#8e847d]">· {sessionId.slice(0, 7)}</span>
+                <span className="font-mono text-[10px] text-[#8e847d]">· {compactDisplaySessionId}</span>
               </div>
               {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
             </div>
@@ -348,7 +353,7 @@ export function SessionDetail({
               <div className="flex items-center gap-1.5">
                 <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${statusDotClass}${statusAnimated ? " animate-pulse" : ""}`} />
                 <span className="text-[11px] text-[var(--vk-text-muted)]">{compactStatusLabel}</span>
-                <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {sessionId.slice(0, 7)}</span>
+                <span className="hidden font-mono text-[10px] text-[var(--vk-text-muted)] sm:inline">· {compactDisplaySessionId}</span>
               </div>
               {showProjectOpenMenu ? <SessionProjectOpenMenu projectId={session.projectId} bridgeId={session.bridgeId ?? null} /> : null}
             </div>

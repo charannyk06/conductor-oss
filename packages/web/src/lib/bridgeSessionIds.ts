@@ -37,6 +37,15 @@ export function decodeBridgeSessionId(value: string | null | undefined): BridgeS
   return { bridgeId, sessionId };
 }
 
+export function getDisplaySessionId(value: string | null | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return "";
+  }
+
+  return decodeBridgeSessionId(trimmed)?.sessionId ?? trimmed;
+}
+
 function looksLikeDashboardSession(value: unknown): value is DashboardSession {
   if (!value || typeof value !== "object") {
     return false;

@@ -11,6 +11,7 @@ import { Archive, Search } from "lucide-react";
 import type { DashboardSession, AttentionLevel } from "@/lib/types";
 import { getAttentionLevel } from "@/lib/types";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
+import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { cn } from "@/lib/cn";
 import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 
@@ -93,7 +94,7 @@ function getSessionSubtitle(session: DashboardSession): string {
     return session.status.replace(/[_-]+/g, " ");
   }
 
-  return session.id.slice(0, 8);
+  return getDisplaySessionId(session.id).slice(0, 8);
 }
 
 function getSessionAgent(session: DashboardSession): string | null {

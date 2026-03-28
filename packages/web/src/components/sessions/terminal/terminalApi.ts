@@ -134,6 +134,74 @@ function resolveProvidedTtydHttpUrl(
   }
 }
 
+function resolveProvidedTtydWsUrl(
+  ttydWsUrl: string | null,
+  ttydHttpUrl: string | null,
+  backendOrigin: string,
+  dashboardOrigin: string,
+): string | null {
+  if (ttydWsUrl) {
+    try {
+      const candidatePathname = (() => {
+        try {
+          return new URL(ttydWsUrl, dashboardOrigin).pathname;
+        } catch {
+          return null;
+        }
+      })();
+      const baseOrigin = candidatePathname && isDashboardTtydProxyPath(candidatePathname)
+        ? dashboardOrigin
+        : backendOrigin;
+      const resolved = new URL(ttydWsUrl, baseOrigin);
+
+      if (resolved.protocol === "http:") resolved.protocol = "ws:";
+      if (resolved.protocol === "https:") resolved.protocol = "wss:";
+      if (resolved.protocol !== "ws:" && resolved.protocol !== "wss:") {
+        return null;
+      }
+      resolved.pathname = normalizeTerminalPathname(resolved.pathname);
+      resolved.hash = "";
+      return resolved.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  if (!ttydHttpUrl) {
+    return null;
+  }
+
+  try {
+    const candidatePathname = (() => {
+      try {
+        return new URL(ttydHttpUrl, dashboardOrigin).pathname;
+      } catch {
+        return null;
+      }
+    })();
+    const baseOrigin = candidatePathname && isDashboardTtydProxyPath(candidatePathname)
+      ? dashboardOrigin
+      : backendOrigin;
+    const resolved = new URL(ttydHttpUrl, baseOrigin);
+
+    if (resolved.protocol === "http:") resolved.protocol = "ws:";
+    if (resolved.protocol === "https:") resolved.protocol = "wss:";
+    if (resolved.protocol !== "ws:" && resolved.protocol !== "wss:") {
+      return null;
+    }
+    resolved.pathname = normalizeTerminalPathname(resolved.pathname);
+    resolved.pathname = resolved.pathname === "/"
+      ? "/ws"
+      : resolved.pathname.endsWith("/ws")
+        ? resolved.pathname
+        : `${resolved.pathname}/ws`;
+    resolved.hash = "";
+    return resolved.toString();
+  } catch {
+    return null;
+  }
+}
+
 function appendBridgeIdToTerminalUrl(
   terminalUrl: string,
   bridgeId?: string | null,
@@ -234,6 +302,7 @@ export async function resolveTerminalConnection(
   if (!auth.interactive) {
     return {
       terminalUrl: null,
+      websocketUrl: null,
       interactive: false,
       reason: auth.reason,
       expiresInSeconds: null,
@@ -252,13 +321,30 @@ export async function resolveTerminalConnection(
   if (!resolvedTerminalUrl) {
     return {
       terminalUrl: null,
+      websocketUrl: null,
       interactive: false,
       reason: "Failed to resolve the ttyd terminal URL.",
     };
   }
 
+  const resolvedWebSocketUrl = resolveProvidedTtydWsUrl(
+    auth.ttydWsUrl,
+    auth.ttydHttpUrl,
+    backendOrigin,
+    dashboardOrigin,
+  );
+  if (!resolvedWebSocketUrl) {
+    return {
+      terminalUrl: null,
+      websocketUrl: null,
+      interactive: false,
+      reason: "Failed to resolve the ttyd terminal websocket URL.",
+    };
+  }
+
   return {
     terminalUrl: appendBridgeIdToTerminalUrl(resolvedTerminalUrl, options?.bridgeId),
+    websocketUrl: appendBridgeIdToTerminalUrl(resolvedWebSocketUrl, options?.bridgeId),
     interactive: true,
     reason: null,
     expiresInSeconds: auth.expiresInSeconds,

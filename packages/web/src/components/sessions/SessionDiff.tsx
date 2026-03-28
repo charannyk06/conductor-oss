@@ -13,6 +13,7 @@ import {
   Search,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { cn } from "@/lib/cn";
 import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import { TERMINAL_STATUSES, type SSESessionEvent } from "@/lib/types";
@@ -1202,7 +1203,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
 
                     {!selectedState.loading && !selectedState.error && selectedState.data?.binary ? (
                       <div className="flex min-h-[180px] items-center justify-center px-4 py-8 text-center text-[12px] text-[var(--vk-text-muted)]">
-                        Binary file preview is not available for {sessionId.slice(0, 6)}.
+                        Binary file preview is not available for {getDisplaySessionId(sessionId).slice(0, 6)}.
                       </div>
                     ) : null}
 
