@@ -8,6 +8,7 @@ import {
   type DashboardSession,
   type SSESessionEvent,
   type SSESnapshotSession,
+  TERMINAL_STATUSES,
 } from "@/lib/types";
 
 const ACTIVE_SESSIONS_POLL_INTERVAL_MS = 15_000;
@@ -118,6 +119,18 @@ function sortSessionIdsByCreatedAt(sessionsById: Map<string, DashboardSession>):
     .map((session) => session.id);
 }
 
+function cloneDashboardSession(session: DashboardSession): DashboardSession {
+  if (typeof structuredClone === "function") {
+    return structuredClone(session);
+  }
+  return JSON.parse(JSON.stringify(session)) as DashboardSession;
+}
+
+function isTerminalSessionStatus(status: string | null | undefined): boolean {
+  const normalized = status?.trim().toLowerCase();
+  return normalized ? TERMINAL_STATUSES.has(normalized) : false;
+}
+
 function commitSessionsState(
   scopeKey: string,
   sessionsById: Map<string, DashboardSession>,
@@ -127,6 +140,33 @@ function commitSessionsState(
   store.sessionsById = sessionsById;
   store.orderedIds = orderedIds;
   store.version += 1;
+}
+
+function updateSessionInStore(
+  scopeKey: string,
+  sessionId: string,
+  updater: (session: DashboardSession) => DashboardSession | null,
+): DashboardSession | null {
+  const store = getSessionsStore(scopeKey);
+  const current = store.sessionsById.get(sessionId);
+  if (!current) {
+    return null;
+  }
+
+  const nextSessions = new Map(store.sessionsById);
+  const nextSession = updater(current);
+  if (nextSession) {
+    nextSessions.set(sessionId, nextSession);
+  } else {
+    nextSessions.delete(sessionId);
+  }
+
+  commitSessionsState(scopeKey, nextSessions, sortSessionIdsByCreatedAt(nextSessions));
+  store.loading = false;
+  store.error = null;
+  emitSessionChange(scopeKey);
+  emitSessionRecordChanges(scopeKey, [sessionId]);
+  return current;
 }
 
 function mapSnapshotSession(session: SSESnapshotSession): DashboardSession {
@@ -266,7 +306,7 @@ function clearSessionsPolling(scopeKey: string) {
 function scheduleSessionsPolling(scopeKey: string, bridgeId?: string | null) {
   const store = getSessionsStore(scopeKey);
   clearSessionsPolling(scopeKey);
-  if (store.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
+  if (scopeKey === LOCAL_SCOPE_KEY || store.activeConsumers === 0 || !sessionsRealtimeEnabled()) {
     return;
   }
 
@@ -436,6 +476,50 @@ export function primeSessionStore(scopeKey: string, session: DashboardSession | 
   emitSessionRecordChanges(scopeKey, [session.id]);
 }
 
+export function optimisticallyArchiveSession(
+  sessionId: string,
+  options?: { bridgeId?: string | null },
+): () => void {
+  const normalizedId = sessionId.trim();
+  if (!normalizedId) {
+    return () => {};
+  }
+
+  const scopeKey = resolveScopeKey(
+    options?.bridgeId ?? decodeBridgeSessionId(normalizedId)?.bridgeId ?? null,
+  );
+  const previous = updateSessionInStore(scopeKey, normalizedId, (session) => {
+    if (session.status.trim().toLowerCase() === "archived") {
+      return session;
+    }
+
+    const finishedAt = new Date().toISOString();
+    const metadata = { ...session.metadata };
+    metadata["archivedAt"] = metadata["archivedAt"] ?? finishedAt;
+    metadata["finishedAt"] = metadata["finishedAt"] ?? finishedAt;
+    metadata["summary"] = "Archived";
+    delete metadata["terminationRequested"];
+
+    return {
+      ...session,
+      status: "archived",
+      activity: "exited",
+      summary: "Archived",
+      lastActivityAt: finishedAt,
+      metadata,
+    };
+  });
+
+  if (!previous) {
+    return () => {};
+  }
+
+  const snapshot = cloneDashboardSession(previous);
+  return () => {
+    updateSessionInStore(scopeKey, normalizedId, () => snapshot);
+  };
+}
+
 function filterProjectSessions(scopeKey: string, projectId?: string | null): DashboardSession[] {
   const store = getSessionsStore(scopeKey);
   const normalized = projectId?.trim();
@@ -510,6 +594,9 @@ export function useSharedSession(
   const [loading, setLoading] = useState(
     enabled && normalizedId !== null && initialSession === null,
   );
+  const cachedSession = normalizedId
+    ? store.sessionsById.get(normalizedId) ?? sessionOverride ?? initialSession
+    : null;
 
   useEffect(() => {
     setHydrated(true);
@@ -536,7 +623,12 @@ export function useSharedSession(
   }, [enabled, inferredBridgeId, normalizedId, scopeKey]);
 
   useEffect(() => {
-    if (!enabled || normalizedId === null || scopeKey === LOCAL_SCOPE_KEY) {
+    if (
+      !enabled
+      || normalizedId === null
+      || scopeKey === LOCAL_SCOPE_KEY
+      || isTerminalSessionStatus(cachedSession?.status)
+    ) {
       return undefined;
     }
 
@@ -554,7 +646,7 @@ export function useSharedSession(
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [enabled, inferredBridgeId, normalizedId, scopeKey]);
+  }, [cachedSession?.status, enabled, inferredBridgeId, normalizedId, scopeKey]);
 
   useEffect(() => {
     if (!enabled || normalizedId === null) {
@@ -602,7 +694,7 @@ export function useSharedSession(
 
   const session = normalizedId
     ? (hydrated
-        ? store.sessionsById.get(normalizedId) ?? sessionOverride ?? initialSession ?? null
+        ? cachedSession ?? null
         : initialSession ?? null)
     : null;
 

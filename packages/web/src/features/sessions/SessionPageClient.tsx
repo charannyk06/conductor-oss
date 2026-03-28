@@ -19,8 +19,8 @@ import {
   encodeBridgeSessionId,
   normalizeBridgeId,
 } from "@/lib/bridgeSessionIds";
-import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildAllProjectsHref, buildSessionHref } from "@/lib/dashboardHref";
+import { archiveSession } from "@/lib/sessionArchive";
 import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 import type { DashboardSession } from "@/lib/types";
 
@@ -153,34 +153,16 @@ export default function SessionPageClient({
   }, []);
 
   async function handleArchiveSession(sessionId: string) {
-    let res = await fetch(withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, effectiveBridgeId), {
-      method: "POST",
-    });
-    let data = (await res.json().catch(() => null)) as
-      | { ok?: boolean; error?: string }
-      | null;
-
-    if (res.status === 404) {
-      res = await fetch(withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/actions`, effectiveBridgeId), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "archive" }),
-      });
-      data = (await res.json().catch(() => null)) as
-        | { ok?: boolean; error?: string }
-        | null;
-    }
-
-    if (!res.ok) {
-      throw new Error(data?.error ?? `Failed to archive session: ${res.status}`);
-    }
+    await archiveSession(sessionId, { bridgeId: effectiveBridgeId });
 
     if (sessionId === canonicalSessionId) {
       router.replace(dashboardRootHref);
       return;
     }
 
-    await refresh();
+    if (effectiveBridgeId) {
+      void refresh();
+    }
   }
 
   if (!params.id) {

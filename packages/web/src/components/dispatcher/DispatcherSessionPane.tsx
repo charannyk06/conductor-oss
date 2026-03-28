@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { Button } from "@/components/ui/Button";
+import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { cn } from "@/lib/cn";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildSessionHref } from "@/lib/dashboardHref";
@@ -846,7 +847,7 @@ export function DispatcherSessionPane({
       return `Dispatcher / ${session.projectId}`;
     }
     const primary = session.issueId?.trim() || session.projectId;
-    const secondary = session.branch?.trim() || session.id.slice(0, 8);
+    const secondary = session.branch?.trim() || getDisplaySessionId(session.id).slice(0, 8);
     return `${primary} / ${secondary}`;
   }, [session.branch, session.id, session.issueId, session.metadata.sessionKind, session.projectId]);
   const agentLabel = useMemo(

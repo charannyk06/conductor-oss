@@ -99,6 +99,23 @@ test("resolveTerminalConnection accepts direct ttyd URLs", async () => {
   assert.equal(connection.interactive, true);
   assert.equal(connection.reason, null);
   assert.equal(connection.terminalUrl, "http://127.0.0.1:41000/");
+  assert.equal(connection.websocketUrl, "ws://127.0.0.1:41000/ws");
+});
+
+test("resolveTerminalConnection derives websocket urls from http-only direct ttyd endpoints", async () => {
+  setWindowLocation("http://127.0.0.1:3000/sessions/session-1");
+  setFetchResponse({
+    required: true,
+    ttydHttpUrl: "http://127.0.0.1:41000/",
+    ttydWsUrl: null,
+  });
+
+  const connection = await resolveTerminalConnection("session-1");
+
+  assert.equal(connection.interactive, true);
+  assert.equal(connection.reason, null);
+  assert.equal(connection.terminalUrl, "http://127.0.0.1:41000/");
+  assert.equal(connection.websocketUrl, "ws://127.0.0.1:41000/ws");
 });
 
 test("resolveTerminalConnection keeps proxied ttyd routes on the dashboard origin even with backend metadata", async () => {
@@ -117,6 +134,10 @@ test("resolveTerminalConnection keeps proxied ttyd routes on the dashboard origi
   assert.equal(
     connection.terminalUrl,
     "https://dashboard.example.com/api/sessions/session-1/terminal/ttyd?token=test-token",
+  );
+  assert.equal(
+    connection.websocketUrl,
+    "wss://dashboard.example.com/api/sessions/session-1/terminal/ttyd/ws?token=test-token",
   );
 });
 
@@ -137,6 +158,10 @@ test("resolveTerminalConnection keeps proxied ttyd routes on the current host wh
     connection.terminalUrl,
     "https://tailnet.example.ts.net/api/sessions/session-1/terminal/ttyd?token=test-token",
   );
+  assert.equal(
+    connection.websocketUrl,
+    "wss://tailnet.example.ts.net/api/sessions/session-1/terminal/ttyd/ws?token=test-token",
+  );
 });
 
 test("resolveTerminalConnection resolves proxy ttyd paths against the current dashboard origin", async () => {
@@ -154,6 +179,10 @@ test("resolveTerminalConnection resolves proxy ttyd paths against the current da
   assert.equal(
     connection.terminalUrl,
     "https://dashboard.example.com/api/sessions/session-2/terminal/ttyd?token=test-token",
+  );
+  assert.equal(
+    connection.websocketUrl,
+    "wss://dashboard.example.com/api/sessions/session-2/terminal/ttyd/ws?token=test-token",
   );
 });
 
@@ -173,6 +202,10 @@ test("resolveTerminalConnection normalizes ws-only ttyd urls without adding a tr
     connection.terminalUrl,
     "https://dashboard.example.com/api/sessions/session-3/terminal/ttyd?token=test-token",
   );
+  assert.equal(
+    connection.websocketUrl,
+    "wss://dashboard.example.com/api/sessions/session-3/terminal/ttyd/ws?token=test-token",
+  );
 });
 
 test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", async () => {
@@ -191,5 +224,32 @@ test("resolveTerminalConnection preserves bridge scope on proxied ttyd routes", 
   assert.equal(
     connection.terminalUrl,
     "https://app.conductross.com/api/sessions/session-bridge/terminal/ttyd?token=test-token&bridgeId=bridge-prod",
+  );
+  assert.equal(
+    connection.websocketUrl,
+    "wss://app.conductross.com/api/sessions/session-bridge/terminal/ttyd/ws?token=test-token&bridgeId=bridge-prod",
+  );
+});
+
+test("resolveTerminalConnection keeps direct relay websocket urls intact for bridge terminals", async () => {
+  setWindowLocation("https://app.conductross.com/sessions/bridge-session");
+  setBackendOriginMeta("https://api.conductross.com");
+  setFetchResponse({
+    required: false,
+    ttydHttpUrl: "/api/sessions/session-bridge/terminal/ttyd?bridgeId=bridge-prod",
+    ttydWsUrl: "wss://relay.example.com/terminal/abc/browser?jwt=test",
+  });
+
+  const connection = await resolveTerminalConnection("bridge-session", { bridgeId: "bridge-prod" });
+
+  assert.equal(connection.interactive, true);
+  assert.equal(connection.reason, null);
+  assert.equal(
+    connection.terminalUrl,
+    "https://app.conductross.com/api/sessions/session-bridge/terminal/ttyd?bridgeId=bridge-prod",
+  );
+  assert.equal(
+    connection.websocketUrl,
+    "wss://relay.example.com/terminal/abc/browser?jwt=test",
   );
 });

@@ -36,6 +36,7 @@ import {
 } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { usePreferences } from "@/hooks/usePreferences";
+import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
 import { buildSessionHref } from "@/lib/dashboardHref";
@@ -975,7 +976,7 @@ function normalizeBoardResponse(value: BoardResponse): BoardResponse {
 
 function formatLinkedSessionLabel(session: ProjectSession): string {
   return (
-    session.branch?.trim() || session.summary?.trim() || session.id.slice(0, 8)
+    session.branch?.trim() || session.summary?.trim() || getDisplaySessionId(session.id).slice(0, 8)
   );
 }
 
