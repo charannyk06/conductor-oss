@@ -3,8 +3,21 @@ import { fileURLToPath } from "node:url";
 
 const isVercelDeployment = process.env.VERCEL === "1" || process.env.VERCEL === "true";
 const workspaceRoot = fileURLToPath(new URL("../..", import.meta.url));
+const baselineContentSecurityPolicy = [
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+  "object-src 'none'",
+].join("; ");
+const embeddedTerminalContentSecurityPolicy = [
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'self'",
+  "object-src 'none'",
+].join("; ");
 
 const securityHeaders = [
+  { key: "Content-Security-Policy", value: baselineContentSecurityPolicy },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-XSS-Protection", value: "1; mode=block" },
@@ -14,7 +27,7 @@ const securityHeaders = [
 
 const embeddedTerminalHeaders = [
   { key: "X-Frame-Options", value: "SAMEORIGIN" },
-  { key: "Content-Security-Policy", value: "frame-ancestors 'self'" },
+  { key: "Content-Security-Policy", value: embeddedTerminalContentSecurityPolicy },
 ];
 
 const developmentWebpackConfig: Pick<NextConfig, "webpack"> = {

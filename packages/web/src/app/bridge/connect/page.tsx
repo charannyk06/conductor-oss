@@ -3,7 +3,7 @@ import Link from "next/link";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { Button } from "@/components/ui/Button";
 import BridgeConnectClient from "@/features/bridge/BridgeConnectClient";
-import { buildSignInPath, getDashboardAccess } from "@/lib/auth";
+import { buildPreferredSignInPath, getDashboardAccess } from "@/lib/auth";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 import { resolveRequestBaseUrl } from "@/lib/clerkConfig";
 
@@ -40,6 +40,7 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
     const redirectTarget = redirectParams.size > 0
       ? `/bridge/connect?${redirectParams.toString()}`
       : "/bridge/connect";
+    const signInPath = await buildPreferredSignInPath(redirectTarget);
 
     return (
       <PublicPageShell className="flex items-center">
@@ -54,7 +55,7 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
             />
             <div className="mt-8">
               <Button asChild variant="primary" size="lg">
-                <Link href={buildSignInPath(redirectTarget)}>Sign in with GitHub</Link>
+                <Link href={signInPath}>Continue to sign in</Link>
               </Button>
             </div>
           </PublicPanel>

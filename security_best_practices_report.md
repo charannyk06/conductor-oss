@@ -1,99 +1,81 @@
-# Security Review Report
+# Security Best Practices Report
+
+Date: 2026-03-27
 
 ## Executive Summary
 
-I found two critical relay-layer issues and one additional high-risk weakness.
+I reviewed the highest-risk security surfaces in Conductor OSS for this pass: the Rust backend auth boundary, the Next.js dashboard proxy/auth bridge, the server-side preview browser, and baseline dashboard response headers.
 
-The relay is the main problem area. It is explicitly internet-facing by default (`0.0.0.0:8080`), but several privileged endpoints trust caller-supplied headers as proof of dashboard identity, and share-link handling exposes active share URLs without authentication while failing to enforce the requested session scope. In practice, a remote attacker can impersonate dashboard users, enumerate paired devices, proxy requests into a victim laptop's local backend, and, when a share exists, read data well beyond the intended shared session.
+Three concrete findings were fixed during this pass. After those fixes, I did not identify any remaining open critical or high-severity issues in the reviewed paths. Rust verification is clean: `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` both pass.
 
-Rust workspace tests were run with `cargo test --workspace` and passed. This review was code-driven and focused on critical security impact, not feature correctness.
+## High Severity
 
-## Critical Findings
+### SEC-001 - Fixed - Forged dashboard proxy headers could bypass backend auth on remotely exposed Rust deployments
 
-### COND-SEC-001
+Impact: An attacker who could reach a remotely bound Rust backend could have supplied `x-conductor-*` proxy auth headers directly and been treated as an authenticated dashboard caller.
 
-- Severity: Critical
-- Title: Public relay trusts forgeable `x-conductor-*` headers as authentication
 - Location:
-  - `crates/conductor-relay/src/relay.rs:350`
-  - `crates/conductor-relay/src/relay.rs:360`
-  - `crates/conductor-relay/src/relay.rs:451`
-  - `crates/conductor-relay/src/relay.rs:527`
-  - `crates/conductor-relay/src/relay.rs:633`
-  - `crates/conductor-relay/src/relay.rs:2393`
-  - `crates/conductor-relay/src/relay.rs:424`
+  - `crates/conductor-server/src/lib.rs:137`
+  - `crates/conductor-server/src/routes/config.rs:369`
+  - `packages/web/src/lib/guardedRustProxy.ts:17`
+  - `packages/web/src/app/api/events/route.ts:44`
 - Evidence:
-  - The relay binds to `0.0.0.0:8080` by default and registers privileged device-management routes directly on that public server.
-  - Privileged handlers call `resolve_proxy_user_id(&headers)` and accept any request with `x-conductor-proxy-authorized: true` plus `x-conductor-access-email` or `x-bridge-user-id`.
-  - There is no signature, shared secret, mTLS check, loopback restriction, or reverse-proxy allowlist protecting those headers.
-  - `/api/bridges` is also unauthenticated and publishes `bridge.user_id` values publicly.
-- Impact:
-  - A remote attacker can forge dashboard identity, impersonate users, create pairing codes, list victim devices, proxy requests through a paired device into its local backend, create relay-backed terminal sessions, and delete devices.
-  - Because `/api/bridges` leaks connected `user_id` values, the relay itself helps attackers discover impersonation targets.
+  - The backend trusts forwarded proxy identity through `proxy_request_authorized(...)` and `resolve_proxy_access_identity(...)` in `crates/conductor-server/src/routes/config.rs`.
+  - The dashboard proxy constructs those headers in `packages/web/src/lib/guardedRustProxy.ts`.
+  - The backend startup path now explicitly blocks remote authenticated deployments unless `CONDUCTOR_PROXY_AUTH_SECRET` is configured in `crates/conductor-server/src/lib.rs:137`.
 - Fix:
-  - Remove header-based trust from the public relay.
-  - Require a cryptographically verifiable relay-to-dashboard credential on every privileged relay route, such as a signed service JWT with audience/issuer validation or mTLS between dashboard and relay.
-  - Treat `x-conductor-*` headers as advisory only after a trusted upstream is authenticated.
-  - Protect `/api/bridges` with authenticated access or remove user identifiers from its response.
+  - Added a shared `CONDUCTOR_PROXY_AUTH_SECRET` check for forwarded dashboard auth headers.
+  - Updated the Next.js proxy path, including the SSE route, to forward the shared secret.
+  - Refused startup when the Rust backend is intentionally exposed off-host with auth enabled but without a proxy-auth secret.
 - Mitigation:
-  - Until fixed, do not expose the relay to the internet.
-  - Bind the relay to loopback or place it behind a trusted reverse proxy that strips incoming `x-conductor-*` headers and injects its own authenticated identity.
+  - Keep the backend loopback-only unless there is a real deployment reason to expose it.
+  - When exposing it off-host, set the same `CONDUCTOR_PROXY_AUTH_SECRET` in both the dashboard and backend processes.
 - False positive notes:
-  - I did not find any app-layer check that would neutralize forged headers before they reach the relay handlers.
+  - This issue matters only when the Rust backend is reachable beyond loopback. Purely local deployments were already relying on the implicit same-host boundary.
 
-### COND-SEC-002
+## Medium Severity
 
-- Severity: Critical
-- Title: Share links are publicly enumerable and not scoped to the requested session
+### SEC-002 - Fixed - The server-side preview browser could be used to reach private-network targets outside the intended local preview boundary
+
+Impact: A malicious preview URL or manually entered target could have turned the server-side browser into an SSRF path toward private or link-local network services.
+
 - Location:
-  - `crates/conductor-relay/src/relay.rs:385`
-  - `crates/conductor-relay/src/relay.rs:798`
-  - `crates/conductor-relay/src/relay.rs:871`
-  - `crates/conductor-relay/src/relay.rs:980`
-  - `crates/conductor-relay/src/relay.rs:1465`
-  - `bridge-cmd/relay/client.go:832`
-  - `bridge-cmd/relay/client.go:1114`
+  - `packages/web/src/lib/devPreviewBrowser.ts:163`
+  - `packages/web/src/lib/devPreviewBrowser.ts:212`
+  - `packages/web/src/lib/devPreviewBrowser.ts:865`
 - Evidence:
-  - `/api/shares` is registered with unauthenticated `GET`, and `list_shares` returns every active `share_id` and `browser_url`.
-  - `delete_share` is also unauthenticated.
-  - `create_share` stores a `session_scope`, but `resolve_browser_connection` ignores it and authorizes the browser connection solely by looking up the share and returning its underlying `bridge_token`.
-  - `route_browser_message` then forwards read-only `FileBrowse`, `ApiRequest` with safe methods, and `PreviewRequest` messages to the bridge without any session-scope check.
-  - On the paired-device Go bridge runtime, `FileBrowse` lists arbitrary directories and `ApiRequest` proxies directly into the local Conductor backend on `127.0.0.1:4749`.
-- Impact:
-  - Any unauthenticated attacker who can reach the relay can enumerate active share links, attach to them, browse the paired machine's filesystem metadata, and send arbitrary `GET` requests into the victim's local backend, which can expose sessions, diffs, workspace files, and configuration data far outside the intended shared session.
-  - Attackers can also revoke all active shares by calling the unauthenticated delete route.
+  - Direct preview navigation is handled in `connect(...)`.
+  - The new `assertSafeDirectNavigationTarget(...)` guard rejects private IP literals and hostnames that resolve to private addresses unless `CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS=true` is explicitly set.
 - Fix:
-  - Resolved by removing the terminal sharing feature from the dashboard and relay.
-  - Keep bridged file browsing restricted to the intended workspace root, not arbitrary filesystem paths.
+  - Added private-network hostname and DNS-resolution checks before direct preview navigation.
+  - Preserved loopback/local dev preview support.
+  - Added an explicit override env var for intentionally unsafe/internal preview targets.
 - Mitigation:
-  - Disable relay share functionality until access control and scope enforcement are fixed.
-  - If shares must stay enabled temporarily, gate them behind authenticated dashboard routes only and rotate any active share IDs.
+  - Prefer loopback dev URLs for local preview flows.
+  - Treat `CONDUCTOR_ALLOW_UNSAFE_PREVIEW_HOSTS` as a temporary, tightly-scoped override.
 - False positive notes:
-  - This finding does not depend on write access; read-only access is already enough to expose local project data and device metadata.
+  - Public-origin preview browsing is still allowed by design; this fix specifically blocks private-network pivoting rather than all remote browsing.
 
-## High-Risk Weakness
+### SEC-003 - Fixed - Dashboard responses lacked a CSP baseline
 
-### COND-SEC-003
+Impact: Without a baseline CSP, the dashboard had less browser-enforced protection against framing abuse and unsafe object/base URI behavior.
 
-- Severity: High
-- Title: Relay browser JWTs become unsigned when `RELAY_JWT_SECRET` is unset
 - Location:
-  - `packages/web/src/lib/bridgeRelayAuth.ts:26`
-  - `crates/conductor-relay/src/relay.rs:2413`
-  - `crates/conductor-relay/src/relay.rs:2572`
+  - `packages/web/next.config.ts:6`
+  - `packages/web/next.config.ts:19`
+  - `packages/web/next.config.ts:28`
 - Evidence:
-  - The dashboard emits `alg: "none"` JWTs when `RELAY_JWT_SECRET` is absent.
-  - The relay then accepts those tokens by base64-decoding the payload without verifying a signature whenever no secret is configured.
-- Impact:
-  - Anyone who can obtain a relay browser endpoint and terminal ID can forge arbitrary identities for browser-terminal access in deployments missing `RELAY_JWT_SECRET`.
-  - This materially worsens COND-SEC-001 because the attacker does not need any signing material to finish the relay-terminal flow.
+  - `packages/web/next.config.ts` now adds a baseline `Content-Security-Policy` header and a terminal-specific CSP variant for the embedded ttyd surface.
 - Fix:
-  - Make `RELAY_JWT_SECRET` mandatory for any relay feature that consumes browser JWTs.
-  - Reject unsigned tokens outright on both the dashboard and relay sides.
+  - Added a minimal non-breaking CSP baseline: `base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'`.
+  - Added a ttyd-specific variant with `frame-ancestors 'self'`.
 - Mitigation:
-  - Treat relay deployments without `RELAY_JWT_SECRET` as insecure and non-production.
+  - If stricter CSP is desired later, expand this to nonce/hash-based script controls once the dashboard’s runtime script requirements are catalogued.
+- False positive notes:
+  - This was a defense-in-depth hardening gap rather than evidence of an active exploit path.
 
 ## Residual Notes
 
-- I did not find a critical auth bypass in the Rust backend itself during this pass; it explicitly refuses non-loopback binding unless `CONDUCTOR_UNSAFE_ALLOW_REMOTE_BACKEND=true` is set.
-- I did not review third-party dependencies, deployment infrastructure, or runtime reverse-proxy configs here, so this report is limited to vulnerabilities visible in repository code.
+- No open critical or high-severity findings were identified in the audited paths after these fixes.
+- Remote authenticated deployments now require `CONDUCTOR_PROXY_AUTH_SECRET`; this is an operational requirement, not an optional hardening step.
+- TypeScript runtime validation could not be executed from this shell because neither `bun` nor `node` is installed here. Rust verification completed successfully.

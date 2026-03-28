@@ -4,6 +4,7 @@ import { NextRequest } from "next/server";
 import {
   buildHostedSignInPath,
   buildHostedSignInRedirectUrl,
+  buildPreferredSignInPath,
   buildSignInPath,
   getDefaultPostSignInRedirectTarget,
   getDashboardAccess,
@@ -17,6 +18,9 @@ const originalWorkspace = env.CONDUCTOR_WORKSPACE;
 const originalRequireAuth = env.CONDUCTOR_REQUIRE_AUTH;
 const originalAllowLocalUnauthenticated = env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED;
 const originalNodeEnv = env.NODE_ENV;
+const originalClerkPublishableKey = env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+const originalClerkSecretKey = env.CLERK_SECRET_KEY;
+const originalHostedSignInUrl = env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL;
 
 function resetDashboardAuthEnv(): void {
   env.CO_CONFIG_PATH = "/tmp/conductor-auth-test-config-does-not-exist.yaml";
@@ -24,6 +28,9 @@ function resetDashboardAuthEnv(): void {
   env.CONDUCTOR_REQUIRE_AUTH = "";
   env.CONDUCTOR_ALLOW_LOCAL_UNAUTHENTICATED = "";
   env.NODE_ENV = originalNodeEnv ?? "test";
+  env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "";
+  env.CLERK_SECRET_KEY = "";
+  env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL = "";
 }
 
 test.afterEach(() => {
@@ -59,6 +66,24 @@ test.after(() => {
     delete env.NODE_ENV;
   } else {
     env.NODE_ENV = originalNodeEnv;
+  }
+
+  if (originalClerkPublishableKey === undefined) {
+    delete env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  } else {
+    env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = originalClerkPublishableKey;
+  }
+
+  if (originalClerkSecretKey === undefined) {
+    delete env.CLERK_SECRET_KEY;
+  } else {
+    env.CLERK_SECRET_KEY = originalClerkSecretKey;
+  }
+
+  if (originalHostedSignInUrl === undefined) {
+    delete env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL;
+  } else {
+    env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL = originalHostedSignInUrl;
   }
 });
 
@@ -242,5 +267,34 @@ test("buildHostedSignInRedirectUrl avoids redirect loops back to the local sign-
   assert.equal(
     buildHostedSignInRedirectUrl("/sign-in", "https://preview.conductross.com", "/"),
     null,
+  );
+});
+
+test("buildPreferredSignInPath uses the hosted auth route when Clerk is configured for it", async () => {
+  env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_live_Y2xlcmsuY29uZHVjdHJvc3MuY29tJA";
+  env.CLERK_SECRET_KEY = "sk_live_hosted";
+  env.NEXT_PUBLIC_CLERK_HOSTED_SIGN_IN_URL = "https://accounts.conductross.com/sign-in/";
+
+  assert.equal(
+    await buildPreferredSignInPath(
+      "/bridge/connect?claim=claim_123",
+      undefined,
+      new Request("https://app.conductross.com/bridge/connect"),
+    ),
+    "/sign-in/hosted?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123",
+  );
+});
+
+test("buildPreferredSignInPath falls back to the local auth route when no hosted auth url is configured", async () => {
+  env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY = "pk_test_loopback";
+  env.CLERK_SECRET_KEY = "sk_test_loopback";
+
+  assert.equal(
+    await buildPreferredSignInPath(
+      "/bridge/connect?claim=claim_123",
+      undefined,
+      new Request("http://127.0.0.1:3000/bridge/connect"),
+    ),
+    "/sign-in?redirect_url=%2Fbridge%2Fconnect%3Fclaim%3Dclaim_123",
   );
 });

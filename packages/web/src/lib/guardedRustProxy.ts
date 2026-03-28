@@ -14,6 +14,12 @@ const PROXY_AUTHENTICATED_HEADER = "x-conductor-access-authenticated";
 const PROXY_ROLE_HEADER = "x-conductor-access-role";
 const PROXY_EMAIL_HEADER = "x-conductor-access-email";
 const PROXY_PROVIDER_HEADER = "x-conductor-access-provider";
+const PROXY_SECRET_HEADER = "x-conductor-proxy-secret";
+
+function proxyAuthSecret(): string | null {
+  const secret = process.env.CONDUCTOR_PROXY_AUTH_SECRET?.trim();
+  return secret ? secret : null;
+}
 
 export function forwardedAccessAuthenticated(access: DashboardAccess): boolean {
   return access.authenticated || access.provider === "local";
@@ -34,6 +40,11 @@ export async function buildForwardedAccessHeaders(request: Request): Promise<Hea
   }
   if (access.provider) {
     headers.set(PROXY_PROVIDER_HEADER, access.provider);
+  }
+  const sharedSecret = proxyAuthSecret();
+  if (sharedSecret) {
+    // Shared secret prevents forged proxy auth headers when the Rust backend is exposed off-host.
+    headers.set(PROXY_SECRET_HEADER, sharedSecret);
   }
 
   return headers;

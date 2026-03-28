@@ -174,7 +174,7 @@ export function SettingsProfilePanel({
       <section className="grid gap-3 lg:grid-cols-2">
         <ProfileDetailCard label="Display Name" value={displayName} />
         <ProfileDetailCard label="Email" value={email} />
-        <ProfileDetailCard label="GitHub" value={githubValue} href={profile?.githubProfileUrl ?? null} />
+        <ProfileDetailCard label="GitHub Username" value={githubValue} href={profile?.githubProfileUrl ?? null} />
         <ProfileDetailCard label="Username" value={profile?.username ?? "Not available"} />
         <ProfileDetailCard label="Auth Provider" value={formatProviderLabel(profile?.provider ?? null)} />
         <ProfileDetailCard label="Access Role" value={formatRoleLabel(profile?.role ?? null)} />

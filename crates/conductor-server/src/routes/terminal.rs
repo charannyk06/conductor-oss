@@ -1020,20 +1020,12 @@ async fn terminal_ttyd_frontend_websocket(
     } else {
         ws
     };
-    let Some(session) = state.get_session(&id).await else {
+    let Some(_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
     if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
-    }
-
-    if ttyd_session_ws_url(&session).is_none() {
-        return error(
-            StatusCode::CONFLICT,
-            format!("Session {id} is not backed by ttyd"),
-        )
-        .into_response();
     }
 
     match state.ensure_session_live(&id).await {
@@ -1054,6 +1046,18 @@ async fn terminal_ttyd_frontend_websocket(
             )
             .into_response();
         }
+    }
+
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
+
+    if ttyd_session_ws_url(&session).is_none() {
+        return error(
+            StatusCode::CONFLICT,
+            format!("Session {id} is not backed by ttyd"),
+        )
+        .into_response();
     }
 
     ws.on_upgrade(move |socket| handle_ttyd_frontend_socket(state, id, socket))
@@ -1132,7 +1136,7 @@ async fn terminal_ttyd_frontend(
     Path(id): Path<String>,
     Query(query): Query<TerminalQuery>,
 ) -> Response {
-    let Some(session) = state.get_session(&id).await else {
+    let Some(_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
@@ -1154,6 +1158,10 @@ async fn terminal_ttyd_frontend(
             .into_response();
         }
     }
+
+    let Some(session) = state.get_session(&id).await else {
+        return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
+    };
 
     let Some(ttyd_http_url) = ttyd_session_http_url(&session) else {
         return error(
