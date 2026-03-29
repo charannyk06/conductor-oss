@@ -78,6 +78,39 @@ fn apply_openclaw_binding_field(
     }
 }
 
+fn apply_openclaw_gateway_url_field(
+    thread: &mut SessionRecord,
+    gateway_url: Option<String>,
+) -> bool {
+    let next_value = gateway_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let current_value = thread
+        .metadata
+        .get("openclawGatewayUrl")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if current_value == next_value {
+        return false;
+    }
+
+    match next_value {
+        Some(value) => {
+            thread
+                .metadata
+                .insert("openclawGatewayUrl".to_string(), value);
+        }
+        None => {
+            thread.metadata.remove("openclawGatewayUrl");
+        }
+    }
+    true
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DispatcherSelectOption {
     pub value: &'static str,
@@ -90,6 +123,7 @@ pub(crate) struct CreateDispatcherThreadOptions {
     pub bridge_id: Option<String>,
     pub dispatcher_agent: Option<String>,
     pub implementation_agent: Option<String>,
+    pub openclaw_gateway_url: Option<String>,
     pub dispatcher_model: Option<String>,
     pub dispatcher_reasoning_effort: Option<String>,
     pub implementation_model: Option<String>,
@@ -134,7 +168,7 @@ impl DispatcherTurnRequest {
     }
 }
 
-const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 3] = [
+const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 4] = [
     DispatcherSelectOption {
         value: "codex",
         name: "Codex",
@@ -150,7 +184,15 @@ const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 3] = [
         name: "Gemini",
         description: "Route implementation work to Gemini sessions.",
     },
+    DispatcherSelectOption {
+        value: "openclaw",
+        name: "OpenClaw",
+        description: "Route work through an OpenClaw gateway-backed runtime.",
+    },
 ];
+
+const DISPATCHER_OPENCLAW_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
+const DISPATCHER_OPENCLAW_REASONING_OPTIONS: [DispatcherSelectOption; 0] = [];
 
 const DISPATCHER_CODEX_MODEL_OPTIONS: [DispatcherSelectOption; 8] = [
     DispatcherSelectOption {
@@ -1107,7 +1149,7 @@ fn default_implementation_agent(
         .or(project.agent.as_deref())
         .unwrap_or(default_agent);
     match candidate.trim() {
-        "codex" | "claude-code" | "gemini" => candidate.trim().to_string(),
+        "codex" | "claude-code" | "gemini" | "openclaw" => candidate.trim().to_string(),
         _ => "codex".to_string(),
     }
 }
@@ -1122,6 +1164,7 @@ pub(crate) fn dispatcher_implementation_model_options(
     match agent.trim() {
         "claude-code" => &DISPATCHER_CLAUDE_MODEL_OPTIONS,
         "gemini" => &DISPATCHER_GEMINI_MODEL_OPTIONS,
+        "openclaw" => &DISPATCHER_OPENCLAW_MODEL_OPTIONS,
         _ => &DISPATCHER_CODEX_MODEL_OPTIONS,
     }
 }
@@ -1131,6 +1174,7 @@ pub(crate) fn dispatcher_implementation_reasoning_options(
 ) -> &'static [DispatcherSelectOption] {
     match agent.trim() {
         "gemini" => &[],
+        "openclaw" => &DISPATCHER_OPENCLAW_REASONING_OPTIONS,
         "claude-code" => &DISPATCHER_DEFAULT_REASONING_OPTIONS,
         _ => &DISPATCHER_CODEX_REASONING_OPTIONS,
     }
@@ -1148,6 +1192,7 @@ pub(crate) fn dispatcher_default_implementation_reasoning_effort(
     match agent.trim() {
         "claude-code" => Some("medium"),
         "codex" => Some("high"),
+        "openclaw" => None,
         _ => None,
     }
 }
@@ -1197,7 +1242,10 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn dispatcher_uses_headless_turns(agent_kind: &AgentKind) -> bool {
-    matches!(agent_kind, AgentKind::Codex | AgentKind::QwenCode)
+    matches!(
+        agent_kind,
+        AgentKind::Codex | AgentKind::QwenCode | AgentKind::OpenClaw
+    )
 }
 
 fn dispatcher_resume_target(thread: &SessionRecord, agent_kind: &AgentKind) -> Option<String> {
@@ -1398,7 +1446,7 @@ fn apply_dispatcher_implementation_preferences(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| match value {
-            "codex" | "claude-code" | "gemini" => value.to_string(),
+            "codex" | "claude-code" | "gemini" | "openclaw" => value.to_string(),
             _ => "codex".to_string(),
         })
         .unwrap_or_else(|| previous_agent.clone());
@@ -2173,6 +2221,7 @@ impl AppState {
             bridge_id,
             dispatcher_agent,
             implementation_agent,
+            openclaw_gateway_url,
             dispatcher_model,
             dispatcher_reasoning_effort,
             implementation_model,
@@ -2212,14 +2261,27 @@ impl AppState {
                     || implementation_model.is_some()
                     || implementation_reasoning_effort.is_some()
                 {
-                    return self
+                    updated = self
                         .update_dispatcher_preferences(
                             &updated.id,
                             implementation_agent,
                             implementation_model,
                             implementation_reasoning_effort,
                         )
-                        .await;
+                        .await?;
+                }
+                if openclaw_gateway_url.is_some() {
+                    let mut updated_thread = updated.clone();
+                    if apply_openclaw_gateway_url_field(
+                        &mut updated_thread,
+                        openclaw_gateway_url.clone(),
+                    ) {
+                        updated_thread.last_activity_at = Utc::now().to_rfc3339();
+                        self.replace_dispatcher_thread(updated_thread.clone())
+                            .await?;
+                        self.sync_acp_dispatcher_state(&updated_thread).await?;
+                        updated = updated_thread;
+                    }
                 }
                 return Ok(updated);
             }
@@ -2281,6 +2343,7 @@ impl AppState {
             implementation_model,
             implementation_reasoning_effort,
         );
+        let _ = apply_openclaw_gateway_url_field(&mut thread, openclaw_gateway_url);
         touch_acp_dispatcher_heartbeat(&mut thread);
 
         let artifacts = self
@@ -2342,9 +2405,12 @@ impl AppState {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| dispatcher_preferred_implementation_agent(&thread));
-        if !matches!(target_agent.as_str(), "codex" | "claude-code" | "gemini") {
+        if !matches!(
+            target_agent.as_str(),
+            "codex" | "claude-code" | "gemini" | "openclaw"
+        ) {
             return Err(anyhow!(
-                "Unsupported implementation agent `{target_agent}`. Expected codex, claude-code, or gemini"
+                "Unsupported implementation agent `{target_agent}`. Expected codex, claude-code, gemini, or openclaw"
             ));
         }
         let target_model = resolve_dispatcher_implementation_model(
@@ -2895,6 +2961,17 @@ impl AppState {
         if executor.kind() == AgentKind::ClaudeCode {
             spawn_env.insert("CLAUDECODE".to_string(), String::new());
             spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
+        }
+        if executor.kind() == AgentKind::OpenClaw {
+            if let Some(gateway_url) = thread
+                .metadata
+                .get("openclawGatewayUrl")
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                spawn_env.insert("OPENCLAW_GATEWAY_URL".to_string(), gateway_url.to_string());
+            }
         }
         prepare_dispatcher_runtime_env(&mut spawn_env);
         let spawn_env = build_runtime_env(executor.binary_path(), &spawn_env);

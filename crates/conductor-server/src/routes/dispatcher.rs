@@ -113,6 +113,7 @@ struct CreateDispatcherBody {
     agent: Option<String>,
     dispatcher_agent: Option<String>,
     implementation_agent: Option<String>,
+    openclaw_gateway_url: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     implementation_model: Option<String>,
@@ -125,6 +126,8 @@ struct UpdateDispatcherPreferencesBody {
     implementation_agent: Option<String>,
     implementation_model: Option<String>,
     implementation_reasoning_effort: Option<String>,
+    /// OpenClaw gateway WebSocket URL (for agent=openclaw)
+    openclaw_gateway_url: Option<String>,
 }
 
 /// PATCH body for OpenClaw (or any orchestrator) binding to this dispatcher thread.
@@ -351,6 +354,7 @@ async fn create_dispatcher(
                 bridge_id: body.bridge_id.or(query.bridge_id),
                 dispatcher_agent: body.dispatcher_agent.or(body.agent),
                 implementation_agent: body.implementation_agent,
+                openclaw_gateway_url: body.openclaw_gateway_url,
                 dispatcher_model: body.model,
                 dispatcher_reasoning_effort: body.reasoning_effort,
                 implementation_model: body.implementation_model,
@@ -544,9 +548,24 @@ async fn update_dispatcher_preferences(
         )
         .await
     {
-        Ok(dispatcher) => ok(json!({
-            "thread": serialize_dispatcher(&state, &dispatcher).await,
-        })),
+        Ok(mut dispatcher) => {
+            if let Some(gateway_url) = body.openclaw_gateway_url {
+                if gateway_url.trim().is_empty() {
+                    dispatcher.metadata.remove("openclawGatewayUrl");
+                } else {
+                    dispatcher.metadata.insert(
+                        "openclawGatewayUrl".to_string(),
+                        gateway_url.trim().to_string(),
+                    );
+                }
+                if let Err(err) = state.replace_dispatcher_thread(dispatcher.clone()).await {
+                    return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+                }
+            }
+            ok(json!({
+                "thread": serialize_dispatcher(&state, &dispatcher).await,
+            }))
+        }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -690,6 +709,7 @@ fn dispatcher_integration_payload(dispatcher: &SessionRecord, project_id: &str) 
         "openclaw": {
             "threadId": meta.get("openclawThreadId").cloned(),
             "sessionId": meta.get("openclawSessionId").cloned(),
+            "gatewayUrl": meta.get("openclawGatewayUrl").cloned(),
         },
         "heartbeat": {
             "state": meta.get("acpHeartbeatState").cloned(),
@@ -953,6 +973,7 @@ async fn send_to_dispatcher(
                             bridge_id: query.bridge_id.clone(),
                             dispatcher_agent: None,
                             implementation_agent: None,
+                            openclaw_gateway_url: None,
                             dispatcher_model: body.model.clone(),
                             dispatcher_reasoning_effort: body.reasoning_effort.clone(),
                             implementation_model: body.model.clone(),

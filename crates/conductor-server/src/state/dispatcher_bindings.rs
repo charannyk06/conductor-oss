@@ -145,7 +145,7 @@ fn upsert_lookup(input: &UpsertDispatcherBindingInput) -> DispatcherBindingLooku
         thread_id: normalize_optional_text(input.thread_id.clone()),
         session_id: normalize_optional_text(input.session_id.clone()),
         channel_id: normalize_optional_text(input.channel_id.clone()),
-        bridge_id: None,
+        bridge_id: normalize_optional_text(input.bridge_id.clone()),
         dispatcher_thread_id: None,
     }
 }
@@ -307,6 +307,7 @@ impl AppState {
                         bridge_id: bridge_id.clone(),
                         dispatcher_agent: input.dispatcher_agent.clone(),
                         implementation_agent: input.implementation_agent.clone(),
+                        openclaw_gateway_url: None,
                         dispatcher_model: input.dispatcher_model.clone(),
                         dispatcher_reasoning_effort: input.dispatcher_reasoning_effort.clone(),
                         implementation_model: input.implementation_model.clone(),
@@ -420,5 +421,67 @@ impl AppState {
         };
 
         self.persist_dispatcher_bindings_snapshot(&snapshot).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        binding_matches_lookup, find_matching_binding_index, upsert_lookup,
+        DispatcherBindingLookup, DispatcherBindingRecord, UpsertDispatcherBindingInput,
+    };
+    use std::collections::HashMap;
+
+    fn binding(id: &str, bridge_id: Option<&str>) -> DispatcherBindingRecord {
+        DispatcherBindingRecord {
+            id: id.to_string(),
+            project_id: "demo".to_string(),
+            provider: "openclaw".to_string(),
+            thread_id: Some("discord-thread-42".to_string()),
+            session_id: Some("openclaw-session-9".to_string()),
+            channel_id: None,
+            bridge_id: bridge_id.map(str::to_string),
+            dispatcher_thread_id: Some(format!("dispatcher-{id}")),
+            title: None,
+            metadata: HashMap::new(),
+            created_at: "2026-03-29T00:00:00Z".to_string(),
+            updated_at: "2026-03-29T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn binding_lookup_respects_bridge_scope() {
+        let scoped = binding("a", Some("bridge-a"));
+        let lookup = DispatcherBindingLookup {
+            provider: Some("openclaw".to_string()),
+            thread_id: Some("discord-thread-42".to_string()),
+            bridge_id: Some("bridge-a".to_string()),
+            ..DispatcherBindingLookup::default()
+        };
+
+        assert!(binding_matches_lookup(&scoped, &lookup));
+
+        let mismatched_lookup = DispatcherBindingLookup {
+            bridge_id: Some("bridge-b".to_string()),
+            ..lookup
+        };
+        assert!(!binding_matches_lookup(&scoped, &mismatched_lookup));
+    }
+
+    #[test]
+    fn upsert_lookup_keeps_bridge_scope_for_existing_binding_matches() {
+        let bindings = vec![
+            binding("a", Some("bridge-a")),
+            binding("b", Some("bridge-b")),
+        ];
+        let lookup = upsert_lookup(&UpsertDispatcherBindingInput {
+            provider: "openclaw".to_string(),
+            thread_id: Some("discord-thread-42".to_string()),
+            bridge_id: Some("bridge-b".to_string()),
+            ..UpsertDispatcherBindingInput::default()
+        });
+
+        assert_eq!(lookup.bridge_id.as_deref(), Some("bridge-b"));
+        assert_eq!(find_matching_binding_index(&bindings, &lookup), Some(1));
     }
 }

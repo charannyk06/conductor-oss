@@ -3,7 +3,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import type { ReactNode } from "react";
-import { Brain, Check, ChevronDown } from "lucide-react";
+import { Brain, Check, ChevronDown, Globe } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { cn } from "@/lib/cn";
 import {
@@ -17,7 +17,7 @@ import { getKnownAgent } from "@/lib/knownAgents";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 
-const DISPATCHER_AGENT_OPTIONS = ["codex", "claude-code", "gemini"] as const;
+const DISPATCHER_AGENT_OPTIONS = ["codex", "claude-code", "gemini", "openclaw"] as const;
 
 function formatReasoningLabel(value: string): string {
   if (value === "xhigh") {
@@ -103,8 +103,10 @@ type DispatcherPreferenceChipsProps = {
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   disabled?: boolean;
   className?: string;
+  openclawGatewayUrl?: string;
   onImplementationAgentChange: (next: string) => void;
   onModelSelectionChange: (next: ModelSelectionState) => void;
+  onOpenclawGatewayUrlChange?: (url: string) => void;
 };
 
 export function DispatcherPreferenceChips({
@@ -114,8 +116,10 @@ export function DispatcherPreferenceChips({
   runtimeModelCatalogs,
   disabled = false,
   className,
+  openclawGatewayUrl = "",
   onImplementationAgentChange,
   onModelSelectionChange,
+  onOpenclawGatewayUrlChange,
 }: DispatcherPreferenceChipsProps) {
   const availableModels = getSelectableAgentModels(
     implementationAgent,
@@ -263,6 +267,25 @@ export function DispatcherPreferenceChips({
               );
             })}
           </PreferenceChip>
+        </div>
+      ) : null}
+
+      {implementationAgent === "openclaw" ? (
+        <div className="col-span-2 min-w-0 sm:flex-none">
+          <div
+            className="inline-flex h-10 min-w-0 items-center gap-2 rounded-[11px] border border-[rgba(214,163,126,0.28)] bg-[rgba(66,44,35,0.94)] px-3 text-[13px] text-[#f2d9cd] sm:h-[30px] sm:rounded-[9px] sm:px-2 sm:text-[11.5px]"
+            title="OpenClaw gateway URL"
+          >
+            <Globe className="h-3.5 w-3.5 shrink-0 text-[#d7b6a5] sm:h-3 sm:w-3" />
+            <input
+              type="url"
+              placeholder="ws://127.0.0.1:18789"
+              value={openclawGatewayUrl}
+              onChange={(e) => onOpenclawGatewayUrlChange?.(e.target.value)}
+              disabled={disabled}
+              className="min-w-0 flex-1 bg-transparent text-[13px] text-[#f2d9cd] placeholder-[rgba(242,217,205,0.45)] outline-none disabled:cursor-not-allowed disabled:opacity-60 sm:text-[11.5px]"
+            />
+          </div>
         </div>
       ) : null}
     </div>

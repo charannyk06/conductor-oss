@@ -100,6 +100,16 @@ static KNOWN_AGENTS: &[KnownAgentInfo] = &[
         setup_url: "",
     },
     KnownAgentInfo {
+        name: "openclaw",
+        label: "OpenClaw",
+        description: "OpenClaw gateway-backed chat runtime",
+        homepage: "https://github.com/openclaw/openclaw#readme",
+        icon_url: "",
+        install_hint: "Configure the gateway URL in the dispatcher UI",
+        install_url: "https://github.com/openclaw/openclaw",
+        setup_url: "https://github.com/openclaw/openclaw",
+    },
+    KnownAgentInfo {
         name: "github-copilot",
         label: "GitHub Copilot",
         description: "GitHub Copilot CLI",
@@ -286,6 +296,11 @@ fn agent_metadata(kind: &AgentKind) -> (&'static str, &'static str, &'static str
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/cursor.svg",
         ),
         AgentKind::OpenCode => ("OpenCode CLI", "https://opencode.ai", ""),
+        AgentKind::OpenClaw => (
+            "OpenClaw gateway-backed runtime",
+            "https://github.com/openclaw/openclaw#readme",
+            "",
+        ),
         AgentKind::Droid => (
             "Factory Droid CLI",
             "https://github.com/Factory-AI/factory",
@@ -356,6 +371,7 @@ async fn build_runtime_model_catalog_for_name(name: &str, binary_path: Option<&P
                 .await
                 .unwrap_or(Value::Null)
         }
+        "openclaw" => Value::Null,
         "github-copilot" => {
             let bp = binary_path.map(Path::to_path_buf);
             build_copilot_runtime_model_catalog(bp.as_deref())
@@ -2149,7 +2165,8 @@ mod tests {
     fn known_agent_order_returns_correct_indices() {
         assert_eq!(known_agent_order("codex"), 0);
         assert_eq!(known_agent_order("claude-code"), 4);
-        assert_eq!(known_agent_order("ccr"), 9);
+        assert_eq!(known_agent_order("openclaw"), 7);
+        assert_eq!(known_agent_order("ccr"), 10);
         assert_eq!(known_agent_order("unknown"), usize::MAX);
     }
 

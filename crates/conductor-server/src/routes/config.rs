@@ -1095,6 +1095,11 @@ fn agent_metadata(
             "https://opencode.ai",
             "",
         ),
+        conductor_core::types::AgentKind::OpenClaw => (
+            "OpenClaw gateway-backed runtime",
+            "https://github.com/openclaw/openclaw#readme",
+            "",
+        ),
         conductor_core::types::AgentKind::Droid => (
             "Factory Droid CLI",
             "https://github.com/Factory-AI/factory",

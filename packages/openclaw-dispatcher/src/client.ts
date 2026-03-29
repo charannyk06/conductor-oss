@@ -1,14 +1,20 @@
 import type {
   ConductorDispatcherClientOptions,
   CreateDispatcherBody,
+  DispatcherBindingListResponse,
+  DispatcherBindingQuery,
+  DispatcherBindingResponse,
+  DispatcherBindingsResponse,
   DispatcherFeedDelta,
   DispatcherFeedPayload,
   DispatcherFeedStreamEvent,
   DispatcherQuery,
+  DispatcherTaskMutationResponse,
   DispatcherThreadResponse,
   PatchDispatcherPreferencesBody,
   PatchIntegrationBody,
   SendToDispatcherBody,
+  UpsertDispatcherBindingBody,
 } from "./types.js";
 
 function trimBaseUrl(baseUrl: string): string {
@@ -26,6 +32,30 @@ function buildQuery(query?: DispatcherQuery): string {
   if (query.threadId) p.set("threadId", query.threadId);
   const s = p.toString();
   return s ? `?${s}` : "";
+}
+
+function buildBindingQuery(query?: DispatcherBindingQuery): string {
+  if (!query) return "";
+  const p = new URLSearchParams();
+  if (query.bindingId) p.set("bindingId", query.bindingId);
+  if (query.provider) p.set("provider", query.provider);
+  if (query.threadId) p.set("threadId", query.threadId);
+  if (query.sessionId) p.set("sessionId", query.sessionId);
+  if (query.channelId) p.set("channelId", query.channelId);
+  if (query.bridgeId) p.set("bridgeId", query.bridgeId);
+  if (query.dispatcherThreadId) p.set("dispatcherThreadId", query.dispatcherThreadId);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
+function hasExplicitBindingTarget(query?: DispatcherBindingQuery): boolean {
+  return Boolean(
+    query?.bindingId ||
+      query?.threadId ||
+      query?.sessionId ||
+      query?.channelId ||
+      query?.dispatcherThreadId,
+  );
 }
 
 /**
@@ -237,37 +267,48 @@ export class ConductorDispatcherClient {
    */
   async getDispatcherBindings(
     projectId: string,
-    query?: Record<string, string | undefined>,
-  ): Promise<unknown> {
-    const q = new URLSearchParams();
-    if (query) {
-      for (const [k, v] of Object.entries(query)) {
-        if (v) q.set(k, v);
-      }
-    }
-    const qs = q.toString();
-    const suffix = qs ? `?${qs}` : "";
+    query?: DispatcherBindingQuery,
+  ): Promise<DispatcherBindingsResponse> {
     return this.json(
-      `/api/projects/${encodeURIComponent(projectId)}/dispatcher/bindings${suffix}`,
+      `/api/projects/${encodeURIComponent(projectId)}/dispatcher/bindings${buildBindingQuery(query)}`,
     );
+  }
+
+  async getBinding(
+    projectId: string,
+    query: DispatcherBindingQuery,
+  ): Promise<DispatcherBindingResponse> {
+    if (!hasExplicitBindingTarget(query)) {
+      throw new Error(
+        "Binding lookup requires bindingId, threadId, sessionId, channelId, or dispatcherThreadId",
+      );
+    }
+    const response = await this.getDispatcherBindings(projectId, query);
+    if ("binding" in response) {
+      return response;
+    }
+    throw new Error("Binding lookup returned a list response");
+  }
+
+  async listBindings(
+    projectId: string,
+    query?: DispatcherBindingQuery,
+  ): Promise<DispatcherBindingListResponse> {
+    const response = await this.getDispatcherBindings(projectId, query);
+    if ("bindings" in response) {
+      return response;
+    }
+    return { bindings: response.binding ? [response.binding] : [] };
   }
 
   /** Create or update a binding row (see Conductor `UpsertDispatcherBindingBody`). */
   async upsertDispatcherBinding(
     projectId: string,
-    body: Record<string, unknown>,
-    query?: Record<string, string | undefined>,
-  ): Promise<unknown> {
-    const q = new URLSearchParams();
-    if (query) {
-      for (const [k, v] of Object.entries(query)) {
-        if (v) q.set(k, v);
-      }
-    }
-    const qs = q.toString();
-    const suffix = qs ? `?${qs}` : "";
+    body: UpsertDispatcherBindingBody,
+    query?: DispatcherBindingQuery,
+  ): Promise<DispatcherBindingResponse> {
     return this.json(
-      `/api/projects/${encodeURIComponent(projectId)}/dispatcher/bindings${suffix}`,
+      `/api/projects/${encodeURIComponent(projectId)}/dispatcher/bindings${buildBindingQuery(query)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -310,7 +351,7 @@ export class ConductorDispatcherClient {
     projectId: string,
     body: Record<string, unknown>,
     query?: DispatcherQuery,
-  ): Promise<unknown> {
+  ): Promise<DispatcherTaskMutationResponse> {
     return this.json(
       `/api/projects/${encodeURIComponent(projectId)}/dispatcher/tasks${buildQuery(query)}`,
       {
@@ -326,7 +367,7 @@ export class ConductorDispatcherClient {
     taskLookup: string,
     body: Record<string, unknown>,
     query?: DispatcherQuery,
-  ): Promise<unknown> {
+  ): Promise<DispatcherTaskMutationResponse> {
     return this.json(
       `/api/projects/${encodeURIComponent(projectId)}/dispatcher/tasks/${encodeURIComponent(taskLookup)}${buildQuery(query)}`,
       {
@@ -342,7 +383,7 @@ export class ConductorDispatcherClient {
     taskLookup: string,
     body: Record<string, unknown>,
     query?: DispatcherQuery,
-  ): Promise<unknown> {
+  ): Promise<DispatcherTaskMutationResponse> {
     return this.json(
       `/api/projects/${encodeURIComponent(projectId)}/dispatcher/tasks/${encodeURIComponent(taskLookup)}/handoff${buildQuery(query)}`,
       {

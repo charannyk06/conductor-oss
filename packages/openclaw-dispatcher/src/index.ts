@@ -1,14 +1,40 @@
 export { ConductorDispatcherClient } from "./client.js";
+export {
+  OpenClawDispatcherAdapter,
+  bindingHasDispatcherThread,
+  bindingToDispatcherQuery,
+  classifyDispatcherFeedEntry,
+  dispatcherEntriesFromEvent,
+} from "./adapter.js";
+export type {
+  BoundDispatcherResult,
+} from "./adapter.js";
 export type {
   ConductorDispatcherClientOptions,
   CreateDispatcherBody,
+  DispatcherBinding,
+  DispatcherBindingEndpoints,
+  DispatcherBindingListResponse,
+  DispatcherBindingQuery,
+  DispatcherBindingResponse,
+  DispatcherBindingsResponse,
   DispatcherFeedDelta,
+  DispatcherFeedEntry,
+  DispatcherEntryClassification,
   DispatcherFeedIntegration,
   DispatcherFeedPayload,
   DispatcherFeedStreamEvent,
+  DispatcherLifecycleEventType,
   DispatcherQuery,
+  DispatcherTaskMutationOperation,
+  DispatcherTaskMutationResponse,
+  DispatcherTaskPacket,
+  DispatcherTaskRecord,
   DispatcherThreadResponse,
+  EnsureOpenClawBindingOptions,
+  OpenClawBindingTarget,
   PatchDispatcherPreferencesBody,
   PatchIntegrationBody,
   SendToDispatcherBody,
+  UpsertDispatcherBindingBody,
 } from "./types.js";

@@ -195,6 +195,9 @@ export function DispatcherPane({
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const [confirmDeleteThreadId, setConfirmDeleteThreadId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState(
+    () => readMetadataValue(thread, "openclawGatewayUrl") || "",
+  );
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
     buildModelSelection(
       preferredImplementationAgent,
@@ -208,6 +211,7 @@ export function DispatcherPane({
 
   useEffect(() => {
     setImplementationAgent(preferredImplementationAgent);
+    setOpenclawGatewayUrl(readMetadataValue(thread, "openclawGatewayUrl") || "");
     setModelSelection(
       buildModelSelection(
         preferredImplementationAgent,
@@ -244,9 +248,18 @@ export function DispatcherPane({
   const showThreadMenu = threads.length > 0 && (threads.length > 1 || Boolean(onDeleteThread));
 
   const persistPreferences = useCallback(
-    async (nextAgent: string, nextSelection: ModelSelectionState) => {
+    async (nextAgent: string, nextSelection: ModelSelectionState, gatewayUrl?: string) => {
       setUpdatingPreferences(true);
       try {
+        const body: Record<string, string> = {
+          implementationAgent: nextAgent,
+          implementationModel: resolveModelSelectionValue(nextSelection) ?? "",
+          implementationReasoningEffort:
+            resolveReasoningSelectionValue(nextSelection) ?? "",
+        };
+        if (gatewayUrl !== undefined) {
+          body.openclawGatewayUrl = gatewayUrl;
+        }
         const response = await fetch(
           withBridgeQuery(
             `/api/projects/${projectId}/dispatcher/preferences?${threadQuery}`,
@@ -255,12 +268,7 @@ export function DispatcherPane({
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              implementationAgent: nextAgent,
-              implementationModel: resolveModelSelectionValue(nextSelection) ?? "",
-              implementationReasoningEffort:
-                resolveReasoningSelectionValue(nextSelection) ?? "",
-            }),
+            body: JSON.stringify(body),
           },
         );
         if (!response.ok) {
@@ -296,6 +304,14 @@ export function DispatcherPane({
       void persistPreferences(implementationAgent, nextSelection);
     },
     [implementationAgent, persistPreferences],
+  );
+
+  const handleOpenclawGatewayUrlChange = useCallback(
+    (url: string) => {
+      setOpenclawGatewayUrl(url);
+      void persistPreferences(implementationAgent, modelSelection, url);
+    },
+    [implementationAgent, modelSelection, persistPreferences],
   );
 
   const handleConfirmDeleteThread = useCallback(async () => {
@@ -421,8 +437,10 @@ export function DispatcherPane({
       modelAccess={modelAccess}
       runtimeModelCatalogs={runtimeModelCatalogs}
       disabled={updatingPreferences}
+      openclawGatewayUrl={openclawGatewayUrl}
       onImplementationAgentChange={handleImplementationAgentChange}
       onModelSelectionChange={handleModelSelectionChange}
+      onOpenclawGatewayUrlChange={handleOpenclawGatewayUrlChange}
     />
   ) : null;
 
