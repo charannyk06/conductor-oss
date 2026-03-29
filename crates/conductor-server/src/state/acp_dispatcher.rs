@@ -3128,8 +3128,8 @@ mod tests {
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
         CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED,
-        ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
-        ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
+        ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL, ACP_RESUME_TARGET_METADATA_KEY,
+        ACP_SESSION_KIND,
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
     use chrono::Utc;
@@ -3237,7 +3237,10 @@ mod tests {
         );
 
         assert_eq!(dispatcher_resume_target(&thread, &AgentKind::Codex), None);
-        assert_eq!(dispatcher_resume_target(&thread, &AgentKind::QwenCode), None);
+        assert_eq!(
+            dispatcher_resume_target(&thread, &AgentKind::QwenCode),
+            None
+        );
         assert_eq!(
             dispatcher_resume_target(&thread, &AgentKind::ClaudeCode),
             Some("session-123".to_string())
@@ -3309,10 +3312,15 @@ mod tests {
             )]),
             ..ConductorConfig::default()
         };
-        let db = Database::in_memory().await.expect("test db should initialize");
+        let db = Database::in_memory()
+            .await
+            .expect("test db should initialize");
         let state = AppState::new(workspace.join("conductor.yaml"), config, db).await;
         let config = state.config.read().await.clone();
-        let project = config.projects.get("demo").expect("demo project should exist");
+        let project = config
+            .projects
+            .get("demo")
+            .expect("demo project should exist");
 
         let prompt = build_acp_dispatcher_prompt(&state, "demo", project, "");
 

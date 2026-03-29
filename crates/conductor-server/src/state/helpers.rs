@@ -155,9 +155,9 @@ pub fn resolve_board_file(
         .map(str::to_string);
 
     let project_repo_board = project_root.as_ref().map(|path| path.join("CONDUCTOR.md"));
-    let external_project_repo_board = project_repo_board.as_ref().filter(|path| {
-        path.exists() && !path.starts_with(workspace_path)
-    });
+    let external_project_repo_board = project_repo_board
+        .as_ref()
+        .filter(|path| path.exists() && !path.starts_with(workspace_path));
 
     let mut candidates = Vec::new();
     if let Some(path) = external_project_repo_board {
@@ -1654,13 +1654,17 @@ mod tests {
         fs::create_dir_all(workspace.join("projects").join(board_dir)).unwrap();
         fs::create_dir_all(&repo).unwrap();
         fs::write(
-            workspace.join("projects").join(board_dir).join("CONDUCTOR.md"),
+            workspace
+                .join("projects")
+                .join(board_dir)
+                .join("CONDUCTOR.md"),
             "# stale workspace shadow board\n",
         )
         .unwrap();
         fs::write(repo.join("CONDUCTOR.md"), "# repo board\n").unwrap();
 
-        let resolved = resolve_board_file(&workspace, board_dir, Some(repo.to_string_lossy().as_ref()));
+        let resolved =
+            resolve_board_file(&workspace, board_dir, Some(repo.to_string_lossy().as_ref()));
 
         assert_eq!(
             resolved,
