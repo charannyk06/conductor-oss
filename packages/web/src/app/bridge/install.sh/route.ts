@@ -193,13 +193,13 @@ ensure_conductor_cli() {
 
   echo "Installing conductor-oss CLI..."
   mkdir -p "$CONDUCTOR_NPM_PREFIX"
-  if ! npm install -g --prefix "$CONDUCTOR_NPM_PREFIX" conductor-oss; then
+  if ! npm install -g --prefix "$CONDUCTOR_NPM_PREFIX" --registry=https://registry.npmjs.org conductor-oss; then
     CONDUCTOR_CMD="$(resolve_conductor_command_path || true)"
     if [ -n "$CONDUCTOR_CMD" ]; then
       echo "Using existing Conductor CLI at $CONDUCTOR_CMD"
     else
       echo "Retrying conductor-oss install inside $CONDUCTOR_NPM_PREFIX with --force..."
-      npm install -g --prefix "$CONDUCTOR_NPM_PREFIX" conductor-oss --force
+      npm install -g --prefix "$CONDUCTOR_NPM_PREFIX" --registry=https://registry.npmjs.org conductor-oss --force
     fi
   fi
 

@@ -87,6 +87,7 @@ export default async function BridgeConnectPage({ searchParams }: BridgeConnectP
       dashboardUrl={baseUrl}
       relayUrl={resolveBridgeRelayUrl()}
       installScriptUrl={new URL("/bridge/install.sh", baseUrl).toString()}
+      installPowerShellUrl={new URL("/bridge/install.ps1", baseUrl).toString()}
     />
   );
 }

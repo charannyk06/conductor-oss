@@ -183,7 +183,12 @@ function buildCliRerunCommand(context: CliUpdateContext): string | null {
   }
 
   const forwardedArgs = process.argv.slice(2).filter((arg) => arg !== "--open");
-  const rerunArgs = [`${context.packageName}@latest`, ...forwardedArgs].map(quoteCliArg);
+  const rerunArgs = [
+    "--yes",
+    "--registry=https://registry.npmjs.org",
+    `${context.packageName}@latest`,
+    ...forwardedArgs,
+  ].map(quoteCliArg);
   return `npx ${rerunArgs.join(" ")}`;
 }
 

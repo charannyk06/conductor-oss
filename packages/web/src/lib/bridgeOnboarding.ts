@@ -1,4 +1,7 @@
-const DEFAULT_INSTALL_SCRIPT_PATH = "/bridge/install.sh";
+const DEFAULT_UNIX_INSTALL_SCRIPT_PATH = "/bridge/install.sh";
+const DEFAULT_WINDOWS_INSTALL_SCRIPT_PATH = "/bridge/install.ps1";
+
+export type BridgeInstallPlatform = "unix" | "windows";
 
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_./:=@%+-]+$/.test(value)) {
@@ -12,29 +15,66 @@ function formatCommand(parts: string[]): string {
   return parts.map(shellQuote).join(" ");
 }
 
-export function buildBridgeInstallScriptUrl(baseUrl: string): string {
-  return new URL(DEFAULT_INSTALL_SCRIPT_PATH, baseUrl).toString();
+function powerShellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+export function resolveBridgeInstallPlatform(os: string | null | undefined): BridgeInstallPlatform {
+  const normalized = os?.trim().toLowerCase() ?? "";
+  return normalized.startsWith("windows") ? "windows" : "unix";
+}
+
+export function buildBridgeInstallScriptUrl(
+  baseUrl: string,
+  platform: BridgeInstallPlatform = "unix",
+): string {
+  return new URL(
+    platform === "windows" ? DEFAULT_WINDOWS_INSTALL_SCRIPT_PATH : DEFAULT_UNIX_INSTALL_SCRIPT_PATH,
+    baseUrl,
+  ).toString();
 }
 
 export function buildBridgeRepairHref(deviceId: string): string {
   return `/bridge/connect?device=${encodeURIComponent(deviceId)}#bridge-setup`;
 }
 
-export function buildBridgeInstallCommand(installScriptUrl: string): string {
+export function buildBridgeInstallCommand(
+  installScriptUrl: string,
+  platform: BridgeInstallPlatform = "unix",
+): string {
+  if (platform === "windows") {
+    return `& ([scriptblock]::Create((Invoke-RestMethod -Uri ${powerShellQuote(installScriptUrl)})))`;
+  }
+
   return `curl -fsSL ${shellQuote(installScriptUrl)} | sh`;
 }
 
 export function buildBridgeBootstrapConnectCommand(
-  _installScriptUrl: string,
+  installScriptUrl: string,
   dashboardUrl: string,
   relayUrl?: string | null,
+  platform: BridgeInstallPlatform = "unix",
 ): string {
+  if (platform === "windows") {
+    const parts = [
+      `& ([scriptblock]::Create((Invoke-RestMethod -Uri ${powerShellQuote(installScriptUrl)})))`,
+      "-Connect",
+      "-DashboardUrl",
+      powerShellQuote(dashboardUrl),
+    ];
+
+    if (relayUrl?.trim()) {
+      parts.push("-RelayUrl", powerShellQuote(relayUrl.trim()));
+    }
+
+    return parts.join(" ");
+  }
+
   const parts = [
-    "npx",
-    "--yes",
-    "conductor-oss@latest",
-    "bridge",
-    "setup",
+    "sh",
+    "-s",
+    "--",
+    "--connect",
     "--dashboard-url",
     dashboardUrl,
   ];
@@ -43,7 +83,7 @@ export function buildBridgeBootstrapConnectCommand(
     parts.push("--relay-url", relayUrl.trim());
   }
 
-  return formatCommand(parts);
+  return `curl -fsSL ${shellQuote(installScriptUrl)} | ${formatCommand(parts)}`;
 }
 
 export function buildBridgeConnectCommand(

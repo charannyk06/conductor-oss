@@ -707,7 +707,7 @@ function buildRepositoryBootstrapCommand(
   preferences: Pick<PreferencesPayload, "ide" | "markdownEditor">,
 ): string {
   const initArgs = [
-    "npx conductor-oss@latest setup",
+    "npx --yes --registry=https://registry.npmjs.org conductor-oss@latest setup",
     "--yes",
     `--path ${shellQuote(repository.path)}`,
     `--project-id ${shellQuote(repository.id)}`,
