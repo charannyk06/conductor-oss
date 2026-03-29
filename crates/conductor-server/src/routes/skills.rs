@@ -25,6 +25,7 @@ const ALL_SKILL_AGENTS: &[&str] = &[
     "codex",
     "gemini",
     "amp",
+    "hermes",
     "cursor-cli",
     "opencode",
     "droid",
@@ -66,6 +67,12 @@ static SKILL_AGENT_CATALOG: &[SkillAgentCatalogEntry] = &[
         name: "Amp",
         project_roots: &[".agents/skills"],
         user_roots: &["~/.config/agents/skills", "~/.agents/skills"],
+    },
+    SkillAgentCatalogEntry {
+        id: "hermes",
+        name: "Hermes",
+        project_roots: &[],
+        user_roots: &["~/.hermes/skills"],
     },
     SkillAgentCatalogEntry {
         id: "cursor-cli",

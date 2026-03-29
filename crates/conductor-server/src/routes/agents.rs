@@ -90,6 +90,16 @@ static KNOWN_AGENTS: &[KnownAgentInfo] = &[
         setup_url: "",
     },
     KnownAgentInfo {
+        name: "hermes",
+        label: "Hermes",
+        description: "Nous Research Hermes Agent CLI",
+        homepage: "https://hermes-agent.nousresearch.com/",
+        icon_url: "/agents/hermes.png",
+        install_hint: "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+        install_url: "https://hermes-agent.nousresearch.com/docs/getting-started/installation/",
+        setup_url: "https://hermes-agent.nousresearch.com/docs/getting-started/installation/",
+    },
+    KnownAgentInfo {
         name: "opencode",
         label: "OpenCode",
         description: "OpenCode CLI",
@@ -290,6 +300,11 @@ fn agent_metadata(kind: &AgentKind) -> (&'static str, &'static str, &'static str
             "https://www.ampcode.com",
             "https://ampcode.com/amp-mark-color.svg",
         ),
+        AgentKind::Hermes => (
+            "Nous Research Hermes Agent CLI",
+            "https://hermes-agent.nousresearch.com/",
+            "/agents/hermes.png",
+        ),
         AgentKind::CursorCli => (
             "Cursor Agent CLI",
             "https://www.cursor.com",
@@ -353,6 +368,7 @@ async fn build_runtime_model_catalog_for_name(name: &str, binary_path: Option<&P
                 .await
                 .unwrap_or(Value::Null)
         }
+        "hermes" => Value::Null,
         "cursor-cli" => {
             let bp = binary_path.map(Path::to_path_buf);
             build_cursor_runtime_model_catalog(bp.as_deref())
@@ -2165,8 +2181,9 @@ mod tests {
     fn known_agent_order_returns_correct_indices() {
         assert_eq!(known_agent_order("codex"), 0);
         assert_eq!(known_agent_order("claude-code"), 4);
-        assert_eq!(known_agent_order("openclaw"), 7);
-        assert_eq!(known_agent_order("ccr"), 10);
+        assert_eq!(known_agent_order("hermes"), 6);
+        assert_eq!(known_agent_order("openclaw"), 8);
+        assert_eq!(known_agent_order("ccr"), 11);
         assert_eq!(known_agent_order("unknown"), usize::MAX);
     }
 

@@ -45,7 +45,11 @@ fn dashboard_metadata_allowlist() -> &'static [&'static str] {
         "lastStderr",
         "mergeReadiness",
         "model",
+        "openclawGatewayScopes",
+        "openclawGatewayTokenConfigured",
+        "openclawGatewayUrl",
         "openclawSessionId",
+        "openclawSessionKey",
         "openclawThreadId",
         "parentTaskId",
         "prBaseRef",
@@ -1760,6 +1764,14 @@ mod tests {
                 "acpProjectMemoryPath".to_string(),
                 ".conductor/rust-backend/acp/alpha/project-memory.md".to_string(),
             ),
+            (
+                "openclawGatewayToken".to_string(),
+                ["secret", "-token"].concat(),
+            ),
+            (
+                "openclawGatewayTokenConfigured".to_string(),
+                "true".to_string(),
+            ),
             ("sessionKind".to_string(), "board_planning".to_string()),
             ("summary".to_string(), oversized),
             (
@@ -1784,8 +1796,15 @@ mod tests {
             filtered.get("acpProjectMemoryPath").map(String::as_str),
             Some(".conductor/rust-backend/acp/alpha/project-memory.md")
         );
+        assert_eq!(
+            filtered
+                .get("openclawGatewayTokenConfigured")
+                .map(String::as_str),
+            Some("true")
+        );
         assert_eq!(filtered.get("taskId").map(String::as_str), Some("task-123"));
         assert!(!filtered.contains_key("spawnRequest"));
+        assert!(!filtered.contains_key("openclawGatewayToken"));
         let summary = filtered
             .get("summary")
             .expect("summary should be preserved");

@@ -25,6 +25,10 @@ export type DispatcherFeedIntegration = {
   openclaw: {
     threadId: string | null;
     sessionId: string | null;
+    gatewayUrl?: string | null;
+    gatewayTokenConfigured?: string | null;
+    gatewayScopes?: string | null;
+    sessionKey?: string | null;
   };
   heartbeat: {
     state: string | null;
@@ -34,6 +38,15 @@ export type DispatcherFeedIntegration = {
     projectPath: string | null;
     sessionPath: string | null;
   };
+  /** Cost/usage tracking from agent runs (Paperclip-style) */
+  usage?: {
+    provider: string | null;
+    model: string | null;
+    costUsd: number | null;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    cachedInputTokens: number | null;
+  } | null;
 };
 
 export type DispatcherFeedPayload = {
@@ -248,6 +261,10 @@ export type CreateDispatcherBody = {
   agent?: string;
   dispatcherAgent?: string;
   implementationAgent?: string;
+  openclawGatewayUrl?: string;
+  openclawGatewayToken?: string;
+  openclawGatewayScopes?: string;
+  openclawSessionKey?: string;
   model?: string;
   reasoningEffort?: string;
   implementationModel?: string;
@@ -259,6 +276,10 @@ export type PatchDispatcherPreferencesBody = {
   implementationAgent?: string;
   implementationModel?: string;
   implementationReasoningEffort?: string;
+  openclawGatewayUrl?: string;
+  openclawGatewayToken?: string;
+  openclawGatewayScopes?: string;
+  openclawSessionKey?: string;
 };
 
 export type UpsertDispatcherBindingBody = {

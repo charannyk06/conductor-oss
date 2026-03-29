@@ -31,6 +31,7 @@ export type SetupCheck = {
 
 export type AgentSetupConfig = {
   commands: string[];
+  installCommand?: InstallCommand;
   installPackage?: string;
   installLabel?: string;
   requiredNodeMajor?: number;
@@ -106,15 +107,22 @@ export function buildAgentCheck(agent: string): SetupCheck {
   const installBlockedByNode = !installed
     && !!config.requiredNodeMajor
     && (!currentNodeMajor || currentNodeMajor < config.requiredNodeMajor);
-  const install = !installed && !installBlockedByNode && config.installPackage && hasNpm
-    ? buildNpmInstall(config.installLabel ?? `Install ${normalized}`, config.installPackage)
+  const install = !installed && !installBlockedByNode
+    ? (
+      config.installCommand
+        ?? (
+          config.installPackage && hasNpm
+            ? buildNpmInstall(config.installLabel ?? `Install ${normalized}`, config.installPackage)
+            : undefined
+        )
+    )
     : undefined;
 
   let detail = "Ready";
   if (!installed) {
     if (installBlockedByNode) {
       detail = `Missing. Requires Node.js ${config.requiredNodeMajor}+ before Conductor can install it.`;
-    } else if (config.installPackage && !hasNpm) {
+    } else if (!config.installCommand && config.installPackage && !hasNpm) {
       detail = "Missing. Install npm first to let Conductor set this up automatically.";
     } else if (install) {
       detail = config.postInstallAuthCommand
@@ -193,6 +201,22 @@ export function resolveAgentSetupConfig(agent: string): AgentSetupConfig {
         label: "Connect OpenCode",
         cmd: "opencode",
         args: ["auth", "login"],
+      },
+    },
+    hermes: {
+      commands: ["hermes", "hermes-agent"],
+      installCommand: {
+        label: "Install Hermes",
+        cmd: "sh",
+        args: [
+          "-lc",
+          "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+        ],
+      },
+      postInstallAuthCommand: {
+        label: "Run Hermes setup",
+        cmd: "hermes",
+        args: ["setup"],
       },
     },
     droid: {

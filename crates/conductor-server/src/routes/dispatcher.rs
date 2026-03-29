@@ -17,8 +17,8 @@ use crate::dispatcher_task_lifecycle::{
 };
 use crate::state::{
     build_normalized_chat_feed, is_project_dispatcher_session, AppState,
-    CreateDispatcherThreadOptions, DispatcherBindingLookup, SessionRecord,
-    UpsertDispatcherBindingInput,
+    CreateDispatcherThreadOptions, DispatcherBindingLookup, OpenClawDispatcherConfigPatch,
+    SessionRecord, UpsertDispatcherBindingInput,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -114,6 +114,9 @@ struct CreateDispatcherBody {
     dispatcher_agent: Option<String>,
     implementation_agent: Option<String>,
     openclaw_gateway_url: Option<String>,
+    openclaw_gateway_token: Option<String>,
+    openclaw_gateway_scopes: Option<String>,
+    openclaw_session_key: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     implementation_model: Option<String>,
@@ -128,6 +131,12 @@ struct UpdateDispatcherPreferencesBody {
     implementation_reasoning_effort: Option<String>,
     /// OpenClaw gateway WebSocket URL (for agent=openclaw)
     openclaw_gateway_url: Option<String>,
+    /// Optional gateway bearer token. Empty string clears the stored token.
+    openclaw_gateway_token: Option<String>,
+    /// Optional gateway scopes passed through to the OpenClaw runtime.
+    openclaw_gateway_scopes: Option<String>,
+    /// Optional explicit session key override for the OpenClaw runtime.
+    openclaw_session_key: Option<String>,
 }
 
 /// PATCH body for OpenClaw (or any orchestrator) binding to this dispatcher thread.
@@ -354,7 +363,12 @@ async fn create_dispatcher(
                 bridge_id: body.bridge_id.or(query.bridge_id),
                 dispatcher_agent: body.dispatcher_agent.or(body.agent),
                 implementation_agent: body.implementation_agent,
-                openclaw_gateway_url: body.openclaw_gateway_url,
+                openclaw_config: OpenClawDispatcherConfigPatch {
+                    gateway_url: body.openclaw_gateway_url,
+                    gateway_token: body.openclaw_gateway_token,
+                    gateway_scopes: body.openclaw_gateway_scopes,
+                    session_key: body.openclaw_session_key,
+                },
                 dispatcher_model: body.model,
                 dispatcher_reasoning_effort: body.reasoning_effort,
                 implementation_model: body.implementation_model,
@@ -545,27 +559,18 @@ async fn update_dispatcher_preferences(
             body.implementation_agent,
             body.implementation_model,
             body.implementation_reasoning_effort,
+            OpenClawDispatcherConfigPatch {
+                gateway_url: body.openclaw_gateway_url,
+                gateway_token: body.openclaw_gateway_token,
+                gateway_scopes: body.openclaw_gateway_scopes,
+                session_key: body.openclaw_session_key,
+            },
         )
         .await
     {
-        Ok(mut dispatcher) => {
-            if let Some(gateway_url) = body.openclaw_gateway_url {
-                if gateway_url.trim().is_empty() {
-                    dispatcher.metadata.remove("openclawGatewayUrl");
-                } else {
-                    dispatcher.metadata.insert(
-                        "openclawGatewayUrl".to_string(),
-                        gateway_url.trim().to_string(),
-                    );
-                }
-                if let Err(err) = state.replace_dispatcher_thread(dispatcher.clone()).await {
-                    return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
-                }
-            }
-            ok(json!({
-                "thread": serialize_dispatcher(&state, &dispatcher).await,
-            }))
-        }
+        Ok(dispatcher) => ok(json!({
+            "thread": serialize_dispatcher(&state, &dispatcher).await,
+        })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -710,6 +715,9 @@ fn dispatcher_integration_payload(dispatcher: &SessionRecord, project_id: &str) 
             "threadId": meta.get("openclawThreadId").cloned(),
             "sessionId": meta.get("openclawSessionId").cloned(),
             "gatewayUrl": meta.get("openclawGatewayUrl").cloned(),
+            "gatewayTokenConfigured": meta.get("openclawGatewayTokenConfigured").cloned(),
+            "gatewayScopes": meta.get("openclawGatewayScopes").cloned(),
+            "sessionKey": meta.get("openclawSessionKey").cloned(),
         },
         "heartbeat": {
             "state": meta.get("acpHeartbeatState").cloned(),
@@ -973,7 +981,7 @@ async fn send_to_dispatcher(
                             bridge_id: query.bridge_id.clone(),
                             dispatcher_agent: None,
                             implementation_agent: None,
-                            openclaw_gateway_url: None,
+                            openclaw_config: OpenClawDispatcherConfigPatch::default(),
                             dispatcher_model: body.model.clone(),
                             dispatcher_reasoning_effort: body.reasoning_effort.clone(),
                             implementation_model: body.model.clone(),

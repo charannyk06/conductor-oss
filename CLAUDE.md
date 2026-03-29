@@ -4,7 +4,7 @@
 
 ## What is Conductor OSS
 
-Conductor is a local-first AI agent orchestrator. It turns Markdown kanban boards into dispatched coding tasks, runs them via agent CLIs (Claude Code, Codex, Gemini, Qwen Code, Amp, Cursor CLI, OpenCode, Droid, GitHub Copilot, CCR) in isolated worktrees, and streams results through a dashboard with a multi-agent Skills tab.
+Conductor is a local-first AI agent orchestrator. It turns Markdown kanban boards into dispatched coding tasks, runs them via agent CLIs (Claude Code, Codex, Gemini, Qwen Code, Amp, Hermes, Cursor CLI, OpenCode, Droid, GitHub Copilot, CCR) in isolated worktrees, and streams results through a dashboard with a multi-agent Skills tab.
 
 **One command. Markdown-native. Local-first by default.**
 
@@ -54,7 +54,7 @@ Conductor is a local-first AI agent orchestrator. It turns Markdown kanban board
 
 ### Supported Agents
 
-Claude Code, Codex, Gemini, Qwen Code, Amp, Cursor CLI, OpenCode, Droid, GitHub Copilot, CCR
+Claude Code, Codex, Gemini, Qwen Code, Amp, Hermes, Cursor CLI, OpenCode, Droid, GitHub Copilot, CCR
 
 ### Skills
 

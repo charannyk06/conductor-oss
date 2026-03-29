@@ -5,6 +5,7 @@
     {"id": "codex", "binary": "codex", "aliases": ["codex"], "installCommand": "npm install -g @openai/codex-cli", "website": "https://openai.com/codex/", "brandColor": "#7EE0C3"},
     {"id": "gemini", "binary": "gemini", "aliases": ["gemini"], "installCommand": "npm install -g @google/gemini-cli", "website": "https://gemini.google.com/", "brandColor": "#8FA7FF"},
     {"id": "amp", "binary": "amp", "aliases": ["amp"], "installCommand": "npm install -g @anthropic-ai/amp", "website": "https://ampcode.com/", "brandColor": "#FF8A62"},
+    {"id": "hermes", "binary": "hermes", "aliases": ["hermes", "hermes-agent"], "installCommand": "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash", "website": "https://hermes-agent.nousresearch.com/", "brandColor": "#D4B26A"},
     {"id": "cursor-cli", "binary": "cursor", "aliases": ["cursor", "cursor-cli", "cursor-agent"], "installCommand": "npm install -g cursor-cli", "website": "https://www.cursor.com/", "brandColor": "#83C8FF"},
     {"id": "opencode", "binary": "opencode", "aliases": ["opencode", "open-code", "open_code"], "installCommand": "npm install -g opencode", "website": "https://opencode.ai/", "brandColor": "#C7D2D8"},
     {"id": "droid", "binary": "droid", "aliases": ["droid"], "installCommand": "npm install -g @anthropic-ai/droid", "website": "https://github.com/Factory-AI/factory", "brandColor": "#F6E58D"},

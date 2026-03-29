@@ -1085,6 +1085,11 @@ fn agent_metadata(
             "https://www.ampcode.com",
             "https://ampcode.com/amp-mark-color.svg",
         ),
+        conductor_core::types::AgentKind::Hermes => (
+            "Nous Research Hermes Agent CLI",
+            "https://hermes-agent.nousresearch.com/",
+            "/agents/hermes.png",
+        ),
         conductor_core::types::AgentKind::CursorCli => (
             "Cursor Agent CLI",
             "https://www.cursor.com",

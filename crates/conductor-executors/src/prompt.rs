@@ -150,6 +150,45 @@ pub fn build_prompt(config: &PromptBuildConfig) -> Result<Option<String>> {
     Ok(Some(sections.join("\n\n")))
 }
 
+/// Build structured dispatch context (Paperclip-style) for injection into agent prompts.
+/// This gives the agent a clear checkout-execute-report workflow.
+pub fn build_dispatch_context(
+    session_id: &str,
+    project_id: &str,
+    card_id: Option<&str>,
+    card_title: Option<&str>,
+    board_path: Option<&Path>,
+    idempotency_key: &str,
+) -> String {
+    let mut lines = Vec::new();
+
+    lines.push("## Conductor Dispatch Context".to_string());
+    lines.push(format!("- session_id: {session_id}"));
+    lines.push(format!("- project_id: {project_id}"));
+
+    if let Some(card_id) = card_id {
+        lines.push(format!("- card_id: {card_id}"));
+    }
+    if let Some(card_title) = card_title {
+        lines.push(format!("- card_title: {card_title}"));
+    }
+    if let Some(board) = board_path {
+        lines.push(format!("- board: {}", board.display()));
+    }
+    lines.push(format!("- idempotency_key: {idempotency_key}"));
+
+    lines.push(String::new());
+    lines.push("## Dispatch Workflow".to_string());
+    lines.push("1. Execute the task instructions above.".to_string());
+    lines.push("2. On completion: summarize what was done.".to_string());
+    lines.push("3. On failure: describe the error and what was attempted.".to_string());
+    lines.push(String::new());
+    lines
+        .push("The orchestrator manages status transitions. Focus on the work itself.".to_string());
+
+    lines.join("\n")
+}
+
 fn build_config_layer(config: &PromptBuildConfig) -> String {
     let mut lines = Vec::new();
 

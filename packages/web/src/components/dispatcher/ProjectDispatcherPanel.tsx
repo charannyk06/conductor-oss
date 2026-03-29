@@ -3,7 +3,10 @@
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, ChevronLeft, Loader2 } from "lucide-react";
-import { DispatcherPreferenceChips } from "@/components/dispatcher/DispatcherPreferenceChips";
+import {
+  DispatcherPreferenceChips,
+  type OpenClawDispatcherPreferences,
+} from "@/components/dispatcher/DispatcherPreferenceChips";
 import { DispatcherPane } from "@/components/dispatcher/DispatcherPane";
 import { Button } from "@/components/ui/Button";
 import {
@@ -25,6 +28,10 @@ function readMetadataValue(
 ): string {
   const value = thread.metadata?.[key];
   return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+}
+
+function readMetadataFlag(thread: DashboardSession, key: string): boolean {
+  return readMetadataValue(thread, key).toLowerCase() === "true";
 }
 
 type ProjectDispatcherPanelProps = {
@@ -53,7 +60,13 @@ export function ProjectDispatcherPanel({
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [implementationAgent, setImplementationAgent] = useState(defaultAgent);
-  const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState("");
+  const [openclawConfig, setOpenclawConfig] = useState<OpenClawDispatcherPreferences>({
+    gatewayUrl: "",
+    gatewayToken: "",
+    gatewayTokenConfigured: false,
+    gatewayScopes: "",
+    sessionKey: "",
+  });
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
     buildModelSelection(defaultAgent, modelAccess, runtimeModelCatalogs, null, null));
 
@@ -67,14 +80,26 @@ export function ProjectDispatcherPanel({
   useEffect(() => {
     if (!dispatcherSession) {
       setImplementationAgent(defaultAgent);
-      setOpenclawGatewayUrl("");
+      setOpenclawConfig({
+        gatewayUrl: "",
+        gatewayToken: "",
+        gatewayTokenConfigured: false,
+        gatewayScopes: "",
+        sessionKey: "",
+      });
       setModelSelection(buildModelSelection(defaultAgent, modelAccess, runtimeModelCatalogs, null, null));
       return;
     }
 
     const nextAgent = readMetadataValue(dispatcherSession, "acpImplementationAgent", defaultAgent);
     setImplementationAgent(nextAgent);
-    setOpenclawGatewayUrl(readMetadataValue(dispatcherSession, "openclawGatewayUrl") || "");
+    setOpenclawConfig({
+      gatewayUrl: readMetadataValue(dispatcherSession, "openclawGatewayUrl"),
+      gatewayToken: "",
+      gatewayTokenConfigured: readMetadataFlag(dispatcherSession, "openclawGatewayTokenConfigured"),
+      gatewayScopes: readMetadataValue(dispatcherSession, "openclawGatewayScopes"),
+      sessionKey: readMetadataValue(dispatcherSession, "openclawSessionKey"),
+    });
     setModelSelection(
       buildModelSelection(
         nextAgent,
@@ -151,7 +176,10 @@ export function ProjectDispatcherPanel({
           forceNew,
           dispatcherAgent: nextDispatcherAgent,
           implementationAgent,
-          openclawGatewayUrl,
+          openclawGatewayUrl: openclawConfig.gatewayUrl,
+          openclawGatewayToken: openclawConfig.gatewayToken.trim() || undefined,
+          openclawGatewayScopes: openclawConfig.gatewayScopes.trim() || undefined,
+          openclawSessionKey: openclawConfig.sessionKey.trim() || undefined,
           implementationModel: modelSelection.customModel.trim() || modelSelection.catalogModel,
           implementationReasoningEffort: modelSelection.reasoningEffort,
         }),
@@ -180,7 +208,10 @@ export function ProjectDispatcherPanel({
     modelSelection.catalogModel,
     modelSelection.customModel,
     modelSelection.reasoningEffort,
-    openclawGatewayUrl,
+    openclawConfig.gatewayScopes,
+    openclawConfig.gatewayToken,
+    openclawConfig.gatewayUrl,
+    openclawConfig.sessionKey,
     projectId,
   ]);
 
@@ -279,13 +310,29 @@ export function ProjectDispatcherPanel({
                 modelAccess={modelAccess}
                 runtimeModelCatalogs={runtimeModelCatalogs}
                 disabled={creating}
-                openclawGatewayUrl={openclawGatewayUrl}
+                openclawConfig={openclawConfig}
                 onImplementationAgentChange={(nextAgent) => {
                   setImplementationAgent(nextAgent);
                   setModelSelection(buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null, null));
                 }}
                 onModelSelectionChange={setModelSelection}
-                onOpenclawGatewayUrlChange={setOpenclawGatewayUrl}
+                onOpenclawConfigChange={(patch) => {
+                  setOpenclawConfig((current) => ({
+                    ...current,
+                    ...patch,
+                    gatewayTokenConfigured:
+                      patch.gatewayToken !== undefined
+                        ? patch.gatewayToken.trim().length > 0
+                        : current.gatewayTokenConfigured,
+                  }));
+                }}
+                onOpenclawGatewayTokenClear={() => {
+                  setOpenclawConfig((current) => ({
+                    ...current,
+                    gatewayToken: "",
+                    gatewayTokenConfigured: false,
+                  }));
+                }}
               />
             </div>
             {error ? <div className="mt-4 text-[13px] text-[#d25151]">{error}</div> : null}

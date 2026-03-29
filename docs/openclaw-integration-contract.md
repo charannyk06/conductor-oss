@@ -46,6 +46,10 @@ If `threadId` is omitted, Conductor uses the latest dispatcher thread for the pr
 | `forceNew` | If true, always create a new thread. |
 | `agent` / `dispatcherAgent` | Dispatcher agent id. |
 | `implementationAgent` | Default coding agent for handoffs. |
+| `openclawGatewayUrl` | Optional OpenClaw gateway URL when the dispatcher or implementation runtime uses OpenClaw. |
+| `openclawGatewayToken` | Optional OpenClaw gateway bearer token override. |
+| `openclawGatewayScopes` | Optional comma-separated gateway scopes override. |
+| `openclawSessionKey` | Optional explicit OpenClaw session key override. |
 | `model` | Dispatcher model. |
 | `reasoningEffort` | Dispatcher reasoning. |
 | `implementationModel` | Default implementation model. |
@@ -63,7 +67,7 @@ If `threadId` is omitted, Conductor uses the latest dispatcher thread for the pr
 
 `PATCH /api/projects/{projectId}/dispatcher/preferences?threadId=&bridgeId=`
 
-**Body:** `{ implementationAgent?, implementationModel?, implementationReasoningEffort? }`
+**Body:** `{ implementationAgent?, implementationModel?, implementationReasoningEffort?, openclawGatewayUrl?, openclawGatewayToken?, openclawGatewayScopes?, openclawSessionKey? }`
 
 **Response:** `{ thread: Session }`
 
@@ -176,7 +180,11 @@ When present on the feed, `integration` describes orchestrator binding and optio
   "bridgeId": null,
   "openclaw": {
     "threadId": "<external thread id>",
-    "sessionId": "<external session id>"
+    "sessionId": "<external session id>",
+    "gatewayUrl": "ws://127.0.0.1:18789",
+    "gatewayTokenConfigured": "true",
+    "gatewayScopes": "operator.read,operator.write",
+    "sessionKey": "conductor:project_dispatcher:demo:dispatcher-123"
   },
   "heartbeat": {
     "state": "...",

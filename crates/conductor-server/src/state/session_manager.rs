@@ -41,6 +41,7 @@ const LIVE_RUNTIME_TERMINATION_GRACE_MS: u64 = 100;
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
+const NATIVE_RESUME_TARGET_METADATA_KEY: &str = "nativeResumeTarget";
 
 fn linked_dispatcher_thread_id(session: &SessionRecord) -> Option<String> {
     session
@@ -50,6 +51,23 @@ fn linked_dispatcher_thread_id(session: &SessionRecord) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn persist_native_resume_target_metadata(
+    session: &mut SessionRecord,
+    metadata: &HashMap<String, Value>,
+) {
+    if let Some(native_resume_target) = metadata
+        .get(NATIVE_RESUME_TARGET_METADATA_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        session.metadata.insert(
+            NATIVE_RESUME_TARGET_METADATA_KEY.to_string(),
+            native_resume_target.to_string(),
+        );
+    }
 }
 
 pub(crate) struct OutputConsumerConfig {
@@ -1670,6 +1688,7 @@ impl AppState {
                     session.status = SessionStatus::Working;
                     session.activity = Some("active".to_string());
                 }
+                persist_native_resume_target_metadata(session, metadata);
                 append_runtime_status_entry_with_metadata(session, text, Some(metadata.clone()));
             }
             _ => {}
@@ -1754,6 +1773,7 @@ impl AppState {
                     session.status = SessionStatus::Working;
                     session.activity = Some("active".to_string());
                 }
+                persist_native_resume_target_metadata(session, &metadata);
                 append_runtime_status_entry_with_metadata(session, &text, Some(metadata));
             }
             ExecutorOutput::NeedsInput(prompt) => {
@@ -2273,7 +2293,17 @@ impl AppState {
             .or_else(|| session_snapshot.reasoning_effort.clone());
         let skip_permissions = project_defaults_to_skip_permissions(&project);
         let native_resume_target =
-            resolve_native_resume_target(agent_kind.clone(), workspace_path.clone()).await;
+            resolve_native_resume_target(agent_kind.clone(), workspace_path.clone())
+                .await
+                .or_else(|| {
+                    session_snapshot
+                        .metadata
+                        .get(NATIVE_RESUME_TARGET_METADATA_KEY)
+                        .map(String::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                });
         let send_follow_up_after_spawn = native_resume_target.is_some();
 
         // Apply the same environment overrides as initial spawn to avoid
@@ -3848,6 +3878,37 @@ mod tests {
         assert!(user_entry.attachments.is_empty());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn persist_native_resume_target_metadata_copies_value_into_session_metadata() {
+        let mut session = SessionRecord::new(
+            "resume-hermes-session".to_string(),
+            "demo".to_string(),
+            Some("session/resume-hermes".to_string()),
+            None,
+            Some("/tmp/demo".to_string()),
+            "hermes".to_string(),
+            None,
+            None,
+            "Investigate".to_string(),
+            None,
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            NATIVE_RESUME_TARGET_METADATA_KEY.to_string(),
+            Value::String("native-hermes-session".to_string()),
+        );
+
+        persist_native_resume_target_metadata(&mut session, &metadata);
+
+        assert_eq!(
+            session
+                .metadata
+                .get(NATIVE_RESUME_TARGET_METADATA_KEY)
+                .map(String::as_str),
+            Some("native-hermes-session")
+        );
     }
 
     #[tokio::test]

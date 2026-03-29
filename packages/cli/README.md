@@ -85,6 +85,7 @@ Conductor currently includes adapters for:
 - Gemini
 - Qwen Code
 - Amp
+- Hermes
 - Cursor CLI
 - OpenCode
 - Droid
