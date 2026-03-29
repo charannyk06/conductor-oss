@@ -256,6 +256,20 @@ const ROLE_LABEL: Record<BoardRole, string> = {
   done: "Done",
   cancelled: "Cancelled",
 };
+
+const ROLE_CAPTION: Record<BoardRole, string> = {
+  intake: "New tasks",
+  ready: "Cleared to dispatch",
+  dispatching: "Launching agents",
+  inProgress: "Agents working",
+  needsInput: "Human needed",
+  blocked: "Blocked on dependency",
+  errored: "Needs attention",
+  review: "Code waiting on eyes",
+  merge: "Ready to land",
+  done: "Completed",
+  cancelled: "Cancelled",
+};
 const ACTIVE_BOARD_REFRESH_MS = 5_000;
 const HIDDEN_BOARD_REFRESH_MS = 20_000;
 const BOARD_REFRESH_DEBOUNCE_MS = 250;
@@ -3836,6 +3850,9 @@ export function WorkspaceKanban({
                           <div className="min-w-0 flex-1">
                             <p className="truncate text-[14px] font-medium text-[var(--vk-text-normal)]">
                               {column.heading || ROLE_LABEL[column.role]}
+                            </p>
+                            <p className="truncate text-[10px] text-[var(--text-faint)]">
+                              {ROLE_CAPTION[column.role]}
                             </p>
                           </div>
                           <span className="inline-flex h-6 min-w-[28px] items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-2 text-[11px] text-[var(--vk-text-muted)]">
