@@ -83,6 +83,7 @@ Conductor ships adapters for the major coding CLIs it knows how to discover, lau
 | Gemini | `gemini` |
 | Qwen Code | `qwen` |
 | Amp | `amp` |
+| Hermes | `hermes` |
 | Cursor CLI | `cursor-agent` |
 | OpenCode | `opencode` |
 | Droid | `droid` |
@@ -91,7 +92,7 @@ Conductor ships adapters for the major coding CLIs it knows how to discover, lau
 
 ## Skills
 
-The dashboard includes a Skills tab for each session. It can install curated official skill bundles for Claude Code, Codex, Gemini, Amp, Cursor CLI, OpenCode, Droid, Qwen Code, CCR, and GitHub Copilot.
+The dashboard includes a Skills tab for each session. It can install curated official skill bundles for Claude Code, Codex, Gemini, Amp, Hermes, Cursor CLI, OpenCode, Droid, Qwen Code, CCR, and GitHub Copilot.
 
 Skills are mapped to each agent's native folder layout, so user-scoped and workspace-scoped installs land in the right place automatically. The backend also detects custom skill folders already present on the machine and lets you activate or deactivate skills for the current session.
 

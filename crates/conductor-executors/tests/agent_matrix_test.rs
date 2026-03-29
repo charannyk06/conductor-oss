@@ -1,6 +1,6 @@
 use conductor_executors::agents::{
     AmpExecutor, CcrExecutor, ClaudeCodeExecutor, CodexExecutor, CopilotExecutor, CursorExecutor,
-    DroidExecutor, GeminiExecutor, OpenCodeExecutor, QwenCodeExecutor,
+    DroidExecutor, GeminiExecutor, HermesExecutor, OpenCodeExecutor, QwenCodeExecutor,
 };
 use conductor_executors::executor::{Executor, ExecutorOutput, SpawnOptions};
 use serde_json::Value;
@@ -77,6 +77,11 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
         ],
     );
     assert_filters_blocked_flags(&amp);
+
+    let hermes =
+        HermesExecutor::new(PathBuf::from("/usr/bin/hermes")).build_args(&options("hermes"));
+    assert_contains(&hermes, &["chat", "-Q", "-q", "--model", "gpt-5", "hermes"]);
+    assert_filters_blocked_flags(&hermes);
 
     let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&options("ccr prompt"));
     assert_contains(
@@ -245,6 +250,12 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
     assert_has_pair(&ccr, "--model", "gpt-5");
     assert_has_pair(&ccr, "--effort", "high");
 
+    let hermes = HermesExecutor::new(PathBuf::from("/usr/bin/hermes")).build_args(&interactive);
+    assert_has_pair(&hermes, "--model", "gpt-5");
+    assert_no_flag(&hermes, "--effort");
+    assert_no_flag(&hermes, "--reasoning-effort");
+    assert_no_flag(&hermes, "-q");
+
     let claude = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).build_args(&interactive);
     assert_has_pair(&claude, "--model", "gpt-5");
     assert_has_pair(&claude, "--effort", "high");
@@ -318,6 +329,16 @@ fn parse_output_handles_representative_agent_formats() {
         ccr,
         ExecutorOutput::Failed { ref error, exit_code: Some(1) } if error == "API Error: 500 upstream failed"
     ));
+
+    let hermes = HermesExecutor::new(PathBuf::from("/usr/bin/hermes"))
+        .parse_output("session_id: hermes-session");
+    let ExecutorOutput::StructuredStatus { metadata, .. } = hermes else {
+        panic!("expected hermes structured status");
+    };
+    assert_eq!(
+        metadata.get("nativeResumeTarget").and_then(Value::as_str),
+        Some("hermes-session")
+    );
 
     let claude = ClaudeCodeExecutor::new(PathBuf::from("/usr/bin/claude")).parse_output(
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Claude says hi"}]}}"#,

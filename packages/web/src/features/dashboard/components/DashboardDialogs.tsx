@@ -38,7 +38,13 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { normalizeAgentName } from "@/lib/agentUtils";
-import { getKnownAgent, KNOWN_AGENT_ORDER } from "@/lib/knownAgents";
+import {
+  filterTerminalAgentNames,
+  getKnownAgent,
+  KNOWN_AGENT_ORDER,
+  resolveTerminalAgent,
+  supportsTerminalSessions,
+} from "@/lib/knownAgents";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import type { DashboardProfile } from "@/lib/dashboardProfile";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
@@ -407,9 +413,10 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
   const payload = toObject(value);
   const notifications = toObject(payload["notifications"]);
   const soundFileRaw = notifications["soundFile"];
-  const codingAgent = typeof payload["codingAgent"] === "string" && payload["codingAgent"].trim().length > 0
+  const rawCodingAgent = typeof payload["codingAgent"] === "string" && payload["codingAgent"].trim().length > 0
     ? payload["codingAgent"].trim()
     : fallbackAgent;
+  const codingAgent = resolveTerminalAgent(rawCodingAgent, fallbackAgent);
   const ide = typeof payload["ide"] === "string" && payload["ide"].trim().length > 0
     ? payload["ide"].trim()
     : "vscode";
@@ -2489,10 +2496,14 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
     }
     const selected = repositories.find((item) => item.id === selectedRepositoryId);
     if (!selected) return;
-    setRepositoryDraft(hydrateRepositoryDraft(selected));
+    const repositoryAgent = resolveTerminalAgent(selected.agent, codingAgent || DEFAULT_AGENT);
+    setRepositoryDraft(hydrateRepositoryDraft({
+      ...selected,
+      agent: repositoryAgent,
+    }));
     setRepositoryModelSelection(
       buildModelSelection(
-        selected.agent,
+        repositoryAgent,
         modelAccess,
         runtimeModelCatalogs,
         selected.agentModel,
@@ -2505,7 +2516,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
       void detectRepositoryBranches(selected.path, selected.defaultBranch);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelAccess, open, repositories, runtimeModelCatalogs, selectedRepositoryId]);
+  }, [codingAgent, modelAccess, open, repositories, runtimeModelCatalogs, selectedRepositoryId]);
 
   const onboardingShouldShowRepositoryStep = mode === "onboarding" && projectCount > 0;
 
@@ -2535,8 +2546,8 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
   const settingsMenuItemClass = "flex min-h-[40px] cursor-default items-center gap-2 rounded-[4px] px-3 py-2 text-[14px] leading-[21px] text-[var(--vk-text-normal)] outline-none hover:bg-[var(--vk-bg-hover)] focus:bg-[var(--vk-bg-hover)]";
 
   const orderedAgentOptions = useMemo(() => {
-    const opts = new Set(agentOptions);
-    if (codingAgent.trim().length > 0) {
+    const opts = new Set(filterTerminalAgentNames(agentOptions));
+    if (codingAgent.trim().length > 0 && supportsTerminalSessions(codingAgent)) {
       opts.add(codingAgent);
     }
     if (opts.size === 0) {
@@ -2550,6 +2561,14 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
       return getAgentLabel(left).localeCompare(getAgentLabel(right));
     });
   }, [agentOptions, codingAgent]);
+
+  useEffect(() => {
+    if (orderedAgentOptions.length === 0) return;
+    if (!codingAgent || !orderedAgentOptions.includes(codingAgent)) {
+      setCodingAgent(resolveTerminalAgent(codingAgent, orderedAgentOptions[0] ?? DEFAULT_AGENT));
+    }
+  }, [codingAgent, orderedAgentOptions]);
+
   const selectedCodingAgentState = agentStates[normalizeAgentName(codingAgent)] ?? null;
 
   function handleModelAccessChange(agent: string, nextAccess: string) {

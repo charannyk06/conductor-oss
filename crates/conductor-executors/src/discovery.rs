@@ -25,6 +25,7 @@ pub async fn discover_executors() -> HashMap<AgentKind, Arc<dyn Executor>> {
     try_discover!(CodexExecutor::discover(), AgentKind::Codex);
     try_discover!(GeminiExecutor::discover(), AgentKind::Gemini);
     try_discover!(AmpExecutor::discover(), AgentKind::Amp);
+    try_discover!(HermesExecutor::discover(), AgentKind::Hermes);
     try_discover!(CursorExecutor::discover(), AgentKind::CursorCli);
     try_discover!(OpenCodeExecutor::discover(), AgentKind::OpenCode);
     try_discover!(OpenClawExecutor::discover(), AgentKind::OpenClaw);
@@ -34,7 +35,7 @@ pub async fn discover_executors() -> HashMap<AgentKind, Arc<dyn Executor>> {
     try_discover!(CopilotExecutor::discover(), AgentKind::GithubCopilot);
 
     if executors.is_empty() {
-        tracing::warn!("No agent executors found. Install at least one CLI or configure a gateway-backed runtime: claude, codex, gemini, amp, cursor, opencode, openclaw, droid, qwen, ccr, copilot");
+        tracing::warn!("No agent executors found. Install at least one CLI or configure a gateway-backed runtime: claude, codex, gemini, amp, hermes, cursor, opencode, openclaw, droid, qwen, ccr, copilot");
     } else {
         tracing::info!(
             "Found {} executor(s): {}",

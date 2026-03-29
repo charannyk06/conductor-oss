@@ -5,7 +5,11 @@ import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ListTodo, Loader2, PencilLine, Trash2 } from "lucide-react";
-import { DispatcherPreferenceChips } from "@/components/dispatcher/DispatcherPreferenceChips";
+import {
+  DispatcherPreferenceChips,
+  type OpenClawDispatcherPreferences,
+  type OpenClawDispatcherPreferencesPatch,
+} from "@/components/dispatcher/DispatcherPreferenceChips";
 import { DispatcherSessionPane } from "@/components/dispatcher/DispatcherSessionPane";
 import { Button } from "@/components/ui/Button";
 import {
@@ -41,6 +45,10 @@ function readMetadataValue(
 ): string {
   const value = thread.metadata?.[key];
   return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+}
+
+function readMetadataFlag(thread: DashboardSession, key: string): boolean {
+  return readMetadataValue(thread, key).toLowerCase() === "true";
 }
 
 function formatRelativeTimestamp(value: string): string {
@@ -195,9 +203,13 @@ export function DispatcherPane({
   const [threadMenuOpen, setThreadMenuOpen] = useState(false);
   const [confirmDeleteThreadId, setConfirmDeleteThreadId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState(
-    () => readMetadataValue(thread, "openclawGatewayUrl") || "",
-  );
+  const [openclawConfig, setOpenclawConfig] = useState<OpenClawDispatcherPreferences>(() => ({
+    gatewayUrl: readMetadataValue(thread, "openclawGatewayUrl"),
+    gatewayToken: "",
+    gatewayTokenConfigured: readMetadataFlag(thread, "openclawGatewayTokenConfigured"),
+    gatewayScopes: readMetadataValue(thread, "openclawGatewayScopes"),
+    sessionKey: readMetadataValue(thread, "openclawSessionKey"),
+  }));
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
     buildModelSelection(
       preferredImplementationAgent,
@@ -211,7 +223,13 @@ export function DispatcherPane({
 
   useEffect(() => {
     setImplementationAgent(preferredImplementationAgent);
-    setOpenclawGatewayUrl(readMetadataValue(thread, "openclawGatewayUrl") || "");
+    setOpenclawConfig({
+      gatewayUrl: readMetadataValue(thread, "openclawGatewayUrl"),
+      gatewayToken: "",
+      gatewayTokenConfigured: readMetadataFlag(thread, "openclawGatewayTokenConfigured"),
+      gatewayScopes: readMetadataValue(thread, "openclawGatewayScopes"),
+      sessionKey: readMetadataValue(thread, "openclawSessionKey"),
+    });
     setModelSelection(
       buildModelSelection(
         preferredImplementationAgent,
@@ -248,7 +266,11 @@ export function DispatcherPane({
   const showThreadMenu = threads.length > 0 && (threads.length > 1 || Boolean(onDeleteThread));
 
   const persistPreferences = useCallback(
-    async (nextAgent: string, nextSelection: ModelSelectionState, gatewayUrl?: string) => {
+    async (
+      nextAgent: string,
+      nextSelection: ModelSelectionState,
+      openclawPatch?: OpenClawDispatcherPreferencesPatch,
+    ) => {
       setUpdatingPreferences(true);
       try {
         const body: Record<string, string> = {
@@ -257,8 +279,17 @@ export function DispatcherPane({
           implementationReasoningEffort:
             resolveReasoningSelectionValue(nextSelection) ?? "",
         };
-        if (gatewayUrl !== undefined) {
-          body.openclawGatewayUrl = gatewayUrl;
+        if (openclawPatch?.gatewayUrl !== undefined) {
+          body.openclawGatewayUrl = openclawPatch.gatewayUrl;
+        }
+        if (openclawPatch?.gatewayToken !== undefined) {
+          body.openclawGatewayToken = openclawPatch.gatewayToken;
+        }
+        if (openclawPatch?.gatewayScopes !== undefined) {
+          body.openclawGatewayScopes = openclawPatch.gatewayScopes;
+        }
+        if (openclawPatch?.sessionKey !== undefined) {
+          body.openclawSessionKey = openclawPatch.sessionKey;
         }
         const response = await fetch(
           withBridgeQuery(
@@ -306,13 +337,29 @@ export function DispatcherPane({
     [implementationAgent, persistPreferences],
   );
 
-  const handleOpenclawGatewayUrlChange = useCallback(
-    (url: string) => {
-      setOpenclawGatewayUrl(url);
-      void persistPreferences(implementationAgent, modelSelection, url);
+  const handleOpenclawConfigChange = useCallback(
+    (patch: OpenClawDispatcherPreferencesPatch) => {
+      setOpenclawConfig((current) => ({
+        ...current,
+        ...patch,
+        gatewayTokenConfigured:
+          patch.gatewayToken !== undefined
+            ? patch.gatewayToken.trim().length > 0
+            : current.gatewayTokenConfigured,
+      }));
+      void persistPreferences(implementationAgent, modelSelection, patch);
     },
     [implementationAgent, modelSelection, persistPreferences],
   );
+
+  const handleOpenclawGatewayTokenClear = useCallback(() => {
+    setOpenclawConfig((current) => ({
+      ...current,
+      gatewayToken: "",
+      gatewayTokenConfigured: false,
+    }));
+    void persistPreferences(implementationAgent, modelSelection, { gatewayToken: "" });
+  }, [implementationAgent, modelSelection, persistPreferences]);
 
   const handleConfirmDeleteThread = useCallback(async () => {
     if (!confirmDeleteThread || !onDeleteThread) {
@@ -437,10 +484,11 @@ export function DispatcherPane({
       modelAccess={modelAccess}
       runtimeModelCatalogs={runtimeModelCatalogs}
       disabled={updatingPreferences}
-      openclawGatewayUrl={openclawGatewayUrl}
+      openclawConfig={openclawConfig}
       onImplementationAgentChange={handleImplementationAgentChange}
       onModelSelectionChange={handleModelSelectionChange}
-      onOpenclawGatewayUrlChange={handleOpenclawGatewayUrlChange}
+      onOpenclawConfigChange={handleOpenclawConfigChange}
+      onOpenclawGatewayTokenClear={handleOpenclawGatewayTokenClear}
     />
   ) : null;
 

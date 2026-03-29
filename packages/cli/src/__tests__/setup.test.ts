@@ -55,6 +55,35 @@ test("buildAgentCheck treats the qwen binary as an installed Qwen Code CLI", () 
   });
 });
 
+test("Hermes setup metadata points at the official installer and setup command", () => {
+  const config = resolveAgentSetupConfig("hermes");
+
+  assert.deepEqual(config.commands, ["hermes", "hermes-agent"]);
+  assert.deepEqual(config.installCommand, {
+    label: "Install Hermes",
+    cmd: "sh",
+    args: [
+      "-lc",
+      "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+    ],
+  });
+  assert.deepEqual(config.postInstallAuthCommand, {
+    label: "Run Hermes setup",
+    cmd: "hermes",
+    args: ["setup"],
+  });
+});
+
+test("buildAgentCheck treats the hermes binary as an installed Hermes CLI", () => {
+  withTemporaryPath(["hermes"], () => {
+    const check = buildAgentCheck("hermes");
+
+    assert.equal(check.installed, true);
+    assert.equal(check.install, undefined);
+    assert.equal(check.postInstallAuthCommand, undefined);
+  });
+});
+
 test("Codex setup metadata points at the current official npm package", () => {
   const config = resolveAgentSetupConfig("codex");
 

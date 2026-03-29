@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::OpenClawDispatcherConfigPatch;
 use super::{AppState, CreateDispatcherThreadOptions};
 
 const MAX_PROJECT_BINDINGS: usize = 200;
@@ -307,7 +308,7 @@ impl AppState {
                         bridge_id: bridge_id.clone(),
                         dispatcher_agent: input.dispatcher_agent.clone(),
                         implementation_agent: input.implementation_agent.clone(),
-                        openclaw_gateway_url: None,
+                        openclaw_config: OpenClawDispatcherConfigPatch::default(),
                         dispatcher_model: input.dispatcher_model.clone(),
                         dispatcher_reasoning_effort: input.dispatcher_reasoning_effort.clone(),
                         implementation_model: input.implementation_model.clone(),

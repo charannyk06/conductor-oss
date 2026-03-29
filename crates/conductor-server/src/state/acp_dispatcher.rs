@@ -55,6 +55,11 @@ const ACP_RESUME_TARGET_METADATA_KEY: &str = "acpResumeTarget";
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
+const OPENCLAW_GATEWAY_URL_METADATA_KEY: &str = "openclawGatewayUrl";
+const OPENCLAW_GATEWAY_TOKEN_METADATA_KEY: &str = "openclawGatewayToken";
+const OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY: &str = "openclawGatewayTokenConfigured";
+const OPENCLAW_GATEWAY_SCOPES_METADATA_KEY: &str = "openclawGatewayScopes";
+const OPENCLAW_SESSION_KEY_METADATA_KEY: &str = "openclawSessionKey";
 
 fn apply_openclaw_binding_field(
     thread: &mut SessionRecord,
@@ -78,18 +83,15 @@ fn apply_openclaw_binding_field(
     }
 }
 
-fn apply_openclaw_gateway_url_field(
-    thread: &mut SessionRecord,
-    gateway_url: Option<String>,
-) -> bool {
-    let next_value = gateway_url
+fn apply_openclaw_text_field(thread: &mut SessionRecord, key: &str, value: Option<String>) -> bool {
+    let next_value = value
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let current_value = thread
         .metadata
-        .get("openclawGatewayUrl")
+        .get(key)
         .map(String::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -100,15 +102,102 @@ fn apply_openclaw_gateway_url_field(
 
     match next_value {
         Some(value) => {
-            thread
-                .metadata
-                .insert("openclawGatewayUrl".to_string(), value);
+            thread.metadata.insert(key.to_string(), value);
         }
         None => {
-            thread.metadata.remove("openclawGatewayUrl");
+            thread.metadata.remove(key);
         }
     }
     true
+}
+
+fn apply_openclaw_secret_field(
+    thread: &mut SessionRecord,
+    value_key: &str,
+    configured_key: &str,
+    value: Option<String>,
+) -> bool {
+    let Some(next_raw) = value else {
+        return false;
+    };
+    let next_value = next_raw
+        .trim()
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let trimmed = next_raw.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+    let current_value = thread
+        .metadata
+        .get(value_key)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string);
+    if current_value == next_value {
+        return false;
+    }
+
+    match next_value {
+        Some(value) => {
+            thread.metadata.insert(value_key.to_string(), value);
+            thread
+                .metadata
+                .insert(configured_key.to_string(), "true".to_string());
+        }
+        None => {
+            thread.metadata.remove(value_key);
+            thread.metadata.remove(configured_key);
+        }
+    }
+    true
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OpenClawDispatcherConfigPatch {
+    pub gateway_url: Option<String>,
+    pub gateway_token: Option<String>,
+    pub gateway_scopes: Option<String>,
+    pub session_key: Option<String>,
+}
+
+fn apply_openclaw_dispatcher_config(
+    thread: &mut SessionRecord,
+    patch: &OpenClawDispatcherConfigPatch,
+) -> bool {
+    let mut changed = false;
+    changed |= apply_openclaw_text_field(
+        thread,
+        OPENCLAW_GATEWAY_URL_METADATA_KEY,
+        patch.gateway_url.clone(),
+    );
+    changed |= apply_openclaw_secret_field(
+        thread,
+        OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY,
+        patch.gateway_token.clone(),
+    );
+    changed |= apply_openclaw_text_field(
+        thread,
+        OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
+        patch.gateway_scopes.clone(),
+    );
+    changed |= apply_openclaw_text_field(
+        thread,
+        OPENCLAW_SESSION_KEY_METADATA_KEY,
+        patch.session_key.clone(),
+    );
+    changed
+}
+
+fn has_openclaw_dispatcher_config_patch(patch: &OpenClawDispatcherConfigPatch) -> bool {
+    patch.gateway_url.is_some()
+        || patch.gateway_token.is_some()
+        || patch.gateway_scopes.is_some()
+        || patch.session_key.is_some()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -123,7 +212,7 @@ pub(crate) struct CreateDispatcherThreadOptions {
     pub bridge_id: Option<String>,
     pub dispatcher_agent: Option<String>,
     pub implementation_agent: Option<String>,
-    pub openclaw_gateway_url: Option<String>,
+    pub openclaw_config: OpenClawDispatcherConfigPatch,
     pub dispatcher_model: Option<String>,
     pub dispatcher_reasoning_effort: Option<String>,
     pub implementation_model: Option<String>,
@@ -2221,7 +2310,7 @@ impl AppState {
             bridge_id,
             dispatcher_agent,
             implementation_agent,
-            openclaw_gateway_url,
+            openclaw_config,
             dispatcher_model,
             dispatcher_reasoning_effort,
             implementation_model,
@@ -2260,6 +2349,7 @@ impl AppState {
                 if implementation_agent.is_some()
                     || implementation_model.is_some()
                     || implementation_reasoning_effort.is_some()
+                    || has_openclaw_dispatcher_config_patch(&openclaw_config)
                 {
                     updated = self
                         .update_dispatcher_preferences(
@@ -2267,21 +2357,9 @@ impl AppState {
                             implementation_agent,
                             implementation_model,
                             implementation_reasoning_effort,
+                            openclaw_config.clone(),
                         )
                         .await?;
-                }
-                if openclaw_gateway_url.is_some() {
-                    let mut updated_thread = updated.clone();
-                    if apply_openclaw_gateway_url_field(
-                        &mut updated_thread,
-                        openclaw_gateway_url.clone(),
-                    ) {
-                        updated_thread.last_activity_at = Utc::now().to_rfc3339();
-                        self.replace_dispatcher_thread(updated_thread.clone())
-                            .await?;
-                        self.sync_acp_dispatcher_state(&updated_thread).await?;
-                        updated = updated_thread;
-                    }
                 }
                 return Ok(updated);
             }
@@ -2343,7 +2421,7 @@ impl AppState {
             implementation_model,
             implementation_reasoning_effort,
         );
-        let _ = apply_openclaw_gateway_url_field(&mut thread, openclaw_gateway_url);
+        let _ = apply_openclaw_dispatcher_config(&mut thread, &openclaw_config);
         touch_acp_dispatcher_heartbeat(&mut thread);
 
         let artifacts = self
@@ -2393,6 +2471,7 @@ impl AppState {
         implementation_agent: Option<String>,
         implementation_model: Option<String>,
         implementation_reasoning_effort: Option<String>,
+        openclaw_config: OpenClawDispatcherConfigPatch,
     ) -> Result<SessionRecord> {
         let mut thread = self
             .get_dispatcher_thread(thread_id)
@@ -2445,12 +2524,14 @@ impl AppState {
             }
         }
 
-        if !apply_dispatcher_implementation_preferences(
+        let implementation_changed = apply_dispatcher_implementation_preferences(
             &mut thread,
             implementation_agent,
             implementation_model,
             implementation_reasoning_effort,
-        ) {
+        );
+        let openclaw_changed = apply_openclaw_dispatcher_config(&mut thread, &openclaw_config);
+        if !implementation_changed && !openclaw_changed {
             return Ok(thread);
         }
 
@@ -2965,12 +3046,45 @@ impl AppState {
         if executor.kind() == AgentKind::OpenClaw {
             if let Some(gateway_url) = thread
                 .metadata
-                .get("openclawGatewayUrl")
+                .get(OPENCLAW_GATEWAY_URL_METADATA_KEY)
                 .map(String::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
                 spawn_env.insert("OPENCLAW_GATEWAY_URL".to_string(), gateway_url.to_string());
+            }
+            if let Some(gateway_token) = thread
+                .metadata
+                .get(OPENCLAW_GATEWAY_TOKEN_METADATA_KEY)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                spawn_env.insert(
+                    "OPENCLAW_GATEWAY_TOKEN".to_string(),
+                    gateway_token.to_string(),
+                );
+            }
+            if let Some(gateway_scopes) = thread
+                .metadata
+                .get(OPENCLAW_GATEWAY_SCOPES_METADATA_KEY)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                spawn_env.insert(
+                    "OPENCLAW_GATEWAY_SCOPES".to_string(),
+                    gateway_scopes.to_string(),
+                );
+            }
+            if let Some(session_key) = thread
+                .metadata
+                .get(OPENCLAW_SESSION_KEY_METADATA_KEY)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                spawn_env.insert("OPENCLAW_SESSION_KEY".to_string(), session_key.to_string());
             }
         }
         prepare_dispatcher_runtime_env(&mut spawn_env);
@@ -3515,9 +3629,11 @@ mod tests {
         dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
-        CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED,
-        ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL, ACP_RESUME_TARGET_METADATA_KEY,
-        ACP_SESSION_KIND,
+        CreateDispatcherThreadOptions, OpenClawDispatcherConfigPatch, ACP_APPROVAL_GRANTED,
+        ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
+        ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
+        OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
     use chrono::Utc;
@@ -3959,6 +4075,103 @@ mod tests {
             .recent_conversation
             .iter()
             .any(|note| note.label == "Assistant" && note.text.contains("assistant update")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_preferences_store_openclaw_runtime_config() {
+        let (root, state) = build_test_state("acp-openclaw-config").await;
+        let gateway_token = ["gateway", "-token-", "123"].concat();
+        let session_key = ["paperclip:", "issue", ":123"].concat();
+        let thread = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    openclaw_config: OpenClawDispatcherConfigPatch {
+                        gateway_url: Some("ws://127.0.0.1:18789".to_string()),
+                        gateway_token: Some(gateway_token.clone()),
+                        gateway_scopes: Some("operator.admin".to_string()),
+                        session_key: Some(session_key.clone()),
+                    },
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should be created");
+
+        assert_eq!(
+            thread
+                .metadata
+                .get(OPENCLAW_GATEWAY_URL_METADATA_KEY)
+                .map(String::as_str),
+            Some("ws://127.0.0.1:18789")
+        );
+        assert_eq!(
+            thread
+                .metadata
+                .get(OPENCLAW_GATEWAY_TOKEN_METADATA_KEY)
+                .map(String::as_str),
+            Some(gateway_token.as_str())
+        );
+        assert_eq!(
+            thread
+                .metadata
+                .get(OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY)
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            thread
+                .metadata
+                .get(OPENCLAW_GATEWAY_SCOPES_METADATA_KEY)
+                .map(String::as_str),
+            Some("operator.admin")
+        );
+        assert_eq!(
+            thread
+                .metadata
+                .get(OPENCLAW_SESSION_KEY_METADATA_KEY)
+                .map(String::as_str),
+            Some(session_key.as_str())
+        );
+
+        let updated = state
+            .update_dispatcher_preferences(
+                &thread.id,
+                None,
+                None,
+                None,
+                OpenClawDispatcherConfigPatch {
+                    gateway_token: Some(String::new()),
+                    gateway_scopes: Some("operator.read,operator.write".to_string()),
+                    session_key: Some("conductor:project_dispatcher:demo:dispatcher-1".to_string()),
+                    ..OpenClawDispatcherConfigPatch::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should update");
+
+        assert!(!updated
+            .metadata
+            .contains_key(OPENCLAW_GATEWAY_TOKEN_METADATA_KEY));
+        assert!(!updated
+            .metadata
+            .contains_key(OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY));
+        assert_eq!(
+            updated
+                .metadata
+                .get(OPENCLAW_GATEWAY_SCOPES_METADATA_KEY)
+                .map(String::as_str),
+            Some("operator.read,operator.write")
+        );
+        assert_eq!(
+            updated
+                .metadata
+                .get(OPENCLAW_SESSION_KEY_METADATA_KEY)
+                .map(String::as_str),
+            Some("conductor:project_dispatcher:demo:dispatcher-1")
+        );
 
         let _ = fs::remove_dir_all(root);
     }

@@ -20,6 +20,7 @@ const FALLBACK_WATCHER_AGENTS: &[&str] = &[
     "claude-code",
     "gemini",
     "amp",
+    "hermes",
     "cursor-cli",
     "opencode",
     "droid",

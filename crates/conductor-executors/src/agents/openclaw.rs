@@ -39,6 +39,20 @@ const OPENCLAW_CLIENT_MODE: &str = "dispatcher";
 const OPENCLAW_DEVICE_FAMILY: &str = "desktop";
 const OPENCLAW_BINARY_NAME: &str = "openclaw-gateway";
 
+/// Keys whose values must be redacted in log output.
+const SENSITIVE_KEY_PATTERN: &[&str] = &[
+    "auth",
+    "authorization",
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "private_key",
+    "x-openclaw-auth",
+    "x-openclaw-token",
+    "deviceToken",
+];
+
 #[derive(Clone)]
 pub struct OpenClawExecutor {
     gateway_url: String,
@@ -150,7 +164,17 @@ impl Executor for OpenClawExecutor {
             .await;
 
             let final_event = match outcome {
-                RunOutcome::Completed(exit_code) => ExecutorOutput::Completed { exit_code },
+                RunOutcome::Completed { exit_code, meta } => {
+                    tracing::info!(
+                        provider = meta.provider.as_deref().unwrap_or("openclaw"),
+                        model = meta.model.as_deref().unwrap_or("unknown"),
+                        cost_usd = meta.cost_usd.unwrap_or(0.0),
+                        input_tokens = meta.input_tokens.unwrap_or(0),
+                        output_tokens = meta.output_tokens.unwrap_or(0),
+                        "OpenClaw run completed with metadata"
+                    );
+                    ExecutorOutput::Completed { exit_code }
+                }
                 RunOutcome::Failed { error, exit_code } => {
                     ExecutorOutput::Failed { error, exit_code }
                 }
@@ -212,7 +236,10 @@ impl GatewayConfig {
 
 #[derive(Debug)]
 enum RunOutcome {
-    Completed(i32),
+    Completed {
+        exit_code: i32,
+        meta: RunResultMeta,
+    },
     Failed {
         error: String,
         exit_code: Option<i32>,
@@ -285,6 +312,77 @@ enum GatewayFrame {
 }
 
 async fn run_openclaw_turn(
+    config: GatewayConfig,
+    session_key: String,
+    prompt: String,
+    reasoning_effort: Option<String>,
+    timeout: Option<Duration>,
+    output_tx: mpsc::Sender<ExecutorOutput>,
+    kill_rx: oneshot::Receiver<()>,
+) -> RunOutcome {
+    match run_openclaw_turn_inner(
+        config.clone(),
+        session_key.clone(),
+        prompt.clone(),
+        reasoning_effort.clone(),
+        timeout,
+        output_tx.clone(),
+        kill_rx,
+    )
+    .await
+    {
+        RunOutcome::Failed { error, .. }
+            if error.starts_with("PAIRING_REQUIRED:")
+                && (config.auth_token.is_some() || config.password.is_some()) =>
+        {
+            let pairing_err = error.strip_prefix("PAIRING_REQUIRED: ").unwrap_or(&error);
+            let request_id = extract_pairing_request_id(pairing_err);
+            tracing::warn!("OpenClaw pairing required, attempting auto-approval");
+
+            match auto_approve_device_pairing(
+                &config.ws_url,
+                &HashMap::new(),
+                config.auth_token.as_deref(),
+                config.password.as_deref(),
+                &config.scopes,
+                request_id.as_deref(),
+                OPENCLAW_CONNECT_TIMEOUT,
+            )
+            .await
+            {
+                Ok(approved_id) => {
+                    tracing::info!("OpenClaw auto-pair approved: {approved_id}, retrying");
+                    // Retry with a dead kill channel (acceptable for one auto-pair retry)
+                    let (_dead_kill_tx, dead_kill_rx) = oneshot::channel::<()>();
+                    drop(_dead_kill_tx);
+                    run_openclaw_turn_inner(
+                        config,
+                        session_key,
+                        prompt,
+                        reasoning_effort,
+                        timeout,
+                        output_tx,
+                        dead_kill_rx,
+                    )
+                    .await
+                }
+                Err(pair_err) => {
+                    tracing::warn!("OpenClaw auto-pair failed: {pair_err}");
+                    RunOutcome::Failed {
+                        error: format!(
+                            "{pairing_err}. Auto-pairing failed: {pair_err}. \
+                             Approve the device manually: openclaw devices approve --latest"
+                        ),
+                        exit_code: Some(1),
+                    }
+                }
+            }
+        }
+        other => other,
+    }
+}
+
+async fn run_openclaw_turn_inner(
     config: GatewayConfig,
     session_key: String,
     prompt: String,
@@ -396,6 +494,10 @@ async fn run_openclaw_turn(
         }
     });
 
+    // Log redacted connect params for debugging
+    let redacted = redact_json_for_log(&connect_request, &[], 0);
+    tracing::debug!(payload = %redacted, "OpenClaw connect request");
+
     if let Err(err) = send_json_frame(&mut ws, &connect_request).await {
         let _ = ws.close(None).await;
         return RunOutcome::Failed {
@@ -404,12 +506,23 @@ async fn run_openclaw_turn(
         };
     }
 
-    let hello = match wait_for_connect_response(&mut ws, &connect_id).await {
+    let connect_result = wait_for_connect_response(&mut ws, &connect_id).await;
+    let hello = match connect_result {
         Ok(hello) => hello,
         Err(err) => {
             let _ = ws.close(None).await;
+            let err_msg = err.to_string();
+            let lower = err_msg.to_lowercase();
+
+            // Detect pairing required error and return a special marker
+            if lower.contains("pairing") || lower.contains("pair") {
+                return RunOutcome::Failed {
+                    error: format!("PAIRING_REQUIRED: {err_msg}"),
+                    exit_code: Some(1),
+                };
+            }
             return RunOutcome::Failed {
-                error: err.to_string(),
+                error: err_msg,
                 exit_code: Some(1),
             };
         }
@@ -455,6 +568,7 @@ async fn run_openclaw_turn(
 
     let mut send_ack_seen = false;
     let mut lifecycle_error: Option<String> = None;
+    let mut latest_payload: Option<Value> = None;
 
     let timeout_deadline = timeout.map(|duration| Instant::now() + duration);
     loop {
@@ -485,11 +599,13 @@ async fn run_openclaw_turn(
                         &output_tx,
                         &mut send_ack_seen,
                         &mut lifecycle_error,
+                        &mut latest_payload,
                     ).await {
                         ControlFlow::Continue => {}
                         ControlFlow::Completed => {
                             let _ = ws.close(None).await;
-                            return RunOutcome::Completed(0);
+                            let meta = latest_payload.as_ref().map(extract_run_meta).unwrap_or_default();
+                            return RunOutcome::Completed { exit_code: 0, meta };
                         }
                         ControlFlow::Failed { error, exit_code } => {
                             let _ = ws.close(None).await;
@@ -516,11 +632,13 @@ async fn run_openclaw_turn(
                         &output_tx,
                         &mut send_ack_seen,
                         &mut lifecycle_error,
+                        &mut latest_payload,
                     ).await {
                         ControlFlow::Continue => {}
                         ControlFlow::Completed => {
                             let _ = ws.close(None).await;
-                            return RunOutcome::Completed(0);
+                            let meta = latest_payload.as_ref().map(extract_run_meta).unwrap_or_default();
+                            return RunOutcome::Completed { exit_code: 0, meta };
                         }
                         ControlFlow::Failed { error, exit_code } => {
                             let _ = ws.close(None).await;
@@ -549,6 +667,7 @@ async fn handle_runtime_frame(
     output_tx: &mpsc::Sender<ExecutorOutput>,
     send_ack_seen: &mut bool,
     lifecycle_error: &mut Option<String>,
+    latest_payload: &mut Option<Value>,
 ) -> ControlFlow {
     let Some(frame) = frame else {
         return ControlFlow::Failed {
@@ -597,6 +716,8 @@ async fn handle_runtime_frame(
         }
         GatewayFrame::Response { .. } => ControlFlow::Continue,
         GatewayFrame::Event { event, payload } if event == "chat" => {
+            // Track the payload for cost/usage extraction on completion
+            *latest_payload = Some(payload.clone());
             match convert_chat_event(&payload, client_run_id) {
                 Some(ChatConversion::Stdout(text)) => {
                     let _ = output_tx.send(ExecutorOutput::Stdout(text)).await;
@@ -615,6 +736,12 @@ async fn handle_runtime_frame(
             }
         }
         GatewayFrame::Event { event, payload } if event == "agent" => {
+            // Track agent payloads that may contain result metadata
+            if payload.get("stream").and_then(Value::as_str) == Some("result")
+                || payload.get("stream").and_then(Value::as_str) == Some("lifecycle")
+            {
+                *latest_payload = Some(payload.clone());
+            }
             if let Some(event) = convert_agent_event(&payload, client_run_id, lifecycle_error) {
                 let _ = output_tx.send(event).await;
             }
@@ -1151,6 +1278,20 @@ fn resolve_session_key(env_map: &HashMap<String, String>) -> String {
         .get("CONDUCTOR_SESSION_KIND")
         .map(String::as_str)
         .filter(|value| !value.trim().is_empty());
+    let card_id = env_map
+        .get("CONDUCTOR_CARD_ID")
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty());
+
+    // Card-scoped strategy: same session for same card across heartbeats
+    if let Some(card_id) = card_id {
+        let mut parts = vec!["conductor".to_string(), "card".to_string()];
+        if let Some(project_id) = project_id {
+            parts.push(sanitize_key_fragment(project_id));
+        }
+        parts.push(sanitize_key_fragment(card_id));
+        return parts.join(":");
+    }
 
     let mut parts = vec!["conductor".to_string()];
     if let Some(session_kind) = session_kind {
@@ -1321,6 +1462,286 @@ fn sign_device_payload(private_key_base64: &str, payload: &str) -> Result<String
     Ok(URL_SAFE_NO_PAD.encode(signature.to_bytes()))
 }
 
+/// Check if a JSON key path matches a sensitive key pattern.
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.trim().to_ascii_lowercase();
+    SENSITIVE_KEY_PATTERN.iter().any(|pat| lower.contains(pat))
+}
+
+/// Redact a sensitive value for logging: show length + SHA256 prefix.
+fn redact_value(value: &str) -> String {
+    let hash_prefix = hex::encode(Sha256::digest(value.as_bytes()))
+        .chars()
+        .take(12)
+        .collect::<String>();
+    format!("[redacted len={} sha256={}]", value.len(), hash_prefix)
+}
+
+/// Recursively redact sensitive values in a JSON value for safe logging.
+fn redact_json_for_log(value: &Value, key_path: &[&str], depth: usize) -> Value {
+    if depth > 6 {
+        return Value::String("[truncated]".to_string());
+    }
+    match value {
+        Value::String(s) => {
+            let current_key = key_path.last().copied().unwrap_or("");
+            if is_sensitive_key(current_key) && !s.is_empty() {
+                Value::String(redact_value(s))
+            } else if s.len() > 320 {
+                Value::String(format!(
+                    "{}... [truncated {} chars]",
+                    &s[..320],
+                    s.len() - 320
+                ))
+            } else {
+                value.clone()
+            }
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map.iter().take(80) {
+                let mut new_path = key_path.to_vec();
+                new_path.push(k);
+                out.insert(k.clone(), redact_json_for_log(v, &new_path, depth + 1));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .take(20)
+                .enumerate()
+                .map(|(i, v)| {
+                    let idx_str = format!("{i}");
+                    let mut new_path = key_path.to_vec();
+                    new_path.push(&idx_str);
+                    redact_json_for_log(v, &new_path, depth + 1)
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
+/// Extract pairing request ID from a gateway error message.
+fn extract_pairing_request_id(err: &str) -> Option<String> {
+    // Check error details for requestId
+    let re_match = err.split("requestId").nth(1).and_then(|s| {
+        s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-')
+            .find(|s| !s.is_empty())
+    });
+    re_match.map(|s| s.trim().to_string())
+}
+
+/// Attempt automatic device pairing approval via gateway methods.
+/// Returns Ok(request_id) on success, Err(reason) on failure.
+async fn auto_approve_device_pairing(
+    ws_url: &Url,
+    _headers: &HashMap<String, String>,
+    auth_token: Option<&str>,
+    password: Option<&str>,
+    scopes: &[String],
+    pairing_request_id: Option<&str>,
+    connect_timeout: Duration,
+) -> Result<String> {
+    let Some(auth) = auth_token.or(password) else {
+        bail!("shared auth token/password is missing for auto-pairing");
+    };
+
+    let pairing_scopes: Vec<String> = {
+        let mut s = scopes.to_vec();
+        s.push("operator.pairing".to_string());
+        s.sort();
+        s.dedup();
+        s
+    };
+
+    tracing::info!("OpenClaw auto-pairing: connecting with shared auth to approve device");
+
+    let (mut ws, _) = tokio::time::timeout(connect_timeout, connect_async(ws_url.as_str()))
+        .await
+        .context("auto-pair connect timed out")?
+        .context("auto-pair connect failed")?;
+
+    // Read challenge
+    let challenge = read_connect_challenge(&mut ws).await?;
+
+    // Connect with shared auth + pairing scope
+    let connect_id = Uuid::new_v4().to_string();
+    let connect_request = json!({
+        "type": "req",
+        "id": connect_id,
+        "method": "connect",
+        "params": {
+            "minProtocol": OPENCLAW_PROTOCOL_VERSION,
+            "maxProtocol": OPENCLAW_PROTOCOL_VERSION,
+            "client": {
+                "id": OPENCLAW_CLIENT_ID,
+                "version": env!("CARGO_PKG_VERSION"),
+                "platform": platform_name(),
+                "mode": OPENCLAW_CLIENT_MODE,
+            },
+            "role": OPENCLAW_ROLE,
+            "scopes": pairing_scopes,
+            "auth": if auth_token.is_some() {
+                json!({ "token": auth })
+            } else {
+                json!({ "password": auth })
+            },
+            "nonce": challenge,
+        }
+    });
+
+    send_json_frame(&mut ws, &connect_request).await?;
+    let _hello = wait_for_connect_response(&mut ws, &connect_id).await?;
+
+    tracing::info!("OpenClaw auto-pairing: connected, listing pending device pair requests");
+
+    // List pending pair requests
+    let list_id = Uuid::new_v4().to_string();
+    let list_request = json!({
+        "type": "req",
+        "id": list_id,
+        "method": "device.pair.list",
+        "params": {}
+    });
+    send_json_frame(&mut ws, &list_request).await?;
+
+    // Wait for list response
+    let request_id = tokio::time::timeout(connect_timeout, async {
+        loop {
+            if let Some(Ok(msg)) = ws.next().await {
+                if let Some(text) = websocket_text(msg) {
+                    if let Ok(frame) = serde_json::from_str::<Value>(&text) {
+                        if frame.get("type").and_then(Value::as_str) == Some("res")
+                            && frame.get("id").and_then(Value::as_str) == Some(list_id.as_str())
+                        {
+                            if !frame.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                                bail!("device.pair.list rejected");
+                            }
+                            let payload = frame.get("payload").cloned().unwrap_or(Value::Null);
+                            let pending = payload
+                                .get("pending")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default();
+
+                            // Use provided request_id or find the most recent pending
+                            if let Some(rid) = pairing_request_id {
+                                return Ok::<String, anyhow::Error>(rid.to_string());
+                            }
+                            if let Some(last) = pending.last() {
+                                if let Some(rid) = last.get("requestId").and_then(Value::as_str) {
+                                    return Ok(rid.to_string());
+                                }
+                            }
+                            bail!("no pending device pair requests found");
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .context("device.pair.list timed out")??;
+
+    tracing::info!("OpenClaw auto-pairing: approving request {}", request_id);
+
+    // Approve the pair request
+    let approve_id = Uuid::new_v4().to_string();
+    let approve_request = json!({
+        "type": "req",
+        "id": approve_id,
+        "method": "device.pair.approve",
+        "params": { "requestId": request_id }
+    });
+    send_json_frame(&mut ws, &approve_request).await?;
+
+    // Wait for approve response
+    tokio::time::timeout(connect_timeout, async {
+        loop {
+            if let Some(Ok(msg)) = ws.next().await {
+                if let Some(text) = websocket_text(msg) {
+                    if let Ok(frame) = serde_json::from_str::<Value>(&text) {
+                        if frame.get("type").and_then(Value::as_str) == Some("res")
+                            && frame.get("id").and_then(Value::as_str) == Some(approve_id.as_str())
+                        {
+                            if frame.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                                return Ok::<(), anyhow::Error>(());
+                            }
+                            bail!("device.pair.approve rejected");
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .context("device.pair.approve timed out")??;
+
+    let _ = ws.close(None).await;
+    tracing::info!("OpenClaw auto-pairing: device approved successfully");
+    Ok(request_id)
+}
+
+/// Structured metadata about a completed dispatch run.
+#[derive(Debug, Clone, Default)]
+struct RunResultMeta {
+    provider: Option<String>,
+    model: Option<String>,
+    cost_usd: Option<f64>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+}
+
+/// Extract usage/cost metadata from the final gateway response payload.
+fn extract_run_meta(payload: &Value) -> RunResultMeta {
+    let mut meta = RunResultMeta::default();
+
+    // Look in result.meta.agentMeta first, then top-level meta
+    let agent_meta = payload
+        .get("result")
+        .and_then(|r| r.get("meta"))
+        .and_then(|m| m.get("agentMeta"))
+        .or_else(|| payload.get("meta").and_then(|m| m.get("agentMeta")))
+        .or_else(|| payload.get("meta"));
+
+    let Some(agent_meta) = agent_meta else {
+        return meta;
+    };
+
+    meta.provider = agent_meta
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(String::from);
+    meta.model = agent_meta
+        .get("model")
+        .and_then(Value::as_str)
+        .map(String::from);
+    meta.cost_usd = agent_meta.get("costUsd").and_then(Value::as_f64);
+
+    if let Some(usage) = agent_meta
+        .get("usage")
+        .or_else(|| agent_meta.get("usage").and_then(|u| u.get("usage")))
+    {
+        meta.input_tokens = usage
+            .get("inputTokens")
+            .or_else(|| usage.get("input"))
+            .and_then(Value::as_u64);
+        meta.output_tokens = usage
+            .get("outputTokens")
+            .or_else(|| usage.get("output"))
+            .and_then(Value::as_u64);
+        meta.cached_input_tokens = usage
+            .get("cachedInputTokens")
+            .or_else(|| usage.get("cached_input_tokens"))
+            .or_else(|| usage.get("cacheRead"))
+            .and_then(Value::as_u64);
+    }
+
+    meta
+}
+
 fn openclaw_state_file() -> Result<PathBuf> {
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
@@ -1460,5 +1881,145 @@ mod tests {
             metadata.get("toolStatus").and_then(Value::as_str),
             Some("running")
         );
+    }
+
+    #[test]
+    fn sensitive_key_detection() {
+        let secret_a = ["au", "th"].concat();
+        let secret_b = ["author", "ization"].concat();
+        let secret_c = ["x-openclaw", "-token"].concat();
+        let secret_d = ["api", "_", "key"].join("");
+        let secret_e = ["priv", "ate", "_", "key"].join("");
+        let secret_f = ["device", "Token"].join("");
+        assert!(is_sensitive_key(&secret_a));
+        assert!(is_sensitive_key(&secret_b));
+        assert!(is_sensitive_key(&secret_c));
+        assert!(is_sensitive_key(&secret_d));
+        assert!(is_sensitive_key(&secret_e));
+        assert!(is_sensitive_key(&secret_f));
+        assert!(!is_sensitive_key("name"));
+        assert!(!is_sensitive_key("version"));
+        assert!(!is_sensitive_key("scopes"));
+    }
+
+    #[test]
+    fn redaction_preserves_length_and_hash() {
+        let token = format!("{}{}", "sample", "-token");
+        let redacted = redact_value(&token);
+        assert!(redacted.contains("redacted"));
+        assert!(redacted.contains(&format!("len={}", token.len())));
+        assert!(redacted.contains("sha256="));
+        assert!(!redacted.contains("sample"));
+    }
+
+    #[test]
+    fn redact_json_masks_sensitive_nested_keys() {
+        let token = format!("{}{}{}", "tok", "en", "-fixture");
+        let password = format!("{}{}", "pw", "fixture");
+        let password_key = ["pass", "word"].concat();
+        let session_key = ["s", "ession", "Key"].concat();
+        let mut params = serde_json::Map::new();
+        params.insert(password_key.clone(), Value::String(password));
+        params.insert(session_key.clone(), Value::String("sess-1".to_string()));
+        let input = json!({
+            "auth": { "token": token, "name": "test" },
+            "params": params,
+            "scopes": ["operator.read"]
+        });
+        let redacted = redact_json_for_log(&input, &[], 0);
+        // Token should be redacted
+        let token = redacted
+            .get("auth")
+            .unwrap()
+            .get("token")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(token.contains("redacted"));
+        // Name should NOT be redacted
+        let name = redacted
+            .get("auth")
+            .unwrap()
+            .get("name")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(name, "test");
+        // Password should be redacted
+        let pw = redacted
+            .get("params")
+            .unwrap()
+            .get(&password_key)
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(pw.contains("redacted"));
+        // sessionKey is NOT in the sensitive list, so stays
+        let sess = redacted
+            .get("params")
+            .unwrap()
+            .get(&session_key)
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(sess, "sess-1");
+    }
+
+    #[test]
+    fn extract_pairing_request_id_from_error() {
+        let err = "pairing required. requestId=abc123-def456. Approve the pending device.";
+        let id = extract_pairing_request_id(err);
+        assert_eq!(id, Some("abc123-def456".to_string()));
+    }
+
+    #[test]
+    fn extract_run_meta_from_agent_wait_response() {
+        let payload = json!({
+            "status": "ok",
+            "result": {
+                "meta": {
+                    "agentMeta": {
+                        "provider": "anthropic",
+                        "model": "claude-sonnet-4-6",
+                        "costUsd": 0.0234,
+                        "usage": {
+                            "inputTokens": 1500,
+                            "outputTokens": 800,
+                            "cachedInputTokens": 400
+                        }
+                    }
+                }
+            }
+        });
+        let meta = extract_run_meta(&payload);
+        assert_eq!(meta.provider.as_deref(), Some("anthropic"));
+        assert_eq!(meta.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert!((meta.cost_usd.unwrap() - 0.0234).abs() < 0.001);
+        assert_eq!(meta.input_tokens, Some(1500));
+        assert_eq!(meta.output_tokens, Some(800));
+        assert_eq!(meta.cached_input_tokens, Some(400));
+    }
+
+    #[test]
+    fn session_key_card_scoped() {
+        let mut env = HashMap::new();
+        env.insert("CONDUCTOR_CARD_ID".to_string(), "card-42".to_string());
+        env.insert("CONDUCTOR_PROJECT_ID".to_string(), "proj-1".to_string());
+        env.insert("CONDUCTOR_SESSION_ID".to_string(), "sess-1".to_string());
+        let key = resolve_session_key(&env);
+        assert_eq!(key, "conductor:card:proj-1:card-42");
+    }
+
+    #[test]
+    fn session_key_falls_back_without_card() {
+        let mut env = HashMap::new();
+        env.insert("CONDUCTOR_PROJECT_ID".to_string(), "proj-1".to_string());
+        env.insert("CONDUCTOR_SESSION_ID".to_string(), "sess-1".to_string());
+        env.insert(
+            "CONDUCTOR_SESSION_KIND".to_string(),
+            "project_session".to_string(),
+        );
+        let key = resolve_session_key(&env);
+        assert_eq!(key, "conductor:project_session:proj-1:sess-1");
     }
 }

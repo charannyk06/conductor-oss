@@ -9,6 +9,7 @@ export type KnownAgent = {
   installHint?: string;
   installUrl?: string;
   setupUrl?: string;
+  surfaces?: Array<"terminal" | "dispatcher">;
 };
 
 export const KNOWN_AGENTS: KnownAgent[] = [
@@ -71,6 +72,19 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     installUrl: "https://www.ampcode.com",
   },
   {
+    name: "hermes",
+    label: "Hermes",
+    description: "Nous Research Hermes Agent CLI",
+    homepage: "https://hermes-agent.nousresearch.com/",
+    iconUrl: "/agents/hermes.png",
+    installHint:
+      "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+    installUrl:
+      "https://hermes-agent.nousresearch.com/docs/getting-started/installation/",
+    setupUrl:
+      "https://hermes-agent.nousresearch.com/docs/getting-started/installation/",
+  },
+  {
     name: "opencode",
     label: "OpenCode",
     description: "OpenCode CLI",
@@ -88,6 +102,7 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     installHint: "Configure the gateway URL in the dispatcher UI",
     installUrl: "https://github.com/openclaw/openclaw",
     setupUrl: "https://github.com/openclaw/openclaw",
+    surfaces: ["dispatcher"],
   },
   {
     name: "github-copilot",
@@ -132,4 +147,46 @@ export function getKnownAgentOrderIndex(value: string): number {
   const normalized = normalizeAgentName(value);
   const index = KNOWN_AGENT_ORDER.findIndex((agent) => normalizeAgentName(agent) === normalized);
   return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
+}
+
+export function supportsTerminalSessions(value: string): boolean {
+  const known = getKnownAgent(value);
+  if (!known) {
+    return true;
+  }
+  return known.surfaces?.includes("terminal") ?? true;
+}
+
+export function filterTerminalAgentNames(values: Iterable<string>): string[] {
+  const filtered: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || !supportsTerminalSessions(trimmed)) {
+      continue;
+    }
+    const normalized = normalizeAgentName(trimmed);
+    if (seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    filtered.push(trimmed);
+  }
+
+  return filtered;
+}
+
+export function resolveTerminalAgent(value: string | null | undefined, fallback: string): string {
+  const trimmedValue = typeof value === "string" ? value.trim() : "";
+  if (trimmedValue && supportsTerminalSessions(trimmedValue)) {
+    return trimmedValue;
+  }
+
+  const trimmedFallback = fallback.trim();
+  if (trimmedFallback && supportsTerminalSessions(trimmedFallback)) {
+    return trimmedFallback;
+  }
+
+  return KNOWN_AGENTS.find((agent) => supportsTerminalSessions(agent.name))?.name ?? "codex";
 }

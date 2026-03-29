@@ -16,6 +16,7 @@ type AgentIconKey =
   | "cursor"
   | "droid"
   | "gemini"
+  | "openclaw"
   | "opencode"
   | "qwen";
 
@@ -38,6 +39,7 @@ const AGENT_ICON_ALIASES: Record<AgentIconKey, string[]> = {
   cursor: ["cursor", "cursor-cli", "cursor-agent", "cursoragent", "agent-cursor-cli"],
   droid: ["droid", "factory-droid", "factory_droid", "agent-droid"],
   gemini: ["gemini", "gemini-cli", "google-gemini", "googlegemini", "agent-gemini"],
+  openclaw: ["openclaw", "open-claw", "open_claw", "agent-openclaw"],
   opencode: ["opencode", "open-code", "open_code", "open-code-cli", "agent-opencode"],
   qwen: ["qwen", "qwen-code", "qwen_code", "qwen-code-cli", "agent-qwen-code"],
 };

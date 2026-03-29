@@ -30,6 +30,7 @@ pub enum AgentKind {
     Codex,
     Gemini,
     Amp,
+    Hermes,
     CursorCli,
     OpenCode,
     OpenClaw,
@@ -48,6 +49,7 @@ impl AgentKind {
             "codex" => Self::Codex,
             "gemini" => Self::Gemini,
             "amp" => Self::Amp,
+            "hermes" | "hermes-agent" => Self::Hermes,
             "cursor" | "cursor-cli" => Self::CursorCli,
             "opencode" => Self::OpenCode,
             "openclaw" => Self::OpenClaw,
@@ -67,6 +69,7 @@ impl std::fmt::Display for AgentKind {
             Self::Codex => write!(f, "codex"),
             Self::Gemini => write!(f, "gemini"),
             Self::Amp => write!(f, "amp"),
+            Self::Hermes => write!(f, "hermes"),
             Self::CursorCli => write!(f, "cursor-cli"),
             Self::OpenCode => write!(f, "opencode"),
             Self::OpenClaw => write!(f, "openclaw"),
@@ -422,6 +425,7 @@ mod tests {
         assert_eq!(AgentKind::QwenCode.to_string(), "qwen-code");
         assert_eq!(AgentKind::GithubCopilot.to_string(), "github-copilot");
         assert_eq!(AgentKind::OpenClaw.to_string(), "openclaw");
+        assert_eq!(AgentKind::Hermes.to_string(), "hermes");
         assert_eq!(
             AgentKind::Custom("my-agent".to_string()).to_string(),
             "my-agent"
@@ -442,6 +446,8 @@ mod tests {
         assert_eq!(AgentKind::parse("claude-code"), AgentKind::ClaudeCode);
         assert_eq!(AgentKind::parse("claude"), AgentKind::ClaudeCode);
         assert_eq!(AgentKind::parse("codex"), AgentKind::Codex);
+        assert_eq!(AgentKind::parse("hermes"), AgentKind::Hermes);
+        assert_eq!(AgentKind::parse("hermes-agent"), AgentKind::Hermes);
         assert_eq!(AgentKind::parse("openclaw"), AgentKind::OpenClaw);
         assert_eq!(AgentKind::parse("qwen-code"), AgentKind::QwenCode);
         assert_eq!(AgentKind::parse("qwen"), AgentKind::QwenCode);

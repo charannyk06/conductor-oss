@@ -56,9 +56,11 @@ import {
 import type { DashboardBridgeConnection, DashboardSession } from "@/lib/types";
 import { normalizeAgentName } from "@/lib/agentUtils";
 import {
+  filterTerminalAgentNames,
   getKnownAgent,
   KNOWN_AGENTS,
   KNOWN_AGENT_ORDER,
+  resolveTerminalAgent,
 } from "@/lib/knownAgents";
 import { useSession } from "@/hooks/useSession";
 import { useSessions } from "@/hooks/useSessions";
@@ -554,9 +556,10 @@ function normalizePreferences(value: unknown, fallbackAgent: string): Preference
   const payload = toObject(value);
   const notifications = toObject(payload["notifications"]);
   const soundFileRaw = notifications["soundFile"];
-  const codingAgent = typeof payload["codingAgent"] === "string" && payload["codingAgent"].trim().length > 0
+  const rawCodingAgent = typeof payload["codingAgent"] === "string" && payload["codingAgent"].trim().length > 0
     ? payload["codingAgent"].trim()
     : fallbackAgent;
+  const codingAgent = resolveTerminalAgent(rawCodingAgent, fallbackAgent);
   const ide = typeof payload["ide"] === "string" && payload["ide"].trim().length > 0
     ? payload["ide"].trim()
     : "vscode";
@@ -1470,7 +1473,11 @@ export default function DashboardClient({
     if (opts.size === 0) {
       opts.add(preferences?.codingAgent || DEFAULT_AGENT);
     }
-    return [...opts];
+    const filtered = filterTerminalAgentNames(opts);
+    if (filtered.length === 0) {
+      filtered.push(resolveTerminalAgent(preferences?.codingAgent || DEFAULT_AGENT, DEFAULT_AGENT));
+    }
+    return filtered;
   }, [agents, preferences?.codingAgent, projects, selectedAgent]);
 
   const agentStatesByName = useMemo(() => {
@@ -1635,7 +1642,10 @@ export default function DashboardClient({
   }, [agentOptions, preferences?.codingAgent, selectedAgent]);
 
   useEffect(() => {
-    const effectiveAgent = selectedAgent || selectedProject?.agent || preferences?.codingAgent || DEFAULT_AGENT;
+    const effectiveAgent = resolveTerminalAgent(
+      selectedAgent || selectedProject?.agent || preferences?.codingAgent || DEFAULT_AGENT,
+      DEFAULT_AGENT,
+    );
     const preferredModel = selectedProject && normalizeAgentName(selectedProject.agent) === normalizeAgentName(effectiveAgent)
       ? selectedProject.agentModel
       : null;
@@ -1732,7 +1742,7 @@ export default function DashboardClient({
       return false;
     }
 
-    const effectiveAgent = selectedAgent || DEFAULT_AGENT;
+    const effectiveAgent = resolveTerminalAgent(selectedAgent || DEFAULT_AGENT, DEFAULT_AGENT);
     const selectedAgentState = agentStatesByName[normalizeAgentName(effectiveAgent)] ?? null;
     if (selectedAgentState && !selectedAgentState.ready) {
       setCreateError(
@@ -1885,7 +1895,10 @@ export default function DashboardClient({
     && (!requiresPairedDeviceScope || Boolean(effectiveBridgeId))
     && !preferences.onboardingAcknowledged;
   const resolvedPreferences = preferences ?? normalizePreferences(null, selectedAgent || DEFAULT_AGENT);
-  const resolvedCodingAgent = selectedAgent || resolvedPreferences.codingAgent || DEFAULT_AGENT;
+  const resolvedCodingAgent = resolveTerminalAgent(
+    selectedAgent || resolvedPreferences.codingAgent || DEFAULT_AGENT,
+    DEFAULT_AGENT,
+  );
   const notificationProjectId = selectedProjectId ?? selectedSessionRecord?.projectId ?? null;
 
   useNotificationAlerts({
@@ -1905,7 +1918,7 @@ export default function DashboardClient({
       },
       "push",
     );
-    setSelectedAgent(preferences?.codingAgent || DEFAULT_AGENT);
+    setSelectedAgent(resolveTerminalAgent(preferences?.codingAgent || DEFAULT_AGENT, DEFAULT_AGENT));
     setBoardMobilePane("board");
     closeSidebarOnMobile();
   }, [closeSidebarOnMobile, navigateDashboard, preferences?.codingAgent, workspaceView]);

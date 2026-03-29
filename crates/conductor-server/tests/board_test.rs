@@ -350,6 +350,100 @@ async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
 }
 
 #[tokio::test]
+async fn dispatcher_preferences_route_persists_openclaw_runtime_settings() {
+    let harness = TestHarness::new("dispatcher-openclaw-preferences-route-test", "ttyd").await;
+    let app = build_app(harness.state.clone());
+    let gateway_token = ["gateway", "-token-", "123"].concat();
+    let session_key = ["paperclip:", "issue", ":123"].concat();
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "forceNew": true,
+                        "dispatcherAgent": "openclaw",
+                        "implementationAgent": "openclaw",
+                        "openclawGatewayUrl": "ws://127.0.0.1:18789",
+                        "openclawGatewayToken": gateway_token.clone(),
+                        "openclawGatewayScopes": "operator.admin",
+                        "openclawSessionKey": session_key.clone(),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: Value = serde_json::from_slice(&create_body).unwrap();
+    let thread_id = create_payload["thread"]["id"]
+        .as_str()
+        .expect("dispatcher thread id should be present")
+        .to_string();
+
+    assert_eq!(
+        create_payload["thread"]["metadata"]["openclawGatewayUrl"].as_str(),
+        Some("ws://127.0.0.1:18789")
+    );
+    assert_eq!(
+        create_payload["thread"]["metadata"]["openclawGatewayTokenConfigured"].as_str(),
+        Some("true")
+    );
+    assert_eq!(
+        create_payload["thread"]["metadata"]["openclawGatewayScopes"].as_str(),
+        Some("operator.admin")
+    );
+    assert_eq!(
+        create_payload["thread"]["metadata"]["openclawSessionKey"].as_str(),
+        Some(session_key.as_str())
+    );
+
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/projects/demo/dispatcher/preferences?threadId={thread_id}"
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "openclawGatewayToken": "",
+                        "openclawGatewayScopes": "operator.read,operator.write",
+                        "openclawSessionKey": "conductor:project_dispatcher:demo:dispatcher-1"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let update_body = axum::body::to_bytes(update_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let update_payload: Value = serde_json::from_slice(&update_body).unwrap();
+    assert!(update_payload["thread"]["metadata"]["openclawGatewayTokenConfigured"].is_null());
+    assert_eq!(
+        update_payload["thread"]["metadata"]["openclawGatewayScopes"].as_str(),
+        Some("operator.read,operator.write")
+    );
+    assert_eq!(
+        update_payload["thread"]["metadata"]["openclawSessionKey"].as_str(),
+        Some("conductor:project_dispatcher:demo:dispatcher-1")
+    );
+}
+
+#[tokio::test]
 async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
     let harness = TestHarness::new("conductor-board-route-test", "ttyd").await;
     fs::write(
