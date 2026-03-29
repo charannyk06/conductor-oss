@@ -2,16 +2,21 @@
 
 import type { AppUpdateStatus, SSESessionEvent, SSESnapshotSession } from "@/lib/types";
 import { resolveBridgeIdFromLocation, withBridgeQuery } from "@/lib/bridgeQuery";
+import { iterateSseFrames } from "@/lib/sseFetch";
 
 type SnapshotListener = (event: SSESessionEvent) => void;
 type AppUpdateListener = (update: AppUpdateStatus | null) => void;
 
 const listeners = new Set<SnapshotListener>();
 const appUpdateListeners = new Set<AppUpdateListener>();
-let eventSource: EventSource | null = null;
 let refreshInFlight: Promise<void> | null = null;
 let focusHandler: (() => void) | null = null;
 let visibilityHandler: (() => void) | null = null;
+
+/** Active fetch stream to /api/events; aborted when tearing down or reconnecting */
+let eventsStreamAbort: AbortController | null = null;
+let eventsReconnectTimer: number | null = null;
+let eventsReconnectAttempt = 0;
 
 function hasSubscribers() {
   return listeners.size > 0 || appUpdateListeners.size > 0;
@@ -19,14 +24,6 @@ function hasSubscribers() {
 
 function pageVisible() {
   return typeof document === "undefined" || document.visibilityState === "visible";
-}
-
-function closeEventSource() {
-  if (!eventSource) {
-    return;
-  }
-  eventSource.close();
-  eventSource = null;
 }
 
 function normalizeSessionArray(value: unknown): SSESessionEvent | null {
@@ -122,10 +119,103 @@ async function refreshSessions() {
   await load;
 }
 
-function ensureEventSource() {
+function clearEventsReconnectTimer() {
+  if (eventsReconnectTimer !== null) {
+    window.clearTimeout(eventsReconnectTimer);
+    eventsReconnectTimer = null;
+  }
+}
+
+function handleEventsSseFrame(frame: { event: string | null; data: string }) {
+  if (frame.event === "refresh") {
+    if (!refreshInFlight) {
+      void refreshSessions();
+    } else {
+      void refreshInFlight;
+    }
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(frame.data) as unknown;
+  } catch {
+    return;
+  }
+
   if (
-    eventSource
-    || typeof EventSource === "undefined"
+    parsed
+    && typeof parsed === "object"
+    && (parsed as { type?: string }).type === "refresh"
+  ) {
+    if (!refreshInFlight) {
+      void refreshSessions();
+    } else {
+      void refreshInFlight;
+    }
+    return;
+  }
+
+  const payload = normalizeSessionArray(parsed);
+  if (!payload) return;
+  dispatchSnapshots(payload);
+}
+
+function scheduleEventsStreamReconnect() {
+  if (!hasSubscribers() || !pageVisible() || currentBridgeId()) {
+    return;
+  }
+  clearEventsReconnectTimer();
+  const delay =
+    eventsReconnectAttempt === 0
+      ? 250
+      : Math.min(400 * 2 ** (eventsReconnectAttempt - 1), 12_000);
+  eventsReconnectAttempt += 1;
+  eventsReconnectTimer = window.setTimeout(() => {
+    eventsReconnectTimer = null;
+    ensureEventsStream();
+  }, delay);
+}
+
+function closeEventsStream() {
+  clearEventsReconnectTimer();
+  eventsReconnectAttempt = 0;
+  eventsStreamAbort?.abort();
+  eventsStreamAbort = null;
+}
+
+async function runEventsStream(ac: AbortController) {
+  try {
+    const response = await fetch("/api/events", {
+      cache: "no-store",
+      signal: ac.signal,
+    });
+    if (!response.ok || !response.body) {
+      if (!ac.signal.aborted) {
+        scheduleEventsStreamReconnect();
+      }
+      return;
+    }
+
+    eventsReconnectAttempt = 0;
+    for await (const frame of iterateSseFrames(response.body, ac.signal)) {
+      handleEventsSseFrame(frame);
+    }
+
+    if (!ac.signal.aborted) {
+      scheduleEventsStreamReconnect();
+    }
+  } catch {
+    if (!ac.signal.aborted) {
+      scheduleEventsStreamReconnect();
+    }
+  }
+}
+
+function ensureEventsStream() {
+  if (
+    typeof fetch === "undefined"
+    || eventsStreamAbort
     || !hasSubscribers()
     || !pageVisible()
     || currentBridgeId()
@@ -133,30 +223,17 @@ function ensureEventSource() {
     return;
   }
 
-  eventSource = new EventSource("/api/events");
-  eventSource.onmessage = (event) => {
+  const ac = new AbortController();
+  eventsStreamAbort = ac;
+  void (async () => {
     try {
-      const payload = normalizeSessionArray(JSON.parse(event.data as string));
-      if (!payload) return;
-      dispatchSnapshots(payload);
-    } catch {
-      // Ignore malformed snapshot events.
+      await runEventsStream(ac);
+    } finally {
+      if (eventsStreamAbort === ac) {
+        eventsStreamAbort = null;
+      }
     }
-  };
-
-  eventSource.addEventListener("refresh", () => {
-    if (!refreshInFlight) {
-      void refreshSessions();
-    } else {
-      void refreshInFlight;
-    }
-  });
-
-  eventSource.onerror = () => {
-    if (!hasSubscribers() || !pageVisible()) {
-      closeEventSource();
-    }
-  };
+  })();
 }
 
 function attachLifecycleListeners() {
@@ -168,7 +245,7 @@ function attachLifecycleListeners() {
     if (!hasSubscribers() || !pageVisible()) {
       return;
     }
-    ensureEventSource();
+    ensureEventsStream();
     if (!refreshInFlight) {
       void refreshSessions();
     }
@@ -176,14 +253,14 @@ function attachLifecycleListeners() {
 
   visibilityHandler = () => {
     if (!hasSubscribers()) {
-      closeEventSource();
+      closeEventsStream();
       return;
     }
     if (!pageVisible()) {
-      closeEventSource();
+      closeEventsStream();
       return;
     }
-    ensureEventSource();
+    ensureEventsStream();
     if (!refreshInFlight) {
       void refreshSessions();
     }
@@ -206,20 +283,20 @@ function detachLifecycleListeners() {
 
 function syncLifecycleState() {
   if (!hasSubscribers()) {
-    closeEventSource();
+    closeEventsStream();
     detachLifecycleListeners();
     return;
   }
   attachLifecycleListeners();
   if (currentBridgeId()) {
-    closeEventSource();
+    closeEventsStream();
     return;
   }
   if (!pageVisible()) {
-    closeEventSource();
+    closeEventsStream();
     return;
   }
-  ensureEventSource();
+  ensureEventsStream();
 }
 
 export function subscribeToSnapshotEvents(listener: SnapshotListener): () => void {

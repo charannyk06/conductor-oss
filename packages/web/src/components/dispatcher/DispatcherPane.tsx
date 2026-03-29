@@ -443,6 +443,7 @@ export function DispatcherPane({
           stream: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/feed/stream?limit=120&${threadQuery}`,
           send: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/send?${threadQuery}`,
           interrupt: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/interrupt?${threadQuery}`,
+          integration: `/api/projects/${encodeURIComponent(projectId)}/dispatcher/integration?${threadQuery}`,
         }}
       />
       {confirmDeleteThread ? (
