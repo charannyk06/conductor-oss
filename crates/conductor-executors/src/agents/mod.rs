@@ -12,8 +12,8 @@ pub mod copilot;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
-pub mod openclaw;
 pub mod opencode;
+pub mod openclaw;
 pub mod qwen;
 
 pub use amp::AmpExecutor;
@@ -24,8 +24,8 @@ pub use copilot::CopilotExecutor;
 pub use cursor::CursorExecutor;
 pub use droid::DroidExecutor;
 pub use gemini::GeminiExecutor;
-pub use openclaw::OpenClawExecutor;
 pub use opencode::OpenCodeExecutor;
+pub use openclaw::OpenClawExecutor;
 pub use qwen::QwenCodeExecutor;
 
 fn push_search_dir(seen: &mut HashSet<PathBuf>, dirs: &mut Vec<PathBuf>, dir: PathBuf) {

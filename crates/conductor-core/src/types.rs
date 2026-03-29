@@ -421,6 +421,7 @@ mod tests {
         assert_eq!(AgentKind::ClaudeCode.to_string(), "claude-code");
         assert_eq!(AgentKind::QwenCode.to_string(), "qwen-code");
         assert_eq!(AgentKind::GithubCopilot.to_string(), "github-copilot");
+        assert_eq!(AgentKind::OpenClaw.to_string(), "openclaw");
         assert_eq!(
             AgentKind::Custom("my-agent".to_string()).to_string(),
             "my-agent"
@@ -441,6 +442,7 @@ mod tests {
         assert_eq!(AgentKind::parse("claude-code"), AgentKind::ClaudeCode);
         assert_eq!(AgentKind::parse("claude"), AgentKind::ClaudeCode);
         assert_eq!(AgentKind::parse("codex"), AgentKind::Codex);
+        assert_eq!(AgentKind::parse("openclaw"), AgentKind::OpenClaw);
         assert_eq!(AgentKind::parse("qwen-code"), AgentKind::QwenCode);
         assert_eq!(AgentKind::parse("qwen"), AgentKind::QwenCode);
         assert_eq!(AgentKind::parse("copilot"), AgentKind::GithubCopilot);
