@@ -307,6 +307,7 @@ impl AppState {
                         bridge_id: bridge_id.clone(),
                         dispatcher_agent: input.dispatcher_agent.clone(),
                         implementation_agent: input.implementation_agent.clone(),
+                        openclaw_gateway_url: None,
                         dispatcher_model: input.dispatcher_model.clone(),
                         dispatcher_reasoning_effort: input.dispatcher_reasoning_effort.clone(),
                         implementation_model: input.implementation_model.clone(),

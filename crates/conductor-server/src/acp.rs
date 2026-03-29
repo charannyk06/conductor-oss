@@ -239,6 +239,7 @@ impl AcpServer {
                     bridge_id: None,
                     dispatcher_agent: session_meta.dispatcher_agent,
                     implementation_agent: session_meta.implementation_agent,
+                    openclaw_gateway_url: None,
                     dispatcher_model,
                     dispatcher_reasoning_effort,
                     implementation_model: session_meta.model,
