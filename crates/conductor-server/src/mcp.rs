@@ -731,7 +731,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_DISPATCHER_CREATE_TASK.to_string(),
-            description: "Create a new first-class dispatcher task for a project. The board remains the projection surface, but ACP dispatchers must provide a launch-ready handoff packet, current-turn file attachments are inherited automatically, and `surfaces` plus `skills` should name the exact reference files and worker guidance required to execute the task.".to_string(),
+            description: "Create a new first-class dispatcher task for a project. The board remains the projection surface, but ACP dispatchers must provide a launch-ready handoff packet, current-turn file attachments are inherited automatically, and `surfaces` plus `skills` should name the exact reference files and worker guidance required to execute the task. Dispatcher sessions must use this tool instead of editing `CONDUCTOR.md` or `.conductor/tasks/*.md` directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -764,7 +764,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_DISPATCHER_UPDATE_TASK.to_string(),
-            description: "Update an existing first-class dispatcher task by task ID, task ref, or linked issue ID. The updated task is then projected back onto the Conductor board.".to_string(),
+            description: "Update an existing first-class dispatcher task by task ID, task ref, or linked issue ID. The updated task is then projected back onto the Conductor board. Dispatcher sessions must use this tool instead of editing `CONDUCTOR.md` or `.conductor/tasks/*.md` directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -801,7 +801,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: TOOL_DISPATCHER_HANDOFF_TASK.to_string(),
-            description: "Explicitly hand off an existing dispatcher task for execution. This validates the execution packet, updates the task, and by default moves it into the ready column so it can be launched from the card.".to_string(),
+            description: "Explicitly hand off an existing dispatcher task for execution. This validates the execution packet, updates the task, and by default moves it into the ready column so it can be launched from the card. Dispatcher sessions must use this tool instead of editing `CONDUCTOR.md` or `.conductor/tasks/*.md` directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

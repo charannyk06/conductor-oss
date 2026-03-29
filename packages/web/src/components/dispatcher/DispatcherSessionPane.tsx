@@ -33,7 +33,12 @@ import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { cn } from "@/lib/cn";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { buildSessionHref } from "@/lib/dashboardHref";
+import {
+  dispatchProjectBoardRefresh,
+  findDispatcherBoardRefreshReason,
+} from "@/lib/dispatcherBoardRefresh";
 import { getKnownAgent, KNOWN_AGENTS } from "@/lib/knownAgents";
+import { iterateSseFrames } from "@/lib/sseFetch";
 import { isDispatcherFeedNearBottom } from "@/components/dispatcher/dispatcherFeedScroll";
 import type { TerminalInsertRequest } from "@/components/sessions/terminalInsert";
 import type { DashboardSession } from "@/lib/types";
@@ -59,6 +64,24 @@ type SessionParserState = {
   command: string | null;
 };
 
+type DispatcherFeedIntegration = {
+  projectId: string;
+  threadId: string;
+  bridgeId: string | null;
+  openclaw: {
+    threadId: string | null;
+    sessionId: string | null;
+  };
+  heartbeat: {
+    state: string | null;
+    nextAt: string | null;
+  };
+  memory: {
+    projectPath: string | null;
+    sessionPath: string | null;
+  };
+};
+
 type SessionFeedPayload = {
   entries: SessionFeedEntry[];
   totalEntries: number;
@@ -70,6 +93,7 @@ type SessionFeedPayload = {
   runtimeStatus: SessionRuntimeStatus | null;
   source: string | null;
   error: string | null;
+  integration: DispatcherFeedIntegration | null;
 };
 
 type FeedDeltaEvent =
@@ -85,6 +109,23 @@ type FeedDeltaEvent =
       runtimeStatus: SessionRuntimeStatus | null;
       source: string | null;
       error: string | null;
+      integration: DispatcherFeedIntegration | null;
+    }
+  | {
+      type: "patch";
+      entryId: string;
+      entry: SessionFeedEntry | null;
+      textDelta: string | null;
+      totalEntries: number;
+      windowLimit: number;
+      truncated: boolean;
+      sessionStatus: string | null;
+      approvalState: string | null;
+      parserState: SessionParserState | null;
+      runtimeStatus: SessionRuntimeStatus | null;
+      source: string | null;
+      error: string | null;
+      integration: DispatcherFeedIntegration | null;
     }
   | {
       type: "replace";
@@ -112,6 +153,8 @@ type DispatcherSessionPaneApiPaths = {
   send: string;
   interrupt?: string | null;
   repositories?: string;
+  /** PATCH OpenClaw (or other orchestrator) thread/session binding */
+  integration?: string;
 };
 
 type RepositoryPathHealth = {
@@ -160,6 +203,7 @@ const EMPTY_FEED_PAYLOAD: SessionFeedPayload = {
   runtimeStatus: null,
   source: null,
   error: null,
+  integration: null,
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -224,6 +268,38 @@ function normalizeRuntimeStatus(value: unknown): SessionRuntimeStatus | null {
   return record as SessionRuntimeStatus;
 }
 
+function normalizeIntegration(value: unknown): DispatcherFeedIntegration | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const oc = asRecord(record.openclaw);
+  const hb = asRecord(record.heartbeat);
+  const mem = asRecord(record.memory);
+  const projectId = readString(record.projectId);
+  const threadId = readString(record.threadId);
+  if (!projectId || !threadId) {
+    return null;
+  }
+  return {
+    projectId,
+    threadId,
+    bridgeId: record.bridgeId === null ? null : readString(record.bridgeId),
+    openclaw: {
+      threadId: oc.threadId === null ? null : readString(oc.threadId),
+      sessionId: oc.sessionId === null ? null : readString(oc.sessionId),
+    },
+    heartbeat: {
+      state: hb.state === null ? null : readString(hb.state),
+      nextAt: hb.nextAt === null ? null : readString(hb.nextAt),
+    },
+    memory: {
+      projectPath: mem.projectPath === null ? null : readString(mem.projectPath),
+      sessionPath: mem.sessionPath === null ? null : readString(mem.sessionPath),
+    },
+  };
+}
+
 function normalizeFeedPayload(value: unknown): SessionFeedPayload {
   const record = asRecord(value);
   return {
@@ -239,12 +315,17 @@ function normalizeFeedPayload(value: unknown): SessionFeedPayload {
     runtimeStatus: normalizeRuntimeStatus(record.runtimeStatus),
     source: readString(record.source),
     error: readString(record.error),
+    integration: normalizeIntegration(record.integration),
   };
 }
 
 function normalizeFeedDelta(value: unknown): FeedDeltaEvent | null {
   const record = asRecord(value);
   const type = readString(record.type);
+  /** Backend sends the first SSE frame as a raw feed JSON object (no `type` field). */
+  if (!type && Array.isArray(record.entries)) {
+    return { type: "replace", payload: normalizeFeedPayload(value) };
+  }
   if (type === "replace") {
     return {
       type,
@@ -265,9 +346,111 @@ function normalizeFeedDelta(value: unknown): FeedDeltaEvent | null {
       runtimeStatus: payload.runtimeStatus,
       source: payload.source,
       error: payload.error,
+      integration: payload.integration,
+    };
+  }
+  if (type === "patch") {
+    const entryId = readString(record.entryId);
+    if (!entryId) {
+      return null;
+    }
+    return {
+      type,
+      entryId,
+      entry: normalizeFeedEntry(record.entry),
+      textDelta: typeof record.textDelta === "string" ? record.textDelta : null,
+      totalEntries: typeof record.totalEntries === "number" ? record.totalEntries : 0,
+      windowLimit: typeof record.windowLimit === "number" ? record.windowLimit : 120,
+      truncated: record.truncated === true,
+      sessionStatus: readString(record.sessionStatus),
+      approvalState: readString(record.approvalState),
+      parserState: normalizeParserState(record.parserState),
+      runtimeStatus: normalizeRuntimeStatus(record.runtimeStatus),
+      source: readString(record.source),
+      error: readString(record.error),
+      integration: normalizeIntegration(record.integration),
     };
   }
   return null;
+}
+
+function applyFeedDelta(current: SessionFeedPayload, delta: FeedDeltaEvent): SessionFeedPayload {
+  if (delta.type === "replace") {
+    return delta.payload;
+  }
+
+  if (delta.type === "append") {
+    return {
+      entries: [...current.entries, ...delta.entries],
+      totalEntries: delta.totalEntries,
+      windowLimit: delta.windowLimit,
+      truncated: delta.truncated,
+      sessionStatus: delta.sessionStatus,
+      approvalState: delta.approvalState,
+      parserState: delta.parserState,
+      runtimeStatus: delta.runtimeStatus,
+      source: delta.source,
+      error: delta.error,
+      integration: delta.integration ?? current.integration,
+    };
+  }
+
+  const nextEntry = delta.entry;
+  if (!nextEntry) {
+    return {
+      ...current,
+      totalEntries: delta.totalEntries,
+      windowLimit: delta.windowLimit,
+      truncated: delta.truncated,
+      sessionStatus: delta.sessionStatus,
+      approvalState: delta.approvalState,
+      parserState: delta.parserState,
+      runtimeStatus: delta.runtimeStatus,
+      source: delta.source,
+      error: delta.error,
+      integration: delta.integration ?? current.integration,
+    };
+  }
+
+  const entries = current.entries.slice();
+  let patchIndex = -1;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (entries[index]?.id === delta.entryId) {
+      patchIndex = index;
+      break;
+    }
+  }
+
+  if (patchIndex >= 0) {
+    const existing = entries[patchIndex];
+    if (
+      delta.textDelta !== null
+      && nextEntry.text.startsWith(existing.text)
+    ) {
+      entries[patchIndex] = {
+        ...nextEntry,
+        text: existing.text + delta.textDelta,
+      };
+    } else {
+      entries[patchIndex] = nextEntry;
+    }
+  } else {
+    entries.push(nextEntry);
+  }
+
+  return {
+    entries,
+    totalEntries: delta.totalEntries,
+    windowLimit: delta.windowLimit,
+    truncated: delta.truncated,
+    sessionStatus: delta.sessionStatus,
+    approvalState: delta.approvalState,
+    parserState: delta.parserState,
+    runtimeStatus: delta.runtimeStatus,
+    source: delta.source,
+    error: delta.error,
+    integration: delta.integration ?? current.integration,
+  };
 }
 
 function normalizeRepositorySettings(value: unknown): RepositorySettingsPayload | null {
@@ -1005,19 +1188,11 @@ export function DispatcherSessionPane({
     () => statusLabel.trim().toLowerCase(),
     [statusLabel],
   );
-  const toolCount = useMemo(
-    () => payload.entries.filter((entry) => entry.kind === "tool").length,
-    [payload.entries],
-  );
   const isDispatcher = session.metadata.sessionKind === "project_dispatcher";
   const approvalState = payload.approvalState ?? session.metadata.acpPlanApprovalState ?? null;
   const awaitingApproval = useMemo(
     () => isDispatcher && shouldShowDispatcherApprovalBanner(payload.entries, approvalState, payload.sessionStatus ?? session.status),
     [approvalState, isDispatcher, payload.entries, payload.sessionStatus, session.status],
-  );
-  const messageCount = useMemo(
-    () => payload.entries.filter((entry) => entry.kind !== "tool").length,
-    [payload.entries],
   );
   const showInterruptAction = Boolean(sessionApiPaths.interrupt)
     && INTERRUPTIBLE_SESSION_STATUSES.has(normalizedStatusLabel);
@@ -1087,15 +1262,35 @@ export function DispatcherSessionPane({
   }, [hideRepositoryControls, loadRepository]);
 
   useEffect(() => {
-    const nextUrl = withBridgeQuery(sessionApiPaths.stream, bridgeId);
-    const source = new EventSource(nextUrl);
-    let refreshTimer: number | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+    const streamAbortRef = { current: null as AbortController | null };
 
-    source.onmessage = (event) => {
+    const clearReconnect = () => {
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const applySseData = (raw: string) => {
       let parsed: unknown = null;
       try {
-        parsed = JSON.parse(event.data) as unknown;
+        parsed = JSON.parse(raw) as unknown;
       } catch {
+        void loadFeed();
+        return;
+      }
+
+      const record = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+      if (record?.type === "refresh") {
+        dispatchProjectBoardRefresh({
+          projectId: session.projectId,
+          reason: "dispatcher_feed_refresh",
+        });
         void loadFeed();
         return;
       }
@@ -1105,47 +1300,82 @@ export function DispatcherSessionPane({
         return;
       }
 
-      setPayload((current) => {
-        if (delta.type === "replace") {
-          return delta.payload;
-        }
+      const boardRefreshReason = delta.type === "append"
+        ? findDispatcherBoardRefreshReason(delta.entries)
+        : null;
+      if (boardRefreshReason) {
+        dispatchProjectBoardRefresh({
+          projectId: session.projectId,
+          reason: boardRefreshReason,
+        });
+      }
 
-        return {
-          entries: [...current.entries, ...delta.entries],
-          totalEntries: delta.totalEntries,
-          windowLimit: delta.windowLimit,
-          truncated: delta.truncated,
-          sessionStatus: delta.sessionStatus,
-          approvalState: delta.approvalState,
-          parserState: delta.parserState,
-          runtimeStatus: delta.runtimeStatus,
-          source: delta.source,
-          error: delta.error,
-        };
-      });
+      setPayload((current) => applyFeedDelta(current, delta));
     };
 
-    source.addEventListener("refresh", () => {
-      void loadFeed();
-    });
-
-    source.onerror = () => {
-      if (refreshTimer !== null) {
+    const scheduleReconnect = () => {
+      if (cancelled) {
         return;
       }
-      refreshTimer = window.setTimeout(() => {
-        refreshTimer = null;
-        void loadFeed();
-      }, 250);
+      clearReconnect();
+      const delay =
+        reconnectAttempt === 0
+          ? 250
+          : Math.min(500 * 2 ** (reconnectAttempt - 1), 12_000);
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, delay);
     };
 
-    return () => {
-      if (refreshTimer !== null) {
-        window.clearTimeout(refreshTimer);
+    const connect = async () => {
+      if (cancelled) {
+        return;
       }
-      source.close();
+      streamAbortRef.current?.abort();
+      const ac = new AbortController();
+      streamAbortRef.current = ac;
+      const streamUrl = withBridgeQuery(sessionApiPaths.stream, bridgeId);
+      try {
+        const res = await fetch(streamUrl, {
+          cache: "no-store",
+          signal: ac.signal,
+        });
+        if (!res.ok || !res.body) {
+          if (!cancelled) {
+            void loadFeed();
+            scheduleReconnect();
+          }
+          return;
+        }
+        reconnectAttempt = 0;
+        for await (const frame of iterateSseFrames(res.body, ac.signal)) {
+          if (cancelled) {
+            return;
+          }
+          applySseData(frame.data);
+        }
+        if (!cancelled) {
+          void loadFeed();
+          scheduleReconnect();
+        }
+      } catch {
+        if (!cancelled && !ac.signal.aborted) {
+          void loadFeed();
+          scheduleReconnect();
+        }
+      }
     };
-  }, [bridgeId, loadFeed, sessionApiPaths.stream]);
+
+    void connect();
+
+    return () => {
+      cancelled = true;
+      clearReconnect();
+      streamAbortRef.current?.abort();
+    };
+  }, [bridgeId, loadFeed, session.projectId, sessionApiPaths.stream]);
 
   useEffect(() => {
     autoScrollEnabledRef.current = true;
@@ -1368,52 +1598,31 @@ export function DispatcherSessionPane({
           </div>
         ) : (
           <div ref={feedContentRef} className="space-y-5">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-[12px] text-[var(--vk-text-muted)]">
-              <span className="inline-flex items-center gap-2">
-                <Wrench className="h-3.5 w-3.5" />
-                <span>{toolCount} tool calls, {messageCount} messages</span>
-              </span>
-              {isDispatcher ? (
-                <>
-                  <span className="text-[var(--vk-text-dim)]">•</span>
-                  <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
-                    {approvalState === "approved_for_next_mutation" ? (
-                      <>
-                        <Check className="h-3 w-3" />
-                        <span>Execution enabled</span>
-                      </>
-                    ) : (
-                      <>
-                        <AlertCircle className="h-3 w-3" />
-                        <span>Plan-only mode</span>
-                      </>
-                    )}
-                  </span>
-                </>
-              ) : null}
-              {payload.parserState ? (
-                <>
-                  <span className="text-[var(--vk-text-dim)]">•</span>
-                  <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
-                    <LoaderCircle className="h-3 w-3" />
-                    <span>{payload.parserState.kind}</span>
-                  </span>
-                  {payload.parserState.command ? (
-                    <ExpandableInlineText
-                      value={payload.parserState.command}
-                      maxLength={72}
-                      className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
-                    />
-                  ) : null}
-                </>
-              ) : null}
-              {payload.truncated ? (
-                <>
-                  <span className="text-[var(--vk-text-dim)]">•</span>
-                  <span>Showing latest {payload.windowLimit}</span>
-                </>
-              ) : null}
-            </div>
+            {payload.parserState || payload.truncated ? (
+              <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-[12px] text-[var(--vk-text-muted)]">
+                {payload.parserState ? (
+                  <>
+                    <span className="inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.03)] px-2 py-0.5">
+                      <LoaderCircle className="h-3 w-3" />
+                      <span>{payload.parserState.kind}</span>
+                    </span>
+                    {payload.parserState.command ? (
+                      <ExpandableInlineText
+                        value={payload.parserState.command}
+                        maxLength={72}
+                        className="rounded-[6px] bg-[rgba(255,255,255,0.05)] px-2 py-0.5 font-mono text-[11px]"
+                      />
+                    ) : null}
+                  </>
+                ) : null}
+                {payload.truncated ? (
+                  <>
+                    {payload.parserState ? <span className="text-[var(--vk-text-dim)]">•</span> : null}
+                    <span>Showing latest {payload.windowLimit}</span>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
 
             {payload.entries.length === 0 ? (
               <div className="rounded-[12px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] px-4 py-4 text-[13px] text-[var(--vk-text-muted)]">
@@ -1492,7 +1701,7 @@ export function DispatcherSessionPane({
               <span>Plan-only review ready</span>
             </div>
             <p className="mt-2 leading-5 text-[#dccba1]">
-              ACP is paused before mutating the board for this turn. Review the proposal above, then approve it or request changes.
+              The dispatcher is paused before mutating the board for this turn. Review the proposal above, then approve it or request changes.
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button

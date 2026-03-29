@@ -172,6 +172,67 @@ fn missing_feed_payload(session_id: &str, window_limit: usize) -> Value {
     })
 }
 
+fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> Option<Value> {
+    if previous_entries.len() != next_entries.len() || previous_entries.is_empty() {
+        return None;
+    }
+
+    let shared_prefix_len = previous_entries.len().saturating_sub(1);
+    if !previous_entries
+        .iter()
+        .take(shared_prefix_len)
+        .zip(next_entries.iter().take(shared_prefix_len))
+        .all(|(left, right)| left == right)
+    {
+        return None;
+    }
+
+    let previous_last = previous_entries.last()?;
+    let next_last = next_entries.last()?;
+    if previous_last == next_last {
+        return None;
+    }
+
+    let entry_id = next_last.get("id").and_then(Value::as_str)?.to_string();
+    if previous_last.get("id").and_then(Value::as_str) != Some(entry_id.as_str()) {
+        return None;
+    }
+    if previous_last.get("kind") != next_last.get("kind")
+        || previous_last.get("source") != next_last.get("source")
+    {
+        return None;
+    }
+
+    let previous_streaming = previous_last
+        .get("streaming")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let next_streaming = next_last
+        .get("streaming")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !previous_streaming && !next_streaming {
+        return None;
+    }
+
+    let text_delta = match (
+        previous_last.get("text").and_then(Value::as_str),
+        next_last.get("text").and_then(Value::as_str),
+    ) {
+        (Some(previous_text), Some(next_text)) => {
+            next_text.strip_prefix(previous_text).map(str::to_string)
+        }
+        _ => None,
+    };
+
+    Some(json!({
+        "type": "patch",
+        "entryId": entry_id,
+        "entry": next_last,
+        "textDelta": text_delta,
+    }))
+}
+
 fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
     let previous_entries = previous
         .get("entries")
@@ -204,6 +265,19 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
             "source": next.get("source").cloned().unwrap_or(Value::Null),
             "error": next.get("error").cloned().unwrap_or(Value::Null),
         });
+    }
+
+    if let Some(mut patch) = streaming_tail_patch(&previous_entries, &next_entries) {
+        patch["totalEntries"] = next.get("totalEntries").cloned().unwrap_or(Value::Null);
+        patch["windowLimit"] = next.get("windowLimit").cloned().unwrap_or(Value::Null);
+        patch["truncated"] = next.get("truncated").cloned().unwrap_or(Value::Null);
+        patch["sessionStatus"] = next.get("sessionStatus").cloned().unwrap_or(Value::Null);
+        patch["approvalState"] = next.get("approvalState").cloned().unwrap_or(Value::Null);
+        patch["parserState"] = next.get("parserState").cloned().unwrap_or(Value::Null);
+        patch["runtimeStatus"] = next.get("runtimeStatus").cloned().unwrap_or(Value::Null);
+        patch["source"] = next.get("source").cloned().unwrap_or(Value::Null);
+        patch["error"] = next.get("error").cloned().unwrap_or(Value::Null);
+        return patch;
     }
 
     json!({
@@ -1290,6 +1364,45 @@ mod tests {
         assert_eq!(
             delta.get("truncated").and_then(|value| value.as_bool()),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn feed_delta_patch_updates_last_streaming_entry() {
+        let previous = json!({
+            "entries": [
+                { "id": "1", "kind": "user", "text": "ship it", "source": "chat", "streaming": false },
+                { "id": "2", "kind": "assistant", "text": "Working", "source": "runtime", "streaming": true }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+        });
+        let next = json!({
+            "entries": [
+                { "id": "1", "kind": "user", "text": "ship it", "source": "chat", "streaming": false },
+                { "id": "2", "kind": "assistant", "text": "Working on it", "source": "runtime", "streaming": true }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+        });
+
+        let delta = build_feed_delta_event(&previous, &next);
+
+        assert_eq!(
+            delta.get("type").and_then(|value| value.as_str()),
+            Some("patch")
+        );
+        assert_eq!(
+            delta.get("entryId").and_then(|value| value.as_str()),
+            Some("2")
+        );
+        assert_eq!(
+            delta.get("textDelta").and_then(|value| value.as_str()),
+            Some(" on it")
         );
     }
 }

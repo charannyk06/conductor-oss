@@ -45,6 +45,15 @@
         "typescript": "^5.9.3",
       },
     },
+    "packages/openclaw-dispatcher": {
+      "name": "@conductor-oss/openclaw-dispatcher",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@types/node": "^25.3.3",
+        "tsx": "^4.21.0",
+        "typescript": "^5.9.3",
+      },
+    },
     "packages/web": {
       "name": "@conductor-oss/web",
       "version": "0.1.0",
@@ -147,6 +156,8 @@
     "@clerk/types": ["@clerk/types@4.101.20", "", { "dependencies": { "@clerk/shared": "^3.47.2" } }, "sha512-MHvr1tGL5lwxD6zdzzixkHICbbZz/S1LChONKR52Qeu0yRGChZomPknsgqBMG9J3yNeyhaj0SWa5phQgQUk0lg=="],
 
     "@conductor-oss/core": ["@conductor-oss/core@workspace:packages/core"],
+
+    "@conductor-oss/openclaw-dispatcher": ["@conductor-oss/openclaw-dispatcher@workspace:packages/openclaw-dispatcher"],
 
     "@conductor-oss/web": ["@conductor-oss/web@workspace:packages/web"],
 

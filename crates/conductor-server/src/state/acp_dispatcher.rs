@@ -56,6 +56,28 @@ const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
 
+fn apply_openclaw_binding_field(
+    thread: &mut SessionRecord,
+    key: &str,
+    value: Option<Option<String>>,
+) {
+    match value {
+        None => {}
+        Some(None) => {
+            thread.metadata.remove(key);
+        }
+        Some(Some(s)) => {
+            if s.trim().is_empty() {
+                thread.metadata.remove(key);
+            } else {
+                thread
+                    .metadata
+                    .insert(key.to_string(), s.trim().to_string());
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DispatcherSelectOption {
     pub value: &'static str,
@@ -1178,6 +1200,14 @@ fn dispatcher_uses_headless_turns(agent_kind: &AgentKind) -> bool {
     matches!(agent_kind, AgentKind::Codex | AgentKind::QwenCode)
 }
 
+fn dispatcher_resume_target(thread: &SessionRecord, agent_kind: &AgentKind) -> Option<String> {
+    if dispatcher_uses_headless_turns(agent_kind) {
+        return None;
+    }
+
+    thread.metadata.get(ACP_RESUME_TARGET_METADATA_KEY).cloned()
+}
+
 fn dispatcher_supports_interactive_structured_output(agent_kind: &AgentKind) -> bool {
     matches!(
         agent_kind,
@@ -1459,12 +1489,18 @@ pub(crate) fn build_acp_dispatcher_prompt(
     user_prompt: &str,
 ) -> String {
     let repo_path = state.resolve_project_path(project);
-    let board_dir = project
-        .board_dir
-        .clone()
-        .unwrap_or_else(|| project_id.to_string());
-    let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
-    let board_path = state.workspace_path.join(board_relative);
+    let repo_board = repo_path.join("CONDUCTOR.md");
+    let board_path = if repo_board.exists() && !repo_board.starts_with(&state.workspace_path) {
+        repo_board
+    } else {
+        let board_dir = project
+            .board_dir
+            .clone()
+            .unwrap_or_else(|| project_id.to_string());
+        let board_relative =
+            resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
+        state.workspace_path.join(board_relative)
+    };
     let repo_display = display_path(&state.workspace_path, &repo_path);
     let board_display = display_path(&state.workspace_path, &board_path);
 
@@ -1497,6 +1533,9 @@ pub(crate) fn build_acp_dispatcher_prompt(
             "- Default to execution mode: inspect the repo and board first, then create or update the right board tasks in the same turn when the request is actionable\n",
             "- Start actionable turns by inspecting the current board with `conductor_get_board`, then inspect the relevant repo files, diffs, PRs, or docs before deciding whether to create, update, or hand off tasks\n",
             "- When the request clearly requires board changes, do not stop at prose: use `conductor_dispatcher_create_task`, `conductor_dispatcher_update_task`, or `conductor_dispatcher_handoff_task` in the same turn unless the user explicitly asked for plan-only review\n",
+            "- Never edit `CONDUCTOR.md`, `.conductor/tasks/*.md`, or other board projection artifacts directly from this dispatcher with shell commands, patch tools, or file writes; those files must only change via the native Conductor MCP task tools\n",
+            "- If you think a task, board column, or packet needs to change, that is a signal to call the dispatcher MCP tools, not to patch markdown by hand\n",
+            "- A dispatcher task-mutation turn is only complete after the relevant MCP task tool succeeds and the board lifecycle mutation has been recorded through Conductor, not after manual file edits\n",
             "- When the user asks for product shaping, convert it into board structure and clear tasks\n",
             "- When implementation should happen, create or update launchable tasks instead of jumping straight into code\n",
             "- Keep the conversation stateful and use the board as the shared execution surface\n",
@@ -1635,6 +1674,7 @@ impl AppState {
             }
         }
 
+        self.clear_dispatcher_binding_thread(thread_id).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
     }
@@ -1644,7 +1684,7 @@ impl AppState {
     }
 
     pub(crate) async fn record_dispatcher_task_lifecycle_event(
-        &self,
+        self: &Arc<Self>,
         thread_id: &str,
         operation: DispatcherTaskOperation,
         task: &BoardTaskRecord,
@@ -1752,9 +1792,277 @@ impl AppState {
         drop(threads);
 
         self.persist_dispatcher_thread(&updated).await?;
+        self.publish_dispatcher_update(thread_id).await;
+
+        let state = Arc::clone(self);
+        let thread_for_sync = updated;
+        tokio::spawn(async move {
+            if let Err(err) = state.sync_acp_dispatcher_state(&thread_for_sync).await {
+                tracing::warn!(
+                    thread_id = %thread_for_sync.id,
+                    error = %err,
+                    "async sync_acp_dispatcher_state after task lifecycle event failed"
+                );
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn link_session_to_dispatcher(
+        &self,
+        session_id: &str,
+        thread_id: &str,
+    ) -> Result<()> {
+        let mut sessions = self.sessions.write().await;
+        let session = sessions
+            .get_mut(session_id)
+            .with_context(|| format!("Unknown session {session_id}"))?;
+        if session
+            .metadata
+            .get("dispatcherThreadId")
+            .map(String::as_str)
+            == Some(thread_id)
+        {
+            return Ok(());
+        }
+        session
+            .metadata
+            .insert("dispatcherThreadId".to_string(), thread_id.to_string());
+        let updated = session.clone();
+        drop(sessions);
+
+        self.persist_session(&updated).await?;
+        self.publish_feed_update(session_id);
+        self.publish_snapshot().await;
+        Ok(())
+    }
+
+    fn dispatcher_task_ref_for_session(session: &SessionRecord) -> String {
+        session
+            .metadata
+            .get("taskRef")
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                session
+                    .metadata
+                    .get("taskId")
+                    .map(String::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or(session.id.as_str())
+            .to_string()
+    }
+
+    fn short_dispatcher_session_id(session_id: &str) -> String {
+        session_id.chars().take(8).collect()
+    }
+
+    async fn record_dispatcher_session_event(
+        &self,
+        thread_id: &str,
+        event_type: &str,
+        source: &str,
+        text: String,
+        session: &SessionRecord,
+        mut metadata: HashMap<String, Value>,
+    ) -> Result<()> {
+        let mut threads = self.dispatcher_threads.write().await;
+        let thread = threads
+            .get_mut(thread_id)
+            .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+
+        metadata.insert(
+            "eventType".to_string(),
+            Value::String(event_type.to_string()),
+        );
+        metadata.insert(
+            "projectId".to_string(),
+            Value::String(thread.project_id.clone()),
+        );
+        metadata.insert("sessionId".to_string(), Value::String(session.id.clone()));
+        metadata.insert(
+            "sessionAgent".to_string(),
+            Value::String(session.agent.clone()),
+        );
+        metadata.insert(
+            "sessionStatus".to_string(),
+            serde_json::to_value(&session.status).unwrap_or(Value::Null),
+        );
+        if let Some(branch) = session.branch.clone() {
+            metadata.insert("sessionBranch".to_string(), Value::String(branch));
+        }
+        if let Some(task_id) = session.metadata.get("taskId").cloned() {
+            metadata.insert("taskId".to_string(), Value::String(task_id));
+        }
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        metadata.insert("taskRef".to_string(), Value::String(task_ref));
+        if let Some(summary) = session
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            metadata.insert("summary".to_string(), Value::String(summary.to_string()));
+        }
+
+        thread.last_activity_at = Utc::now().to_rfc3339();
+        thread.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "system_message".to_string(),
+            source: source.to_string(),
+            text,
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata,
+        });
+        enforce_conversation_limit(thread);
+        let updated = thread.clone();
+        drop(threads);
+
+        self.persist_dispatcher_thread(&updated).await?;
         self.sync_acp_dispatcher_state(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
+    }
+
+    pub(crate) async fn record_dispatcher_session_launch_event(
+        &self,
+        thread_id: &str,
+        task: &BoardTaskRecord,
+        session: &SessionRecord,
+    ) -> Result<()> {
+        let task_ref = task
+            .task_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(task.id.as_str());
+        let title = split_task_text(&task.text).0;
+        let mut details = vec![format!("- Task: {title}")];
+        details.push(format!("- Session: {}", session.id));
+        details.push(format!("- Agent: {}", session.agent));
+        if let Some(branch) = session
+            .branch
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            details.push(format!("- Branch: {branch}"));
+        }
+
+        let mut metadata = HashMap::new();
+        metadata.insert("taskTitle".to_string(), Value::String(title));
+        metadata.insert("taskId".to_string(), Value::String(task.id.clone()));
+        metadata.insert("taskRef".to_string(), Value::String(task_ref.to_string()));
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_session_launched",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Opened coding session `{}` for `{task_ref}`.\n\n{}",
+                Self::short_dispatcher_session_id(&session.id),
+                details.join("\n")
+            ),
+            session,
+            metadata,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_dispatcher_blocker_event(
+        &self,
+        thread_id: &str,
+        session: &SessionRecord,
+        prompt: &str,
+    ) -> Result<()> {
+        let prompt = prompt.trim();
+        let prompt = if prompt.is_empty() {
+            "Session is waiting for user input."
+        } else {
+            prompt
+        };
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        let mut metadata = HashMap::new();
+        metadata.insert("blocker".to_string(), Value::String(prompt.to_string()));
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_blocker_detected",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Coding session `{}` for `{task_ref}` needs input.\n\n- Agent: {}\n- Prompt: {prompt}",
+                Self::short_dispatcher_session_id(&session.id),
+                session.agent,
+            ),
+            session,
+            metadata,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_dispatcher_session_completion_event(
+        &self,
+        thread_id: &str,
+        session: &SessionRecord,
+    ) -> Result<()> {
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        let summary = session
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Ready for follow-up");
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "completionSummary".to_string(),
+            Value::String(summary.to_string()),
+        );
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_session_completed",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Coding session `{}` for `{task_ref}` completed.\n\n- Agent: {}\n- Summary: {summary}",
+                Self::short_dispatcher_session_id(&session.id),
+                session.agent,
+            ),
+            session,
+            metadata,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_dispatcher_session_failure_event(
+        &self,
+        thread_id: &str,
+        session: &SessionRecord,
+        error: &str,
+        exit_code: Option<i32>,
+    ) -> Result<()> {
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        let message = error.trim();
+        let detail = if message.is_empty() {
+            "Session failed".to_string()
+        } else {
+            message.to_string()
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert("error".to_string(), Value::String(detail.clone()));
+        if let Some(exit_code) = exit_code {
+            metadata.insert("exitCode".to_string(), Value::Number(exit_code.into()));
+        }
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_session_failed",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Coding session `{}` for `{task_ref}` failed.\n\n- Agent: {}\n- Error: {}",
+                Self::short_dispatcher_session_id(&session.id),
+                session.agent,
+                detail
+            ),
+            session,
+            metadata,
+        )
+        .await
     }
 
     pub(crate) async fn invalidate_dispatcher_caches(&self, thread_id: &str) {
@@ -1996,6 +2304,26 @@ impl AppState {
         Ok(thread)
     }
 
+    pub(crate) async fn update_dispatcher_integration_binding(
+        self: &Arc<Self>,
+        thread_id: &str,
+        openclaw_thread_id: Option<Option<String>>,
+        openclaw_session_id: Option<Option<String>>,
+    ) -> Result<SessionRecord> {
+        let mut thread = self
+            .get_dispatcher_thread(thread_id)
+            .await
+            .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+
+        apply_openclaw_binding_field(&mut thread, "openclawThreadId", openclaw_thread_id);
+        apply_openclaw_binding_field(&mut thread, "openclawSessionId", openclaw_session_id);
+
+        thread.last_activity_at = Utc::now().to_rfc3339();
+        self.replace_dispatcher_thread(thread.clone()).await?;
+        self.sync_acp_dispatcher_state(&thread).await?;
+        Ok(thread)
+    }
+
     pub(crate) async fn update_dispatcher_preferences(
         self: &Arc<Self>,
         thread_id: &str,
@@ -2212,13 +2540,18 @@ impl AppState {
             return Err(anyhow!("Unknown project: {project_id}"));
         };
         let repo_path = self.resolve_project_path(project);
-        let board_dir = project
-            .board_dir
-            .clone()
-            .unwrap_or_else(|| project_id.to_string());
-        let board_relative =
-            resolve_board_file(&self.workspace_path, &board_dir, Some(&project.path));
-        let board_path = self.workspace_path.join(board_relative);
+        let repo_board = repo_path.join("CONDUCTOR.md");
+        let board_path = if repo_board.exists() && !repo_board.starts_with(&self.workspace_path) {
+            repo_board
+        } else {
+            let board_dir = project
+                .board_dir
+                .clone()
+                .unwrap_or_else(|| project_id.to_string());
+            let board_relative =
+                resolve_board_file(&self.workspace_path, &board_dir, Some(&project.path));
+            self.workspace_path.join(board_relative)
+        };
         let repo_display = display_path(&self.workspace_path, &repo_path);
         let board_display = display_path(&self.workspace_path, &board_path);
 
@@ -2590,11 +2923,7 @@ impl AppState {
         } else {
             dispatcher_supports_interactive_structured_output(&executor.kind())
         };
-        let resume_target = if use_headless_turns {
-            thread.metadata.get(ACP_RESUME_TARGET_METADATA_KEY).cloned()
-        } else {
-            None
-        };
+        let resume_target = dispatcher_resume_target(thread, &executor.kind());
 
         let prompt = self
             .dispatcher_prompt_with_context(
@@ -3105,11 +3434,12 @@ mod tests {
     use super::{
         build_acp_dispatcher_prompt, codex_runtime_model_entry,
         codex_runtime_reasoning_supported_in_cache, dispatcher_context_attachment_paths,
-        dispatcher_model_supported_for_agent, dispatcher_supports_interactive_structured_output,
-        dispatcher_uses_headless_turns, merge_dispatcher_context_attachments,
-        normalize_loaded_dispatcher_thread, prepare_dispatcher_runtime_env, read_json,
-        AcpSessionMemoryState, AppState, CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED,
-        ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
+        dispatcher_model_supported_for_agent, dispatcher_resume_target,
+        dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
+        merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
+        prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
+        CreateDispatcherThreadOptions, ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED,
+        ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL, ACP_RESUME_TARGET_METADATA_KEY,
         ACP_SESSION_KIND,
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
@@ -3198,6 +3528,36 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn headless_dispatchers_rebuild_state_instead_of_reusing_native_resume_targets() {
+        let mut thread = SessionRecord::new(
+            "session-1".to_string(),
+            "demo".to_string(),
+            None,
+            None,
+            None,
+            "codex".to_string(),
+            None,
+            None,
+            String::new(),
+            None,
+        );
+        thread.metadata.insert(
+            ACP_RESUME_TARGET_METADATA_KEY.to_string(),
+            "session-123".to_string(),
+        );
+
+        assert_eq!(dispatcher_resume_target(&thread, &AgentKind::Codex), None);
+        assert_eq!(
+            dispatcher_resume_target(&thread, &AgentKind::QwenCode),
+            None
+        );
+        assert_eq!(
+            dispatcher_resume_target(&thread, &AgentKind::ClaudeCode),
+            Some("session-123".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn dispatcher_prompt_requires_board_inspection_and_launch_ready_packets() {
         let (root, state) = build_test_state("acp-dispatcher-prompt-shaping").await;
@@ -3217,10 +3577,72 @@ mod tests {
         assert!(prompt.contains("conductor_dispatcher_create_task"));
         assert!(prompt.contains("conductor_dispatcher_update_task"));
         assert!(prompt.contains("conductor_dispatcher_handoff_task"));
+        assert!(prompt.contains("Never edit `CONDUCTOR.md`, `.conductor/tasks/*.md`, or other board projection artifacts directly"));
+        assert!(prompt.contains("A dispatcher task-mutation turn is only complete after the relevant MCP task tool succeeds"));
         assert!(prompt.contains("Treat `surfaces` as the task's reference files"));
         assert!(prompt.contains("Treat `skills` as required worker guidance"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_prompt_prefers_external_repo_board_over_workspace_shadow_board() {
+        let workspace = std::env::temp_dir().join(format!(
+            "acp-dispatcher-external-board-workspace-{}",
+            Uuid::new_v4()
+        ));
+        let external_repo = std::env::temp_dir().join(format!(
+            "acp-dispatcher-external-board-repo-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(workspace.join("projects").join("demo")).expect("shadow board dir");
+        fs::create_dir_all(&external_repo).expect("external repo");
+        fs::write(
+            workspace.join("projects").join("demo").join("CONDUCTOR.md"),
+            "## Shadow\n",
+        )
+        .expect("shadow board write");
+        fs::write(external_repo.join("CONDUCTOR.md"), "## Repo\n").expect("repo board write");
+
+        let config = ConductorConfig {
+            workspace: workspace.clone(),
+            preferences: PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: external_repo.to_string_lossy().to_string(),
+                    board_dir: Some("demo".to_string()),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("ttyd".to_string()),
+                    default_branch: "main".to_string(),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
+        let db = Database::in_memory()
+            .await
+            .expect("test db should initialize");
+        let state = AppState::new(workspace.join("conductor.yaml"), config, db).await;
+        let config = state.config.read().await.clone();
+        let project = config
+            .projects
+            .get("demo")
+            .expect("demo project should exist");
+
+        let prompt = build_acp_dispatcher_prompt(&state, "demo", project, "");
+
+        assert!(prompt.contains(&format!(
+            "- Board path: `{}`",
+            external_repo.join("CONDUCTOR.md").to_string_lossy()
+        )));
+        assert!(!prompt.contains("- Board path: `projects/demo/CONDUCTOR.md`"));
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&external_repo);
     }
 
     #[test]

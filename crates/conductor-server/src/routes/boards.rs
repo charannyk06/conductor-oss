@@ -155,6 +155,7 @@ pub(crate) struct BoardTaskRecord {
     pub(crate) priority: Option<String>,
     pub(crate) task_ref: Option<String>,
     pub(crate) attempt_ref: Option<String>,
+    pub(crate) dispatcher_thread_id: Option<String>,
     pub(crate) issue_id: Option<String>,
     pub(crate) github_item_id: Option<String>,
     pub(crate) attachments: Vec<String>,
@@ -368,7 +369,9 @@ async fn add_board_comment(
             format!("{} on {}", author, task.text),
         )
         .await;
-    state.publish_snapshot().await;
+    state
+        .publish_snapshot_with_projects(std::iter::once(body.project_id.as_str()))
+        .await;
 
     match load_board_response(&state, &body.project_id).await {
         Ok(payload) => created(payload),
@@ -431,12 +434,18 @@ pub(crate) async fn load_board_response(
             format!("Unknown project: {project_id}"),
         ));
     };
-    let board_dir = project
-        .board_dir
-        .clone()
-        .unwrap_or_else(|| project_id.to_string());
-    let board_relative = resolve_board_file(&state.workspace_path, &board_dir, Some(&project.path));
-    let board_path = state.workspace_path.join(&board_relative);
+    // Must match `resolve_board_path_for_project` used by dispatcher/board writes: when the repo
+    // lives outside the workspace and has CONDUCTOR.md, tasks are written there—not under
+    // `workspace_path` alone.
+    let board_path = resolve_board_path_for_project(state, project_id)
+        .await
+        .map_err(|err| (StatusCode::NOT_FOUND, err.to_string()))?;
+    let board_path_display = board_path
+        .strip_prefix(&state.workspace_path)
+        .ok()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| board_path.to_string_lossy().to_string());
     let parsed = parse_board(&board_path, project_id);
     let task_comments = state.task_comments(project_id).await;
     let mut grouped = HashMap::<String, Vec<BoardTaskRecord>>::new();
@@ -496,6 +505,7 @@ pub(crate) async fn load_board_response(
                 "priority": task.priority,
                 "taskRef": task.task_ref,
                 "attemptRef": task.attempt_ref,
+                "dispatcherThreadId": task.dispatcher_thread_id,
                 "issueId": task.issue_id,
                 "githubItemId": task.github_item_id,
                 "attachments": task.attachments,
@@ -558,7 +568,7 @@ pub(crate) async fn load_board_response(
     Ok(json!({
         "projectId": project_id,
         "repository": project.repo.clone(),
-        "boardPath": board_relative,
+        "boardPath": board_path_display,
         "workspacePath": state.workspace_path.to_string_lossy().to_string(),
         "columns": columns,
         "primaryRoles": ordered_columns.iter().map(|(role, _)| role.as_str()).collect::<Vec<_>>(),
@@ -660,19 +670,32 @@ pub(crate) fn parse_task_line(
     _role: &str,
     project_id: &str,
 ) -> Option<BoardTaskRecord> {
-    let checked = if let Some(rest) = line.strip_prefix("- [ ] ") {
-        (false, rest)
+    let (checked, raw_line, legacy_format) = if let Some(rest) = line.strip_prefix("- [ ] ") {
+        (false, rest, false)
     } else if let Some(rest) = line.strip_prefix("- [x] ") {
-        (true, rest)
+        (true, rest, false)
     } else if let Some(rest) = line.strip_prefix("- ") {
-        (false, rest)
+        (false, rest, false)
     } else {
-        return None;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('>') || trimmed.starts_with("%%") {
+            return None;
+        }
+        (false, trimmed, true)
     };
 
-    let inline_tags = parse_inline_tags(checked.1);
-    let mut segments = checked.1.split(" | ");
-    let text = strip_inline_tags(segments.next()?.trim()).to_string();
+    let inline_tags = parse_inline_tags(raw_line);
+    let mut segments = raw_line.split(" | ");
+    let raw_text = strip_inline_tags(segments.next()?.trim());
+    let (inferred_task_ref, text) = if legacy_format {
+        let (task_ref, text) = extract_legacy_task_ref(raw_text);
+        if task_ref.is_none() && inline_tags.is_empty() {
+            return None;
+        }
+        (task_ref, text)
+    } else {
+        (None, raw_text.to_string())
+    };
     let mut metadata: HashMap<&str, String> = HashMap::new();
     for segment in segments {
         let mut parts = segment.splitn(2, ':');
@@ -686,9 +709,10 @@ pub(crate) fn parse_task_line(
     Some(BoardTaskRecord {
         id: metadata
             .remove("id")
+            .or_else(|| inferred_task_ref.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         text,
-        checked: checked.0,
+        checked,
         agent: metadata
             .remove("agent")
             .map(|value| strip_inline_tags(&value).to_string())
@@ -724,9 +748,14 @@ pub(crate) fn parse_task_line(
         task_ref: metadata
             .remove("taskRef")
             .map(|value| strip_inline_tags(&value).to_string())
-            .filter(|value| !value.is_empty()),
+            .filter(|value| !value.is_empty())
+            .or(inferred_task_ref),
         attempt_ref: metadata
             .remove("attemptRef")
+            .map(|value| strip_inline_tags(&value).to_string())
+            .filter(|value| !value.is_empty()),
+        dispatcher_thread_id: metadata
+            .remove("dispatcherThreadId")
             .map(|value| strip_inline_tags(&value).to_string())
             .filter(|value| !value.is_empty()),
         issue_id: metadata
@@ -784,6 +813,49 @@ pub(crate) fn parse_task_line(
                 .unwrap_or_default(),
         },
     })
+}
+
+fn extract_legacy_task_ref(value: &str) -> (Option<String>, String) {
+    let trimmed = value.trim();
+    let Some((candidate, remainder)) = trimmed.split_once(' ') else {
+        return (None, trimmed.to_string());
+    };
+    let candidate = candidate.trim_end_matches(':').trim();
+    let remainder = remainder.trim();
+    if remainder.is_empty() || !looks_like_task_ref(candidate) {
+        return (None, trimmed.to_string());
+    }
+
+    (Some(candidate.to_string()), remainder.to_string())
+}
+
+fn looks_like_task_ref(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.len() < 3 {
+        return false;
+    }
+
+    let mut has_separator = false;
+    let mut has_alpha = false;
+    let mut has_digit = false;
+
+    for ch in trimmed.chars() {
+        if ch == '-' || ch == '_' {
+            has_separator = true;
+            continue;
+        }
+        if ch.is_ascii_alphabetic() {
+            has_alpha = true;
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            has_digit = true;
+            continue;
+        }
+        return false;
+    }
+
+    has_separator && has_alpha && has_digit
 }
 
 fn parse_inline_tags(value: &str) -> HashMap<String, String> {
@@ -967,6 +1039,12 @@ pub(crate) async fn resolve_board_path_for_project(
         .projects
         .get(project_id)
         .ok_or_else(|| anyhow!("Unknown project: {project_id}"))?;
+    let project_root = state.resolve_project_path(project);
+    let repo_board = project_root.join("CONDUCTOR.md");
+    if repo_board.exists() && !repo_board.starts_with(&state.workspace_path) {
+        return Ok(repo_board);
+    }
+
     let board_dir = project
         .board_dir
         .clone()
@@ -1025,7 +1103,9 @@ pub(crate) async fn update_board_task_attempt_ref(
     let role = target_role.unwrap_or("dispatching");
     if update_task_dispatch_state(&mut board, task_id, role, None, Some(attempt_ref)) {
         write_parsed_board(&board_path, &board, project_id)?;
-        state.publish_snapshot().await;
+        state
+            .publish_snapshot_with_projects(std::iter::once(project_id))
+            .await;
     }
     Ok(())
 }
@@ -1325,6 +1405,16 @@ pub(crate) fn build_task_line(task: &BoardTaskRecord, project_id: &str) -> Strin
     {
         segments.push(format!("attemptRef:{}", sanitize_value(attempt_ref)));
     }
+    if let Some(dispatcher_thread_id) = task
+        .dispatcher_thread_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        segments.push(format!(
+            "dispatcherThreadId:{}",
+            sanitize_value(dispatcher_thread_id)
+        ));
+    }
     if let Some(issue_id) = task
         .issue_id
         .as_deref()
@@ -1518,6 +1608,7 @@ mod tests {
             priority: None,
             task_ref: None,
             attempt_ref: None,
+            dispatcher_thread_id: None,
             issue_id: None,
             github_item_id: None,
             attachments: Vec::new(),
@@ -1540,6 +1631,7 @@ mod tests {
             priority: Some("high".to_string()),
             task_ref: Some("DEM-001".to_string()),
             attempt_ref: None,
+            dispatcher_thread_id: None,
             issue_id: None,
             github_item_id: None,
             attachments: vec!["docs/spec.md".to_string()],
@@ -1591,6 +1683,7 @@ mod tests {
             priority: Some("high".to_string()),
             task_ref: Some("DEM-002".to_string()),
             attempt_ref: None,
+            dispatcher_thread_id: None,
             issue_id: None,
             github_item_id: None,
             attachments: vec!["docs/spec,final.md".to_string()],
@@ -1626,6 +1719,37 @@ mod tests {
         assert_eq!(parsed.packet.skills, task.packet.skills);
         assert_eq!(parsed.packet.review_refs, task.packet.review_refs);
         assert_eq!(parsed.packet.deliverables, task.packet.deliverables);
+    }
+
+    #[test]
+    fn parse_task_line_accepts_legacy_plain_task_lines() {
+        let parsed = parse_task_line(
+            "ACP-002 Repo review and risk scan #project/agent-client-protocol-main #agent/codex #type/review #priority/medium",
+            "ready",
+            "agent-client-protocol-main",
+        )
+        .expect("legacy task line should parse");
+
+        assert_eq!(parsed.id, "ACP-002");
+        assert_eq!(parsed.task_ref.as_deref(), Some("ACP-002"));
+        assert_eq!(parsed.text, "Repo review and risk scan");
+        assert_eq!(
+            parsed.project.as_deref(),
+            Some("agent-client-protocol-main")
+        );
+        assert_eq!(parsed.agent.as_deref(), Some("codex"));
+        assert_eq!(parsed.task_type.as_deref(), Some("review"));
+        assert_eq!(parsed.priority.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn parse_task_line_ignores_legacy_section_notes_without_task_shape() {
+        assert!(parse_task_line(
+            "Move tagged tasks here to dispatch an agent.",
+            "ready",
+            "agent-client-protocol-main"
+        )
+        .is_none());
     }
 
     #[test]

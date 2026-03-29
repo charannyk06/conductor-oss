@@ -40,6 +40,11 @@ import { getDisplaySessionId } from "@/lib/bridgeSessionIds";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { cn } from "@/lib/cn";
 import { buildSessionHref } from "@/lib/dashboardHref";
+import {
+  shouldRefreshProjectBoardFromSnapshotEvent,
+  subscribeProjectBoardRefresh,
+} from "@/lib/dispatcherBoardRefresh";
+import { subscribeToSnapshotEvents } from "@/lib/liveEvents";
 import { getDefaultSessionPrimaryTab } from "@/lib/sessionKinds";
 
 type BoardRole =
@@ -251,9 +256,11 @@ const ROLE_LABEL: Record<BoardRole, string> = {
   done: "Done",
   cancelled: "Cancelled",
 };
-const ACTIVE_BOARD_REFRESH_MS = 20_000;
-const HIDDEN_BOARD_REFRESH_MS = 60_000;
-const BOARD_REFRESH_DEBOUNCE_MS = 1200;
+const ACTIVE_BOARD_REFRESH_MS = 5_000;
+const HIDDEN_BOARD_REFRESH_MS = 20_000;
+const BOARD_REFRESH_DEBOUNCE_MS = 250;
+/** After backend snapshot_delta (board/dispatcher changes), reload the board quickly */
+const BOARD_SSE_REFRESH_DEBOUNCE_MS = 80;
 const BOARD_PLANNING_SESSION_KIND = "board_planning";
 const MARKDOWN_EDITOR_LABELS: Record<string, string> = {
   obsidian: "Obsidian",
@@ -2097,7 +2104,7 @@ export function WorkspaceKanban({
   );
 
   const scheduleBoardRefresh = useCallback(
-    (options?: { silent?: boolean }) => {
+    (options?: { silent?: boolean; debounceMs?: number }) => {
       if (!projectId) {
         return;
       }
@@ -2105,13 +2112,42 @@ export function WorkspaceKanban({
         window.clearTimeout(boardRefreshTimeoutRef.current);
         boardRefreshTimeoutRef.current = null;
       }
+      const debounceMs = options?.debounceMs ?? BOARD_REFRESH_DEBOUNCE_MS;
       boardRefreshTimeoutRef.current = window.setTimeout(() => {
         boardRefreshTimeoutRef.current = null;
         void loadBoard(options);
-      }, BOARD_REFRESH_DEBOUNCE_MS);
+      }, debounceMs);
     },
     [loadBoard, projectId]
   );
+
+  useEffect(() => {
+    if (!projectId) {
+      return;
+    }
+    const unsubscribe = subscribeToSnapshotEvents((event) => {
+      if (event.type !== "snapshot" && event.type !== "snapshot_delta") {
+        return;
+      }
+      if (!shouldRefreshProjectBoardFromSnapshotEvent(event, projectId)) {
+        return;
+      }
+      scheduleBoardRefresh({ silent: true, debounceMs: BOARD_SSE_REFRESH_DEBOUNCE_MS });
+    });
+    return unsubscribe;
+  }, [projectId, scheduleBoardRefresh]);
+
+  useEffect(() => {
+    if (!projectId) {
+      return;
+    }
+    return subscribeProjectBoardRefresh(projectId, () => {
+      scheduleBoardRefresh({
+        silent: true,
+        debounceMs: BOARD_SSE_REFRESH_DEBOUNCE_MS,
+      });
+    });
+  }, [projectId, scheduleBoardRefresh]);
 
   useEffect(() => {
     void loadBoard({ silent: false });

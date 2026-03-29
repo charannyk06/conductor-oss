@@ -17,7 +17,8 @@ use crate::dispatcher_task_lifecycle::{
 };
 use crate::state::{
     build_normalized_chat_feed, is_project_dispatcher_session, AppState,
-    CreateDispatcherThreadOptions, SessionRecord,
+    CreateDispatcherThreadOptions, DispatcherBindingLookup, SessionRecord,
+    UpsertDispatcherBindingInput,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -37,6 +38,10 @@ pub fn router() -> Router<Arc<AppState>> {
                 .post(create_dispatcher)
                 .delete(delete_dispatcher),
         )
+        .route(
+            "/api/projects/{project_id}/dispatcher/bindings",
+            get(get_dispatcher_bindings).post(upsert_dispatcher_binding),
+        )
         .route("/api/projects/{project_id}/dispatcher/feed", get(get_feed))
         .route(
             "/api/projects/{project_id}/dispatcher/feed/stream",
@@ -45,6 +50,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/api/projects/{project_id}/dispatcher/preferences",
             patch(update_dispatcher_preferences),
+        )
+        .route(
+            "/api/projects/{project_id}/dispatcher/integration",
+            patch(update_dispatcher_integration),
         )
         .route(
             "/api/projects/{project_id}/dispatcher/tasks",
@@ -118,6 +127,26 @@ struct UpdateDispatcherPreferencesBody {
     implementation_reasoning_effort: Option<String>,
 }
 
+/// PATCH body for OpenClaw (or any orchestrator) binding to this dispatcher thread.
+/// Omit a key to leave it unchanged; JSON `null` clears; string sets.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDispatcherIntegrationBody {
+    #[serde(default)]
+    openclaw_thread_id: Option<Value>,
+    #[serde(default)]
+    openclaw_session_id: Option<Value>,
+}
+
+fn integration_value_to_binding(value: Option<Value>) -> Result<Option<Option<String>>, String> {
+    match value {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(Value::String(s)) => Ok(Some(Some(s))),
+        Some(_) => Err("expected string or null".to_string()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SendBody {
@@ -125,6 +154,42 @@ struct SendBody {
     attachments: Option<Vec<String>>,
     model: Option<String>,
     reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DispatcherBindingQuery {
+    binding_id: Option<String>,
+    provider: Option<String>,
+    thread_id: Option<String>,
+    session_id: Option<String>,
+    channel_id: Option<String>,
+    bridge_id: Option<String>,
+    dispatcher_thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertDispatcherBindingBody {
+    binding_id: Option<String>,
+    provider: String,
+    thread_id: Option<String>,
+    session_id: Option<String>,
+    channel_id: Option<String>,
+    bridge_id: Option<String>,
+    dispatcher_thread_id: Option<String>,
+    #[serde(default)]
+    create_dispatcher: bool,
+    #[serde(default)]
+    force_new_dispatcher: bool,
+    dispatcher_agent: Option<String>,
+    implementation_agent: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    implementation_model: Option<String>,
+    implementation_reasoning_effort: Option<String>,
+    title: Option<String>,
+    metadata: Option<std::collections::HashMap<String, Value>>,
 }
 
 fn resolve_feed_window_limit(limit: Option<usize>) -> usize {
@@ -135,6 +200,65 @@ fn resolve_feed_window_limit(limit: Option<usize>) -> usize {
 
 fn trimmed_query_value(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn binding_query_lookup(query: &DispatcherBindingQuery) -> DispatcherBindingLookup {
+    DispatcherBindingLookup {
+        binding_id: query.binding_id.clone(),
+        provider: query.provider.clone(),
+        thread_id: query.thread_id.clone(),
+        session_id: query.session_id.clone(),
+        channel_id: query.channel_id.clone(),
+        bridge_id: query.bridge_id.clone(),
+        dispatcher_thread_id: query.dispatcher_thread_id.clone(),
+    }
+}
+
+async fn serialize_dispatcher_binding(
+    state: &Arc<AppState>,
+    project_id: &str,
+    binding: crate::state::DispatcherBindingRecord,
+) -> Value {
+    let dispatcher_thread = match binding.dispatcher_thread_id.as_deref() {
+        Some(thread_id) => match state.get_dispatcher_thread(thread_id).await {
+            Some(thread) => serialize_dispatcher(state, &thread).await,
+            None => Value::Null,
+        },
+        None => Value::Null,
+    };
+    let dispatcher_query = binding
+        .dispatcher_thread_id
+        .as_deref()
+        .map(|thread_id| format!("threadId={thread_id}"));
+    let base_path = format!("/api/projects/{project_id}/dispatcher");
+    let tasks_endpoint = dispatcher_query
+        .as_ref()
+        .map(|query| format!("{base_path}/tasks?{query}"))
+        .unwrap_or_else(|| format!("{base_path}/tasks"));
+
+    json!({
+        "id": binding.id,
+        "projectId": binding.project_id,
+        "provider": binding.provider,
+        "threadId": binding.thread_id,
+        "sessionId": binding.session_id,
+        "channelId": binding.channel_id,
+        "bridgeId": binding.bridge_id,
+        "dispatcherThreadId": binding.dispatcher_thread_id,
+        "title": binding.title,
+        "metadata": binding.metadata,
+        "createdAt": binding.created_at,
+        "updatedAt": binding.updated_at,
+        "dispatcherThread": dispatcher_thread,
+        "dispatcherEndpoints": {
+            "dispatcher": dispatcher_query.as_ref().map(|query| format!("{base_path}?{query}")),
+            "feed": dispatcher_query.as_ref().map(|query| format!("{base_path}/feed?{query}")),
+            "stream": dispatcher_query.as_ref().map(|query| format!("{base_path}/feed/stream?{query}")),
+            "send": dispatcher_query.as_ref().map(|query| format!("{base_path}/send?{query}")),
+            "interrupt": dispatcher_query.as_ref().map(|query| format!("{base_path}/interrupt?{query}")),
+            "tasks": tasks_endpoint,
+        },
+    })
 }
 
 fn dispatcher_matches_scope(
@@ -268,6 +392,121 @@ async fn delete_dispatcher(
 
     match state.delete_dispatcher_thread(&dispatcher.id).await {
         Ok(()) => ok(json!({ "deletedThreadId": dispatcher.id })),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+fn lookup_has_binding_target(lookup: &DispatcherBindingLookup) -> bool {
+    lookup.binding_id.is_some()
+        || lookup.thread_id.is_some()
+        || lookup.session_id.is_some()
+        || lookup.channel_id.is_some()
+        || lookup.dispatcher_thread_id.is_some()
+}
+
+async fn get_dispatcher_bindings(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<DispatcherBindingQuery>,
+) -> ApiResponse {
+    let lookup = binding_query_lookup(&query);
+    if lookup_has_binding_target(&lookup) {
+        match state.get_dispatcher_binding(&project_id, &lookup).await {
+            Some(binding) => ok(json!({
+                "binding": serialize_dispatcher_binding(&state, &project_id, binding).await,
+            })),
+            None => ok(json!({ "binding": Value::Null })),
+        }
+    } else {
+        let bindings = state
+            .list_dispatcher_bindings(&project_id, Some(&lookup))
+            .await;
+        let mut payload = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            payload.push(serialize_dispatcher_binding(&state, &project_id, binding).await);
+        }
+        ok(json!({ "bindings": payload }))
+    }
+}
+
+async fn upsert_dispatcher_binding(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<DispatcherBindingQuery>,
+    Json(body): Json<UpsertDispatcherBindingBody>,
+) -> ApiResponse {
+    let input = UpsertDispatcherBindingInput {
+        binding_id: body.binding_id.or(query.binding_id),
+        provider: body.provider,
+        thread_id: body.thread_id.or(query.thread_id),
+        session_id: body.session_id.or(query.session_id),
+        channel_id: body.channel_id.or(query.channel_id),
+        bridge_id: body.bridge_id.or(query.bridge_id),
+        dispatcher_thread_id: body.dispatcher_thread_id.or(query.dispatcher_thread_id),
+        create_dispatcher: body.create_dispatcher,
+        force_new_dispatcher: body.force_new_dispatcher,
+        dispatcher_agent: body.dispatcher_agent,
+        implementation_agent: body.implementation_agent,
+        dispatcher_model: body.model,
+        dispatcher_reasoning_effort: body.reasoning_effort,
+        implementation_model: body.implementation_model,
+        implementation_reasoning_effort: body.implementation_reasoning_effort,
+        title: body.title,
+        metadata: body.metadata.unwrap_or_default(),
+    };
+
+    match state.upsert_dispatcher_binding(&project_id, input).await {
+        Ok(binding) => created(json!({
+            "binding": serialize_dispatcher_binding(&state, &project_id, binding).await,
+        })),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+    }
+}
+
+async fn update_dispatcher_integration(
+    State(state): State<Arc<AppState>>,
+    Path(project_id): Path<String>,
+    Query(query): Query<DispatcherQuery>,
+    Json(body): Json<UpdateDispatcherIntegrationBody>,
+) -> ApiResponse {
+    let bridge_id = trimmed_query_value(query.bridge_id.as_deref());
+    let dispatcher = match resolve_project_dispatcher(
+        &state,
+        &project_id,
+        bridge_id,
+        query.thread_id.as_deref(),
+    )
+    .await
+    {
+        Some(dispatcher) => dispatcher,
+        None => {
+            return error(
+                StatusCode::NOT_FOUND,
+                format!("Dispatcher thread for project {project_id} not found"),
+            );
+        }
+    };
+
+    let openclaw_thread_id = match integration_value_to_binding(body.openclaw_thread_id) {
+        Ok(v) => v,
+        Err(msg) => return error(StatusCode::BAD_REQUEST, msg.to_string()),
+    };
+    let openclaw_session_id = match integration_value_to_binding(body.openclaw_session_id) {
+        Ok(v) => v,
+        Err(msg) => return error(StatusCode::BAD_REQUEST, msg.to_string()),
+    };
+
+    match state
+        .update_dispatcher_integration_binding(
+            &dispatcher.id,
+            openclaw_thread_id,
+            openclaw_session_id,
+        )
+        .await
+    {
+        Ok(dispatcher) => ok(json!({
+            "thread": serialize_dispatcher(&state, &dispatcher).await,
+        })),
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
@@ -433,12 +672,95 @@ async fn dispatcher_feed_payload(
         "parserState": parser_state,
         "runtimeStatus": Value::Null,
         "source": if dispatcher.output.is_empty() { "conversation-only" } else { "runtime-output" },
+        "integration": dispatcher_integration_payload(dispatcher, &dispatcher.project_id),
     });
 
     state
         .store_dispatcher_feed_payload(&dispatcher.id, window_limit, payload.clone())
         .await;
     payload
+}
+
+fn dispatcher_integration_payload(dispatcher: &SessionRecord, project_id: &str) -> Value {
+    let meta = &dispatcher.metadata;
+    json!({
+        "projectId": project_id,
+        "threadId": dispatcher.id,
+        "bridgeId": dispatcher.bridge_id,
+        "openclaw": {
+            "threadId": meta.get("openclawThreadId").cloned(),
+            "sessionId": meta.get("openclawSessionId").cloned(),
+        },
+        "heartbeat": {
+            "state": meta.get("acpHeartbeatState").cloned(),
+            "nextAt": meta.get("acpNextHeartbeatAt").cloned(),
+        },
+        "memory": {
+            "projectPath": meta.get("acpProjectMemoryPath").cloned(),
+            "sessionPath": meta.get("acpSessionMemoryPath").cloned(),
+        },
+    })
+}
+
+fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> Option<Value> {
+    if previous_entries.len() != next_entries.len() || previous_entries.is_empty() {
+        return None;
+    }
+
+    let shared_prefix_len = previous_entries.len().saturating_sub(1);
+    if !previous_entries
+        .iter()
+        .take(shared_prefix_len)
+        .zip(next_entries.iter().take(shared_prefix_len))
+        .all(|(left, right)| left == right)
+    {
+        return None;
+    }
+
+    let previous_last = previous_entries.last()?;
+    let next_last = next_entries.last()?;
+    if previous_last == next_last {
+        return None;
+    }
+
+    let entry_id = next_last.get("id").and_then(Value::as_str)?.to_string();
+    if previous_last.get("id").and_then(Value::as_str) != Some(entry_id.as_str()) {
+        return None;
+    }
+    if previous_last.get("kind") != next_last.get("kind")
+        || previous_last.get("source") != next_last.get("source")
+    {
+        return None;
+    }
+
+    let previous_streaming = previous_last
+        .get("streaming")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let next_streaming = next_last
+        .get("streaming")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !previous_streaming && !next_streaming {
+        return None;
+    }
+
+    let text_delta = match (
+        previous_last.get("text").and_then(Value::as_str),
+        next_last.get("text").and_then(Value::as_str),
+    ) {
+        (Some(previous_text), Some(next_text)) => {
+            next_text.strip_prefix(previous_text).map(str::to_string)
+        }
+        _ => None,
+    };
+
+    Some(json!({
+        "type": "patch",
+        "entryId": entry_id,
+        "entry": next_last,
+        "textDelta": text_delta,
+    }))
 }
 
 fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
@@ -472,7 +794,22 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
             "runtimeStatus": next.get("runtimeStatus").cloned().unwrap_or(Value::Null),
             "source": next.get("source").cloned().unwrap_or(Value::Null),
             "error": next.get("error").cloned().unwrap_or(Value::Null),
+            "integration": next.get("integration").cloned().unwrap_or(Value::Null),
         });
+    }
+
+    if let Some(mut patch) = streaming_tail_patch(&previous_entries, &next_entries) {
+        patch["totalEntries"] = next.get("totalEntries").cloned().unwrap_or(Value::Null);
+        patch["windowLimit"] = next.get("windowLimit").cloned().unwrap_or(Value::Null);
+        patch["truncated"] = next.get("truncated").cloned().unwrap_or(Value::Null);
+        patch["sessionStatus"] = next.get("sessionStatus").cloned().unwrap_or(Value::Null);
+        patch["approvalState"] = next.get("approvalState").cloned().unwrap_or(Value::Null);
+        patch["parserState"] = next.get("parserState").cloned().unwrap_or(Value::Null);
+        patch["runtimeStatus"] = next.get("runtimeStatus").cloned().unwrap_or(Value::Null);
+        patch["source"] = next.get("source").cloned().unwrap_or(Value::Null);
+        patch["error"] = next.get("error").cloned().unwrap_or(Value::Null);
+        patch["integration"] = next.get("integration").cloned().unwrap_or(Value::Null);
+        return patch;
     }
 
     json!({
@@ -525,6 +862,7 @@ async fn feed_stream(
             "approvalState": Value::Null,
             "parserState": Value::Null,
             "runtimeStatus": Value::Null,
+            "integration": Value::Null,
             "error": format!("Dispatcher thread for project {project_id} not found"),
         }),
     };
@@ -681,6 +1019,7 @@ async fn interrupt_dispatcher(
 mod tests {
     use super::{dispatcher_matches_scope, trimmed_query_value};
     use crate::state::{SessionRecord, SessionStatus};
+    use serde_json::Value;
 
     fn build_dispatcher(id: &str) -> SessionRecord {
         let mut session = SessionRecord::new(
@@ -735,5 +1074,59 @@ mod tests {
             "alpha",
             Some("bridge-1")
         ));
+    }
+
+    #[test]
+    fn integration_value_maps_json_null_to_clear() {
+        assert_eq!(
+            super::integration_value_to_binding(Some(Value::Null)).unwrap(),
+            Some(None)
+        );
+        assert_eq!(
+            super::integration_value_to_binding(Some(Value::String("t1".to_string()))).unwrap(),
+            Some(Some("t1".to_string()))
+        );
+        assert_eq!(super::integration_value_to_binding(None).unwrap(), None);
+    }
+
+    #[test]
+    fn feed_delta_patch_updates_last_streaming_entry() {
+        let previous = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "user", "text": "ship it", "source": "chat", "streaming": false },
+                { "id": "2", "kind": "assistant", "text": "Working", "source": "runtime", "streaming": true }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+        let next = serde_json::json!({
+            "entries": [
+                { "id": "1", "kind": "user", "text": "ship it", "source": "chat", "streaming": false },
+                { "id": "2", "kind": "assistant", "text": "Working on it", "source": "runtime", "streaming": true }
+            ],
+            "totalEntries": 2,
+            "windowLimit": 120,
+            "truncated": false,
+            "sessionStatus": "working",
+            "integration": Value::Null,
+        });
+
+        let delta = super::build_feed_delta_event(&previous, &next);
+
+        assert_eq!(
+            delta.get("type").and_then(|value| value.as_str()),
+            Some("patch")
+        );
+        assert_eq!(
+            delta.get("entryId").and_then(|value| value.as_str()),
+            Some("2")
+        );
+        assert_eq!(
+            delta.get("textDelta").and_then(|value| value.as_str()),
+            Some(" on it")
+        );
     }
 }

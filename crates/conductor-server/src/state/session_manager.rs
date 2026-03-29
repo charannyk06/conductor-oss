@@ -34,12 +34,23 @@ use crate::acp_prompt::{
     acp_dispatcher_turn_prefix, rewrite_acp_dispatcher_command,
 };
 use crate::error_logger::{categories, ErrorContext};
+use crate::routes::boards::resolve_board_task_record;
 const LAUNCH_PROGRESS_PREFIX: &str = "\u{1b}[90m[Conductor]\u{1b}[0m";
 const LIVE_RUNTIME_TERMINATION_GRACE_MS: u64 = 100;
 
 const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
+
+fn linked_dispatcher_thread_id(session: &SessionRecord) -> Option<String> {
+    session
+        .metadata
+        .get("dispatcherThreadId")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
 
 pub(crate) struct OutputConsumerConfig {
     pub terminal_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
@@ -1452,6 +1463,7 @@ impl AppState {
                 "queuedAt",
                 "queueSource",
                 "launchAttempts",
+                "dispatcherThreadId",
                 "lastRecoveredAt",
                 "restartRecoveryCount",
                 "recoveryState",
@@ -1495,6 +1507,34 @@ impl AppState {
             }
             let _ = self.cleanup_unpersisted_workspace(&workspace_path).await;
             return Err(err.context("Failed to persist session after spawn"));
+        }
+        if let Some(dispatcher_thread_id) = linked_dispatcher_thread_id(&record) {
+            let task_lookup = record
+                .metadata
+                .get("taskId")
+                .cloned()
+                .or_else(|| record.metadata.get("taskRef").cloned());
+            if let Some(task_lookup) = task_lookup {
+                if let Some(task) =
+                    resolve_board_task_record(self, &record.project_id, &task_lookup).await
+                {
+                    if let Err(err) = self
+                        .record_dispatcher_session_launch_event(
+                            &dispatcher_thread_id,
+                            &task,
+                            &record,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %record.id,
+                            dispatcher_thread_id,
+                            error = %err,
+                            "failed to record dispatcher session launch event"
+                        );
+                    }
+                }
+            }
         }
         self.attach_terminal_runtime(
             &session_id,
@@ -1684,6 +1724,7 @@ impl AppState {
         let requested_termination = termination_requested
             .as_deref()
             .filter(|action| matches!(*action, "kill" | "archive"));
+        let mut dispatcher_event: Option<(&'static str, String, Option<i32>)> = None;
         let invalidate_runtime_status = matches!(
             &event,
             ExecutorOutput::NeedsInput(_)
@@ -1727,6 +1768,9 @@ impl AppState {
                     if !detect_parser_state(session, &prompt) {
                         set_parser_state(session, "needs_input", &prompt, None);
                     }
+                    if linked_dispatcher_thread_id(session).is_some() {
+                        dispatcher_event = Some(("blocker", prompt.clone(), None));
+                    }
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
@@ -1755,6 +1799,9 @@ impl AppState {
                         session.summary = Some(summary.clone());
                         session.metadata.insert("summary".to_string(), summary);
                     }
+                    if linked_dispatcher_thread_id(session).is_some() {
+                        dispatcher_event = Some(("completed", String::new(), Some(exit_code)));
+                    }
                 } else {
                     session
                         .metadata
@@ -1779,6 +1826,13 @@ impl AppState {
                     session.summary = Some(summary.clone());
                     session.metadata.insert("summary".to_string(), summary);
                     session.metadata.remove("terminationRequested");
+                    if linked_dispatcher_thread_id(session).is_some() {
+                        dispatcher_event = Some((
+                            "failed",
+                            session.summary.clone().unwrap_or_default(),
+                            Some(exit_code),
+                        ));
+                    }
                 }
             }
             ExecutorOutput::Failed { error, exit_code } => {
@@ -1814,10 +1868,20 @@ impl AppState {
                     if !parser_state_detected && requested_kill {
                         clear_parser_state(session);
                     }
+                    if linked_dispatcher_thread_id(session).is_some() {
+                        dispatcher_event = Some(("failed", error.clone(), exit_code));
+                    }
                 }
             }
             ExecutorOutput::Composite(_) => {}
         }
+
+        let dispatcher_thread_id = linked_dispatcher_thread_id(session);
+        let dispatcher_session = if dispatcher_thread_id.is_some() && dispatcher_event.is_some() {
+            Some(session.clone())
+        } else {
+            None
+        };
 
         drop(sessions);
         if clear_live_handle {
@@ -1825,6 +1889,38 @@ impl AppState {
         }
         self.queue_hot_path_session_update(session_id, invalidate_runtime_status)
             .await;
+        if let (Some(dispatcher_thread_id), Some(session), Some((kind, message, exit_code))) =
+            (dispatcher_thread_id, dispatcher_session, dispatcher_event)
+        {
+            let outcome = match kind {
+                "blocker" => {
+                    self.record_dispatcher_blocker_event(&dispatcher_thread_id, &session, &message)
+                        .await
+                }
+                "completed" => {
+                    self.record_dispatcher_session_completion_event(&dispatcher_thread_id, &session)
+                        .await
+                }
+                "failed" => {
+                    self.record_dispatcher_session_failure_event(
+                        &dispatcher_thread_id,
+                        &session,
+                        &message,
+                        exit_code,
+                    )
+                    .await
+                }
+                _ => Ok(()),
+            };
+            if let Err(err) = outcome {
+                tracing::warn!(
+                    session_id = %session.id,
+                    dispatcher_thread_id,
+                    error = %err,
+                    "failed to record dispatcher-linked session event"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -4018,6 +4114,90 @@ mod tests {
         assert_eq!(updated.activity.as_deref(), Some("exited"));
         assert!(updated.metadata.contains_key("archivedAt"));
         assert!(!updated.metadata.contains_key("terminationRequested"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn linked_worker_sessions_emit_dispatcher_blocker_and_completion_events() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-dispatcher-linked-session-test-{}",
+            Uuid::new_v4()
+        ));
+        let repo = root.join("repo");
+        seed_git_repo(&repo);
+
+        let project = ProjectConfig {
+            path: repo.to_string_lossy().to_string(),
+            agent: Some("codex".to_string()),
+            default_branch: "main".to_string(),
+            ..ProjectConfig::default()
+        };
+        let state = build_state(&root, project, "demo").await;
+        let dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut session = SessionRecord::new(
+            "linked-worker".to_string(),
+            "demo".to_string(),
+            Some("session/linked-worker".to_string()),
+            None,
+            Some(repo.to_string_lossy().to_string()),
+            "codex".to_string(),
+            None,
+            None,
+            "Implement linked worker flow".to_string(),
+            Some(42),
+        );
+        session.status = SessionStatus::Working;
+        session.activity = Some("active".to_string());
+        session
+            .metadata
+            .insert("dispatcherThreadId".to_string(), dispatcher.id.clone());
+        session
+            .metadata
+            .insert("taskId".to_string(), "task-42".to_string());
+        session
+            .metadata
+            .insert("taskRef".to_string(), "DEM-042".to_string());
+        state.replace_session(session).await.unwrap();
+        let _ = state.ensure_terminal_host("linked-worker").await;
+
+        state
+            .apply_runtime_event(
+                "linked-worker",
+                ExecutorOutput::NeedsInput("Need product approval".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let mut resumed = state.get_session("linked-worker").await.unwrap();
+        resumed.status = SessionStatus::Working;
+        resumed.activity = Some("active".to_string());
+        state.replace_session(resumed).await.unwrap();
+
+        state
+            .apply_runtime_event("linked-worker", ExecutorOutput::Completed { exit_code: 0 })
+            .await
+            .unwrap();
+
+        let updated = state
+            .get_dispatcher_thread(&dispatcher.id)
+            .await
+            .expect("dispatcher thread should exist");
+        let event_types = updated
+            .conversation
+            .iter()
+            .filter_map(|entry| entry.metadata.get("eventType").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(event_types.contains(&"dispatcher_blocker_detected"));
+        assert!(event_types.contains(&"dispatcher_session_completed"));
 
         let _ = fs::remove_dir_all(&root);
     }

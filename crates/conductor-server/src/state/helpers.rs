@@ -40,10 +40,13 @@ fn dashboard_metadata_allowlist() -> &'static [&'static str] {
         "devServerLog",
         "devServerPort",
         "devServerUrl",
+        "dispatcherThreadId",
         "finishedAt",
         "lastStderr",
         "mergeReadiness",
         "model",
+        "openclawSessionId",
+        "openclawThreadId",
         "parentTaskId",
         "prBaseRef",
         "prDraft",
@@ -154,20 +157,39 @@ pub fn resolve_board_file(
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string);
 
+    let project_repo_board = project_root.as_ref().map(|path| path.join("CONDUCTOR.md"));
+    let external_project_repo_board = project_repo_board
+        .as_ref()
+        .filter(|path| path.exists() && !path.starts_with(workspace_path));
+
     let mut candidates = Vec::new();
+
     let trimmed = board_dir.trim();
     if !trimmed.is_empty() {
         if trimmed.ends_with(".md") {
             candidates.push(PathBuf::from(trimmed));
-            candidates.push(PathBuf::from("projects").join(trimmed));
         } else {
             candidates.push(PathBuf::from(trimmed).join("CONDUCTOR.md"));
+        }
+    }
+
+    if let Some(path) = external_project_repo_board {
+        candidates.push(path.clone());
+    }
+
+    if !trimmed.is_empty() {
+        if trimmed.ends_with(".md") {
+            candidates.push(PathBuf::from("projects").join(trimmed));
+        } else {
             candidates.push(PathBuf::from("projects").join(trimmed).join("CONDUCTOR.md"));
         }
     }
 
     if let Some(project_root) = project_root.as_ref() {
-        candidates.push(project_root.join("CONDUCTOR.md"));
+        let repo_board = project_root.join("CONDUCTOR.md");
+        if external_project_repo_board != Some(&repo_board) {
+            candidates.push(repo_board);
+        }
     }
 
     if let Some(name) = project_name.as_deref() {
@@ -936,6 +958,7 @@ fn normalized_entry_attachments(
 pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let mut feed = Vec::new();
     let is_streaming = is_streaming_status(&session.status);
+    let dispatcher = is_acp_dispatcher_session(session);
     let last_runtime_assistant_id = if is_streaming {
         session
             .conversation
@@ -944,8 +967,8 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
             .find(|entry| {
                 entry.kind == "assistant_message"
                     && entry.source == "runtime"
-                    && !is_runtime_transport_dump(&entry.text)
                     && !is_runtime_internal_noise_text(&entry.text)
+                    && (dispatcher || !is_runtime_transport_dump(&entry.text))
             })
             .map(|entry| entry.id.clone())
     } else {
@@ -954,8 +977,8 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let has_structured_runtime_entries = session.conversation.iter().any(|entry| {
         matches!(entry.kind.as_str(), "assistant_message" | "status_message")
             && entry.source == "runtime"
-            && !is_runtime_transport_dump(&entry.text)
             && !is_runtime_internal_noise_text(&entry.text)
+            && (dispatcher || !is_runtime_transport_dump(&entry.text))
     });
     let runtime_entries = if has_structured_runtime_entries {
         Vec::new()
@@ -967,10 +990,11 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     }
 
     for entry in &session.conversation {
-        if entry.source == "runtime"
+        let skip_runtime_dump = entry.source == "runtime"
             && (is_runtime_transport_dump(&entry.text)
                 || is_runtime_internal_noise_text(&entry.text))
-        {
+            && !(dispatcher && entry.kind == "assistant_message");
+        if skip_runtime_dump {
             continue;
         }
 
@@ -1622,6 +1646,37 @@ mod tests {
             repo.file_name().and_then(|value| value.to_str()).unwrap(),
             Some(repo.to_string_lossy().as_ref()),
         );
+
+        assert_eq!(
+            resolved,
+            repo.join("CONDUCTOR.md")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn resolve_board_file_prefers_external_repo_board_over_workspace_shadow_board() {
+        let workspace = temp_path("workspace-shadow");
+        let repo = temp_path("repo-shadow");
+        let board_dir = repo.file_name().and_then(|value| value.to_str()).unwrap();
+        fs::create_dir_all(workspace.join("projects").join(board_dir)).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            workspace
+                .join("projects")
+                .join(board_dir)
+                .join("CONDUCTOR.md"),
+            "# stale workspace shadow board\n",
+        )
+        .unwrap();
+        fs::write(repo.join("CONDUCTOR.md"), "# repo board\n").unwrap();
+
+        let resolved =
+            resolve_board_file(&workspace, board_dir, Some(repo.to_string_lossy().as_ref()));
 
         assert_eq!(
             resolved,

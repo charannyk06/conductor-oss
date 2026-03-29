@@ -3,6 +3,7 @@ mod app_update;
 mod board_collaboration;
 mod bridge_registry;
 mod detached;
+mod dispatcher_bindings;
 mod helpers;
 mod mcp_config;
 mod runtime_status;
@@ -28,6 +29,9 @@ pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use detached::DETACHED_PID_METADATA_KEY;
 pub(crate) use detached::{
     RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
+};
+pub(crate) use dispatcher_bindings::{
+    DispatcherBindingLookup, DispatcherBindingRecord, UpsertDispatcherBindingInput,
 };
 pub(crate) use helpers::sanitize_terminal_text;
 pub(crate) use helpers::session_to_dashboard_value_with_bridge;
@@ -138,6 +142,7 @@ pub struct AppState {
     pub dispatcher_threads: RwLock<HashMap<String, SessionRecord>>,
     terminal_hosts: TerminalHostRegistry,
     bridge_registry: RwLock<HashMap<String, BridgeConnectionRecord>>,
+    dispatcher_bindings: RwLock<HashMap<String, Vec<DispatcherBindingRecord>>>,
     pub event_snapshots: broadcast::Sender<String>,
     /// Sends (session_id, delta_line) for incremental output updates.
     pub output_updates: broadcast::Sender<(String, String)>,
@@ -166,7 +171,7 @@ impl AppState {
         let (event_snapshots, _) = broadcast::channel(256);
         let (output_updates, _) = broadcast::channel(512);
         let (feed_updates, _) = broadcast::channel(512);
-        let (dispatcher_updates, _) = broadcast::channel(256);
+        let (dispatcher_updates, _) = broadcast::channel(2048);
         let app_update_config = AppUpdateConfig::from_env();
         let app_update_state = app_update::AppUpdateRuntime::new(&app_update_config);
         let state = Arc::new(Self {
@@ -179,6 +184,7 @@ impl AppState {
             dispatcher_threads: RwLock::new(HashMap::new()),
             terminal_hosts: TerminalHostRegistry::default(),
             bridge_registry: RwLock::new(HashMap::new()),
+            dispatcher_bindings: RwLock::new(HashMap::new()),
             event_snapshots,
             output_updates,
             feed_updates,
@@ -202,6 +208,7 @@ impl AppState {
         state.ensure_dispatcher_store();
         state.load_sessions_from_disk().await;
         state.load_dispatchers_from_disk().await;
+        state.load_dispatcher_bindings_from_disk().await;
         state.load_board_collaboration_from_disk().await;
         state.start_session_flush_watchdog();
         state
@@ -439,17 +446,38 @@ impl AppState {
         serde_json::to_string(&json!({
             "type": "snapshot",
             "sessions": self.cached_snapshot_sessions().await,
+            "changedProjectIds": [],
             "appUpdate": self.app_update_snapshot().await,
         }))
         .unwrap_or_else(|_| "{\"type\":\"snapshot\",\"sessions\":[]}".to_string())
     }
 
     pub async fn publish_snapshot(&self) {
+        self.publish_snapshot_with_projects(std::iter::empty::<&str>())
+            .await;
+    }
+
+    pub async fn publish_snapshot_with_projects<'a, I>(&self, changed_project_ids: I)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
         let (sessions, removed_session_ids) = self.refresh_dashboard_snapshot_cache().await;
+        let mut project_ids = sessions
+            .iter()
+            .filter_map(|session| session.get("projectId").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        for project_id in changed_project_ids {
+            let trimmed = project_id.trim();
+            if !trimmed.is_empty() {
+                project_ids.insert(trimmed.to_string());
+            }
+        }
         let payload = serde_json::to_string(&json!({
             "type": "snapshot_delta",
             "sessions": sessions,
             "removedSessionIds": removed_session_ids,
+            "changedProjectIds": project_ids.into_iter().collect::<Vec<_>>(),
             "appUpdate": self.app_update_snapshot().await,
         }))
         .unwrap_or_else(|_| "{\"type\":\"snapshot_delta\",\"sessions\":[]}".to_string());
@@ -1251,6 +1279,43 @@ mod tests {
         assert!(
             !contains_arg(&normal_args, "mcp_servers.conductor.command"),
             "non-dispatcher sessions should not receive the internal conductor MCP server"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_snapshot_with_projects_includes_changed_project_ids() {
+        let root = std::env::temp_dir().join(format!("conductor-state-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test root should exist");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            ..ConductorConfig::default()
+        };
+        let config_path = root.join("conductor.yaml");
+        let db = Database::in_memory()
+            .await
+            .expect("in-memory db should open");
+        let state = AppState::new(config_path, config, db).await;
+        let mut rx = state.event_snapshots.subscribe();
+
+        state
+            .publish_snapshot_with_projects(std::iter::once("demo"))
+            .await;
+
+        let payload = rx.recv().await.expect("snapshot event should be published");
+        let parsed: Value =
+            serde_json::from_str(&payload).expect("snapshot payload should be json");
+        assert_eq!(
+            parsed.get("type").and_then(Value::as_str),
+            Some("snapshot_delta")
+        );
+        assert_eq!(
+            parsed
+                .get("changedProjectIds")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            vec![Value::String("demo".to_string())]
         );
     }
 }

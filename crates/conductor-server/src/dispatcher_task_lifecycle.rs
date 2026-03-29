@@ -214,6 +214,7 @@ pub(crate) async fn create_dispatcher_task(
         priority: trimmed_option(input.priority),
         task_ref: Some(next_human_task_ref(&board, &project_id)),
         attempt_ref: trimmed_option(input.attempt_ref),
+        dispatcher_thread_id: effective_dispatcher_thread_id(&context),
         issue_id: trimmed_option(input.issue_id),
         github_item_id: trimmed_option(input.github_item_id),
         attachments,
@@ -299,6 +300,9 @@ async fn mutate_existing_dispatcher_task(
     let caller_session = context.caller_session.as_ref();
     let source_role = board.columns[source_column_index].role.clone();
     apply_task_update(&mut task, &input, &project_id);
+    if let Some(dispatcher_thread_id) = effective_dispatcher_thread_id(&context) {
+        task.dispatcher_thread_id = Some(dispatcher_thread_id);
+    }
     task.attachments = merge_dispatcher_turn_attachments(caller_session, task.attachments.clone());
     enrich_dispatcher_task_handoff(
         state,
@@ -356,8 +360,9 @@ async fn finalize_dispatcher_task_mutation(
             task.text.clone(),
         )
         .await;
-    state.publish_snapshot().await;
 
+    // Record dispatcher conversation + notify dispatcher SSE *before* publish_snapshot so
+    // dashboard snapshot_delta includes the updated dispatcher thread and board clients refresh.
     if let Some(thread_id) = effective_dispatcher_thread_id(&context) {
         if let Err(err) = state
             .record_dispatcher_task_lifecycle_event(&thread_id, operation, &task, &role)
@@ -371,6 +376,10 @@ async fn finalize_dispatcher_task_mutation(
             );
         }
     }
+
+    state
+        .publish_snapshot_with_projects(std::iter::once(project_id.as_str()))
+        .await;
 
     let board_payload = load_board_response(state, &project_id)
         .await
@@ -410,6 +419,7 @@ fn board_task_value(task: &BoardTaskRecord, role: &str) -> Value {
         "priority": task.priority,
         "taskRef": task.task_ref,
         "attemptRef": task.attempt_ref,
+        "dispatcherThreadId": task.dispatcher_thread_id,
         "issueId": task.issue_id,
         "githubItemId": task.github_item_id,
         "attachments": task.attachments,

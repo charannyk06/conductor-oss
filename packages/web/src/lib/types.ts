@@ -149,6 +149,7 @@ export interface SSESnapshotSession {
 export interface SSESnapshotEvent {
   type: "snapshot";
   sessions: SSESnapshotSession[];
+  changedProjectIds?: string[];
   appUpdate?: AppUpdateStatus | null;
 }
 
@@ -156,6 +157,7 @@ export interface SSESnapshotDeltaEvent {
   type: "snapshot_delta";
   sessions: SSESnapshotSession[];
   removedSessionIds?: string[];
+  changedProjectIds?: string[];
   appUpdate?: AppUpdateStatus | null;
 }
 
