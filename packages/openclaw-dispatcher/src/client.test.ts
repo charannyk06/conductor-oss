@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { ConductorDispatcherClient } from "./client.js";
 import type { DispatcherFeedDelta } from "./types.js";
 
-test("builds feed URL without double slashes", async () => {
-  const c = new ConductorDispatcherClient({ baseUrl: "http://127.0.0.1:4748/" });
+test("builds feed URL without trailing slashes", async () => {
+  const c = new ConductorDispatcherClient({ baseUrl: "http://127.0.0.1:4748///" });
   assert.equal(c.baseUrl, "http://127.0.0.1:4748");
 });
 

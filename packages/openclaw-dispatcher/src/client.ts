@@ -12,7 +12,11 @@ import type {
 } from "./types.js";
 
 function trimBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
+  let end = baseUrl.length;
+  while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return end === baseUrl.length ? baseUrl : baseUrl.slice(0, end);
 }
 
 function buildQuery(query?: DispatcherQuery): string {
