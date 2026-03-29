@@ -78,7 +78,10 @@ fn apply_openclaw_binding_field(
     }
 }
 
-fn apply_openclaw_gateway_url_field(thread: &mut SessionRecord, gateway_url: Option<String>) -> bool {
+fn apply_openclaw_gateway_url_field(
+    thread: &mut SessionRecord,
+    gateway_url: Option<String>,
+) -> bool {
     let next_value = gateway_url
         .as_deref()
         .map(str::trim)
@@ -2274,7 +2277,8 @@ impl AppState {
                         openclaw_gateway_url.clone(),
                     ) {
                         updated_thread.last_activity_at = Utc::now().to_rfc3339();
-                        self.replace_dispatcher_thread(updated_thread.clone()).await?;
+                        self.replace_dispatcher_thread(updated_thread.clone())
+                            .await?;
                         self.sync_acp_dispatcher_state(&updated_thread).await?;
                         updated = updated_thread;
                     }

@@ -135,9 +135,7 @@ impl Executor for OpenClawExecutor {
         let (input_tx, mut input_rx) = mpsc::channel::<ExecutorInput>(8);
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
-        tokio::spawn(async move {
-            while input_rx.recv().await.is_some() {}
-        });
+        tokio::spawn(async move { while input_rx.recv().await.is_some() {} });
 
         tokio::spawn(async move {
             let outcome = run_openclaw_turn(
@@ -153,7 +151,9 @@ impl Executor for OpenClawExecutor {
 
             let final_event = match outcome {
                 RunOutcome::Completed(exit_code) => ExecutorOutput::Completed { exit_code },
-                RunOutcome::Failed { error, exit_code } => ExecutorOutput::Failed { error, exit_code },
+                RunOutcome::Failed { error, exit_code } => {
+                    ExecutorOutput::Failed { error, exit_code }
+                }
             };
             let _ = output_tx.send(final_event).await;
         });
@@ -270,10 +270,7 @@ struct AgentPayload {
 #[serde(tag = "type")]
 enum GatewayFrame {
     #[serde(rename = "event")]
-    Event {
-        event: String,
-        payload: Value,
-    },
+    Event { event: String, payload: Value },
     #[serde(rename = "res")]
     Response {
         id: String,
@@ -296,7 +293,11 @@ async fn run_openclaw_turn(
     output_tx: mpsc::Sender<ExecutorOutput>,
     mut kill_rx: oneshot::Receiver<()>,
 ) -> RunOutcome {
-    let ws_result = tokio::time::timeout(OPENCLAW_CONNECT_TIMEOUT, connect_async(config.ws_url.as_str())).await;
+    let ws_result = tokio::time::timeout(
+        OPENCLAW_CONNECT_TIMEOUT,
+        connect_async(config.ws_url.as_str()),
+    )
+    .await;
     let (mut ws, _) = match ws_result {
         Ok(Ok(pair)) => pair,
         Ok(Err(err)) => {
@@ -551,9 +552,9 @@ async fn handle_runtime_frame(
 ) -> ControlFlow {
     let Some(frame) = frame else {
         return ControlFlow::Failed {
-            error: lifecycle_error
-                .clone()
-                .unwrap_or_else(|| "OpenClaw gateway disconnected before the run completed".to_string()),
+            error: lifecycle_error.clone().unwrap_or_else(|| {
+                "OpenClaw gateway disconnected before the run completed".to_string()
+            }),
             exit_code: Some(1),
         };
     };
@@ -578,7 +579,12 @@ async fn handle_runtime_frame(
     };
 
     match frame {
-        GatewayFrame::Response { id, ok, payload: _, error } if id == send_request_id => {
+        GatewayFrame::Response {
+            id,
+            ok,
+            payload: _,
+            error,
+        } if id == send_request_id => {
             *send_ack_seen = true;
             if ok {
                 ControlFlow::Continue
@@ -602,7 +608,9 @@ async fn handle_runtime_frame(
                     }
                     ControlFlow::Completed
                 }
-                Some(ChatConversion::Failed { error, exit_code }) => ControlFlow::Failed { error, exit_code },
+                Some(ChatConversion::Failed { error, exit_code }) => {
+                    ControlFlow::Failed { error, exit_code }
+                }
                 None => ControlFlow::Continue,
             }
         }
@@ -624,8 +632,9 @@ async fn handle_runtime_frame(
 
 async fn read_connect_challenge<S>(ws: &mut S) -> Result<String>
 where
-    S: futures_util::Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
+    S: futures_util::Stream<
+            Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin,
 {
     let next = tokio::time::timeout(OPENCLAW_CONNECT_TIMEOUT, ws.next())
         .await
@@ -637,7 +646,8 @@ where
     let Some(text) = websocket_text(message) else {
         bail!("OpenClaw gateway sent a non-text connect challenge");
     };
-    let frame: GatewayFrame = serde_json::from_str(&text).context("invalid OpenClaw challenge frame")?;
+    let frame: GatewayFrame =
+        serde_json::from_str(&text).context("invalid OpenClaw challenge frame")?;
     match frame {
         GatewayFrame::Event { event, payload } if event == "connect.challenge" => payload
             .get("nonce")
@@ -652,8 +662,9 @@ where
 
 async fn wait_for_connect_response<S>(ws: &mut S, connect_id: &str) -> Result<Value>
 where
-    S: futures_util::Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
-        + Unpin,
+    S: futures_util::Stream<
+            Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>,
+        > + Unpin,
 {
     loop {
         let next = tokio::time::timeout(OPENCLAW_CONNECT_TIMEOUT, ws.next())
@@ -666,11 +677,20 @@ where
         let Some(text) = websocket_text(message) else {
             continue;
         };
-        let frame: GatewayFrame = serde_json::from_str(&text).context("invalid OpenClaw connect response")?;
+        let frame: GatewayFrame =
+            serde_json::from_str(&text).context("invalid OpenClaw connect response")?;
         match frame {
-            GatewayFrame::Response { id, ok, payload, error } if id == connect_id => {
+            GatewayFrame::Response {
+                id,
+                ok,
+                payload,
+                error,
+            } if id == connect_id => {
                 if !ok {
-                    bail!("{}", gateway_error_message(error.as_ref(), "OpenClaw connect rejected"));
+                    bail!(
+                        "{}",
+                        gateway_error_message(error.as_ref(), "OpenClaw connect rejected")
+                    );
                 }
                 let payload = payload.unwrap_or(Value::Null);
                 if payload.get("type").and_then(Value::as_str) != Some("hello-ok") {
@@ -736,7 +756,9 @@ fn convert_chat_event(payload: &Value, client_run_id: &str) -> Option<ChatConver
 
     match payload.state.as_str() {
         "delta" => extract_message_text(payload.message.as_ref()).map(ChatConversion::Stdout),
-        "final" => Some(ChatConversion::Completed(extract_message_text(payload.message.as_ref()))),
+        "final" => Some(ChatConversion::Completed(extract_message_text(
+            payload.message.as_ref(),
+        ))),
         "error" => Some(ChatConversion::Failed {
             error: payload
                 .error_message
@@ -814,7 +836,11 @@ fn convert_heartbeat_event(payload: &Value) -> Option<ExecutorOutput> {
 }
 
 fn tool_event_to_output(payload: &AgentPayload) -> Option<ExecutorOutput> {
-    let phase = payload.data.get("phase").and_then(Value::as_str).unwrap_or("update");
+    let phase = payload
+        .data
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("update");
     let name = payload
         .data
         .get("name")
@@ -847,7 +873,10 @@ fn tool_event_to_output(payload: &AgentPayload) -> Option<ExecutorOutput> {
         phase_to_tool_status(phase),
         content,
     );
-    metadata.insert("openclawPhase".to_string(), Value::String(phase.to_string()));
+    metadata.insert(
+        "openclawPhase".to_string(),
+        Value::String(phase.to_string()),
+    );
     metadata.insert(
         "openclawRunId".to_string(),
         Value::String(payload.run_id.clone()),
@@ -894,7 +923,12 @@ fn lifecycle_event_to_output(payload: &AgentPayload) -> Option<ExecutorOutput> {
             "error" => "OpenClaw failed".to_string(),
             other => format!("OpenClaw {other}"),
         },
-        metadata: lifecycle_metadata(phase, detail, &payload.run_id, payload.session_key.as_deref()),
+        metadata: lifecycle_metadata(
+            phase,
+            detail,
+            &payload.run_id,
+            payload.session_key.as_deref(),
+        ),
     })
 }
 
@@ -1089,12 +1123,7 @@ fn resolve_scopes(options: &SpawnOptions) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .filter(|scopes| !scopes.is_empty())
-        .unwrap_or_else(|| {
-            vec![
-                "operator.read".to_string(),
-                "operator.write".to_string(),
-            ]
-        })
+        .unwrap_or_else(|| vec!["operator.read".to_string(), "operator.write".to_string()])
 }
 
 fn resolve_session_key(env_map: &HashMap<String, String>) -> String {
@@ -1155,14 +1184,17 @@ fn websocket_url(raw: &str) -> Result<Url> {
         bail!("OpenClaw gateway URL is empty");
     }
 
-    let mut url = Url::parse(trimmed).with_context(|| format!("invalid OpenClaw gateway URL: {trimmed}"))?;
+    let mut url =
+        Url::parse(trimmed).with_context(|| format!("invalid OpenClaw gateway URL: {trimmed}"))?;
     match url.scheme() {
         "ws" | "wss" => {}
         "http" => {
-            url.set_scheme("ws").map_err(|_| anyhow!("invalid OpenClaw gateway URL scheme"))?;
+            url.set_scheme("ws")
+                .map_err(|_| anyhow!("invalid OpenClaw gateway URL scheme"))?;
         }
         "https" => {
-            url.set_scheme("wss").map_err(|_| anyhow!("invalid OpenClaw gateway URL scheme"))?;
+            url.set_scheme("wss")
+                .map_err(|_| anyhow!("invalid OpenClaw gateway URL scheme"))?;
         }
         other => bail!("unsupported OpenClaw gateway URL scheme: {other}"),
     }
@@ -1216,10 +1248,7 @@ fn locale_name() -> String {
         .ok()
         .or_else(|| env::var("LANG").ok())
         .unwrap_or_else(|| "en_US".to_string());
-    raw.split('.')
-        .next()
-        .unwrap_or("en_US")
-        .replace('_', "-")
+    raw.split('.').next().unwrap_or("en_US").replace('_', "-")
 }
 
 fn build_connect_auth(
@@ -1309,7 +1338,10 @@ fn load_or_create_device_identity() -> Result<DeviceIdentityStore> {
         if let Ok(identity) = serde_json::from_str::<DeviceIdentityStore>(&contents) {
             return Ok(identity);
         }
-        tracing::warn!("failed to parse OpenClaw device auth file at {}", path.display());
+        tracing::warn!(
+            "failed to parse OpenClaw device auth file at {}",
+            path.display()
+        );
     }
 
     let identity = generate_device_identity();

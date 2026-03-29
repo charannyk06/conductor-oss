@@ -553,9 +553,10 @@ async fn update_dispatcher_preferences(
                 if gateway_url.trim().is_empty() {
                     dispatcher.metadata.remove("openclawGatewayUrl");
                 } else {
-                    dispatcher
-                        .metadata
-                        .insert("openclawGatewayUrl".to_string(), gateway_url.trim().to_string());
+                    dispatcher.metadata.insert(
+                        "openclawGatewayUrl".to_string(),
+                        gateway_url.trim().to_string(),
+                    );
                 }
                 if let Err(err) = state.replace_dispatcher_thread(dispatcher.clone()).await {
                     return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
