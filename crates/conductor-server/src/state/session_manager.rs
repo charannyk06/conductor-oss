@@ -13,8 +13,8 @@ use super::bridge_registry::{
     BridgeConnectionRecord, BridgeConnectionStatus, BRIDGE_HEARTBEAT_TIMEOUT_SECS,
 };
 use super::helpers::{
-    append_output, is_runtime_status_line, merge_assistant_fragment, runtime_tool_metadata,
-    sanitize_terminal_text,
+    append_output, apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
+    runtime_tool_metadata, sanitize_terminal_text,
 };
 use super::runtime_status::resolve_native_resume_target;
 use super::types::{
@@ -1274,6 +1274,9 @@ impl AppState {
             // is used instead of any inherited API key billing context.
             spawn_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         }
+        if executor.kind() == AgentKind::OpenClaw {
+            apply_openclaw_runtime_env(&mut spawn_env);
+        }
         let spawn_env = build_runtime_env(executor.binary_path(), &spawn_env);
         let extra_args = if executor.kind() == AgentKind::Codex {
             self.codex_mcp_extra_args(
@@ -2320,6 +2323,9 @@ impl AppState {
         if executor.kind() == AgentKind::ClaudeCode {
             resume_env.insert("CLAUDECODE".to_string(), String::new());
             resume_env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
+        }
+        if executor.kind() == AgentKind::OpenClaw {
+            apply_openclaw_runtime_env(&mut resume_env);
         }
         let resume_env = build_runtime_env(executor.binary_path(), &resume_env);
         let session_mcp_servers = deserialize_mcp_servers(

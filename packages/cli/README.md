@@ -9,7 +9,7 @@ It starts the local dashboard and Rust backend, scaffolds `CONDUCTOR.md` and `co
 Use it without installing:
 
 ```bash
-npx conductor-oss@latest
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest
 ```
 
 Or install it globally:
@@ -30,8 +30,8 @@ The package installs these command aliases:
 Initialize an existing repo:
 
 ```bash
-npx conductor-oss@latest init
-npx conductor-oss@latest start --workspace .
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest init
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start --workspace .
 ```
 
 Launcher defaults:
@@ -103,6 +103,18 @@ The current package supports local-first usage plus optional access-control and 
 - Verified Cloudflare Access JWT validation and role bindings
 - Optional Clerk-backed sign-in flows in the web app
 - Bridge and relay flows for paired-device execution
+
+For first-time bridge pairing, prefer the hosted installer rather than `npx`:
+
+```bash
+curl -fsSL https://app.conductross.com/bridge/install.sh | sh -s -- --connect --dashboard-url https://app.conductross.com --relay-url https://relay.conductross.com/
+```
+
+On Windows PowerShell:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://app.conductross.com/bridge/install.ps1'))) -Connect -DashboardUrl 'https://app.conductross.com' -RelayUrl 'https://relay.conductross.com/'
+```
 
 Unauthenticated public dashboard access is not supported.
 

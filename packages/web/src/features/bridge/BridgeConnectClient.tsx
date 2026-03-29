@@ -36,11 +36,14 @@ import {
   requestBridgeServiceRestart,
 } from "@/lib/bridgeDeviceControl";
 import {
+  type BridgeInstallPlatform,
   buildBridgeBootstrapConnectCommand,
   buildBridgeConnectCommand,
   buildBridgeInstallCommand,
+  buildBridgeInstallScriptUrl,
   buildBridgeManualPairCommand,
   buildBridgeRepairHref,
+  resolveBridgeInstallPlatform,
 } from "@/lib/bridgeOnboarding";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
@@ -181,12 +184,14 @@ export default function BridgeConnectClient({
   dashboardUrl,
   relayUrl,
   installScriptUrl,
+  installPowerShellUrl,
 }: {
   initialClaimToken?: string | null;
   initialSelectedDeviceId?: string | null;
   dashboardUrl: string;
   relayUrl: string | null;
   installScriptUrl: string;
+  installPowerShellUrl: string;
 }) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
@@ -204,6 +209,7 @@ export default function BridgeConnectClient({
     initialClaimToken ? "pending" : "idle",
   );
   const [showAdvancedSetup, setShowAdvancedSetup] = useState(false);
+  const [setupPlatform, setSetupPlatform] = useState<BridgeInstallPlatform>("unix");
   const [claimError, setClaimError] = useState<string | null>(null);
   const [claimedDevice, setClaimedDevice] = useState<{ deviceId: string; deviceName: string } | null>(null);
   const [recentPairingDeviceId, setRecentPairingDeviceId] = useState<string | null>(null);
@@ -221,14 +227,15 @@ export default function BridgeConnectClient({
   });
   const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
   const relayConfigured = Boolean(relayUrl?.trim());
+  const setupInstallUrl = setupPlatform === "windows" ? installPowerShellUrl : installScriptUrl;
 
   const bootstrapConnectCommand = useMemo(
-    () => buildBridgeBootstrapConnectCommand(installScriptUrl, dashboardUrl, relayUrl),
-    [dashboardUrl, installScriptUrl, relayUrl],
+    () => buildBridgeBootstrapConnectCommand(setupInstallUrl, dashboardUrl, relayUrl, setupPlatform),
+    [dashboardUrl, relayUrl, setupInstallUrl, setupPlatform],
   );
   const installCommand = useMemo(
-    () => buildBridgeInstallCommand(installScriptUrl),
-    [installScriptUrl],
+    () => buildBridgeInstallCommand(setupInstallUrl, setupPlatform),
+    [setupInstallUrl, setupPlatform],
   );
   const connectCommand = useMemo(
     () => buildBridgeConnectCommand(dashboardUrl, relayUrl),
@@ -260,6 +267,22 @@ export default function BridgeConnectClient({
       ?? null,
     [claimedDeviceRecord, connectedDevices, devices, recentPairingDeviceRecord, selectedDeviceId],
   );
+  const selectedDeviceInstallPlatform = useMemo(
+    () => resolveBridgeInstallPlatform(selectedDevice?.os),
+    [selectedDevice?.os],
+  );
+  const selectedDeviceSetupInstallUrl = selectedDeviceInstallPlatform === "windows"
+    ? installPowerShellUrl
+    : installScriptUrl;
+  const selectedDeviceBootstrapConnectCommand = useMemo(
+    () => buildBridgeBootstrapConnectCommand(
+      selectedDeviceSetupInstallUrl,
+      dashboardUrl,
+      relayUrl,
+      selectedDeviceInstallPlatform,
+    ),
+    [dashboardUrl, installPowerShellUrl, installScriptUrl, relayUrl, selectedDeviceInstallPlatform, selectedDeviceSetupInstallUrl],
+  );
   const readyDevice = useMemo(
     () => (claimedDeviceRecord?.connected ? claimedDeviceRecord : null)
       ?? (recentPairingDeviceRecord?.connected ? recentPairingDeviceRecord : null)
@@ -283,6 +306,14 @@ export default function BridgeConnectClient({
     (serviceAction.deviceId === selectedDevice?.device_id && isLegacyBridgeBuildErrorMessage(serviceAction.message))
     || (pairingAutoUpdate.deviceId === selectedDevice?.device_id && isLegacyBridgeBuildErrorMessage(pairingAutoUpdate.message))
   );
+
+  useEffect(() => {
+    if (typeof navigator === "undefined") {
+      return;
+    }
+
+    setSetupPlatform(navigator.userAgent.toLowerCase().includes("windows") ? "windows" : "unix");
+  }, []);
 
   useEffect(() => {
     setSelectedDeviceId((current) => {
@@ -588,7 +619,11 @@ export default function BridgeConnectClient({
     });
 
     try {
-      const message = await requestBridgeRepair(device.device_id, installScriptUrl);
+      const repairInstallUrl = buildBridgeInstallScriptUrl(
+        dashboardUrl,
+        resolveBridgeInstallPlatform(device.os),
+      );
+      const message = await requestBridgeRepair(device.device_id, repairInstallUrl);
       setServiceAction({
         deviceId: device.device_id,
         kind: "repair",
@@ -876,14 +911,40 @@ export default function BridgeConnectClient({
                 Connect this laptop
               </h2>
               <p className="mt-2 text-sm leading-6 text-[var(--vk-text-muted)]">
-                Most users only need one command. It runs through `npx`, chooses the right installer
-                for this OS, opens the browser, and pairs the current laptop to this dashboard.
+                Most users only need one command. Choose the shell for this laptop, then run the
+                hosted bridge installer. It installs the bridge, opens the browser, and pairs the
+                current laptop to this dashboard without requiring the full Conductor CLI first.
               </p>
 
-              <div className="mt-5">
+              <div className="mt-5 flex flex-wrap gap-2">
+                {([
+                  { value: "unix", label: "macOS / Linux" },
+                  { value: "windows", label: "Windows PowerShell" },
+                ] satisfies Array<{ value: BridgeInstallPlatform; label: string }>).map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={cn(
+                      "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+                      setupPlatform === option.value
+                        ? "border-[var(--vk-orange)] bg-[color:color-mix(in_srgb,var(--vk-orange)_14%,transparent)] text-[var(--vk-text-strong)]"
+                        : "border-[var(--vk-border)] bg-[var(--vk-bg-main)] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)]",
+                    )}
+                    onClick={() => {
+                      setSetupPlatform(option.value);
+                    }}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-4">
                 <CommandBlock
                   title="Recommended command"
-                  description="Run this once on the laptop you want to use. Works on macOS, Linux, and Windows anywhere `npx` is available."
+                  description={setupPlatform === "windows"
+                    ? "Run this in Windows PowerShell on the laptop you want to pair."
+                    : "Run this in Terminal on the laptop you want to pair."}
                   command={bootstrapConnectCommand}
                   footer={(
                     <Button
@@ -907,7 +968,7 @@ export default function BridgeConnectClient({
                     Step 1
                   </div>
                   <p className="mt-2 text-sm leading-6 text-[var(--vk-text-normal)]">
-                    Run the command in Terminal, PowerShell, or Command Prompt on the laptop you want to pair.
+                    Run the command in Terminal on macOS or Linux, or in PowerShell on Windows.
                   </p>
                 </li>
                 <li className="rounded-[18px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 py-4">
@@ -1103,8 +1164,10 @@ export default function BridgeConnectClient({
                       <BridgeLocalRepairNotice
                         deviceId={selectedDevice.device_id}
                         deviceName={selectedDevice.device_name}
+                        deviceOs={selectedDevice.os}
                         dashboardUrl={dashboardUrl}
                         installScriptUrl={installScriptUrl}
+                        installPowerShellUrl={installPowerShellUrl}
                         relayUrl={relayUrl}
                       />
                     ) : null}
@@ -1196,7 +1259,7 @@ export default function BridgeConnectClient({
                             variant="outline"
                             size="md"
                             onClick={() => {
-                              void handleCopyCommand(bootstrapConnectCommand, "setup");
+                              void handleCopyCommand(selectedDeviceBootstrapConnectCommand, "setup");
                             }}
                           >
                             {copiedCommand === "setup" ? <CheckCircle2 className="h-4 w-4" /> : <Copy className="h-4 w-4" />}

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1216,6 +1217,42 @@ func runBridgeInstallScript(installScriptURL string) error {
 	scriptBytes, err := io.ReadAll(io.LimitReader(response.Body, 512*1024))
 	if err != nil {
 		return fmt.Errorf("read install script: %w", err)
+	}
+
+	if runtime.GOOS == "windows" {
+		tempFile, err := os.CreateTemp("", "conductor-bridge-install-*.ps1")
+		if err != nil {
+			return fmt.Errorf("create temporary PowerShell install script: %w", err)
+		}
+		tempPath := tempFile.Name()
+		defer os.Remove(tempPath)
+
+		if _, err := tempFile.Write(scriptBytes); err != nil {
+			tempFile.Close()
+			return fmt.Errorf("write temporary PowerShell install script: %w", err)
+		}
+		if err := tempFile.Close(); err != nil {
+			return fmt.Errorf("close temporary PowerShell install script: %w", err)
+		}
+
+		commandPath := "powershell.exe"
+		if systemRoot := strings.TrimSpace(os.Getenv("SystemRoot")); systemRoot != "" {
+			candidate := filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				commandPath = candidate
+			}
+		}
+
+		command := exec.Command(commandPath, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tempPath)
+		command.Stdout = os.Stderr
+		command.Stderr = os.Stderr
+		command.Env = os.Environ()
+
+		if err := command.Run(); err != nil {
+			return fmt.Errorf("run PowerShell install script: %w", err)
+		}
+
+		return nil
 	}
 
 	command := exec.Command("sh", "-s", "--")

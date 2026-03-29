@@ -6,13 +6,19 @@ import { CheckCircle2, Copy, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/cn";
 import { describeLegacyBridgeBuild } from "@/lib/bridgeBuildCompatibility";
-import { buildBridgeBootstrapConnectCommand, buildBridgeRepairHref } from "@/lib/bridgeOnboarding";
+import {
+  buildBridgeBootstrapConnectCommand,
+  buildBridgeRepairHref,
+  resolveBridgeInstallPlatform,
+} from "@/lib/bridgeOnboarding";
 
 type BridgeLocalRepairNoticeProps = {
   deviceId: string;
   deviceName: string;
+  deviceOs: string;
   dashboardUrl: string;
   installScriptUrl: string;
+  installPowerShellUrl: string;
   relayUrl?: string | null;
   className?: string;
 };
@@ -20,15 +26,22 @@ type BridgeLocalRepairNoticeProps = {
 export function BridgeLocalRepairNotice({
   deviceId,
   deviceName,
+  deviceOs,
   dashboardUrl,
   installScriptUrl,
+  installPowerShellUrl,
   relayUrl,
   className,
 }: BridgeLocalRepairNoticeProps) {
   const [copied, setCopied] = useState(false);
+  const repairPlatform = useMemo(
+    () => resolveBridgeInstallPlatform(deviceOs),
+    [deviceOs],
+  );
+  const repairInstallUrl = repairPlatform === "windows" ? installPowerShellUrl : installScriptUrl;
   const repairCommand = useMemo(
-    () => buildBridgeBootstrapConnectCommand(installScriptUrl, dashboardUrl, relayUrl),
-    [dashboardUrl, installScriptUrl, relayUrl],
+    () => buildBridgeBootstrapConnectCommand(repairInstallUrl, dashboardUrl, relayUrl, repairPlatform),
+    [dashboardUrl, relayUrl, repairInstallUrl, repairPlatform],
   );
   const repairHref = useMemo(
     () => buildBridgeRepairHref(deviceId),

@@ -19,7 +19,11 @@ import {
   requestBridgeRepair,
   requestBridgeServiceRestart,
 } from "@/lib/bridgeDeviceControl";
-import { buildBridgeInstallScriptUrl, buildBridgeRepairHref } from "@/lib/bridgeOnboarding";
+import {
+  buildBridgeInstallScriptUrl,
+  buildBridgeRepairHref,
+  resolveBridgeInstallPlatform,
+} from "@/lib/bridgeOnboarding";
 import { formatBridgeVersionSuffix, normalizeBridgeDevices } from "@/lib/bridgeDevices";
 import { resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
@@ -294,7 +298,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     });
 
     try {
-      const installScriptUrl = buildBridgeInstallScriptUrl(window.location.origin);
+      const installScriptUrl = buildBridgeInstallScriptUrl(
+        window.location.origin,
+        resolveBridgeInstallPlatform(device.os),
+      );
       const message = await requestBridgeRepair(device.device_id, installScriptUrl);
       setServiceAction({
         deviceId: device.device_id,
@@ -458,8 +465,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
                           <BridgeLocalRepairNotice
                             deviceId={device.device_id}
                             deviceName={device.device_name}
+                            deviceOs={device.os}
                             dashboardUrl={dashboardUrl}
                             installScriptUrl={buildBridgeInstallScriptUrl(dashboardUrl)}
+                            installPowerShellUrl={buildBridgeInstallScriptUrl(dashboardUrl, "windows")}
                             relayUrl={relayUrl}
                           />
                         ) : null}

@@ -535,7 +535,7 @@ function buildRepositoryBootstrapCommand(
   preferences: Pick<PreferencesPayload, "ide" | "markdownEditor">,
 ): string {
   const initArgs = [
-    "npx conductor-oss@latest setup",
+    "npx --yes --registry=https://registry.npmjs.org conductor-oss@latest setup",
     "--yes",
     `--path ${shellQuote(repository.path)}`,
     `--project-id ${shellQuote(repository.id)}`,
@@ -3098,7 +3098,7 @@ function hydrateRepositoryDraft(value: RepositorySettingsPayload): RepositorySet
                           <h5 className="text-[22px] leading-[22px] text-[var(--vk-text-strong)]">Repo-Preseed Bootstrap</h5>
                           <p className="text-[13px] text-[var(--vk-text-muted)]">
                             Use this when you already know the target repository and want one command to prefill it. The
-                            default first-run path is still `npx conductor-oss@latest`, which opens the dashboard and lets
+                            default first-run path is still `npx --yes --registry=https://registry.npmjs.org conductor-oss@latest`, which opens the dashboard and lets
                             the user choose preferences before adding a project.
                           </p>
                         </div>

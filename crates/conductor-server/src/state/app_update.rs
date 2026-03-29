@@ -17,6 +17,7 @@ use crate::state::AppState;
 const APP_UPDATE_CHECK_TTL_SECS: i64 = 5 * 60;
 const APP_UPDATE_BACKGROUND_INTERVAL_SECS: u64 = 30 * 60;
 const APP_UPDATE_LOG_TAIL_LIMIT: usize = 6000;
+const NPM_PUBLIC_REGISTRY: &str = "https://registry.npmjs.org";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -453,6 +454,7 @@ impl AppUpdateStatus {
                     config.install_mode,
                     package_name,
                     config.rerun_command.as_deref(),
+                    None,
                 )
             }),
             can_auto_update: config.install_mode.can_auto_update(),
@@ -508,17 +510,34 @@ fn build_update_command(
     install_mode: AppInstallMode,
     package_name: &str,
     rerun_command: Option<&str>,
+    target_version: Option<&str>,
 ) -> Option<String> {
+    let package_spec = target_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("{package_name}@{value}"))
+        .unwrap_or_else(|| format!("{package_name}@latest"));
+
     match install_mode {
         AppInstallMode::Npx => rerun_command
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-            .or_else(|| Some(format!("npx {package_name}@latest start"))),
-        AppInstallMode::GlobalNpm => Some(format!("npm install -g {package_name}@latest")),
-        AppInstallMode::GlobalPnpm => Some(format!("pnpm add -g {package_name}@latest")),
-        AppInstallMode::GlobalBun => Some(format!("bun add -g {package_name}@latest")),
-        AppInstallMode::Unknown => Some(format!("npm install -g {package_name}@latest")),
+            .or_else(|| {
+                Some(format!(
+                    "npx --yes --registry={NPM_PUBLIC_REGISTRY} {package_spec} start"
+                ))
+            }),
+        AppInstallMode::GlobalNpm => Some(format!(
+            "npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
+        )),
+        AppInstallMode::GlobalPnpm => Some(format!(
+            "pnpm add -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
+        )),
+        AppInstallMode::GlobalBun => Some(format!("bun add -g {package_spec}")),
+        AppInstallMode::Unknown => Some(format!(
+            "npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
+        )),
         AppInstallMode::Source => None,
     }
 }
@@ -526,34 +545,35 @@ fn build_update_command(
 fn resolve_update_invocation(
     install_mode: AppInstallMode,
     package_name: &str,
+    target_version: &str,
 ) -> Option<(&'static str, Vec<String>, String)> {
+    let package_spec = format!("{package_name}@{target_version}");
+
     match install_mode {
         AppInstallMode::GlobalNpm => Some((
             "npm",
             vec![
                 "install".to_string(),
                 "-g".to_string(),
-                format!("{package_name}@latest"),
+                format!("--registry={NPM_PUBLIC_REGISTRY}"),
+                package_spec.clone(),
             ],
-            format!("npm install -g {package_name}@latest"),
+            format!("npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"),
         )),
         AppInstallMode::GlobalPnpm => Some((
             "pnpm",
             vec![
                 "add".to_string(),
                 "-g".to_string(),
-                format!("{package_name}@latest"),
+                format!("--registry={NPM_PUBLIC_REGISTRY}"),
+                package_spec.clone(),
             ],
-            format!("pnpm add -g {package_name}@latest"),
+            format!("pnpm add -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"),
         )),
         AppInstallMode::GlobalBun => Some((
             "bun",
-            vec![
-                "add".to_string(),
-                "-g".to_string(),
-                format!("{package_name}@latest"),
-            ],
-            format!("bun add -g {package_name}@latest"),
+            vec!["add".to_string(), "-g".to_string(), package_spec.clone()],
+            format!("bun add -g {package_spec}"),
         )),
         _ => None,
     }
@@ -726,12 +746,30 @@ impl AppState {
 
                     runtime.status.latest_version = Some(latest_version);
                     runtime.status.update_available = update_available;
+                    runtime.status.update_command =
+                        config.package_name.as_deref().and_then(|package_name| {
+                            build_update_command(
+                                config.install_mode,
+                                package_name,
+                                config.rerun_command.as_deref(),
+                                runtime.status.latest_version.as_deref(),
+                            )
+                        });
                     runtime.status.error = None;
                 }
                 Err(error) => {
                     runtime.status.error = Some(error.to_string());
                     runtime.status.latest_version = None;
                     runtime.status.update_available = false;
+                    runtime.status.update_command =
+                        config.package_name.as_deref().and_then(|package_name| {
+                            build_update_command(
+                                config.install_mode,
+                                package_name,
+                                config.rerun_command.as_deref(),
+                                None,
+                            )
+                        });
                 }
             }
 
@@ -756,11 +794,12 @@ impl AppState {
             .ok_or_else(|| anyhow!("No newer Conductor version is available right now."))?;
 
         let (command, args, display_command) =
-            resolve_update_invocation(config.install_mode, &package_name).ok_or_else(|| {
-                anyhow!(
+            resolve_update_invocation(config.install_mode, &package_name, &latest_version)
+                .ok_or_else(|| {
+                    anyhow!(
             "Automatic updates are unavailable for this install. Use the suggested command instead."
         )
-            })?;
+                })?;
 
         let next_snapshot = {
             let mut runtime = self.app_update.lock().await;
@@ -797,6 +836,8 @@ impl AppState {
             let result = Command::new(command)
                 .args(&args)
                 .env("NO_COLOR", "1")
+                .env("NPM_CONFIG_REGISTRY", NPM_PUBLIC_REGISTRY)
+                .env("npm_config_registry", NPM_PUBLIC_REGISTRY)
                 .output()
                 .await;
 
@@ -1003,15 +1044,21 @@ mod tests {
     #[test]
     fn build_update_command_matches_install_mode() {
         assert_eq!(
-            build_update_command(AppInstallMode::Npx, "conductor-oss", None),
-            Some("npx conductor-oss@latest start".to_string())
+            build_update_command(AppInstallMode::Npx, "conductor-oss", None, None),
+            Some(
+                "npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start"
+                    .to_string()
+            )
         );
         assert_eq!(
-            build_update_command(AppInstallMode::GlobalNpm, "conductor-oss", None),
-            Some("npm install -g conductor-oss@latest".to_string())
+            build_update_command(AppInstallMode::GlobalNpm, "conductor-oss", None, None),
+            Some(
+                "npm install -g --registry=https://registry.npmjs.org conductor-oss@latest"
+                    .to_string()
+            )
         );
         assert_eq!(
-            build_update_command(AppInstallMode::Source, "conductor-oss", None),
+            build_update_command(AppInstallMode::Source, "conductor-oss", None, None),
             None
         );
     }
@@ -1022,9 +1069,10 @@ mod tests {
             build_update_command(
                 AppInstallMode::Npx,
                 "conductor-oss",
-                Some("npx conductor-oss@latest start --workspace demo"),
+                Some("npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start --workspace demo"),
+                None,
             ),
-            Some("npx conductor-oss@latest start --workspace demo".to_string())
+            Some("npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start --workspace demo".to_string())
         );
     }
 }

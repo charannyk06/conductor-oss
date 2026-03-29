@@ -44,7 +44,7 @@ Conductor adds:
 ### Launch
 
 ```bash
-npx conductor-oss@latest
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest
 ```
 
 Running the package with no arguments defaults to `start --open`.
@@ -57,8 +57,8 @@ Running the package with no arguments defaults to `start --open`.
 ### Initialize an existing repo
 
 ```bash
-npx conductor-oss@latest init
-npx conductor-oss@latest start --workspace .
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest init
+npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start --workspace .
 ```
 
 `init` scaffolds `conductor.yaml` and `CONDUCTOR.md`. The SQLite database at `.conductor/conductor.db` is created the first time the backend starts.
@@ -187,6 +187,18 @@ What is no longer supported:
 - The old tmux-first terminal model
 
 The user-facing paired-device flow is built around the companion `conductor-bridge` binary and the dashboard bridge pages. The repo also contains `bridge-cmd/`, `crates/conductor-relay/`, and native Rust `conductor bridge ...` commands for lower-level bridge and relay development.
+
+For first-time bridge pairing, prefer the hosted installer instead of routing through `npx`:
+
+```bash
+curl -fsSL https://app.conductross.com/bridge/install.sh | sh -s -- --connect --dashboard-url https://app.conductross.com --relay-url https://relay.conductross.com/
+```
+
+On Windows PowerShell:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod -Uri 'https://app.conductross.com/bridge/install.ps1'))) -Connect -DashboardUrl 'https://app.conductross.com' -RelayUrl 'https://relay.conductross.com/'
+```
 
 ## Local Files and Runtime Artifacts
 

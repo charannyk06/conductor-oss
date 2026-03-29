@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
                     println!("  conductor.yaml already exists (use --force to overwrite)");
                 }
                 if result.created > 0 {
-                    println!("\nDetected project defaults:\n  project id: {}\n  repo: {}\n  path: {}\n  default branch: {}\n  agent: {}\n\nNext steps:\n  1. co start\n  2. Open dashboard\n  3. Open CONDUCTOR.md\n\n  Tip: Running `npx conductor-oss@latest init` from a repo root now auto-detects origin + branch.\n", result.project.project_id, result.project.repo, result.project.path.display(), result.project.default_branch, result.project.agent);
+                    println!("\nDetected project defaults:\n  project id: {}\n  repo: {}\n  path: {}\n  default branch: {}\n  agent: {}\n\nNext steps:\n  1. co start\n  2. Open dashboard\n  3. Open CONDUCTOR.md\n\n  Tip: Running `npx --yes --registry=https://registry.npmjs.org conductor-oss@latest init` from a repo root now auto-detects origin + branch.\n", result.project.project_id, result.project.repo, result.project.path.display(), result.project.default_branch, result.project.agent);
                 }
             }
         }

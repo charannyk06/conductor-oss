@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::env;
+use std::fs;
 use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 
@@ -17,9 +19,22 @@ const RECOVERY_ACTION_METADATA_KEY: &str = "recoveryAction";
 const RECOVERY_COUNT_METADATA_KEY: &str = "restartRecoveryCount";
 const RECOVERED_AT_METADATA_KEY: &str = "lastRecoveredAt";
 const DASHBOARD_METADATA_MAX_VALUE_BYTES: usize = 2048;
+const OPENCLAW_GATEWAY_URL_ENV: &str = "OPENCLAW_GATEWAY_URL";
+const OPENCLAW_GATEWAY_TOKEN_ENV: &str = "OPENCLAW_GATEWAY_TOKEN";
+const OPENCLAW_GATEWAY_AUTH_TOKEN_ENV: &str = "OPENCLAW_GATEWAY_AUTH_TOKEN";
+const OPENCLAW_GATEWAY_PASSWORD_ENV: &str = "OPENCLAW_GATEWAY_PASSWORD";
+const OPENCLAW_GATEWAY_SCOPES_ENV: &str = "OPENCLAW_GATEWAY_SCOPES";
 const LEGACY_DIRECT_RUNTIME_SUMMARY: &str =
     "Legacy direct terminal session is no longer supported. Archive it and start a fresh ttyd session.";
 const LEGACY_TMUX_RUNTIME_SUMMARY: &str = "Archived legacy tmux session after tmux runtime removal";
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ResolvedOpenClawRuntimeEnv {
+    gateway_url: Option<String>,
+    gateway_token: Option<String>,
+    gateway_password: Option<String>,
+    gateway_scopes: Option<String>,
+}
 
 fn dashboard_metadata_allowlist() -> &'static [&'static str] {
     &[
@@ -113,6 +128,174 @@ pub(crate) fn dashboard_session_metadata(
         filtered.insert((*key).to_string(), trim_dashboard_metadata_value(value));
     }
     filtered
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+}
+
+fn read_json_file(path: &Path) -> Option<Value> {
+    let contents = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+fn trimmed_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_env_placeholder(value: &str, env_map: &HashMap<String, String>) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let placeholder = trimmed
+        .strip_prefix("${")
+        .and_then(|candidate| candidate.strip_suffix('}'))
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty());
+    if let Some(name) = placeholder {
+        return trimmed_string(env_map.get(name).map(String::as_str));
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn resolved_openclaw_config_secret(
+    config: &Value,
+    field: &str,
+    env_map: &HashMap<String, String>,
+) -> Option<String> {
+    let auth = config.get("gateway")?.get("auth")?;
+    match auth.get(field) {
+        Some(Value::String(value)) => resolve_env_placeholder(value, env_map),
+        _ => None,
+    }
+}
+
+fn resolved_openclaw_gateway_url_from_config(config: &Value) -> Option<String> {
+    let gateway = config.get("gateway")?;
+    if let Some(url) = trimmed_string(
+        gateway
+            .get("remote")
+            .and_then(|remote| remote.get("url"))
+            .and_then(Value::as_str),
+    ) {
+        return Some(url);
+    }
+    if let Some(url) = trimmed_string(gateway.get("url").and_then(Value::as_str)) {
+        return Some(url);
+    }
+
+    let port = gateway
+        .get("port")
+        .and_then(Value::as_u64)
+        .filter(|port| (1..=u16::MAX as u64).contains(port))?;
+    let bind = gateway
+        .get("bind")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("loopback");
+    if bind.eq_ignore_ascii_case("custom") {
+        if let Some(host) = trimmed_string(gateway.get("customBindHost").and_then(Value::as_str)) {
+            return Some(format!("ws://{host}:{port}"));
+        }
+    }
+
+    Some(format!("ws://127.0.0.1:{port}"))
+}
+
+fn resolve_openclaw_runtime_env_from_sources(
+    env_map: &HashMap<String, String>,
+    config: Option<&Value>,
+) -> ResolvedOpenClawRuntimeEnv {
+    let config_gateway_auth_mode = config
+        .and_then(|candidate| candidate.get("gateway"))
+        .and_then(|gateway| gateway.get("auth"))
+        .and_then(|auth| auth.get("mode"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let config_gateway_token =
+        config.and_then(|candidate| resolved_openclaw_config_secret(candidate, "token", env_map));
+    let config_gateway_password = config
+        .and_then(|candidate| resolved_openclaw_config_secret(candidate, "password", env_map));
+
+    let gateway_token = trimmed_string(env_map.get(OPENCLAW_GATEWAY_TOKEN_ENV).map(String::as_str))
+        .or_else(|| {
+            trimmed_string(
+                env_map
+                    .get(OPENCLAW_GATEWAY_AUTH_TOKEN_ENV)
+                    .map(String::as_str),
+            )
+        })
+        .or_else(|| match config_gateway_auth_mode.as_deref() {
+            Some("password") => None,
+            Some("token") => config_gateway_token.clone(),
+            _ if config_gateway_password.is_none() => config_gateway_token.clone(),
+            _ => None,
+        });
+    let gateway_password = trimmed_string(
+        env_map
+            .get(OPENCLAW_GATEWAY_PASSWORD_ENV)
+            .map(String::as_str),
+    )
+    .or_else(|| match config_gateway_auth_mode.as_deref() {
+        Some("token") => None,
+        Some("password") => config_gateway_password.clone(),
+        _ if config_gateway_token.is_none() => config_gateway_password.clone(),
+        _ => None,
+    });
+
+    ResolvedOpenClawRuntimeEnv {
+        gateway_url: trimmed_string(env_map.get(OPENCLAW_GATEWAY_URL_ENV).map(String::as_str))
+            .or_else(|| config.and_then(resolved_openclaw_gateway_url_from_config)),
+        gateway_token,
+        gateway_password,
+        gateway_scopes: trimmed_string(
+            env_map.get(OPENCLAW_GATEWAY_SCOPES_ENV).map(String::as_str),
+        ),
+    }
+}
+
+fn insert_runtime_env_if_missing(
+    env_map: &mut HashMap<String, String>,
+    key: &str,
+    value: Option<String>,
+) {
+    if trimmed_string(env_map.get(key).map(String::as_str)).is_some() {
+        return;
+    }
+    if let Some(value) = value {
+        env_map.insert(key.to_string(), value);
+    }
+}
+
+pub(crate) fn apply_openclaw_runtime_env(env_map: &mut HashMap<String, String>) {
+    let process_env = env::vars().collect::<HashMap<String, String>>();
+    let config = user_home_dir()
+        .map(|home| home.join(".openclaw").join("openclaw.json"))
+        .and_then(|path| read_json_file(&path));
+    let resolved = resolve_openclaw_runtime_env_from_sources(&process_env, config.as_ref());
+
+    insert_runtime_env_if_missing(env_map, OPENCLAW_GATEWAY_URL_ENV, resolved.gateway_url);
+    insert_runtime_env_if_missing(env_map, OPENCLAW_GATEWAY_TOKEN_ENV, resolved.gateway_token);
+    insert_runtime_env_if_missing(
+        env_map,
+        OPENCLAW_GATEWAY_PASSWORD_ENV,
+        resolved.gateway_password,
+    );
+    insert_runtime_env_if_missing(
+        env_map,
+        OPENCLAW_GATEWAY_SCOPES_ENV,
+        resolved.gateway_scopes,
+    );
 }
 
 pub fn session_to_dashboard_value(session: &SessionRecord) -> Value {
@@ -1355,6 +1538,7 @@ mod tests {
     use super::*;
     use crate::state::ConversationEntry;
     use chrono::Utc;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -1368,6 +1552,77 @@ mod tests {
     fn sanitize_terminal_text_strips_ansi_and_control_sequences() {
         let input = "\u{001b}[90m{\"type\":\"assistant\"}\u{001b}[0m\u{0008}";
         assert_eq!(sanitize_terminal_text(input), "{\"type\":\"assistant\"}");
+    }
+
+    #[test]
+    fn resolve_openclaw_runtime_env_prefers_explicit_env_and_expands_config_placeholders() {
+        let env_map = HashMap::from([
+            (
+                OPENCLAW_GATEWAY_AUTH_TOKEN_ENV.to_string(),
+                "auth-token-123".to_string(),
+            ),
+            (
+                OPENCLAW_GATEWAY_SCOPES_ENV.to_string(),
+                "operator.read,operator.write".to_string(),
+            ),
+        ]);
+        let config = json!({
+            "gateway": {
+                "port": 18789,
+                "bind": "lan",
+                "auth": {
+                    "mode": "token",
+                    "token": "${OPENCLAW_GATEWAY_AUTH_TOKEN}",
+                }
+            }
+        });
+
+        let resolved = resolve_openclaw_runtime_env_from_sources(&env_map, Some(&config));
+
+        assert_eq!(
+            resolved.gateway_url.as_deref(),
+            Some("ws://127.0.0.1:18789")
+        );
+        assert_eq!(resolved.gateway_token.as_deref(), Some("auth-token-123"));
+        assert_eq!(
+            resolved.gateway_scopes.as_deref(),
+            Some("operator.read,operator.write")
+        );
+        assert_eq!(resolved.gateway_password, None);
+    }
+
+    #[test]
+    fn resolve_openclaw_runtime_env_uses_password_mode_and_keeps_env_precedence() {
+        let env_map = HashMap::from([
+            (
+                OPENCLAW_GATEWAY_URL_ENV.to_string(),
+                "wss://gateway.example.com/socket".to_string(),
+            ),
+            (
+                OPENCLAW_GATEWAY_PASSWORD_ENV.to_string(),
+                "super-secret".to_string(),
+            ),
+        ]);
+        let config = json!({
+            "gateway": {
+                "port": 17777,
+                "bind": "custom",
+                "customBindHost": "192.168.1.40",
+                "auth": {
+                    "mode": "password",
+                    "password": "${OPENCLAW_GATEWAY_PASSWORD}",
+                }
+            }
+        });
+
+        let resolved = resolve_openclaw_runtime_env_from_sources(&env_map, Some(&config));
+
+        assert_eq!(
+            resolved.gateway_url.as_deref(),
+            Some("wss://gateway.example.com/socket")
+        );
+        assert_eq!(resolved.gateway_password.as_deref(), Some("super-secret"));
+        assert_eq!(resolved.gateway_token, None);
     }
 
     #[test]

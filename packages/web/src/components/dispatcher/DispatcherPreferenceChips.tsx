@@ -3,7 +3,7 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import type { ModelAccessPreferences } from "@conductor-oss/core/types";
 import type { ReactNode } from "react";
-import { Brain, Check, ChevronDown, Globe, KeyRound, Link2, ShieldCheck, X } from "lucide-react";
+import { Brain, Check, ChevronDown } from "lucide-react";
 import { AgentTileIcon } from "@/components/AgentTileIcon";
 import { cn } from "@/lib/cn";
 import {
@@ -18,8 +18,6 @@ import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 
 const DISPATCHER_AGENT_OPTIONS = ["codex", "claude-code", "gemini", "openclaw"] as const;
-const OPENCLAW_INPUT_CLASS =
-  "min-w-0 flex-1 bg-transparent text-[13px] text-[#f2d9cd] placeholder-[rgba(242,217,205,0.45)] outline-none disabled:cursor-not-allowed disabled:opacity-60 sm:text-[11.5px]";
 
 function formatReasoningLabel(value: string): string {
   if (value === "xhigh") {
@@ -105,24 +103,9 @@ type DispatcherPreferenceChipsProps = {
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>;
   disabled?: boolean;
   className?: string;
-  openclawConfig?: OpenClawDispatcherPreferences;
   onImplementationAgentChange: (next: string) => void;
   onModelSelectionChange: (next: ModelSelectionState) => void;
-  onOpenclawConfigChange?: (patch: OpenClawDispatcherPreferencesPatch) => void;
-  onOpenclawGatewayTokenClear?: () => void;
 };
-
-export type OpenClawDispatcherPreferences = {
-  gatewayUrl: string;
-  gatewayToken: string;
-  gatewayTokenConfigured: boolean;
-  gatewayScopes: string;
-  sessionKey: string;
-};
-
-export type OpenClawDispatcherPreferencesPatch = Partial<
-  Pick<OpenClawDispatcherPreferences, "gatewayUrl" | "gatewayToken" | "gatewayScopes" | "sessionKey">
->;
 
 export function DispatcherPreferenceChips({
   implementationAgent,
@@ -131,17 +114,8 @@ export function DispatcherPreferenceChips({
   runtimeModelCatalogs,
   disabled = false,
   className,
-  openclawConfig = {
-    gatewayUrl: "",
-    gatewayToken: "",
-    gatewayTokenConfigured: false,
-    gatewayScopes: "",
-    sessionKey: "",
-  },
   onImplementationAgentChange,
   onModelSelectionChange,
-  onOpenclawConfigChange,
-  onOpenclawGatewayTokenClear,
 }: DispatcherPreferenceChipsProps) {
   const availableModels = getSelectableAgentModels(
     implementationAgent,
@@ -292,85 +266,6 @@ export function DispatcherPreferenceChips({
         </div>
       ) : null}
 
-      {implementationAgent === "openclaw" ? (
-        <div className="col-span-2 grid gap-1.5 sm:flex sm:flex-wrap sm:items-center">
-          <div
-            className="inline-flex h-10 min-w-0 items-center gap-2 rounded-[11px] border border-[rgba(214,163,126,0.28)] bg-[rgba(66,44,35,0.94)] px-3 text-[13px] text-[#f2d9cd] sm:h-[30px] sm:min-w-[15rem] sm:rounded-[9px] sm:px-2 sm:text-[11.5px]"
-            title="OpenClaw gateway URL"
-          >
-            <Globe className="h-3.5 w-3.5 shrink-0 text-[#d7b6a5] sm:h-3 sm:w-3" />
-            <input
-              type="url"
-              placeholder="ws://127.0.0.1:18789"
-              value={openclawConfig.gatewayUrl}
-              onChange={(e) => onOpenclawConfigChange?.({ gatewayUrl: e.target.value })}
-              disabled={disabled}
-              className={OPENCLAW_INPUT_CLASS}
-            />
-          </div>
-
-          <div
-            className="inline-flex h-10 min-w-0 items-center gap-2 rounded-[11px] border border-[rgba(214,163,126,0.28)] bg-[rgba(66,44,35,0.94)] px-3 text-[13px] text-[#f2d9cd] sm:h-[30px] sm:min-w-[15rem] sm:rounded-[9px] sm:px-2 sm:text-[11.5px]"
-            title="OpenClaw gateway token"
-          >
-            <KeyRound className="h-3.5 w-3.5 shrink-0 text-[#d7b6a5] sm:h-3 sm:w-3" />
-            <input
-              type="password"
-              placeholder={
-                openclawConfig.gatewayTokenConfigured
-                  ? "Stored token configured"
-                  : "OpenClaw gateway token"
-              }
-              value={openclawConfig.gatewayToken}
-              onChange={(e) => onOpenclawConfigChange?.({ gatewayToken: e.target.value })}
-              disabled={disabled}
-              className={OPENCLAW_INPUT_CLASS}
-            />
-            {openclawConfig.gatewayTokenConfigured ? (
-              <button
-                type="button"
-                onClick={() => onOpenclawGatewayTokenClear?.()}
-                disabled={disabled}
-                className="inline-flex h-5 w-5 items-center justify-center rounded text-[rgba(242,217,205,0.72)] transition hover:bg-[rgba(255,255,255,0.08)] hover:text-[#f2d9cd] disabled:cursor-not-allowed disabled:opacity-50"
-                title="Clear stored gateway token"
-                aria-label="Clear stored gateway token"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            ) : null}
-          </div>
-
-          <div
-            className="inline-flex h-10 min-w-0 items-center gap-2 rounded-[11px] border border-[rgba(214,163,126,0.28)] bg-[rgba(66,44,35,0.94)] px-3 text-[13px] text-[#f2d9cd] sm:h-[30px] sm:min-w-[13rem] sm:rounded-[9px] sm:px-2 sm:text-[11.5px]"
-            title="OpenClaw session key override"
-          >
-            <Link2 className="h-3.5 w-3.5 shrink-0 text-[#d7b6a5] sm:h-3 sm:w-3" />
-            <input
-              type="text"
-              placeholder="conductor:project_dispatcher:demo"
-              value={openclawConfig.sessionKey}
-              onChange={(e) => onOpenclawConfigChange?.({ sessionKey: e.target.value })}
-              disabled={disabled}
-              className={OPENCLAW_INPUT_CLASS}
-            />
-          </div>
-
-          <div
-            className="inline-flex h-10 min-w-0 items-center gap-2 rounded-[11px] border border-[rgba(214,163,126,0.28)] bg-[rgba(66,44,35,0.94)] px-3 text-[13px] text-[#f2d9cd] sm:h-[30px] sm:min-w-[13rem] sm:rounded-[9px] sm:px-2 sm:text-[11.5px]"
-            title="OpenClaw gateway scopes"
-          >
-            <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#d7b6a5] sm:h-3 sm:w-3" />
-            <input
-              type="text"
-              placeholder="operator.read,operator.write"
-              value={openclawConfig.gatewayScopes}
-              onChange={(e) => onOpenclawConfigChange?.({ gatewayScopes: e.target.value })}
-              disabled={disabled}
-              className={OPENCLAW_INPUT_CLASS}
-            />
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
