@@ -99,7 +99,7 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     description: "OpenClaw gateway-backed chat runtime",
     homepage: "https://github.com/openclaw/openclaw#readme",
     iconUrl: null,
-    installHint: "Configure the gateway URL in the dispatcher UI",
+    installHint: "Configure the OpenClaw gateway in backend runtime settings",
     installUrl: "https://github.com/openclaw/openclaw",
     setupUrl: "https://github.com/openclaw/openclaw",
     surfaces: ["dispatcher"],

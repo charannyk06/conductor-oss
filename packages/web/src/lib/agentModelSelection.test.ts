@@ -85,3 +85,20 @@ test("buildModelSelection preserves explicit custom model but drops unverifiable
   assert.equal(selection.customModel, "openai/gpt-5.4");
   assert.equal(selection.reasoningEffort, "");
 });
+
+test("openclaw suppresses frontend model and reasoning selection", () => {
+  const selection = buildModelSelection(
+    "openclaw",
+    {},
+    {},
+    "gpt-5.3-codex-spark",
+    "high",
+  );
+
+  assert.deepEqual(selection, {
+    catalogModel: "",
+    customModel: "",
+    reasoningEffort: "",
+  });
+  assert.deepEqual(getSelectableAgentModels("openclaw", {}, {}), []);
+});
