@@ -1,5 +1,7 @@
 # OpenClaw Dispatcher Front Door
 
+Full HTTP request/response details: [`openclaw-integration-contract.md`](./openclaw-integration-contract.md).
+
 ## Product goal
 
 OpenClaw is the top-level orchestrator chat surface.
