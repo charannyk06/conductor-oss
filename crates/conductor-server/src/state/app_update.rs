@@ -523,18 +523,18 @@ fn build_update_command(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-            .or_else(|| Some(format!(
-                "npx --yes --registry={NPM_PUBLIC_REGISTRY} {package_spec} start"
-            ))),
+            .or_else(|| {
+                Some(format!(
+                    "npx --yes --registry={NPM_PUBLIC_REGISTRY} {package_spec} start"
+                ))
+            }),
         AppInstallMode::GlobalNpm => Some(format!(
             "npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
         )),
         AppInstallMode::GlobalPnpm => Some(format!(
             "pnpm add -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
         )),
-        AppInstallMode::GlobalBun => Some(format!(
-            "bun add -g {package_spec}"
-        )),
+        AppInstallMode::GlobalBun => Some(format!("bun add -g {package_spec}")),
         AppInstallMode::Unknown => Some(format!(
             "npm install -g --registry={NPM_PUBLIC_REGISTRY} {package_spec}"
         )),
@@ -572,11 +572,7 @@ fn resolve_update_invocation(
         )),
         AppInstallMode::GlobalBun => Some((
             "bun",
-            vec![
-                "add".to_string(),
-                "-g".to_string(),
-                package_spec.clone(),
-            ],
+            vec!["add".to_string(), "-g".to_string(), package_spec.clone()],
             format!("bun add -g {package_spec}"),
         )),
         _ => None,
@@ -750,28 +746,30 @@ impl AppState {
 
                     runtime.status.latest_version = Some(latest_version);
                     runtime.status.update_available = update_available;
-                    runtime.status.update_command = config.package_name.as_deref().and_then(|package_name| {
-                        build_update_command(
-                            config.install_mode,
-                            package_name,
-                            config.rerun_command.as_deref(),
-                            runtime.status.latest_version.as_deref(),
-                        )
-                    });
+                    runtime.status.update_command =
+                        config.package_name.as_deref().and_then(|package_name| {
+                            build_update_command(
+                                config.install_mode,
+                                package_name,
+                                config.rerun_command.as_deref(),
+                                runtime.status.latest_version.as_deref(),
+                            )
+                        });
                     runtime.status.error = None;
                 }
                 Err(error) => {
                     runtime.status.error = Some(error.to_string());
                     runtime.status.latest_version = None;
                     runtime.status.update_available = false;
-                    runtime.status.update_command = config.package_name.as_deref().and_then(|package_name| {
-                        build_update_command(
-                            config.install_mode,
-                            package_name,
-                            config.rerun_command.as_deref(),
-                            None,
-                        )
-                    });
+                    runtime.status.update_command =
+                        config.package_name.as_deref().and_then(|package_name| {
+                            build_update_command(
+                                config.install_mode,
+                                package_name,
+                                config.rerun_command.as_deref(),
+                                None,
+                            )
+                        });
                 }
             }
 
@@ -796,11 +794,12 @@ impl AppState {
             .ok_or_else(|| anyhow!("No newer Conductor version is available right now."))?;
 
         let (command, args, display_command) =
-            resolve_update_invocation(config.install_mode, &package_name, &latest_version).ok_or_else(|| {
-                anyhow!(
+            resolve_update_invocation(config.install_mode, &package_name, &latest_version)
+                .ok_or_else(|| {
+                    anyhow!(
             "Automatic updates are unavailable for this install. Use the suggested command instead."
         )
-            })?;
+                })?;
 
         let next_snapshot = {
             let mut runtime = self.app_update.lock().await;
@@ -1046,11 +1045,17 @@ mod tests {
     fn build_update_command_matches_install_mode() {
         assert_eq!(
             build_update_command(AppInstallMode::Npx, "conductor-oss", None, None),
-            Some("npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start".to_string())
+            Some(
+                "npx --yes --registry=https://registry.npmjs.org conductor-oss@latest start"
+                    .to_string()
+            )
         );
         assert_eq!(
             build_update_command(AppInstallMode::GlobalNpm, "conductor-oss", None, None),
-            Some("npm install -g --registry=https://registry.npmjs.org conductor-oss@latest".to_string())
+            Some(
+                "npm install -g --registry=https://registry.npmjs.org conductor-oss@latest"
+                    .to_string()
+            )
         );
         assert_eq!(
             build_update_command(AppInstallMode::Source, "conductor-oss", None, None),

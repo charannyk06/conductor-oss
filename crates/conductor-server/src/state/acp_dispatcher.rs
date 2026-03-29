@@ -15,8 +15,8 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
 use super::helpers::{
-    is_runtime_status_line, merge_assistant_fragment, resolve_board_file, runtime_tool_metadata,
-    sanitize_terminal_text,
+    apply_openclaw_runtime_env, is_runtime_status_line, merge_assistant_fragment,
+    resolve_board_file, runtime_tool_metadata, sanitize_terminal_text,
 };
 use super::workspace::{is_process_alive, terminate_process};
 use super::{
@@ -3086,6 +3086,7 @@ impl AppState {
             {
                 spawn_env.insert("OPENCLAW_SESSION_KEY".to_string(), session_key.to_string());
             }
+            apply_openclaw_runtime_env(&mut spawn_env);
         }
         prepare_dispatcher_runtime_env(&mut spawn_env);
         let spawn_env = build_runtime_env(executor.binary_path(), &spawn_env);
