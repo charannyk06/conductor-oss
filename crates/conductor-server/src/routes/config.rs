@@ -1095,6 +1095,11 @@ fn agent_metadata(
             "https://opencode.ai",
             "",
         ),
+        conductor_core::types::AgentKind::OpenClaw => (
+            "OpenClaw gateway-backed runtime",
+            "https://github.com/openclaw/openclaw#readme",
+            "",
+        ),
         conductor_core::types::AgentKind::Droid => (
             "Factory Droid CLI",
             "https://github.com/Factory-AI/factory",
@@ -1114,11 +1119,6 @@ fn agent_metadata(
             "GitHub Copilot CLI",
             "https://docs.github.com/copilot/how-tos/copilot-cli",
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
-        ),
-        conductor_core::types::AgentKind::OpenClaw => (
-            "OpenClaw Gateway",
-            "https://docs.openclaw.ai",
-            "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openclaw.svg",
         ),
         conductor_core::types::AgentKind::Custom(_) => ("Custom agent", "", ""),
     }

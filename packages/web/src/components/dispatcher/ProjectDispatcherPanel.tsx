@@ -53,6 +53,7 @@ export function ProjectDispatcherPanel({
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [implementationAgent, setImplementationAgent] = useState(defaultAgent);
+  const [openclawGatewayUrl, setOpenclawGatewayUrl] = useState("");
   const [modelSelection, setModelSelection] = useState<ModelSelectionState>(() =>
     buildModelSelection(defaultAgent, modelAccess, runtimeModelCatalogs, null, null));
 
@@ -66,12 +67,14 @@ export function ProjectDispatcherPanel({
   useEffect(() => {
     if (!dispatcherSession) {
       setImplementationAgent(defaultAgent);
+      setOpenclawGatewayUrl("");
       setModelSelection(buildModelSelection(defaultAgent, modelAccess, runtimeModelCatalogs, null, null));
       return;
     }
 
     const nextAgent = readMetadataValue(dispatcherSession, "acpImplementationAgent", defaultAgent);
     setImplementationAgent(nextAgent);
+    setOpenclawGatewayUrl(readMetadataValue(dispatcherSession, "openclawGatewayUrl") || "");
     setModelSelection(
       buildModelSelection(
         nextAgent,
@@ -133,12 +136,22 @@ export function ProjectDispatcherPanel({
     setCreating(true);
     setError(null);
     try {
+      const currentDispatcherAgent = dispatcherSession
+        ? readMetadataValue(dispatcherSession, "agent")
+        : "";
+      const nextDispatcherAgent = implementationAgent === "openclaw"
+        ? "openclaw"
+        : currentDispatcherAgent === "openclaw"
+          ? ""
+          : currentDispatcherAgent;
       const response = await fetch(withBridgeQuery(`/api/projects/${projectId}/dispatcher`, bridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           forceNew,
+          dispatcherAgent: nextDispatcherAgent,
           implementationAgent,
+          openclawGatewayUrl,
           implementationModel: modelSelection.customModel.trim() || modelSelection.catalogModel,
           implementationReasoningEffort: modelSelection.reasoningEffort,
         }),
@@ -160,7 +173,16 @@ export function ProjectDispatcherPanel({
     } finally {
       setCreating(false);
     }
-  }, [bridgeId, implementationAgent, modelSelection.catalogModel, modelSelection.customModel, modelSelection.reasoningEffort, projectId]);
+  }, [
+    bridgeId,
+    dispatcherSession?.metadata?.agent,
+    implementationAgent,
+    modelSelection.catalogModel,
+    modelSelection.customModel,
+    modelSelection.reasoningEffort,
+    openclawGatewayUrl,
+    projectId,
+  ]);
 
   const handleDeleteThread = useCallback(async (threadId: string) => {
     setDeletingThreadId(threadId);
@@ -257,11 +279,13 @@ export function ProjectDispatcherPanel({
                 modelAccess={modelAccess}
                 runtimeModelCatalogs={runtimeModelCatalogs}
                 disabled={creating}
+                openclawGatewayUrl={openclawGatewayUrl}
                 onImplementationAgentChange={(nextAgent) => {
                   setImplementationAgent(nextAgent);
                   setModelSelection(buildModelSelection(nextAgent, modelAccess, runtimeModelCatalogs, null, null));
                 }}
                 onModelSelectionChange={setModelSelection}
+                onOpenclawGatewayUrlChange={setOpenclawGatewayUrl}
               />
             </div>
             {error ? <div className="mt-4 text-[13px] text-[#d25151]">{error}</div> : null}

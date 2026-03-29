@@ -80,6 +80,16 @@ export const KNOWN_AGENTS: KnownAgent[] = [
     installUrl: "https://opencode.ai",
   },
   {
+    name: "openclaw",
+    label: "OpenClaw",
+    description: "OpenClaw gateway-backed chat runtime",
+    homepage: "https://github.com/openclaw/openclaw#readme",
+    iconUrl: null,
+    installHint: "Configure the gateway URL in the dispatcher UI",
+    installUrl: "https://github.com/openclaw/openclaw",
+    setupUrl: "https://github.com/openclaw/openclaw",
+  },
+  {
     name: "github-copilot",
     label: "GitHub Copilot",
     description: "GitHub Copilot CLI",
