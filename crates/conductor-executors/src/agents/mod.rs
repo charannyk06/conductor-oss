@@ -12,6 +12,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod droid;
 pub mod gemini;
+pub mod openclaw;
 pub mod opencode;
 pub mod qwen;
 
@@ -23,6 +24,7 @@ pub use copilot::CopilotExecutor;
 pub use cursor::CursorExecutor;
 pub use droid::DroidExecutor;
 pub use gemini::GeminiExecutor;
+pub use openclaw::OpenClawExecutor;
 pub use opencode::OpenCodeExecutor;
 pub use qwen::QwenCodeExecutor;
 

@@ -1115,6 +1115,11 @@ fn agent_metadata(
             "https://docs.github.com/copilot/how-tos/copilot-cli",
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
         ),
+        conductor_core::types::AgentKind::OpenClaw => (
+            "OpenClaw Gateway",
+            "https://docs.openclaw.ai",
+            "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openclaw.svg",
+        ),
         conductor_core::types::AgentKind::Custom(_) => ("Custom agent", "", ""),
     }
 }

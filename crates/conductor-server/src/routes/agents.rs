@@ -306,6 +306,11 @@ fn agent_metadata(kind: &AgentKind) -> (&'static str, &'static str, &'static str
             "https://docs.github.com/copilot/how-tos/copilot-cli",
             "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/githubcopilot.svg",
         ),
+        AgentKind::OpenClaw => (
+            "OpenClaw Gateway",
+            "https://docs.openclaw.ai",
+            "https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/openclaw.svg",
+        ),
         AgentKind::Custom(_) => ("Custom agent", "", ""),
     }
 }

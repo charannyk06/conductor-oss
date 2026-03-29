@@ -410,14 +410,18 @@ dependencies = [
  "anyhow",
  "async-trait",
  "conductor-core",
+ "futures-util",
  "nix 0.29.0",
  "portable-pty",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
+ "uuid",
  "which",
 ]
 
