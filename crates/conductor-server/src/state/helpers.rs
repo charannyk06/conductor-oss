@@ -40,6 +40,7 @@ fn dashboard_metadata_allowlist() -> &'static [&'static str] {
         "devServerLog",
         "devServerPort",
         "devServerUrl",
+        "dispatcherThreadId",
         "finishedAt",
         "lastStderr",
         "mergeReadiness",
@@ -957,6 +958,7 @@ fn normalized_entry_attachments(
 pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let mut feed = Vec::new();
     let is_streaming = is_streaming_status(&session.status);
+    let dispatcher = is_acp_dispatcher_session(session);
     let last_runtime_assistant_id = if is_streaming {
         session
             .conversation
@@ -965,8 +967,8 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
             .find(|entry| {
                 entry.kind == "assistant_message"
                     && entry.source == "runtime"
-                    && !is_runtime_transport_dump(&entry.text)
                     && !is_runtime_internal_noise_text(&entry.text)
+                    && (dispatcher || !is_runtime_transport_dump(&entry.text))
             })
             .map(|entry| entry.id.clone())
     } else {
@@ -975,8 +977,8 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     let has_structured_runtime_entries = session.conversation.iter().any(|entry| {
         matches!(entry.kind.as_str(), "assistant_message" | "status_message")
             && entry.source == "runtime"
-            && !is_runtime_transport_dump(&entry.text)
             && !is_runtime_internal_noise_text(&entry.text)
+            && (dispatcher || !is_runtime_transport_dump(&entry.text))
     });
     let runtime_entries = if has_structured_runtime_entries {
         Vec::new()
@@ -988,10 +990,11 @@ pub fn build_normalized_chat_feed(session: &SessionRecord) -> Vec<Value> {
     }
 
     for entry in &session.conversation {
-        if entry.source == "runtime"
+        let skip_runtime_dump = entry.source == "runtime"
             && (is_runtime_transport_dump(&entry.text)
                 || is_runtime_internal_noise_text(&entry.text))
-        {
+            && !(dispatcher && entry.kind == "assistant_message");
+        if skip_runtime_dump {
             continue;
         }
 

@@ -56,6 +56,28 @@ const PARSER_STATE_KEY: &str = "parserState";
 const PARSER_STATE_MESSAGE_KEY: &str = "parserStateMessage";
 const PARSER_STATE_COMMAND_KEY: &str = "parserStateCommand";
 
+fn apply_openclaw_binding_field(
+    thread: &mut SessionRecord,
+    key: &str,
+    value: Option<Option<String>>,
+) {
+    match value {
+        None => {}
+        Some(None) => {
+            thread.metadata.remove(key);
+        }
+        Some(Some(s)) => {
+            if s.trim().is_empty() {
+                thread.metadata.remove(key);
+            } else {
+                thread
+                    .metadata
+                    .insert(key.to_string(), s.trim().to_string());
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DispatcherSelectOption {
     pub value: &'static str,
@@ -1652,6 +1674,7 @@ impl AppState {
             }
         }
 
+        self.clear_dispatcher_binding_thread(thread_id).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
     }
@@ -1661,7 +1684,7 @@ impl AppState {
     }
 
     pub(crate) async fn record_dispatcher_task_lifecycle_event(
-        &self,
+        self: &Arc<Self>,
         thread_id: &str,
         operation: DispatcherTaskOperation,
         task: &BoardTaskRecord,
@@ -1769,9 +1792,277 @@ impl AppState {
         drop(threads);
 
         self.persist_dispatcher_thread(&updated).await?;
+        self.publish_dispatcher_update(thread_id).await;
+
+        let state = Arc::clone(self);
+        let thread_for_sync = updated;
+        tokio::spawn(async move {
+            if let Err(err) = state.sync_acp_dispatcher_state(&thread_for_sync).await {
+                tracing::warn!(
+                    thread_id = %thread_for_sync.id,
+                    error = %err,
+                    "async sync_acp_dispatcher_state after task lifecycle event failed"
+                );
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn link_session_to_dispatcher(
+        &self,
+        session_id: &str,
+        thread_id: &str,
+    ) -> Result<()> {
+        let mut sessions = self.sessions.write().await;
+        let session = sessions
+            .get_mut(session_id)
+            .with_context(|| format!("Unknown session {session_id}"))?;
+        if session
+            .metadata
+            .get("dispatcherThreadId")
+            .map(String::as_str)
+            == Some(thread_id)
+        {
+            return Ok(());
+        }
+        session
+            .metadata
+            .insert("dispatcherThreadId".to_string(), thread_id.to_string());
+        let updated = session.clone();
+        drop(sessions);
+
+        self.persist_session(&updated).await?;
+        self.publish_feed_update(session_id);
+        self.publish_snapshot().await;
+        Ok(())
+    }
+
+    fn dispatcher_task_ref_for_session(session: &SessionRecord) -> String {
+        session
+            .metadata
+            .get("taskRef")
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                session
+                    .metadata
+                    .get("taskId")
+                    .map(String::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or(session.id.as_str())
+            .to_string()
+    }
+
+    fn short_dispatcher_session_id(session_id: &str) -> String {
+        session_id.chars().take(8).collect()
+    }
+
+    async fn record_dispatcher_session_event(
+        &self,
+        thread_id: &str,
+        event_type: &str,
+        source: &str,
+        text: String,
+        session: &SessionRecord,
+        mut metadata: HashMap<String, Value>,
+    ) -> Result<()> {
+        let mut threads = self.dispatcher_threads.write().await;
+        let thread = threads
+            .get_mut(thread_id)
+            .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+
+        metadata.insert(
+            "eventType".to_string(),
+            Value::String(event_type.to_string()),
+        );
+        metadata.insert(
+            "projectId".to_string(),
+            Value::String(thread.project_id.clone()),
+        );
+        metadata.insert("sessionId".to_string(), Value::String(session.id.clone()));
+        metadata.insert(
+            "sessionAgent".to_string(),
+            Value::String(session.agent.clone()),
+        );
+        metadata.insert(
+            "sessionStatus".to_string(),
+            serde_json::to_value(&session.status).unwrap_or(Value::Null),
+        );
+        if let Some(branch) = session.branch.clone() {
+            metadata.insert("sessionBranch".to_string(), Value::String(branch));
+        }
+        if let Some(task_id) = session.metadata.get("taskId").cloned() {
+            metadata.insert("taskId".to_string(), Value::String(task_id));
+        }
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        metadata.insert("taskRef".to_string(), Value::String(task_ref));
+        if let Some(summary) = session
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            metadata.insert("summary".to_string(), Value::String(summary.to_string()));
+        }
+
+        thread.last_activity_at = Utc::now().to_rfc3339();
+        thread.conversation.push(ConversationEntry {
+            id: Uuid::new_v4().to_string(),
+            kind: "system_message".to_string(),
+            source: source.to_string(),
+            text,
+            created_at: Utc::now().to_rfc3339(),
+            attachments: Vec::new(),
+            metadata,
+        });
+        enforce_conversation_limit(thread);
+        let updated = thread.clone();
+        drop(threads);
+
+        self.persist_dispatcher_thread(&updated).await?;
         self.sync_acp_dispatcher_state(&updated).await?;
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
+    }
+
+    pub(crate) async fn record_dispatcher_session_launch_event(
+        &self,
+        thread_id: &str,
+        task: &BoardTaskRecord,
+        session: &SessionRecord,
+    ) -> Result<()> {
+        let task_ref = task
+            .task_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(task.id.as_str());
+        let title = split_task_text(&task.text).0;
+        let mut details = vec![format!("- Task: {title}")];
+        details.push(format!("- Session: {}", session.id));
+        details.push(format!("- Agent: {}", session.agent));
+        if let Some(branch) = session
+            .branch
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            details.push(format!("- Branch: {branch}"));
+        }
+
+        let mut metadata = HashMap::new();
+        metadata.insert("taskTitle".to_string(), Value::String(title));
+        metadata.insert("taskId".to_string(), Value::String(task.id.clone()));
+        metadata.insert("taskRef".to_string(), Value::String(task_ref.to_string()));
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_session_launched",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Opened coding session `{}` for `{task_ref}`.\n\n{}",
+                Self::short_dispatcher_session_id(&session.id),
+                details.join("\n")
+            ),
+            session,
+            metadata,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_dispatcher_blocker_event(
+        &self,
+        thread_id: &str,
+        session: &SessionRecord,
+        prompt: &str,
+    ) -> Result<()> {
+        let prompt = prompt.trim();
+        let prompt = if prompt.is_empty() {
+            "Session is waiting for user input."
+        } else {
+            prompt
+        };
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        let mut metadata = HashMap::new();
+        metadata.insert("blocker".to_string(), Value::String(prompt.to_string()));
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_blocker_detected",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Coding session `{}` for `{task_ref}` needs input.\n\n- Agent: {}\n- Prompt: {prompt}",
+                Self::short_dispatcher_session_id(&session.id),
+                session.agent,
+            ),
+            session,
+            metadata,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_dispatcher_session_completion_event(
+        &self,
+        thread_id: &str,
+        session: &SessionRecord,
+    ) -> Result<()> {
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        let summary = session
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Ready for follow-up");
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "completionSummary".to_string(),
+            Value::String(summary.to_string()),
+        );
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_session_completed",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Coding session `{}` for `{task_ref}` completed.\n\n- Agent: {}\n- Summary: {summary}",
+                Self::short_dispatcher_session_id(&session.id),
+                session.agent,
+            ),
+            session,
+            metadata,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_dispatcher_session_failure_event(
+        &self,
+        thread_id: &str,
+        session: &SessionRecord,
+        error: &str,
+        exit_code: Option<i32>,
+    ) -> Result<()> {
+        let task_ref = Self::dispatcher_task_ref_for_session(session);
+        let message = error.trim();
+        let detail = if message.is_empty() {
+            "Session failed".to_string()
+        } else {
+            message.to_string()
+        };
+        let mut metadata = HashMap::new();
+        metadata.insert("error".to_string(), Value::String(detail.clone()));
+        if let Some(exit_code) = exit_code {
+            metadata.insert("exitCode".to_string(), Value::Number(exit_code.into()));
+        }
+        self.record_dispatcher_session_event(
+            thread_id,
+            "dispatcher_session_failed",
+            "dispatcher_session_lifecycle",
+            format!(
+                "Coding session `{}` for `{task_ref}` failed.\n\n- Agent: {}\n- Error: {}",
+                Self::short_dispatcher_session_id(&session.id),
+                session.agent,
+                detail
+            ),
+            session,
+            metadata,
+        )
+        .await
     }
 
     pub(crate) async fn invalidate_dispatcher_caches(&self, thread_id: &str) {
@@ -2008,6 +2299,26 @@ impl AppState {
             .insert("acpBoardPath".to_string(), artifacts.board_display);
         update_dispatcher_active_skills_metadata(&mut thread, &[]);
 
+        self.replace_dispatcher_thread(thread.clone()).await?;
+        self.sync_acp_dispatcher_state(&thread).await?;
+        Ok(thread)
+    }
+
+    pub(crate) async fn update_dispatcher_integration_binding(
+        self: &Arc<Self>,
+        thread_id: &str,
+        openclaw_thread_id: Option<Option<String>>,
+        openclaw_session_id: Option<Option<String>>,
+    ) -> Result<SessionRecord> {
+        let mut thread = self
+            .get_dispatcher_thread(thread_id)
+            .await
+            .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+
+        apply_openclaw_binding_field(&mut thread, "openclawThreadId", openclaw_thread_id);
+        apply_openclaw_binding_field(&mut thread, "openclawSessionId", openclaw_session_id);
+
+        thread.last_activity_at = Utc::now().to_rfc3339();
         self.replace_dispatcher_thread(thread.clone()).await?;
         self.sync_acp_dispatcher_state(&thread).await?;
         Ok(thread)

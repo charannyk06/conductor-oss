@@ -1260,6 +1260,7 @@ async fn pull_github_project_into_board(
             priority: None,
             task_ref: Some(next_human_task_ref(&ref_board, project_id)),
             attempt_ref: None,
+            dispatcher_thread_id: None,
             issue_id: item.issue_id.clone(),
             github_item_id: Some(item.item_id.clone()),
             attachments: Vec::new(),

@@ -303,6 +303,20 @@ async fn process_board_change(
 
         match spawn_result {
             Ok(session) => {
+                if let Some(dispatcher_thread_id) = task.dispatcher_thread_id.as_deref() {
+                    if let Err(err) = state
+                        .link_session_to_dispatcher(&session.id, dispatcher_thread_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            project_id,
+                            session_id = session.id,
+                            dispatcher_thread_id,
+                            error = %err,
+                            "failed to link queued session back to dispatcher thread"
+                        );
+                    }
+                }
                 tracing::info!(
                     project_id,
                     session_id = session.id,
@@ -338,7 +352,9 @@ async fn process_board_change(
 
     drop(_spawn_guard);
     state.kick_spawn_supervisor().await;
-    state.publish_snapshot().await;
+    state
+        .publish_snapshot_with_projects(std::iter::once(project_id.as_str()))
+        .await;
 
     Ok(())
 }
@@ -392,6 +408,7 @@ mod tests {
     use conductor_executors::executor::{
         Executor, ExecutorHandle, ExecutorInput, ExecutorOutput, SpawnOptions,
     };
+    use serde_json::Value;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;
@@ -593,6 +610,112 @@ mod tests {
 
         automation.abort();
         let _ = automation.await;
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn board_automation_records_dispatcher_session_launch_events() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-runtime-dispatcher-launch-test-{}",
+            Uuid::new_v4()
+        ));
+        if !crate::state::ttyd_binary_available(&root) {
+            return;
+        }
+
+        let project_root = root.join("repo");
+        fs::create_dir_all(&project_root).unwrap();
+        let board_path = project_root.join("CONDUCTOR.md");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            preferences: conductor_core::config::PreferencesConfig {
+                coding_agent: "codex".to_string(),
+                ..conductor_core::config::PreferencesConfig::default()
+            },
+            projects: BTreeMap::from([(
+                "demo".to_string(),
+                ProjectConfig {
+                    path: project_root.to_string_lossy().to_string(),
+                    agent: Some("codex".to_string()),
+                    runtime: Some("ttyd".to_string()),
+                    ..ProjectConfig::default()
+                },
+            )]),
+            ..ConductorConfig::default()
+        };
+
+        let db = Database::in_memory().await.unwrap();
+        let config_path = root.join("conductor.yaml");
+        let state = AppState::new(config_path, config, db).await;
+        state
+            .executors
+            .write()
+            .await
+            .insert(AgentKind::Codex, Arc::new(TestExecutor));
+
+        let dispatcher = state
+            .create_project_dispatcher_thread(
+                "demo",
+                crate::state::CreateDispatcherThreadOptions::default(),
+            )
+            .await
+            .unwrap();
+        fs::write(
+            &board_path,
+            [
+                "## Ready to Dispatch",
+                "",
+                &format!(
+                    "- [ ] Routed implementation task | id:task-1 | project:demo | agent:codex | taskRef:DEM-700 | dispatcherThreadId:{}",
+                    dispatcher.id
+                ),
+                "",
+                "## Dispatching",
+                "",
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        process_board_change(state.clone(), "demo".to_string(), board_path.clone())
+            .await
+            .unwrap();
+
+        wait_for_condition("dispatcher launch event", || {
+            let Ok(threads) = state.dispatcher_threads.try_read() else {
+                return None;
+            };
+            let thread = threads.get(&dispatcher.id)?;
+            thread
+                .conversation
+                .iter()
+                .find(|entry| {
+                    entry.metadata.get("eventType").and_then(Value::as_str)
+                        == Some("dispatcher_session_launched")
+                })
+                .cloned()
+        })
+        .await;
+
+        let updated = state
+            .get_dispatcher_thread(&dispatcher.id)
+            .await
+            .expect("dispatcher thread should still exist");
+        let launch_event = updated
+            .conversation
+            .iter()
+            .find(|entry| {
+                entry.metadata.get("eventType").and_then(Value::as_str)
+                    == Some("dispatcher_session_launched")
+            })
+            .expect("dispatcher launch event should be recorded");
+        assert_eq!(
+            launch_event.metadata.get("taskRef").and_then(Value::as_str),
+            Some("DEM-700")
+        );
+        assert!(launch_event.text.contains("Opened coding session"));
+
         let _ = fs::remove_dir_all(&root);
     }
 }

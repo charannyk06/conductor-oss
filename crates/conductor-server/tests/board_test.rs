@@ -220,6 +220,136 @@ async fn dispatcher_task_routes_create_update_and_handoff_deterministically() {
 }
 
 #[tokio::test]
+async fn dispatcher_bindings_route_binds_openclaw_thread_to_dispatcher() {
+    let harness = TestHarness::new("dispatcher-bindings-route-test", "ttyd").await;
+    let app = build_app(harness.state.clone());
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher/bindings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "provider": "openclaw",
+                        "threadId": "discord-thread-42",
+                        "sessionId": "openclaw-session-9",
+                        "channelId": "discord-channel-7",
+                        "createDispatcher": true,
+                        "implementationAgent": "codex",
+                        "title": "OpenClaw project thread"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_body = axum::body::to_bytes(create_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_payload: Value = serde_json::from_slice(&create_body).unwrap();
+    let binding = &create_payload["binding"];
+    let binding_id = binding["id"]
+        .as_str()
+        .expect("binding id should be present")
+        .to_string();
+    let dispatcher_thread_id = binding["dispatcherThreadId"]
+        .as_str()
+        .expect("dispatcher thread id should be present")
+        .to_string();
+    assert_eq!(binding["provider"], "openclaw");
+    assert_eq!(binding["threadId"], "discord-thread-42");
+    assert_eq!(binding["sessionId"], "openclaw-session-9");
+    assert_eq!(binding["channelId"], "discord-channel-7");
+    assert_eq!(binding["dispatcherThread"]["id"], dispatcher_thread_id);
+    assert_eq!(
+        binding["dispatcherEndpoints"]["tasks"],
+        format!(
+            "/api/projects/demo/dispatcher/tasks?threadId={}",
+            dispatcher_thread_id
+        )
+    );
+
+    let get_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(
+                    "/api/projects/demo/dispatcher/bindings?provider=openclaw&threadId=discord-thread-42",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_body = axum::body::to_bytes(get_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let get_payload: Value = serde_json::from_slice(&get_body).unwrap();
+    assert_eq!(get_payload["binding"]["id"], binding_id);
+    assert_eq!(
+        get_payload["binding"]["dispatcherThreadId"],
+        dispatcher_thread_id
+    );
+    assert_eq!(
+        get_payload["binding"]["dispatcherThread"]["metadata"]["openclawThreadId"],
+        "discord-thread-42"
+    );
+    assert_eq!(
+        get_payload["binding"]["dispatcherThread"]["metadata"]["openclawSessionId"],
+        "openclaw-session-9"
+    );
+    assert_eq!(
+        get_payload["binding"]["dispatcherEndpoints"]["tasks"],
+        format!(
+            "/api/projects/demo/dispatcher/tasks?threadId={}",
+            dispatcher_thread_id
+        )
+    );
+
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/demo/dispatcher/bindings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "provider": "openclaw",
+                        "threadId": "discord-thread-42",
+                        "title": "Renamed OpenClaw thread",
+                        "metadata": { "workspace": "alpha" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_response.status(), StatusCode::CREATED);
+    let update_body = axum::body::to_bytes(update_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let update_payload: Value = serde_json::from_slice(&update_body).unwrap();
+    assert_eq!(update_payload["binding"]["id"], binding_id);
+    assert_eq!(
+        update_payload["binding"]["dispatcherThreadId"],
+        dispatcher_thread_id
+    );
+    assert_eq!(
+        update_payload["binding"]["title"],
+        "Renamed OpenClaw thread"
+    );
+    assert_eq!(update_payload["binding"]["metadata"]["workspace"], "alpha");
+}
+
+#[tokio::test]
 async fn board_routes_preserve_task_metadata_across_roundtrip_updates() {
     let harness = TestHarness::new("conductor-board-route-test", "ttyd").await;
     fs::write(
