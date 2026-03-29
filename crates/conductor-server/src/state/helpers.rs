@@ -44,6 +44,8 @@ fn dashboard_metadata_allowlist() -> &'static [&'static str] {
         "lastStderr",
         "mergeReadiness",
         "model",
+        "openclawSessionId",
+        "openclawThreadId",
         "parentTaskId",
         "prBaseRef",
         "prDraft",
@@ -160,17 +162,24 @@ pub fn resolve_board_file(
         .filter(|path| path.exists() && !path.starts_with(workspace_path));
 
     let mut candidates = Vec::new();
-    if let Some(path) = external_project_repo_board {
-        candidates.push(path.clone());
-    }
 
     let trimmed = board_dir.trim();
     if !trimmed.is_empty() {
         if trimmed.ends_with(".md") {
             candidates.push(PathBuf::from(trimmed));
-            candidates.push(PathBuf::from("projects").join(trimmed));
         } else {
             candidates.push(PathBuf::from(trimmed).join("CONDUCTOR.md"));
+        }
+    }
+
+    if let Some(path) = external_project_repo_board {
+        candidates.push(path.clone());
+    }
+
+    if !trimmed.is_empty() {
+        if trimmed.ends_with(".md") {
+            candidates.push(PathBuf::from("projects").join(trimmed));
+        } else {
             candidates.push(PathBuf::from("projects").join(trimmed).join("CONDUCTOR.md"));
         }
     }
