@@ -92,6 +92,8 @@ export interface DashboardPR {
   reviewDecision: ReviewDecision;
   mergeability: MergeReadiness;
   previewUrl: string | null;
+  additions?: number;
+  deletions?: number;
 }
 
 /** Aggregate stats for the dashboard status line. */

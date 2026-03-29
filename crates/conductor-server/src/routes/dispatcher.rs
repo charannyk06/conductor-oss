@@ -714,10 +714,6 @@ fn dispatcher_integration_payload(dispatcher: &SessionRecord, project_id: &str) 
         "openclaw": {
             "threadId": meta.get("openclawThreadId").cloned(),
             "sessionId": meta.get("openclawSessionId").cloned(),
-            "gatewayUrl": meta.get("openclawGatewayUrl").cloned(),
-            "gatewayTokenConfigured": meta.get("openclawGatewayTokenConfigured").cloned(),
-            "gatewayScopes": meta.get("openclawGatewayScopes").cloned(),
-            "sessionKey": meta.get("openclawSessionKey").cloned(),
         },
         "heartbeat": {
             "state": meta.get("acpHeartbeatState").cloned(),
@@ -1116,6 +1112,49 @@ mod tests {
             Some(Some("t1".to_string()))
         );
         assert_eq!(super::integration_value_to_binding(None).unwrap(), None);
+    }
+
+    #[test]
+    fn integration_payload_excludes_openclaw_runtime_config_fields() {
+        let mut dispatcher = build_dispatcher("dispatcher-1");
+        dispatcher
+            .metadata
+            .insert("openclawThreadId".to_string(), "oc-thread-1".to_string());
+        dispatcher
+            .metadata
+            .insert("openclawSessionId".to_string(), "oc-session-1".to_string());
+        dispatcher.metadata.insert(
+            "openclawGatewayUrl".to_string(),
+            "ws://127.0.0.1:18789".to_string(),
+        );
+        dispatcher.metadata.insert(
+            "openclawGatewayTokenConfigured".to_string(),
+            "true".to_string(),
+        );
+        dispatcher.metadata.insert(
+            "openclawGatewayScopes".to_string(),
+            "operator.read,operator.write".to_string(),
+        );
+        dispatcher.metadata.insert(
+            "openclawSessionKey".to_string(),
+            "conductor:project_dispatcher:alpha:dispatcher-1".to_string(),
+        );
+
+        let payload = super::dispatcher_integration_payload(&dispatcher, "alpha");
+        let openclaw = payload.get("openclaw").and_then(Value::as_object).unwrap();
+
+        assert_eq!(
+            openclaw.get("threadId").and_then(Value::as_str),
+            Some("oc-thread-1")
+        );
+        assert_eq!(
+            openclaw.get("sessionId").and_then(Value::as_str),
+            Some("oc-session-1")
+        );
+        assert!(!openclaw.contains_key("gatewayUrl"));
+        assert!(!openclaw.contains_key("gatewayTokenConfigured"));
+        assert!(!openclaw.contains_key("gatewayScopes"));
+        assert!(!openclaw.contains_key("sessionKey"));
     }
 
     #[test]

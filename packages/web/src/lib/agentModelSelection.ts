@@ -24,6 +24,10 @@ export type ModelSelectionState = {
   reasoningEffort: string;
 };
 
+function usesBackendManagedModelConfig(agent: string): boolean {
+  return normalizeAgentName(agent) === "openclaw";
+}
+
 export function emptyModelSelection(): ModelSelectionState {
   return {
     catalogModel: "",
@@ -66,6 +70,10 @@ export function getSelectableAgentModels(
   modelAccess: ModelAccessPreferences,
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
 ): AgentModelOption[] {
+  if (usesBackendManagedModelConfig(agent)) {
+    return [];
+  }
+
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
   const scopedModels = getRuntimeCatalogModelsForAccess(runtimeCatalog, access);
@@ -91,6 +99,10 @@ export function getSelectableAgentReasoningOptions(
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
   model: string | null | undefined,
 ): AgentReasoningOption[] {
+  if (usesBackendManagedModelConfig(agent)) {
+    return [];
+  }
+
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
 
@@ -106,6 +118,10 @@ export function getSelectableDefaultAgentModel(
   modelAccess: ModelAccessPreferences,
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
 ): string {
+  if (usesBackendManagedModelConfig(agent)) {
+    return "";
+  }
+
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
 
@@ -124,6 +140,10 @@ export function getSelectableDefaultReasoningEffort(
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
   model: string | null | undefined,
 ): string {
+  if (usesBackendManagedModelConfig(agent)) {
+    return "";
+  }
+
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const access = resolveAgentModelAccess(agent, modelAccess);
 
@@ -138,6 +158,10 @@ export function getSelectableModelPlaceholder(
   agent: string,
   runtimeModelCatalogs: Record<string, RuntimeAgentModelCatalog>,
 ): string {
+  if (usesBackendManagedModelConfig(agent)) {
+    return "";
+  }
+
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);
   const runtimePlaceholder = runtimeCatalog?.customModelPlaceholder.trim();
   if (runtimePlaceholder) {
@@ -154,6 +178,10 @@ export function buildModelSelection(
   preferredModel?: string | null,
   preferredReasoningEffort?: string | null,
 ): ModelSelectionState {
+  if (usesBackendManagedModelConfig(agent)) {
+    return emptyModelSelection();
+  }
+
   const trimmedPreferred = preferredModel?.trim() ?? "";
   const trimmedPreferredReasoning = preferredReasoningEffort?.trim().toLowerCase() ?? "";
   const runtimeCatalog = getRuntimeModelCatalog(agent, runtimeModelCatalogs);

@@ -115,7 +115,7 @@ static KNOWN_AGENTS: &[KnownAgentInfo] = &[
         description: "OpenClaw gateway-backed chat runtime",
         homepage: "https://github.com/openclaw/openclaw#readme",
         icon_url: "",
-        install_hint: "Configure the gateway URL in the dispatcher UI",
+        install_hint: "Configure the OpenClaw gateway in backend runtime settings",
         install_url: "https://github.com/openclaw/openclaw",
         setup_url: "https://github.com/openclaw/openclaw",
     },

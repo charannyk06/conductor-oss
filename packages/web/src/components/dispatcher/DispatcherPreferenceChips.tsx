@@ -132,6 +132,7 @@ export function DispatcherPreferenceChips({
     runtimeModelCatalogs,
     resolvedModel,
   );
+  const showModelControls = availableModels.length > 0;
   const reasoningValue = modelSelection.reasoningEffort.trim().toLowerCase();
 
   return (
@@ -141,7 +142,7 @@ export function DispatcherPreferenceChips({
           label={<AgentLabel agent={implementationAgent} />}
           title={`Change coding agent (${getKnownAgent(implementationAgent)?.label ?? implementationAgent})`}
           disabled={disabled}
-          triggerClassName="w-full justify-between sm:w-auto sm:justify-start sm:max-w-[7.5rem]"
+          triggerClassName="w-full justify-between sm:h-[27px] sm:w-auto sm:justify-start sm:max-w-[6.75rem]"
         >
           <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
             Coding agent
@@ -153,7 +154,7 @@ export function DispatcherPreferenceChips({
               <DropdownMenu.Item
                 key={agent}
                 onSelect={() => onImplementationAgentChange(agent)}
-                className="flex min-h-[44px] cursor-default items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] sm:min-h-[38px] sm:rounded-[7px] sm:px-2.5 sm:py-1.5 sm:text-[12.5px]"
+                className="flex min-h-[40px] cursor-default items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] sm:min-h-[34px] sm:rounded-[7px] sm:px-2 sm:py-1.5 sm:text-[12px]"
               >
                 <AgentTileIcon
                   seed={{ label: agent }}
@@ -172,58 +173,60 @@ export function DispatcherPreferenceChips({
         </PreferenceChip>
       </div>
 
-      <div className="col-span-2 min-w-0 sm:flex-none">
-        <PreferenceChip
-          label={modelLabel}
-          title={`Change model${resolvedModel ? ` (${modelLabel})` : ""}`}
-          disabled={disabled || availableModels.length === 0}
-          triggerClassName="w-full justify-between sm:w-auto sm:justify-start sm:max-w-[14.75rem]"
-          contentClassName="sm:min-w-[220px]"
-        >
-          <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
-            Change model
-          </div>
-          {availableModels.map((model) => {
-            const selected = model.id === resolvedModel;
-            return (
-              <DropdownMenu.Item
-                key={model.id}
-                onSelect={() => {
-                  const nextReasoningOptions = getSelectableAgentReasoningOptions(
-                    implementationAgent,
-                    modelAccess,
-                    runtimeModelCatalogs,
-                    model.id,
-                  );
-                  onModelSelectionChange({
-                    catalogModel: model.id,
-                    customModel: "",
-                    reasoningEffort: nextReasoningOptions.some((option) => option.id === reasoningValue)
-                      ? reasoningValue
-                      : getSelectableDefaultReasoningEffort(
-                        implementationAgent,
-                        modelAccess,
-                        runtimeModelCatalogs,
-                        model.id,
-                      ),
-                  });
-                }}
-                className="flex min-h-[44px] cursor-default items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] sm:min-h-[38px] sm:rounded-[7px] sm:px-2.5 sm:py-1.5 sm:text-[12.5px]"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[13px] font-medium sm:text-[12.5px]">{model.label}</p>
-                  <p className="truncate text-[11px] text-[rgba(255,255,255,0.58)] sm:text-[10.5px]">
-                    {model.description}
-                  </p>
-                </div>
-                {selected ? <Check className="h-4 w-4 text-[#f2d9cd] sm:h-3.5 sm:w-3.5" /> : null}
-              </DropdownMenu.Item>
-            );
-          })}
-        </PreferenceChip>
-      </div>
+      {showModelControls ? (
+        <div className="col-span-2 min-w-0 sm:flex-none">
+          <PreferenceChip
+            label={modelLabel}
+            title={`Change model${resolvedModel ? ` (${modelLabel})` : ""}`}
+            disabled={disabled}
+            triggerClassName="w-full justify-between sm:h-[27px] sm:w-auto sm:justify-start sm:max-w-[11.75rem]"
+            contentClassName="sm:min-w-[220px]"
+          >
+            <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
+              Change model
+            </div>
+            {availableModels.map((model) => {
+              const selected = model.id === resolvedModel;
+              return (
+                <DropdownMenu.Item
+                  key={model.id}
+                  onSelect={() => {
+                    const nextReasoningOptions = getSelectableAgentReasoningOptions(
+                      implementationAgent,
+                      modelAccess,
+                      runtimeModelCatalogs,
+                      model.id,
+                    );
+                    onModelSelectionChange({
+                      catalogModel: model.id,
+                      customModel: "",
+                      reasoningEffort: nextReasoningOptions.some((option) => option.id === reasoningValue)
+                        ? reasoningValue
+                        : getSelectableDefaultReasoningEffort(
+                          implementationAgent,
+                          modelAccess,
+                          runtimeModelCatalogs,
+                          model.id,
+                        ),
+                    });
+                  }}
+                  className="flex min-h-[40px] cursor-default items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] sm:min-h-[34px] sm:rounded-[7px] sm:px-2 sm:py-1.5 sm:text-[12px]"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px] font-medium sm:text-[12px]">{model.label}</p>
+                    <p className="truncate text-[11px] text-[rgba(255,255,255,0.58)] sm:text-[10.5px]">
+                      {model.description}
+                    </p>
+                  </div>
+                  {selected ? <Check className="h-4 w-4 text-[#f2d9cd] sm:h-3.5 sm:w-3.5" /> : null}
+                </DropdownMenu.Item>
+              );
+            })}
+          </PreferenceChip>
+        </div>
+      ) : null}
 
-      {availableReasoningOptions.length > 0 ? (
+      {showModelControls && availableReasoningOptions.length > 0 ? (
         <div className="col-span-2 min-w-0 sm:flex-none">
           <PreferenceChip
             label={(
@@ -235,7 +238,7 @@ export function DispatcherPreferenceChips({
             title={`Change thinking level (${formatReasoningLabel(reasoningValue || availableReasoningOptions[0].id)})`}
             disabled={disabled}
             accent
-            triggerClassName="w-full justify-between sm:w-auto sm:justify-start sm:max-w-[7.75rem]"
+            triggerClassName="w-full justify-between sm:h-[27px] sm:w-auto sm:justify-start sm:max-w-[7rem]"
           >
             <div className="px-3 pb-2 pt-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[rgba(255,255,255,0.58)]">
               Thinking
@@ -249,7 +252,7 @@ export function DispatcherPreferenceChips({
                     ...modelSelection,
                     reasoningEffort: option.id,
                   })}
-                  className="flex min-h-[44px] cursor-default items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] sm:min-h-[38px] sm:rounded-[7px] sm:px-2.5 sm:py-1.5 sm:text-[12.5px]"
+                  className="flex min-h-[40px] cursor-default items-center gap-2.5 rounded-[8px] px-3 py-2 text-[13px] text-[#f3efea] outline-none transition hover:bg-[rgba(255,255,255,0.06)] focus:bg-[rgba(255,255,255,0.06)] sm:min-h-[34px] sm:rounded-[7px] sm:px-2 sm:py-1.5 sm:text-[12px]"
                 >
                   <Brain className="h-4 w-4 text-[#d7b6a5] sm:h-3.5 sm:w-3.5" />
                   <div className="min-w-0 flex-1">

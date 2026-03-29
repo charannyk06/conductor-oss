@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
-  ArrowRight,
   FolderGit2,
   FolderKanban,
   GitBranch,
@@ -13,59 +12,14 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/Card";
 import { getAttentionLevel, type DashboardSession } from "@/lib/types";
-import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 import type { ConfigProject } from "@/hooks/useConfig";
+import { SessionCard } from "@/components/SessionCard";
 
 interface WorkspaceOverviewProps {
   projects: ConfigProject[];
   sessions: DashboardSession[];
   onCreateWorkspace: () => void;
   onSelectSession: (sessionId: string) => void;
-}
-
-const RELATIVE_TIME_TICK_MS = 60_000;
-
-function formatRelativeTime(isoDate: string, now: number | null): string {
-  if (now === null) return "Updated recently";
-  const diffMs = now - new Date(isoDate).getTime();
-  if (!Number.isFinite(diffMs) || diffMs < 60_000) return "Updated now";
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 60) return `Updated ${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `Updated ${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `Updated ${days}d ago`;
-}
-
-function getStatusTone(session: DashboardSession): "success" | "warning" | "error" | "outline" {
-  const level = getAttentionLevel(session);
-  if (session.status === "queued") return "outline";
-  if (level === "merge") return "success";
-  if (level === "review" || level === "respond") return "warning";
-  if (session.status === "errored" || session.status === "killed") return "error";
-  return "outline";
-}
-
-function getStatusLabel(session: DashboardSession): string {
-  if (session.status === "queued") {
-    const queuePosition = Number.parseInt(session.metadata.queuePosition ?? "", 10);
-    return Number.isFinite(queuePosition) && queuePosition > 0
-      ? `Queued #${queuePosition}`
-      : "Queued";
-  }
-  if (session.metadata.recoveryState === "reattach_pending") {
-    return "Reattaching";
-  }
-  if (session.metadata.recoveryState === "detached_runtime") {
-    return "Recover";
-  }
-  const level = getAttentionLevel(session);
-  if (level === "merge") return "Ready";
-  if (level === "respond") return "Needs input";
-  if (level === "review") return "Review";
-  if (level === "pending") return "Pending";
-  if (level === "done") return "Done";
-  return "Running";
 }
 
 function selectRecentSessions(sessions: DashboardSession[], limit: number): DashboardSession[] {
@@ -90,36 +44,12 @@ function selectRecentSessions(sessions: DashboardSession[], limit: number): Dash
   return recent;
 }
 
-function formatRecentSessionSubtitle(session: DashboardSession): string | null {
-  const branch = session.branch?.trim() ?? "";
-  const model = session.model?.trim() ?? "";
-  const agent = session.metadata["agent"]?.trim() ?? "";
-
-  if (branch && model) {
-    return `${branch} · ${formatCurrentModelLabel(agent, model)}`;
-  }
-  if (branch) return branch;
-  if (model) return formatCurrentModelLabel(agent, model);
-  return null;
-}
-
 export function WorkspaceOverview({
   projects,
   sessions,
   onCreateWorkspace,
   onSelectSession,
 }: WorkspaceOverviewProps) {
-  const [relativeNow, setRelativeNow] = useState<number | null>(null);
-
-  useEffect(() => {
-    setRelativeNow(Date.now());
-    const interval = window.setInterval(() => {
-      setRelativeNow(Date.now());
-    }, RELATIVE_TIME_TICK_MS);
-
-    return () => window.clearInterval(interval);
-  }, []);
-
   const visibleSessions = useMemo(
     () => sessions.filter((session) => session.status !== "archived"),
     [sessions],
@@ -152,10 +82,10 @@ export function WorkspaceOverview({
   const showWelcomeState = projects.length === 0 && visibleSessions.length === 0;
 
   const statCards = [
-    { label: "Projects", value: String(projects.length), icon: FolderGit2 },
-    { label: "Active sessions", value: String(sessionStats.active), icon: Layers3 },
-    { label: "Need attention", value: String(sessionStats.attention), icon: Sparkles },
-    { label: "Merge ready", value: String(sessionStats.merge), icon: GitBranch },
+    { label: "Projects", value: String(projects.length), icon: FolderGit2, caption: "Linked workspaces" },
+    { label: "Active sessions", value: String(sessionStats.active), icon: Layers3, caption: "Agent sessions in progress" },
+    { label: "Need attention", value: String(sessionStats.attention), icon: Sparkles, caption: "Awaiting review or input" },
+    { label: "Merge ready", value: String(sessionStats.merge), icon: GitBranch, caption: "Cleared to land" },
   ];
 
   if (showWelcomeState) {
@@ -225,7 +155,7 @@ export function WorkspaceOverview({
         </div>
 
         <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-          {statCards.map(({ label, value, icon: Icon }) => (
+          {statCards.map(({ label, value, icon: Icon, caption }) => (
             <Card
               key={label}
               className="bg-[color:color-mix(in_srgb,var(--vk-bg-panel)_86%,transparent)] [content-visibility:auto] [contain-intrinsic-size:104px]"
@@ -237,6 +167,7 @@ export function WorkspaceOverview({
                 <div>
                   <p className="text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">{label}</p>
                   <p className="mt-1 text-[22px] font-semibold text-[var(--vk-text-strong)]">{value}</p>
+                  <p className="mt-0.5 text-[10px] text-[var(--text-faint)]">{caption}</p>
                 </div>
               </CardContent>
             </Card>
@@ -259,38 +190,13 @@ export function WorkspaceOverview({
                 <div className="flex h-full min-h-[180px] items-center justify-center rounded-[6px] border border-dashed border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-4 text-center text-[13px] text-[var(--vk-text-muted)]">
                   No sessions yet. Create or open a workspace to start work.
                 </div>
-              ) : recentSessions.map((session) => {
-                const subtitle = formatRecentSessionSubtitle(session);
-
-                return (
-                <button
+              ) : recentSessions.map((session) => (
+                <SessionCard
                   key={session.id}
-                  type="button"
-                  onClick={() => onSelectSession(session.id)}
-                  className="flex w-full items-center gap-2 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2.5 py-3 text-left transition-colors hover:bg-[var(--vk-bg-hover)] [content-visibility:auto] [contain-intrinsic-size:82px] sm:gap-3 sm:px-3"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <p className="truncate text-[14px] font-medium text-[var(--vk-text-strong)]">
-                        {session.summary?.trim() || session.projectId}
-                      </p>
-                      <Badge variant={getStatusTone(session)}>{getStatusLabel(session)}</Badge>
-                    </div>
-                    <p className="mt-1 truncate text-[12px] text-[var(--vk-text-muted)]">
-                      {session.projectId}
-                      {subtitle ? ` · ${subtitle}` : ""}
-                      {session.issueId ? ` · ${session.issueId}` : ""}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right">
-                    <p className="text-[11px] text-[var(--vk-text-muted)]">
-                      {formatRelativeTime(session.lastActivityAt, relativeNow)}
-                    </p>
-                    <ArrowRight className="ml-auto mt-2 h-4 w-4 text-[var(--vk-text-muted)]" />
-                  </div>
-                </button>
-                );
-              })}
+                  session={session}
+                  onSelect={onSelectSession}
+                />
+              ))}
             </CardContent>
           </Card>
         </div>
