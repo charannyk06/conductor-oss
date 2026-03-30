@@ -146,6 +146,130 @@ impl AppState {
         self.publish_snapshot().await;
         Ok(())
     }
+
+    /// Automatic session cleanup: clears recovery state from terminal sessions
+    /// and removes stale terminal files. Runs on startup and periodically.
+    pub(crate) async fn cleanup_stale_sessions(self: &std::sync::Arc<Self>) {
+        use chrono::{Duration, Utc};
+        use std::collections::HashSet;
+
+        let now = Utc::now();
+        let day_ago = now - Duration::hours(24);
+        let week_ago = now - Duration::days(7);
+        let terminal_statuses: HashSet<&str> = [
+            "killed",
+            "archived",
+            "done",
+            "terminated",
+            "merged",
+            "cleanup",
+            "errored",
+        ]
+        .into_iter()
+        .collect();
+
+        let mut sessions_to_remove: Vec<String> = Vec::new();
+        let mut sessions_to_fix: Vec<String> = Vec::new();
+        let mut terminal_files_removed: usize = 0;
+
+        {
+            let sessions = self.sessions.read().await;
+            for (id, session) in sessions.iter() {
+                if !terminal_statuses.contains(session.status.as_str()) {
+                    continue;
+                }
+
+                let last_activity = session
+                    .last_activity_at
+                    .parse::<chrono::DateTime<Utc>>()
+                    .unwrap_or_else(|_| Utc::now());
+
+                // Clear recovery state from terminal sessions older than 24h
+                if last_activity < day_ago {
+                    let has_recovery = session
+                        .metadata
+                        .get("recoveryState")
+                        .is_some_and(|v| !v.is_empty());
+                    if has_recovery {
+                        sessions_to_fix.push(id.clone());
+                    }
+
+                    // Remove terminal files for terminal sessions
+                    let terminal_path = self.session_terminal_capture_path(id);
+                    let restore_path = self.session_terminal_restore_path(id);
+                    if terminal_path.exists() {
+                        let _ = tokio::fs::remove_file(&terminal_path).await;
+                        terminal_files_removed += 1;
+                    }
+                    if restore_path.exists() {
+                        let _ = tokio::fs::remove_file(&restore_path).await;
+                        terminal_files_removed += 1;
+                    }
+                }
+
+                // Queue very old terminal sessions for full removal
+                if last_activity < week_ago {
+                    sessions_to_remove.push(id.clone());
+                }
+            }
+        }
+
+        // Clear recovery state from sessions that need fixing
+        if !sessions_to_fix.is_empty() {
+            let mut sessions = self.sessions.write().await;
+            for id in &sessions_to_fix {
+                if let Some(session) = sessions.get_mut(id) {
+                    session.metadata.remove("recoveryState");
+                    session.metadata.remove("lastRecoveredAt");
+                    session.metadata.remove("recoveryAction");
+                    session.metadata.remove("restartRecoveryCount");
+                    if let Ok(content) = serde_json::to_string_pretty(session) {
+                        let path = self.session_snapshot_path(id);
+                        let _ = tokio::fs::write(&path, content).await;
+                    }
+                }
+            }
+        }
+
+        // Remove very old sessions entirely
+        for id in &sessions_to_remove {
+            let json_path = self.session_snapshot_path(id);
+            let _ = tokio::fs::remove_file(&json_path).await;
+            {
+                let mut sessions = self.sessions.write().await;
+                sessions.remove(id);
+            }
+        }
+
+        if !sessions_to_fix.is_empty()
+            || !sessions_to_remove.is_empty()
+            || terminal_files_removed > 0
+        {
+            tracing::info!(
+                cleared_recovery = sessions_to_fix.len(),
+                removed_old = sessions_to_remove.len(),
+                terminal_files = terminal_files_removed,
+                "session cleanup completed"
+            );
+        }
+    }
+
+    /// Start a background janitor that periodically cleans stale sessions.
+    pub(crate) fn start_session_cleanup_janitor(self: &std::sync::Arc<Self>) {
+        let state = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            // Run immediately on startup
+            state.cleanup_stale_sessions().await;
+
+            // Then every 6 hours
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                state.cleanup_stale_sessions().await;
+            }
+        });
+    }
 }
 
 #[cfg(test)]
