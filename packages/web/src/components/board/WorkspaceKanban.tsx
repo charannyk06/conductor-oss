@@ -243,6 +243,20 @@ const ROLE_COLOR: Record<BoardRole, string> = {
   cancelled: "#6b7280",
 };
 
+const TASK_TYPE_COLORS: Record<string, { bg: string; text: string }> = {
+  feature: { bg: "color-mix(in srgb, #3c83f6 16%, transparent)", text: "#60a5fa" },
+  fix: { bg: "color-mix(in srgb, #f59f0a 16%, transparent)", text: "#fbbf24" },
+  review: { bg: "color-mix(in srgb, #895af6 16%, transparent)", text: "#a78bfa" },
+  chore: { bg: "color-mix(in srgb, #6b7280 16%, transparent)", text: "#9ca3af" },
+  docs: { bg: "color-mix(in srgb, #21c45d 16%, transparent)", text: "#34d399" },
+};
+
+const PRIORITY_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
+  high: { bg: "color-mix(in srgb, #ef4444 14%, transparent)", text: "#f87171", dot: "#ef4444" },
+  medium: { bg: "color-mix(in srgb, #f59f0a 14%, transparent)", text: "#fbbf24", dot: "#f59f0a" },
+  low: { bg: "color-mix(in srgb, #3c83f6 14%, transparent)", text: "#60a5fa", dot: "#3c83f6" },
+};
+
 const ROLE_LABEL: Record<BoardRole, string> = {
   intake: "To do",
   ready: "Ready",
@@ -1414,6 +1428,12 @@ function BoardTaskCard({
   const { linkedSessions, primaryLinkedSession, unresolvedPrimaryLink } =
     getTaskLinkedRunData(projectSessions, task);
   const taskReference = getTaskReference(task);
+  const lastActivityTs = getTaskLastActivityTimestamp(task, linkedSessions);
+  const hasActiveSession = linkedSessions.some((s) => {
+    const st = s.status?.trim().toLowerCase() ?? "";
+    return st === "working" || st === "running" || st === "dispatching";
+  });
+  const priorityColor = task.priority ? PRIORITY_COLORS[task.priority]?.dot : null;
 
   return (
     <div
@@ -1429,15 +1449,28 @@ function BoardTaskCard({
       onDragEnd={dragEnabled ? onDragEnd : undefined}
       className={cn(
         layout === "kanban"
-          ? "rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]"
-          : "rounded-[10px] border border-[var(--vk-border)] bg-[rgba(23,25,30,0.72)] p-4 shadow-[0_10px_24px_rgba(0,0,0,0.18)]",
-        isDragging && "opacity-60"
+          ? "relative rounded-[10px] border border-[rgba(255,255,255,0.08)] bg-[rgba(23,25,30,0.96)] p-3 shadow-[0_10px_24px_rgba(0,0,0,0.24)] [content-visibility:auto] [contain-intrinsic-size:240px]"
+          : "relative rounded-[10px] border border-[var(--vk-border)] bg-[rgba(23,25,30,0.72)] p-4 shadow-[0_10px_24px_rgba(0,0,0,0.18)]",
+        isDragging && "opacity-60",
+        hasActiveSession && "border-l-2",
       )}
+      style={hasActiveSession ? { borderLeftColor: ROLE_COLOR[role] } : undefined}
     >
-      <div className="flex items-start gap-2">
-        <p className="min-w-0 flex-1 font-mono text-[12px] text-[var(--vk-text-muted)]">
+      <div className="flex items-center gap-2">
+        <span
+          className="h-2 w-2 shrink-0 rounded-full"
+          style={{ backgroundColor: ROLE_COLOR[role], opacity: hasActiveSession ? 1 : 0.4 }}
+        />
+        <p className="min-w-0 flex-1 font-mono text-[11px] text-[var(--vk-text-muted)]">
           {taskReference}
         </p>
+        {priorityColor && (
+          <span
+            className="h-2 w-2 shrink-0 rounded-full"
+            style={{ backgroundColor: priorityColor }}
+            title={`${task.priority} priority`}
+          />
+        )}
         <button
           type="button"
           onClick={() => onOpenEditor(task, role)}
@@ -1448,7 +1481,7 @@ function BoardTaskCard({
           <Pencil className="h-3.5 w-3.5" />
         </button>
       </div>
-      <p className="pt-1 text-[15px] leading-[22px] text-[var(--vk-text-normal)]">
+      <p className="pt-1.5 text-[14px] font-semibold leading-[21px] text-[var(--vk-text-strong)]">
         {taskTitle}
       </p>
       {taskDescription && (
@@ -1621,30 +1654,51 @@ function BoardTaskCard({
       <div className="mt-2 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1.5">
           {task.agent ? (
-            <>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-[color:color-mix(in_srgb,var(--vk-text-muted)_10%,transparent)] px-2 py-0.5">
               <AgentTileIcon
                 seed={{ label: task.agent }}
-                className="h-6 w-6"
+                className="h-4 w-4"
               />
-              <span className="truncate text-[12px] text-[var(--vk-text-muted)]">
+              <span className="truncate text-[11px] font-medium text-[var(--vk-text-secondary)]">
                 {formatAgentLabel(task.agent)}
               </span>
-            </>
+            </span>
           ) : (
-            <span className="text-[12px] text-[var(--vk-text-muted)]">
+            <span className="text-[11px] text-[var(--vk-text-faint)]">
               No agent
+            </span>
+          )}
+          {lastActivityTs && (
+            <span className="text-[10px] text-[var(--vk-text-faint)]">
+              {formatRelativeBoardTime(lastActivityTs)}
             </span>
           )}
         </div>
 
         <div className="flex flex-wrap items-center gap-1">
           {task.type && (
-            <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
+            <span
+              className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold"
+              style={{
+                background: TASK_TYPE_COLORS[task.type]?.bg ?? "color-mix(in srgb, var(--vk-text-muted) 10%, transparent)",
+                color: TASK_TYPE_COLORS[task.type]?.text ?? "var(--vk-text-muted)",
+              }}
+            >
               {task.type}
             </span>
           )}
           {task.priority && (
-            <span className="inline-flex h-5 items-center rounded-[3px] bg-[color:#292929] px-2 text-[11px] text-[var(--vk-text-muted)]">
+            <span
+              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold"
+              style={{
+                background: PRIORITY_COLORS[task.priority]?.bg ?? "color-mix(in srgb, var(--vk-text-muted) 10%, transparent)",
+                color: PRIORITY_COLORS[task.priority]?.text ?? "var(--vk-text-muted)",
+              }}
+            >
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{ background: PRIORITY_COLORS[task.priority]?.dot ?? "var(--vk-text-faint)" }}
+              />
               {task.priority}
             </span>
           )}
