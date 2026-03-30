@@ -46,6 +46,45 @@ export function buildBridgeTtydProxyUrl(
   return `${url.pathname}${url.search}`;
 }
 
+function injectBridgeTtydHtmlFragmentEarly(html: string, marker: string, fragment: string): string {
+  if (html.includes(marker)) {
+    return html;
+  }
+
+  const headOpenIndex = html.indexOf("<head");
+  if (headOpenIndex >= 0) {
+    const headCloseIndex = html.indexOf(">", headOpenIndex);
+    if (headCloseIndex >= 0) {
+      return `${html.slice(0, headCloseIndex + 1)}${fragment}${html.slice(headCloseIndex + 1)}`;
+    }
+  }
+
+  const scriptOpenIndex = html.indexOf("<script");
+  if (scriptOpenIndex >= 0) {
+    return `${html.slice(0, scriptOpenIndex)}${fragment}${html.slice(scriptOpenIndex)}`;
+  }
+
+  return injectBridgeTtydHtmlFragment(html, marker, fragment);
+}
+
+function injectBridgeTtydHtmlFragment(html: string, marker: string, fragment: string): string {
+  if (html.includes(marker)) {
+    return html;
+  }
+
+  const bodyCloseIndex = html.lastIndexOf("</body>");
+  if (bodyCloseIndex >= 0) {
+    return `${html.slice(0, bodyCloseIndex)}${fragment}${html.slice(bodyCloseIndex)}`;
+  }
+
+  const htmlCloseIndex = html.lastIndexOf("</html>");
+  if (htmlCloseIndex >= 0) {
+    return `${html.slice(0, htmlCloseIndex)}${fragment}${html.slice(htmlCloseIndex)}`;
+  }
+
+  return `${html}${fragment}`;
+}
+
 export async function createBridgeTtydRelayWebSocketUrl(
   request: Request,
   bridgeId: string,
@@ -184,17 +223,7 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   }
 
   const relayWsLiteral = JSON.stringify(relayTtydWsUrl);
-  const fragment = `<!-- ${marker} -->\n<script>\n(function() {\n  if (window.__conductorBridgeTtydRelayPatched) return;\n  window.__conductorBridgeTtydRelayPatched = true;\n\n  const RELAY_TTYD_WS_URL = ${relayWsLiteral};\n  if (!RELAY_TTYD_WS_URL) return;\n\n  const previousWebSocket = window.WebSocket;\n  if (typeof previousWebSocket !== 'function') return;\n\n  const patchedWebSocket = function(url, protocols) {\n    let normalizedUrl = String(url);\n    try {\n      const candidate = new URL(normalizedUrl, window.location.href);\n      if (candidate.pathname === '/ws' || candidate.pathname.endsWith('/ws')) {\n        normalizedUrl = RELAY_TTYD_WS_URL;\n      }\n    } catch {\n    }\n\n    if (arguments.length > 1) {\n      return new previousWebSocket(normalizedUrl, protocols);\n    }\n    return new previousWebSocket(normalizedUrl);\n  };\n\n  Object.setPrototypeOf(patchedWebSocket, previousWebSocket);\n  patchedWebSocket.prototype = previousWebSocket.prototype;\n  window.WebSocket = patchedWebSocket;\n})();\n</script>`;
+  const fragment = `<!-- ${marker} -->\n<script>\n(function() {\n  if (window.__conductorBridgeTtydRelayPatched) return;\n  window.__conductorBridgeTtydRelayPatched = true;\n\n  const RELAY_TTYD_WS_URL = ${relayWsLiteral};\n  if (!RELAY_TTYD_WS_URL) return;\n\n  const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);\n  const previousWebSocket = window.WebSocket;\n  if (typeof previousWebSocket !== 'function') return;\n\n  const patchedWebSocket = function(url, protocols) {\n    let normalizedUrl = String(url);\n    try {\n      const candidate = new URL(normalizedUrl, window.location.href);\n      if (LOOPBACK_HOSTS.has(candidate.hostname) || candidate.pathname === '/' || candidate.pathname === '/ws') {\n        normalizedUrl = RELAY_TTYD_WS_URL;\n      }\n    } catch {\n    }\n\n    if (arguments.length > 1) {\n      return new previousWebSocket(normalizedUrl, protocols);\n    }\n    return new previousWebSocket(normalizedUrl);\n  };\n\n  Object.setPrototypeOf(patchedWebSocket, previousWebSocket);\n  patchedWebSocket.prototype = previousWebSocket.prototype;\n  window.WebSocket = patchedWebSocket;\n})();\n</script>`;
 
-  const bodyCloseIndex = html.lastIndexOf("</body>");
-  if (bodyCloseIndex >= 0) {
-    return `${html.slice(0, bodyCloseIndex)}${fragment}${html.slice(bodyCloseIndex)}`;
-  }
-
-  const htmlCloseIndex = html.lastIndexOf("</html>");
-  if (htmlCloseIndex >= 0) {
-    return `${html.slice(0, htmlCloseIndex)}${fragment}${html.slice(htmlCloseIndex)}`;
-  }
-
-  return `${html}${fragment}`;
+  return injectBridgeTtydHtmlFragmentEarly(html, marker, fragment);
 }
