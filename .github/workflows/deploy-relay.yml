@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3 # pinned SHA unavailable locally
+        uses: docker/setup-qemu-action@v4 # pinned SHA unavailable locally
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3 # pinned SHA unavailable locally
