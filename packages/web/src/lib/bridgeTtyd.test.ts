@@ -35,6 +35,8 @@ test("injectBridgeTtydRelayShim rewrites ttyd websocket connects through relay",
   assert.match(injected, /LOOPBACK_HOSTS/);
   assert.match(injected, /candidate\.hostname/);
   assert.match(injected, /candidate\.pathname === '\/'/);
+  assert.match(injected, /candidate\.pathname === '\/ws'/);
+  assert.match(injected, /candidate\.pathname\.endsWith\('\/ws'\)/);
   assert.match(injected, /normalizedUrl = RELAY_TTYD_WS_URL/);
   assert.ok(
     injected.indexOf("conductor-bridge-ttyd-relay-shim") < injected.indexOf("<script src=\"/refresh.js\">"),

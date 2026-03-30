@@ -80,7 +80,19 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
 
     let hermes =
         HermesExecutor::new(PathBuf::from("/usr/bin/hermes")).build_args(&options("hermes"));
-    assert_contains(&hermes, &["chat", "-Q", "-q", "--model", "gpt-5", "hermes"]);
+    assert_contains(
+        &hermes,
+        &[
+            "chat",
+            "--toolsets",
+            "terminal",
+            "-Q",
+            "-q",
+            "--model",
+            "gpt-5",
+            "hermes",
+        ],
+    );
     assert_filters_blocked_flags(&hermes);
 
     let ccr = CcrExecutor::new(PathBuf::from("/usr/bin/ccr")).build_args(&options("ccr prompt"));
@@ -251,6 +263,7 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
     assert_has_pair(&ccr, "--effort", "high");
 
     let hermes = HermesExecutor::new(PathBuf::from("/usr/bin/hermes")).build_args(&interactive);
+    assert_contains(&hermes, &["--toolsets", "terminal"]);
     assert_has_pair(&hermes, "--model", "gpt-5");
     assert_no_flag(&hermes, "--effort");
     assert_no_flag(&hermes, "--reasoning-effort");

@@ -223,7 +223,45 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   }
 
   const relayWsLiteral = JSON.stringify(relayTtydWsUrl);
-  const fragment = `<!-- ${marker} -->\n<script>\n(function() {\n  if (window.__conductorBridgeTtydRelayPatched) return;\n  window.__conductorBridgeTtydRelayPatched = true;\n\n  const RELAY_TTYD_WS_URL = ${relayWsLiteral};\n  if (!RELAY_TTYD_WS_URL) return;\n\n  const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);\n  const previousWebSocket = window.WebSocket;\n  if (typeof previousWebSocket !== 'function') return;\n\n  const patchedWebSocket = function(url, protocols) {\n    let normalizedUrl = String(url);\n    try {\n      const candidate = new URL(normalizedUrl, window.location.href);\n      if (LOOPBACK_HOSTS.has(candidate.hostname) || candidate.pathname === '/' || candidate.pathname === '/ws') {\n        normalizedUrl = RELAY_TTYD_WS_URL;\n      }\n    } catch {\n    }\n\n    if (arguments.length > 1) {\n      return new previousWebSocket(normalizedUrl, protocols);\n    }\n    return new previousWebSocket(normalizedUrl);\n  };\n\n  Object.setPrototypeOf(patchedWebSocket, previousWebSocket);\n  patchedWebSocket.prototype = previousWebSocket.prototype;\n  window.WebSocket = patchedWebSocket;\n})();\n</script>`;
+  const fragment = `<!-- ${marker} -->
+<script>
+(function() {
+  if (window.__conductorBridgeTtydRelayPatched) return;
+  window.__conductorBridgeTtydRelayPatched = true;
+
+  const RELAY_TTYD_WS_URL = ${relayWsLiteral};
+  if (!RELAY_TTYD_WS_URL) return;
+
+  const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+  const previousWebSocket = window.WebSocket;
+  if (typeof previousWebSocket !== 'function') return;
+
+  const patchedWebSocket = function(url, protocols) {
+    let normalizedUrl = String(url);
+    try {
+      const candidate = new URL(normalizedUrl, window.location.href);
+      if (
+        LOOPBACK_HOSTS.has(candidate.hostname) ||
+        candidate.pathname === '/' ||
+        candidate.pathname === '/ws' ||
+        candidate.pathname.endsWith('/ws')
+      ) {
+        normalizedUrl = RELAY_TTYD_WS_URL;
+      }
+    } catch {
+    }
+
+    if (arguments.length > 1) {
+      return new previousWebSocket(normalizedUrl, protocols);
+    }
+    return new previousWebSocket(normalizedUrl);
+  };
+
+  Object.setPrototypeOf(patchedWebSocket, previousWebSocket);
+  patchedWebSocket.prototype = previousWebSocket.prototype;
+  window.WebSocket = patchedWebSocket;
+})();
+</script>`;
 
   return injectBridgeTtydHtmlFragmentEarly(html, marker, fragment);
 }

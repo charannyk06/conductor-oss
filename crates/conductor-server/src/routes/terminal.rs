@@ -524,9 +524,9 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
             const shouldRewriteToProxy =
                 LOOPBACK_HOSTS.has(candidate.hostname)
                 || candidate.pathname === '/'
-                || candidate.pathname === '/ws';
+                || candidate.pathname === '/ws'
+                || candidate.pathname.endsWith('/ws');
             const url = shouldRewriteToProxy ? resolveProxyWebSocketUrl() : candidate;
-
             if (token) {
                 url.searchParams.set('token', token);
             }
@@ -2083,12 +2083,16 @@ mod tests {
         assert!(
             injected.contains("const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);")
         );
-        assert!(injected.contains("const resolveProxyWebSocketUrl = () => {"));
         assert!(injected.contains("const readLocationBridgeId = () => {"));
+        assert!(injected.contains("const resolveProxyWebSocketUrl = () => {"));
         assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
         assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
         assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));
+        assert!(injected.contains("const url = new URL(window.location.href);"));
+        assert!(injected.contains("candidate.hostname"));
         assert!(injected.contains("candidate.pathname === '/'"));
+        assert!(injected.contains("candidate.pathname === '/ws'"));
+        assert!(injected.contains("candidate.pathname.endsWith('/ws')"));
         assert!(injected.contains("url.searchParams.set('token', token);"));
         assert!(injected.contains("url.searchParams.set('bridgeId', bridgeId);"));
         assert!(injected.contains("window.addEventListener('message', handleMessage);"));
