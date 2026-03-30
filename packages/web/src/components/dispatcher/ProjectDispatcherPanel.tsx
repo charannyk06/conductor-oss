@@ -130,7 +130,7 @@ export function ProjectDispatcherPanel({
     try {
       const currentDispatcherAgent = dispatcherSession
         ? readMetadataValue(dispatcherSession, "agent")
-        : "";
+        : defaultAgent;
       const nextDispatcherAgent = implementationAgent === "openclaw"
         ? "openclaw"
         : currentDispatcherAgent === "openclaw"
@@ -165,6 +165,7 @@ export function ProjectDispatcherPanel({
   }, [
     bridgeId,
     dispatcherSession?.metadata?.agent,
+    defaultAgent,
     implementationAgent,
     modelSelection.catalogModel,
     modelSelection.customModel,
@@ -176,6 +177,8 @@ export function ProjectDispatcherPanel({
     setDeletingThreadId(threadId);
     setError(null);
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
       const response = await fetch(
         withBridgeQuery(
           `/api/projects/${projectId}/dispatcher?threadId=${encodeURIComponent(threadId)}`,
@@ -183,21 +186,31 @@ export function ProjectDispatcherPanel({
         ),
         {
           method: "DELETE",
+          signal: controller.signal,
         },
       );
+      clearTimeout(timeout);
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
         throw new Error(payload?.error ?? "Failed to delete dispatcher thread");
       }
-      await loadDispatcherThreads();
+      setDispatcherThreads((current) =>
+        sortDispatcherThreadsByActivity(current.filter((candidate) => candidate.id !== threadId)),
+      );
+      setSelectedThreadId((current) => (current === threadId ? null : current));
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        const timeoutError = new Error("Delete timed out after 15s. The backend may be busy.");
+        setError(timeoutError.message);
+        throw timeoutError;
+      }
       const message = err instanceof Error ? err.message : "Failed to delete dispatcher thread";
       setError(message);
       throw err instanceof Error ? err : new Error(message);
     } finally {
       setDeletingThreadId((current) => current === threadId ? null : current);
     }
-  }, [bridgeId, loadDispatcherThreads, projectId]);
+  }, [bridgeId, projectId]);
 
   if (collapsed) {
     return (

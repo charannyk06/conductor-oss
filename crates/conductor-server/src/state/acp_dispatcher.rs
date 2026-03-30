@@ -753,6 +753,14 @@ async fn write_text(path: &Path, content: String) -> Result<()> {
     Ok(())
 }
 
+async fn remove_optional_file(path: PathBuf) -> Result<()> {
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
 async fn read_json<T>(path: &Path) -> Option<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -1241,6 +1249,12 @@ fn default_implementation_agent(
         "codex" | "claude-code" | "gemini" | "openclaw" => candidate.trim().to_string(),
         _ => "codex".to_string(),
     }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn dispatcher_implementation_agent_options() -> &'static [DispatcherSelectOption] {
@@ -1790,7 +1804,16 @@ impl AppState {
             .await
             .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
 
-        let _ = self.interrupt_dispatcher(thread_id).await;
+        // Interrupt with timeout - dont block delete if runtime is stuck
+        let interrupt_self = self.clone();
+        let interrupt_thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                interrupt_self.interrupt_dispatcher(&interrupt_thread_id),
+            )
+            .await;
+        });
         self.clear_dispatcher_runtime(thread_id).await;
         self.active_session_skills.lock().await.remove(thread_id);
         {
@@ -1799,19 +1822,30 @@ impl AppState {
         }
         self.invalidate_dispatcher_caches(thread_id).await;
 
-        for path in [
-            self.dispatcher_snapshot_path(thread_id),
-            self.acp_session_memory_json_path(&thread.project_id, thread_id),
-            self.acp_session_memory_markdown_path(&thread.project_id, thread_id),
-        ] {
-            match tokio::fs::remove_file(path).await {
-                Ok(()) => {}
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err.into()),
-            }
-        }
+        let snapshot_path = self.dispatcher_snapshot_path(thread_id);
+        let session_json_path = self.acp_session_memory_json_path(&thread.project_id, thread_id);
+        let session_md_path = self.acp_session_memory_markdown_path(&thread.project_id, thread_id);
+        tokio::try_join!(
+            remove_optional_file(snapshot_path),
+            remove_optional_file(session_json_path),
+            remove_optional_file(session_md_path),
+        )?;
 
-        self.clear_dispatcher_binding_thread(thread_id).await?;
+        let cleanup_state = Arc::clone(self);
+        let cleanup_thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            if let Err(err) = cleanup_state
+                .clear_dispatcher_binding_thread(&cleanup_thread_id)
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %cleanup_thread_id,
+                    error = %err,
+                    "failed to clear dispatcher binding after delete"
+                );
+            }
+        });
+
         self.publish_dispatcher_update(thread_id).await;
         Ok(())
     }
@@ -2323,10 +2357,12 @@ impl AppState {
             .get(project_id)
             .cloned()
             .with_context(|| format!("Unknown project: {project_id}"))?;
-        let agent = dispatcher_agent
-            .clone()
-            .or_else(|| project.agent.clone())
-            .unwrap_or_else(|| config.preferences.coding_agent.clone());
+        let default_agent =
+            normalize_optional_string(Some(config.preferences.coding_agent.clone()))
+                .unwrap_or_else(|| "codex".to_string());
+        let agent = normalize_optional_string(dispatcher_agent)
+            .or_else(|| normalize_optional_string(project.agent.clone()))
+            .unwrap_or_else(|| default_agent.clone());
         if !force_new {
             if let Some(existing) = self
                 .latest_project_dispatcher_thread(
@@ -2404,13 +2440,10 @@ impl AppState {
             ACP_APPROVAL_STATE_METADATA_KEY.to_string(),
             ACP_APPROVAL_GRANTED.to_string(),
         );
-        let selected_implementation_agent = implementation_agent.unwrap_or_else(|| {
-            default_implementation_agent(
-                Some(agent.as_str()),
-                &project,
-                &config.preferences.coding_agent,
-            )
-        });
+        let selected_implementation_agent = normalize_optional_string(implementation_agent)
+            .unwrap_or_else(|| {
+                default_implementation_agent(Some(agent.as_str()), &project, &default_agent)
+            });
         thread.metadata.insert(
             ACP_IMPLEMENTATION_AGENT_METADATA_KEY.to_string(),
             selected_implementation_agent,
@@ -2441,7 +2474,8 @@ impl AppState {
         update_dispatcher_active_skills_metadata(&mut thread, &[]);
 
         self.replace_dispatcher_thread(thread.clone()).await?;
-        self.sync_acp_dispatcher_state(&thread).await?;
+        // The initial artifact write already materializes the ACP memory files for this thread.
+        // Avoid immediately rewriting the same files again on the creation path.
         Ok(thread)
     }
 
@@ -2731,8 +2765,6 @@ impl AppState {
         project_memory.board_path = board_display.clone();
         project_memory.default_branch = default_branch.to_string();
         project_memory.updated_at = now.clone();
-        write_json(&project_json, &project_memory).await?;
-        write_text(&project_md, render_project_memory_markdown(&project_memory)).await?;
 
         let session_memory = AcpSessionMemoryState {
             version: ACP_MEMORY_VERSION,
@@ -2764,8 +2796,14 @@ impl AppState {
             long_term_memory_path: project_memory_display.clone(),
             updated_at: now,
         };
-        write_json(&session_json, &session_memory).await?;
-        write_text(&session_md, render_session_memory_markdown(&session_memory)).await?;
+        let project_memory_markdown = render_project_memory_markdown(&project_memory);
+        let session_memory_markdown = render_session_memory_markdown(&session_memory);
+        tokio::try_join!(
+            write_json(&project_json, &project_memory),
+            write_text(&project_md, project_memory_markdown),
+            write_json(&session_json, &session_memory),
+            write_text(&session_md, session_memory_markdown),
+        )?;
 
         Ok(AcpDispatcherArtifacts {
             project_memory_display,
@@ -2828,11 +2866,24 @@ impl AppState {
             long_term_memory_path,
             updated_at: Utc::now().to_rfc3339(),
         };
-        write_json(&session_json, &session_memory).await?;
-        write_text(&session_md, render_session_memory_markdown(&session_memory)).await?;
-
-        if let Some(project_memory) = read_json::<AcpProjectMemoryState>(&project_json).await {
-            write_text(&project_md, render_project_memory_markdown(&project_memory)).await?;
+        let session_memory_markdown = render_session_memory_markdown(&session_memory);
+        let project_memory_markdown = read_json::<AcpProjectMemoryState>(&project_json)
+            .await
+            .map(|project_memory| render_project_memory_markdown(&project_memory));
+        match project_memory_markdown {
+            Some(project_memory_markdown) => {
+                tokio::try_join!(
+                    write_json(&session_json, &session_memory),
+                    write_text(&session_md, session_memory_markdown),
+                    write_text(&project_md, project_memory_markdown),
+                )?;
+            }
+            None => {
+                tokio::try_join!(
+                    write_json(&session_json, &session_memory),
+                    write_text(&session_md, session_memory_markdown),
+                )?;
+            }
         }
 
         Ok(())
@@ -3632,9 +3683,10 @@ mod tests {
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
         CreateDispatcherThreadOptions, OpenClawDispatcherConfigPatch, ACP_APPROVAL_GRANTED,
         ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
-        ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
-        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
-        OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
+        ACP_IMPLEMENTATION_AGENT_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
+        OPENCLAW_GATEWAY_SCOPES_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_METADATA_KEY, OPENCLAW_GATEWAY_URL_METADATA_KEY,
+        OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
     use chrono::Utc;
@@ -4172,6 +4224,33 @@ mod tests {
                 .get(OPENCLAW_SESSION_KEY_METADATA_KEY)
                 .map(String::as_str),
             Some("conductor:project_dispatcher:demo:dispatcher-1")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn create_dispatcher_thread_ignores_blank_agent_values() {
+        let (root, state) = build_test_state("acp-blank-agent-values").await;
+        let thread = state
+            .create_project_dispatcher_thread(
+                "demo",
+                CreateDispatcherThreadOptions {
+                    dispatcher_agent: Some("   ".to_string()),
+                    implementation_agent: Some("   ".to_string()),
+                    ..CreateDispatcherThreadOptions::default()
+                },
+            )
+            .await
+            .expect("dispatcher thread should be created");
+
+        assert_eq!(thread.agent, "codex");
+        assert_eq!(
+            thread
+                .metadata
+                .get(ACP_IMPLEMENTATION_AGENT_METADATA_KEY)
+                .map(String::as_str),
+            Some("codex")
         );
 
         let _ = fs::remove_dir_all(root);
