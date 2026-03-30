@@ -18,7 +18,11 @@ pub(crate) struct TerminalHostRegistry {
 
 impl TerminalHostRegistry {
     pub(crate) fn new_stream(&self) -> broadcast::Sender<TerminalStreamEvent> {
-        let (sender, _) = broadcast::channel(2048);
+        // Capacity of 8192 handles 30-50 concurrent terminals under heavy output.
+        // Each sender can lag behind without causing RecvError::Lagged, which
+        // triggers costly snapshot restoration. The extra headroom prevents
+        // browser disconnections during burst output.
+        let (sender, _) = broadcast::channel(8192);
         sender
     }
 

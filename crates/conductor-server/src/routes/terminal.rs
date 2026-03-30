@@ -1687,9 +1687,36 @@ async fn handle_ttyd_frontend_client_message(
         Some(ttyd_protocol::ClientMessage::Input(data)) => {
             let text = String::from_utf8_lossy(&data).into_owned();
             if let Some(input_tx) = handle.input_tx.read().await.clone() {
-                input_tx
+                if let Err(e) = input_tx
                     .send(conductor_executors::executor::ExecutorInput::Raw(text))
-                    .await?;
+                    .await
+                {
+                    // The input receiver (terminal runtime) has been dropped.
+                    // Emit an error event so the browser can show a notification
+                    // to the user instead of silently losing their keystrokes.
+                    tracing::warn!(session_id = %session_id, error = %e, "terminal input channel closed, dropping input");
+                    state
+                        .emit_terminal_stream_event(
+                            session_id,
+                            crate::state::TerminalStreamEvent::Error(
+                                "Terminal input channel closed. Please reload the terminal."
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                }
+            } else {
+                // No input channel means the terminal runtime was detached.
+                // Notify the browser so it can show the user a message.
+                tracing::warn!(session_id = %session_id, "terminal input channel missing, dropping input");
+                state
+                    .emit_terminal_stream_event(
+                        session_id,
+                        crate::state::TerminalStreamEvent::Error(
+                            "Terminal is not running. Please reload the terminal.".to_string(),
+                        ),
+                    )
+                    .await;
             }
         }
         Some(ttyd_protocol::ClientMessage::Resize { columns, rows }) => {

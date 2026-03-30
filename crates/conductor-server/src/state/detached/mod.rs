@@ -107,6 +107,10 @@ impl AppState {
     }
 
     pub(crate) async fn restore_runtime_sessions(self: &Arc<Self>) {
+        // Clean up orphaned ttyd processes from previous server runs before
+        // restoring sessions. This prevents port exhaustion and zombie processes.
+        self.cleanup_orphaned_ttyd_processes().await;
+
         let session_ids: Vec<String> = {
             let sessions = self.sessions.read().await;
             sessions
@@ -178,5 +182,67 @@ impl AppState {
                 .await;
         }
         Ok(())
+    }
+
+    /// Reaps any lingering ttyd processes that belong to this Conductor backend
+    /// but are not tracked in the current active session state. This prevents
+    /// orphan terminal processes from consuming memory and exhausting the ttyd port range.
+    async fn cleanup_orphaned_ttyd_processes(&self) {
+        #[cfg(unix)]
+        {
+            let known_pids: std::collections::HashSet<u32> = {
+                let sessions = self.sessions.read().await;
+                sessions
+                    .values()
+                    .filter(|s| !s.status.is_terminal())
+                    .filter_map(|s| s.metadata.get(TTYD_PID_METADATA_KEY))
+                    .filter_map(|pid_str| pid_str.parse::<u32>().ok())
+                    .collect()
+            };
+
+            use tokio::process::Command;
+
+            // Find all running ttyd processes
+            let output = Command::new("ps")
+                .args(["-e", "-o", "pid,ppid,command"])
+                .output()
+                .await;
+
+            if let Ok(output) = output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines().skip(1) {
+                    // Skip header
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() < 3 {
+                        continue;
+                    }
+
+                    if let Ok(pid) = parts[0].parse::<u32>() {
+                        let command = parts[2..].join(" ");
+
+                        // If it's a ttyd process spawned by conductor (has the "ttyd-agent" or similar markers)
+                        if command.contains("ttyd")
+                            && (command.contains("ttyd-agent") || command.contains("conductor"))
+                        {
+                            if !known_pids.contains(&pid) {
+                                tracing::info!(pid, command, "Cleaning up orphaned ttyd process");
+                                unsafe {
+                                    // Send SIGTERM, then SIGKILL
+                                    libc::kill(pid as i32, libc::SIGTERM);
+
+                                    // We spawn a short sleeper to send SIGKILL to avoid blocking the main startup
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                        if libc::kill(pid as i32, 0) == 0 {
+                                            libc::kill(pid as i32, libc::SIGKILL);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
