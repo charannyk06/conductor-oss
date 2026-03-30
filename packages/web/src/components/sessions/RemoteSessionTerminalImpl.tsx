@@ -396,6 +396,11 @@ export function RemoteSessionTerminal({
       return;
     }
     const interval = window.setInterval(() => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        setConnectionQuality("offline");
+        return;
+      }
       const elapsed = Date.now() - lastMessageTimeRef.current;
       if (elapsed < 5_000) {
         setConnectionQuality("good");
