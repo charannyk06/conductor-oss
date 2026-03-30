@@ -61,7 +61,7 @@ which = "7"
 regex = "1"
 
 # Crypto (for webhook HMAC, auth)
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
