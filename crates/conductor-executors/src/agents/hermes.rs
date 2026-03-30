@@ -87,6 +87,11 @@ impl Executor for HermesExecutor {
     fn build_args(&self, options: &SpawnOptions) -> Vec<String> {
         let mut args = vec!["chat".to_string()];
 
+        // Hermes loads a large default tool surface; keep the default launch
+        // lean so sessions reach the first turn faster.
+        args.push("--toolsets".to_string());
+        args.push("terminal".to_string());
+
         if let Some(model) = &options.model {
             args.push("--model".to_string());
             args.push(model.clone());
@@ -192,6 +197,8 @@ mod tests {
             args,
             vec![
                 "chat",
+                "--toolsets",
+                "terminal",
                 "--model",
                 "nous-hermes",
                 "--yolo",
@@ -223,7 +230,16 @@ mod tests {
 
         assert_eq!(
             args,
-            vec!["chat", "--resume", "session-123", "-Q", "-q", "continue"]
+            vec![
+                "chat",
+                "--toolsets",
+                "terminal",
+                "--resume",
+                "session-123",
+                "-Q",
+                "-q",
+                "continue",
+            ]
         );
     }
 
