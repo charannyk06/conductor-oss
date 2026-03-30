@@ -38,7 +38,7 @@ jobs:
         uses: docker/setup-qemu-action@v3 # pinned SHA unavailable locally
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3 # pinned SHA unavailable locally
+        uses: docker/setup-buildx-action@v4 # pinned SHA unavailable locally
 
       - name: Log in to GHCR
         uses: docker/login-action@v3 # pinned SHA unavailable locally
