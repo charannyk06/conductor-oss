@@ -2,6 +2,7 @@ pub mod discovery;
 pub mod executor;
 pub mod process;
 pub mod prompt;
+pub mod update;
 
 pub mod agents;
 
