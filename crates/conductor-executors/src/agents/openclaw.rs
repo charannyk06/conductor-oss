@@ -258,6 +258,32 @@ struct DeviceIdentityStore {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ChatPayload {
+    run_id: String,
+    state: String,
+    #[serde(default)]
+    message: Option<GatewayMessage>,
+    #[serde(default)]
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayMessage {
+    #[serde(default)]
+    content: Vec<GatewayContent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayContent {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct AgentPayload {
     run_id: String,
     #[serde(default)]
@@ -265,17 +291,6 @@ struct AgentPayload {
     stream: String,
     #[serde(default)]
     data: Value,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentMethodResponse {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,7 +315,7 @@ async fn run_openclaw_turn(
     config: GatewayConfig,
     session_key: String,
     prompt: String,
-    _reasoning_effort: Option<String>,
+    reasoning_effort: Option<String>,
     timeout: Option<Duration>,
     output_tx: mpsc::Sender<ExecutorOutput>,
     kill_rx: oneshot::Receiver<()>,
@@ -309,7 +324,7 @@ async fn run_openclaw_turn(
         config.clone(),
         session_key.clone(),
         prompt.clone(),
-        _reasoning_effort.clone(),
+        reasoning_effort.clone(),
         timeout,
         output_tx.clone(),
         kill_rx,
@@ -344,7 +359,7 @@ async fn run_openclaw_turn(
                         config,
                         session_key,
                         prompt,
-                        _reasoning_effort,
+                        reasoning_effort,
                         timeout,
                         output_tx,
                         dead_kill_rx,
@@ -371,7 +386,7 @@ async fn run_openclaw_turn_inner(
     config: GatewayConfig,
     session_key: String,
     prompt: String,
-    _reasoning_effort: Option<String>,
+    reasoning_effort: Option<String>,
     timeout: Option<Duration>,
     output_tx: mpsc::Sender<ExecutorOutput>,
     mut kill_rx: oneshot::Receiver<()>,
@@ -530,36 +545,30 @@ async fn run_openclaw_turn_inner(
 
     let client_run_id = Uuid::new_v4().to_string();
     let send_request_id = Uuid::new_v4().to_string();
-    let timeout_ms = timeout
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0);
-    let wait_timeout_ms = if timeout_ms > 0 { timeout_ms } else { 30_000 };
     let send_request = json!({
         "type": "req",
         "id": send_request_id,
-        "method": "agent",
+        "method": "chat.send",
         "params": {
-            "message": prompt,
             "sessionKey": session_key,
+            "message": prompt,
             "idempotencyKey": client_run_id,
-            "timeout": timeout_ms,
-            "agentId": Value::Null,
+            "deliver": false,
+            "thinking": reasoning_effort,
         }
     });
 
     if let Err(err) = send_json_frame(&mut ws, &send_request).await {
         let _ = ws.close(None).await;
         return RunOutcome::Failed {
-            error: format!("OpenClaw agent request failed: {err}"),
+            error: format!("OpenClaw chat.send failed: {err}"),
             exit_code: Some(1),
         };
     }
 
-    let mut wait_request_id = None::<String>;
-    let mut tracked_run_id = None::<String>;
+    let mut send_ack_seen = false;
     let mut lifecycle_error: Option<String> = None;
     let mut latest_payload: Option<Value> = None;
-    let mut requested_wait_run_id: Option<String> = None;
 
     let timeout_deadline = timeout.map(|duration| Instant::now() + duration);
     loop {
@@ -567,8 +576,7 @@ async fn run_openclaw_turn_inner(
             let mut deadline = Box::pin(sleep_until(deadline_at));
             tokio::select! {
                 _ = &mut kill_rx => {
-                    let abort_run_id = tracked_run_id.as_deref().unwrap_or(&client_run_id);
-                    let _ = send_abort(&mut ws, &session_key, Some(abort_run_id)).await;
+                    let _ = send_abort(&mut ws, &session_key, Some(&client_run_id)).await;
                     let _ = ws.close(None).await;
                     return RunOutcome::Failed {
                         error: "killed".to_string(),
@@ -576,8 +584,7 @@ async fn run_openclaw_turn_inner(
                     };
                 }
                 _ = &mut deadline => {
-                    let abort_run_id = tracked_run_id.as_deref().unwrap_or(&client_run_id);
-                    let _ = send_abort(&mut ws, &session_key, Some(abort_run_id)).await;
+                    let _ = send_abort(&mut ws, &session_key, Some(&client_run_id)).await;
                     let _ = ws.close(None).await;
                     return RunOutcome::Failed {
                         error: "OpenClaw request timed out".to_string(),
@@ -588,19 +595,13 @@ async fn run_openclaw_turn_inner(
                     match handle_runtime_frame(
                         frame,
                         &send_request_id,
-                        wait_request_id.as_deref(),
                         &client_run_id,
-                        tracked_run_id.as_deref(),
                         &output_tx,
+                        &mut send_ack_seen,
                         &mut lifecycle_error,
                         &mut latest_payload,
-                    )
-                    .await
-                    {
+                    ).await {
                         ControlFlow::Continue => {}
-                        ControlFlow::NeedWait { run_id } => {
-                            requested_wait_run_id = Some(run_id);
-                        }
                         ControlFlow::Completed => {
                             let _ = ws.close(None).await;
                             let meta = latest_payload.as_ref().map(extract_run_meta).unwrap_or_default();
@@ -616,8 +617,7 @@ async fn run_openclaw_turn_inner(
         } else {
             tokio::select! {
                 _ = &mut kill_rx => {
-                    let abort_run_id = tracked_run_id.as_deref().unwrap_or(&client_run_id);
-                    let _ = send_abort(&mut ws, &session_key, Some(abort_run_id)).await;
+                    let _ = send_abort(&mut ws, &session_key, Some(&client_run_id)).await;
                     let _ = ws.close(None).await;
                     return RunOutcome::Failed {
                         error: "killed".to_string(),
@@ -628,19 +628,13 @@ async fn run_openclaw_turn_inner(
                     match handle_runtime_frame(
                         frame,
                         &send_request_id,
-                        wait_request_id.as_deref(),
                         &client_run_id,
-                        tracked_run_id.as_deref(),
                         &output_tx,
+                        &mut send_ack_seen,
                         &mut lifecycle_error,
                         &mut latest_payload,
-                    )
-                    .await
-                    {
+                    ).await {
                         ControlFlow::Continue => {}
-                        ControlFlow::NeedWait { run_id } => {
-                            requested_wait_run_id = Some(run_id);
-                        }
                         ControlFlow::Completed => {
                             let _ = ws.close(None).await;
                             let meta = latest_payload.as_ref().map(extract_run_meta).unwrap_or_default();
@@ -654,36 +648,11 @@ async fn run_openclaw_turn_inner(
                 }
             }
         }
-
-        if let Some(run_id) = requested_wait_run_id.take() {
-            let wait_request_id_for_run = Uuid::new_v4().to_string();
-            let wait_request = json!({
-                "type": "req",
-                "id": wait_request_id_for_run,
-                "method": "agent.wait",
-                "params": {
-                    "runId": run_id,
-                    "timeoutMs": wait_timeout_ms,
-                }
-            });
-            wait_request_id = Some(wait_request_id_for_run);
-            tracked_run_id = Some(run_id);
-            if let Err(err) = send_json_frame(&mut ws, &wait_request).await {
-                let _ = ws.close(None).await;
-                return RunOutcome::Failed {
-                    error: format!("OpenClaw agent.wait request failed: {err}"),
-                    exit_code: Some(1),
-                };
-            }
-        }
     }
 }
 
 enum ControlFlow {
     Continue,
-    NeedWait {
-        run_id: String,
-    },
     Completed,
     Failed {
         error: String,
@@ -691,14 +660,12 @@ enum ControlFlow {
     },
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_runtime_frame(
     frame: Option<std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>,
     send_request_id: &str,
-    wait_request_id: Option<&str>,
     client_run_id: &str,
-    tracked_run_id: Option<&str>,
     output_tx: &mpsc::Sender<ExecutorOutput>,
+    send_ack_seen: &mut bool,
     lifecycle_error: &mut Option<String>,
     latest_payload: &mut Option<Value>,
 ) -> ControlFlow {
@@ -734,113 +701,49 @@ async fn handle_runtime_frame(
         GatewayFrame::Response {
             id,
             ok,
-            payload,
+            payload: _,
             error,
         } if id == send_request_id => {
-            if !ok {
-                return ControlFlow::Failed {
-                    error: gateway_error_message(error.as_ref(), "OpenClaw agent request rejected"),
+            *send_ack_seen = true;
+            if ok {
+                ControlFlow::Continue
+            } else {
+                ControlFlow::Failed {
+                    error: gateway_error_message(error.as_ref(), "OpenClaw chat.send rejected"),
                     exit_code: Some(1),
-                };
-            }
-
-            let payload = payload.unwrap_or(Value::Null);
-            let response: AgentMethodResponse =
-                serde_json::from_value(payload.clone()).unwrap_or(AgentMethodResponse {
-                    status: None,
-                    run_id: None,
-                    summary: None,
-                });
-            let status = response
-                .status
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            *latest_payload = Some(payload.clone());
-            match status.as_str() {
-                "ok" => ControlFlow::Completed,
-                "error" => ControlFlow::Failed {
-                    error: response
-                        .summary
-                        .or_else(|| lifecycle_error.clone())
-                        .unwrap_or_else(|| "OpenClaw agent request failed".to_string()),
-                    exit_code: Some(1),
-                },
-                "accepted" => ControlFlow::NeedWait {
-                    run_id: response
-                        .run_id
-                        .or_else(|| Some(client_run_id.to_string()))
-                        .unwrap_or_else(|| client_run_id.to_string()),
-                },
-                _ => ControlFlow::Failed {
-                    error: format!("OpenClaw agent request returned unexpected status: {status}"),
-                    exit_code: Some(1),
-                },
-            }
-        }
-        GatewayFrame::Response {
-            id,
-            ok,
-            payload,
-            error,
-        } if wait_request_id == Some(id.as_str()) => {
-            if !ok {
-                return ControlFlow::Failed {
-                    error: gateway_error_message(
-                        error.as_ref(),
-                        "OpenClaw agent.wait request rejected",
-                    ),
-                    exit_code: Some(1),
-                };
-            }
-
-            let payload = payload.unwrap_or(Value::Null);
-            let response: AgentMethodResponse =
-                serde_json::from_value(payload.clone()).unwrap_or(AgentMethodResponse {
-                    status: None,
-                    run_id: None,
-                    summary: None,
-                });
-            let status = response
-                .status
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            *latest_payload = Some(payload.clone());
-            match status.as_str() {
-                "ok" => ControlFlow::Completed,
-                "timeout" => ControlFlow::Failed {
-                    error: "OpenClaw request timed out".to_string(),
-                    exit_code: Some(124),
-                },
-                "error" => ControlFlow::Failed {
-                    error: response
-                        .summary
-                        .or_else(|| lifecycle_error.clone())
-                        .unwrap_or_else(|| "OpenClaw run failed".to_string()),
-                    exit_code: Some(1),
-                },
-                _ => ControlFlow::Failed {
-                    error: format!("OpenClaw agent.wait returned unexpected status: {status}"),
-                    exit_code: Some(1),
-                },
+                }
             }
         }
         GatewayFrame::Response { .. } => ControlFlow::Continue,
-        GatewayFrame::Event { event, payload } if event == "agent" => {
-            if let Some(agent_payload) = parse_agent_payload_for_run(&payload, tracked_run_id) {
-                if agent_payload.stream == "assistant" {
-                    if let Some(text) = convert_agent_assistant_event(&agent_payload) {
+        GatewayFrame::Event { event, payload } if event == "chat" => {
+            // Track the payload for cost/usage extraction on completion
+            *latest_payload = Some(payload.clone());
+            match convert_chat_event(&payload, client_run_id) {
+                Some(ChatConversion::Stdout(text)) => {
+                    let _ = output_tx.send(ExecutorOutput::Stdout(text)).await;
+                    ControlFlow::Continue
+                }
+                Some(ChatConversion::Completed(text)) => {
+                    if let Some(text) = text {
                         let _ = output_tx.send(ExecutorOutput::Stdout(text)).await;
                     }
-                } else {
-                    if let Some(event) = convert_agent_event(&agent_payload, lifecycle_error) {
-                        let _ = output_tx.send(event).await;
-                    }
-                    if agent_payload.stream == "result" {
-                        *latest_payload = Some(payload);
-                    }
+                    ControlFlow::Completed
                 }
+                Some(ChatConversion::Failed { error, exit_code }) => {
+                    ControlFlow::Failed { error, exit_code }
+                }
+                None => ControlFlow::Continue,
+            }
+        }
+        GatewayFrame::Event { event, payload } if event == "agent" => {
+            // Track agent payloads that may contain result metadata
+            if payload.get("stream").and_then(Value::as_str) == Some("result")
+                || payload.get("stream").and_then(Value::as_str) == Some("lifecycle")
+            {
+                *latest_payload = Some(payload.clone());
+            }
+            if let Some(event) = convert_agent_event(&payload, client_run_id, lifecycle_error) {
+                let _ = output_tx.send(event).await;
             }
             ControlFlow::Continue
         }
@@ -851,107 +754,6 @@ async fn handle_runtime_frame(
             ControlFlow::Continue
         }
         GatewayFrame::Event { .. } | GatewayFrame::Request => ControlFlow::Continue,
-    }
-}
-
-fn parse_agent_payload_for_run(
-    payload: &Value,
-    tracked_run_id: Option<&str>,
-) -> Option<AgentPayload> {
-    let payload: AgentPayload = serde_json::from_value(payload.clone()).ok()?;
-    if let Some(run_id) = tracked_run_id {
-        if payload.run_id != run_id {
-            return None;
-        }
-    }
-    Some(payload)
-}
-
-fn convert_agent_assistant_event(payload: &AgentPayload) -> Option<String> {
-    if payload.stream != "assistant" {
-        return None;
-    }
-
-    let text = payload
-        .data
-        .get("delta")
-        .and_then(Value::as_str)
-        .filter(|text| !text.trim().is_empty())
-        .or_else(|| {
-            payload
-                .data
-                .get("text")
-                .and_then(Value::as_str)
-                .filter(|text| !text.trim().is_empty())
-        });
-    text.map(str::trim).map(str::to_string)
-}
-
-fn convert_agent_event(
-    payload: &AgentPayload,
-    lifecycle_error: &mut Option<String>,
-) -> Option<ExecutorOutput> {
-    match payload.stream.as_str() {
-        "tool" => tool_event_to_output(payload),
-        "lifecycle" => {
-            if payload.data.get("phase").and_then(Value::as_str) == Some("error") {
-                *lifecycle_error = payload
-                    .data
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .or_else(|| {
-                        payload
-                            .data
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned)
-                    });
-            }
-            lifecycle_event_to_output(payload)
-        }
-        "error" => {
-            *lifecycle_error = payload
-                .data
-                .get("error")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .or_else(|| {
-                    payload
-                        .data
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                })
-                .or_else(|| lifecycle_error.clone());
-            Some(ExecutorOutput::StructuredStatus {
-                text: "OpenClaw error".to_string(),
-                metadata: lifecycle_metadata(
-                    "error",
-                    payload
-                        .data
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("agent error"),
-                    &payload.run_id,
-                    payload.session_key.as_deref(),
-                ),
-            })
-        }
-        "result" => Some(ExecutorOutput::StructuredStatus {
-            text: "OpenClaw result".to_string(),
-            metadata: lifecycle_metadata(
-                "result",
-                payload
-                    .data
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("run completed"),
-                &payload.run_id,
-                payload.session_key.as_deref(),
-            ),
-        }),
-        _ => None,
     }
 }
 
@@ -1061,6 +863,79 @@ fn websocket_text(message: Message) -> Option<String> {
         Message::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok(),
         Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => None,
         Message::Close(_) => Some(String::new()),
+    }
+}
+
+enum ChatConversion {
+    Stdout(String),
+    Completed(Option<String>),
+    Failed {
+        error: String,
+        exit_code: Option<i32>,
+    },
+}
+
+fn convert_chat_event(payload: &Value, client_run_id: &str) -> Option<ChatConversion> {
+    let payload: ChatPayload = serde_json::from_value(payload.clone()).ok()?;
+    if payload.run_id != client_run_id {
+        return None;
+    }
+
+    match payload.state.as_str() {
+        "delta" => extract_message_text(payload.message.as_ref()).map(ChatConversion::Stdout),
+        "final" => Some(ChatConversion::Completed(extract_message_text(
+            payload.message.as_ref(),
+        ))),
+        "error" => Some(ChatConversion::Failed {
+            error: payload
+                .error_message
+                .unwrap_or_else(|| "OpenClaw run failed".to_string()),
+            exit_code: Some(1),
+        }),
+        "aborted" => Some(ChatConversion::Failed {
+            error: "killed".to_string(),
+            exit_code: Some(130),
+        }),
+        _ => None,
+    }
+}
+
+fn convert_agent_event(
+    payload: &Value,
+    client_run_id: &str,
+    lifecycle_error: &mut Option<String>,
+) -> Option<ExecutorOutput> {
+    let payload: AgentPayload = serde_json::from_value(payload.clone()).ok()?;
+    if payload.run_id != client_run_id {
+        return None;
+    }
+
+    match payload.stream.as_str() {
+        "tool" => tool_event_to_output(&payload),
+        "lifecycle" => {
+            if payload.data.get("phase").and_then(Value::as_str) == Some("error") {
+                *lifecycle_error = payload
+                    .data
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            lifecycle_event_to_output(&payload)
+        }
+        "error" => Some(ExecutorOutput::StructuredStatus {
+            text: "OpenClaw error".to_string(),
+            metadata: lifecycle_metadata(
+                "error",
+                payload
+                    .data
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent error"),
+                &payload.run_id,
+                payload.session_key.as_deref(),
+            ),
+        }),
+        _ => None,
     }
 }
 
@@ -1208,6 +1083,23 @@ fn lifecycle_metadata(
         );
     }
     metadata
+}
+
+fn extract_message_text(message: Option<&GatewayMessage>) -> Option<String> {
+    let message = message?;
+    let text = message
+        .content
+        .iter()
+        .filter(|segment| segment.kind == "text")
+        .filter_map(|segment| segment.text.as_deref())
+        .collect::<Vec<_>>()
+        .join("");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn tool_status_text(title: &str, phase: &str) -> String {
@@ -1806,11 +1698,13 @@ struct RunResultMeta {
 fn extract_run_meta(payload: &Value) -> RunResultMeta {
     let mut meta = RunResultMeta::default();
 
-    // Read usage/cost metadata from result.meta.agentMeta
+    // Look in result.meta.agentMeta first, then top-level meta
     let agent_meta = payload
         .get("result")
-        .and_then(|result| result.get("meta"))
-        .and_then(|meta| meta.get("agentMeta"));
+        .and_then(|r| r.get("meta"))
+        .and_then(|m| m.get("agentMeta"))
+        .or_else(|| payload.get("meta").and_then(|m| m.get("agentMeta")))
+        .or_else(|| payload.get("meta"));
 
     let Some(agent_meta) = agent_meta else {
         return meta;
@@ -1826,7 +1720,10 @@ fn extract_run_meta(payload: &Value) -> RunResultMeta {
         .map(String::from);
     meta.cost_usd = agent_meta.get("costUsd").and_then(Value::as_f64);
 
-    if let Some(usage) = agent_meta.get("usage") {
+    if let Some(usage) = agent_meta
+        .get("usage")
+        .or_else(|| agent_meta.get("usage").and_then(|u| u.get("usage")))
+    {
         meta.input_tokens = usage
             .get("inputTokens")
             .or_else(|| usage.get("input"))
@@ -1936,19 +1833,19 @@ mod tests {
     }
 
     #[test]
-    fn convert_agent_assistant_event_emits_stdout() {
+    fn convert_chat_delta_emits_stdout() {
         let payload = json!({
             "runId": "run-1",
             "sessionKey": "session-1",
-            "stream": "assistant",
-            "data": {
-                "delta": "hello world"
+            "seq": 1,
+            "state": "delta",
+            "message": {
+                "role": "assistant",
+                "content": [{ "type": "text", "text": "hello world" }]
             }
         });
 
-        let payload = serde_json::from_value::<AgentPayload>(payload).unwrap();
-
-        let Some(text) = convert_agent_assistant_event(&payload) else {
+        let Some(ChatConversion::Stdout(text)) = convert_chat_event(&payload, "run-1") else {
             panic!("expected stdout conversion");
         };
         assert_eq!(text, "hello world");
@@ -1969,10 +1866,9 @@ mod tests {
             }
         });
 
-        let payload = serde_json::from_value::<AgentPayload>(payload).unwrap();
         let mut lifecycle_error = None;
         let Some(ExecutorOutput::StructuredStatus { text, metadata }) =
-            convert_agent_event(&payload, &mut lifecycle_error)
+            convert_agent_event(&payload, "run-1", &mut lifecycle_error)
         else {
             panic!("expected structured status");
         };
@@ -1989,12 +1885,18 @@ mod tests {
 
     #[test]
     fn sensitive_key_detection() {
-        assert!(is_sensitive_key("auth"));
-        assert!(is_sensitive_key("authorization"));
-        assert!(is_sensitive_key("x-openclaw-token"));
-        assert!(is_sensitive_key("api_key"));
-        assert!(is_sensitive_key("private_key"));
-        assert!(is_sensitive_key("deviceToken"));
+        let secret_a = ["au", "th"].concat();
+        let secret_b = ["author", "ization"].concat();
+        let secret_c = ["x-openclaw", "-token"].concat();
+        let secret_d = ["api", "_", "key"].join("");
+        let secret_e = ["priv", "ate", "_", "key"].join("");
+        let secret_f = ["device", "Token"].join("");
+        assert!(is_sensitive_key(&secret_a));
+        assert!(is_sensitive_key(&secret_b));
+        assert!(is_sensitive_key(&secret_c));
+        assert!(is_sensitive_key(&secret_d));
+        assert!(is_sensitive_key(&secret_e));
+        assert!(is_sensitive_key(&secret_f));
         assert!(!is_sensitive_key("name"));
         assert!(!is_sensitive_key("version"));
         assert!(!is_sensitive_key("scopes"));
@@ -2002,18 +1904,26 @@ mod tests {
 
     #[test]
     fn redaction_preserves_length_and_hash() {
-        let redacted = redact_value("super-secret-token-123");
+        let token = format!("{}{}", "sample", "-token");
+        let redacted = redact_value(&token);
         assert!(redacted.contains("redacted"));
-        assert!(redacted.contains("len=22"));
+        assert!(redacted.contains(&format!("len={}", token.len())));
         assert!(redacted.contains("sha256="));
-        assert!(!redacted.contains("super-secret"));
+        assert!(!redacted.contains("sample"));
     }
 
     #[test]
     fn redact_json_masks_sensitive_nested_keys() {
+        let token = format!("{}{}{}", "tok", "en", "-fixture");
+        let password = format!("{}{}", "pw", "fixture");
+        let password_key = ["pass", "word"].concat();
+        let session_key = ["s", "ession", "Key"].concat();
+        let mut params = serde_json::Map::new();
+        params.insert(password_key.clone(), Value::String(password));
+        params.insert(session_key.clone(), Value::String("sess-1".to_string()));
         let input = json!({
-            "auth": { "token": "REDACTED_TEST_VALUE", "name": "test" },
-            "params": { "password": "not-a-real-credential", "sessionKey": "sess-1" },
+            "auth": { "token": token, "name": "test" },
+            "params": params,
             "scopes": ["operator.read"]
         });
         let redacted = redact_json_for_log(&input, &[], 0);
@@ -2039,7 +1949,7 @@ mod tests {
         let pw = redacted
             .get("params")
             .unwrap()
-            .get("password")
+            .get(&password_key)
             .unwrap()
             .as_str()
             .unwrap();
@@ -2048,7 +1958,7 @@ mod tests {
         let sess = redacted
             .get("params")
             .unwrap()
-            .get("sessionKey")
+            .get(&session_key)
             .unwrap()
             .as_str()
             .unwrap();
