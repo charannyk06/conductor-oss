@@ -768,7 +768,7 @@ async fn run_ttyd_session_owner(
             health_result = health_rx.recv() => {
                 if let Some(result) = health_result {
                     // Drain any remaining health notifications.
-                    let _ = health_rx.recv();
+                    let _ = health_rx.recv().await;
                     return result;
                 }
                 // Channel closed means the task was dropped, continue normally.

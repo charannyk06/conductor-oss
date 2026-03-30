@@ -223,21 +223,20 @@ impl AppState {
                         // If it's a ttyd process spawned by conductor (has the "ttyd-agent" or similar markers)
                         if command.contains("ttyd")
                             && (command.contains("ttyd-agent") || command.contains("conductor"))
+                            && !known_pids.contains(&pid)
                         {
-                            if !known_pids.contains(&pid) {
-                                tracing::info!(pid, command, "Cleaning up orphaned ttyd process");
-                                unsafe {
-                                    // Send SIGTERM, then SIGKILL
-                                    libc::kill(pid as i32, libc::SIGTERM);
+                            tracing::info!(pid, command, "Cleaning up orphaned ttyd process");
+                            unsafe {
+                                // Send SIGTERM, then SIGKILL
+                                libc::kill(pid as i32, libc::SIGTERM);
 
-                                    // We spawn a short sleeper to send SIGKILL to avoid blocking the main startup
-                                    tokio::spawn(async move {
-                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                        if libc::kill(pid as i32, 0) == 0 {
-                                            libc::kill(pid as i32, libc::SIGKILL);
-                                        }
-                                    });
-                                }
+                                // We spawn a short sleeper to send SIGKILL to avoid blocking the main startup
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                    if libc::kill(pid as i32, 0) == 0 {
+                                        libc::kill(pid as i32, libc::SIGKILL);
+                                    }
+                                });
                             }
                         }
                     }
