@@ -108,6 +108,44 @@ function Build-Bridge($goExe) {
   }
 }
 
+function Ensure-ConductorCli {
+  $existing = Resolve-ConductorCommandPath
+  if ($existing) {
+    Write-Host "Conductor CLI already installed at $existing"
+    return
+  }
+
+  $npm = Get-Command npm -ErrorAction SilentlyContinue
+  if (-not $npm) {
+    Write-Host "npm is not available; install conductor-oss manually later or set CONDUCTOR_BRIDGE_BACKEND_COMMAND." -ForegroundColor Yellow
+    return
+  }
+
+  Write-Host "Installing conductor-oss CLI via npm..."
+  New-Item -ItemType Directory -Force -Path $ConductorNpmPrefix | Out-Null
+  $installOk = $true
+  try {
+    & npm install -g --prefix $ConductorNpmPrefix --registry=https://registry.npmjs.org conductor-oss
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+  } catch {
+    Write-Host "Retrying conductor-oss install with --force..."
+    & npm install -g --prefix $ConductorNpmPrefix --registry=https://registry.npmjs.org conductor-oss --force
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Could not install conductor-oss via npm. Install it manually later." -ForegroundColor Yellow
+      $installOk = $false
+    }
+  }
+
+  if ($installOk) {
+    $installed = Resolve-ConductorCommandPath
+    if ($installed) {
+      Write-Host "Installed conductor-oss CLI."
+    } else {
+      Write-Host "Installed conductor-oss but could not locate the CLI binary." -ForegroundColor Yellow
+    }
+  }
+}
+
 function Resolve-ConductorCommandPath {
   $candidates = @(
     (Join-Path $ConductorNpmPrefix "bin\\conductor.cmd"),
@@ -157,6 +195,7 @@ function Run-Connect {
 
 $goExe = Ensure-Go
 Build-Bridge $goExe
+Ensure-ConductorCli
 Write-Host "Installing bridge background service..."
 & $BridgeBin install
 if ($LASTEXITCODE -ne 0) {
@@ -169,7 +208,7 @@ if ($DashboardUrl) {
 } else {
   Write-Host "Bridge service installed. Future reconnects can use: conductor-bridge connect --dashboard-url <your dashboard URL>"
 }
-Write-Host "Bridge setup does not need the full Conductor CLI first. You can install conductor-oss later if needed."
+Write-Host "Conductor CLI installed for local backend. Bridge service ready."
 Run-Connect
 `;
 }
