@@ -510,11 +510,15 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         }
 
         try {
-            const url = new URL(value, window.location.href);
-            if (url.pathname !== '/ws' && !url.pathname.endsWith('/ws')) {
+            const candidate = new URL(value, window.location.href);
+            if (candidate.pathname !== '/' && candidate.pathname !== '/ws' && !candidate.pathname.endsWith('/ws')) {
                 return value;
             }
 
+            const url = new URL(window.location.href);
+            url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+            url.pathname = url.pathname.replace(/\/+$/, '');
+            url.pathname = url.pathname.length > 0 ? url.pathname + '/ws' : '/ws';
             if (token) {
                 url.searchParams.set('token', token);
             }
@@ -2045,6 +2049,10 @@ mod tests {
         assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
         assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
         assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));
+        assert!(injected.contains("const url = new URL(window.location.href);"));
+        assert!(injected.contains("candidate.pathname !== '/'"));
+        assert!(injected.contains("url.pathname = url.pathname.replace(/\\/+$/, '');"));
+        assert!(injected.contains("url.pathname = url.pathname.length > 0 ? url.pathname + '/ws' : '/ws';"));
         assert!(injected.contains("url.searchParams.set('token', token);"));
         assert!(injected.contains("url.searchParams.set('bridgeId', bridgeId);"));
         assert!(injected.contains("window.addEventListener('message', handleMessage);"));

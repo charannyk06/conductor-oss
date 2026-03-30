@@ -32,6 +32,6 @@ test("injectBridgeTtydRelayShim rewrites ttyd websocket connects through relay",
 
   assert.match(injected, /conductor-bridge-ttyd-relay-shim/);
   assert.match(injected, /RELAY_TTYD_WS_URL/);
-  assert.match(injected, /candidate\.pathname === '\/ws'/);
+  assert.match(injected, /candidate\.pathname === '\/' \|\| candidate\.pathname === '\/ws'/);
   assert.match(injected, /normalizedUrl = RELAY_TTYD_WS_URL/);
 });
