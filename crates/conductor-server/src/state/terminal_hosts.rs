@@ -18,7 +18,11 @@ pub(crate) struct TerminalHostRegistry {
 
 impl TerminalHostRegistry {
     pub(crate) fn new_stream(&self) -> broadcast::Sender<TerminalStreamEvent> {
-        let (sender, _) = broadcast::channel(2048);
+        // Capacity of 8192 handles 30-50 concurrent terminals under heavy output.
+        // Each sender can lag behind without causing RecvError::Lagged, which
+        // triggers costly snapshot restoration. The extra headroom prevents
+        // browser disconnections during burst output.
+        let (sender, _) = broadcast::channel(8192);
         sender
     }
 
@@ -119,6 +123,14 @@ impl TerminalHostRegistry {
         resize_tx: Option<mpsc::Sender<PtyDimensions>>,
         kill_tx: oneshot::Sender<()>,
     ) {
+        // Guard against race: only attach if the channels are currently None.
+        // This prevents a slow reconnect from overwriting a faster new session's channels.
+        if handle.input_tx.read().await.is_some() {
+            tracing::warn!(
+                "terminal session already has active runtime attached, skipping attach to prevent channel overwrite"
+            );
+            return;
+        }
         *handle.input_tx.write().await = Some(input_tx);
         *handle.resize_tx.write().await = resize_tx;
         *handle.kill_tx.lock().await = Some(kill_tx);

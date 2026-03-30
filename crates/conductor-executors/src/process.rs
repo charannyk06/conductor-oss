@@ -364,7 +364,12 @@ pub async fn spawn_process_with_pty_size_and_env_removals(
             }
             result = async move {
                 loop {
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // Reduced from 500ms to 100ms for faster exit detection on
+                    // crash.  With 30-50 concurrent terminals this keeps the
+                    // worst-case detection latency under 100ms while the extra
+                    // CPU overhead of more-frequent try_wait() calls is
+                    // acceptable for a system that prioritizes robustness.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     let child = Arc::clone(&child_for_wait);
                     match tokio::task::spawn_blocking(move || {
                         let mut child = child.lock().unwrap_or_else(|e| e.into_inner());

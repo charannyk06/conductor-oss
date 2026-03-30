@@ -184,6 +184,9 @@ export function RemoteSessionTerminal({
   const retryAttemptRef = useRef(0);
   const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
   const followBottomRef = useRef(true);
+  const lastMessageTimeRef = useRef<number>(0);
+  type ConnectionQuality = "good" | "degraded" | "bad" | "offline";
+  const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>("offline");
   const [hasOutput, setHasOutput] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -380,6 +383,34 @@ export function RemoteSessionTerminal({
     reconnectTimerRef.current = window.setTimeout(() => {
       setConnectionTick((value) => value + 1);
     }, delay);
+  }, [expectsRelayTerminal]);
+
+  // Monitor connection quality by checking elapsed time since the last WebSocket
+  // message.  Thresholds are tuned so "degraded" triggers after 5 seconds of
+  // silence (network trouble) and "bad" after 15 seconds (ttyd may be hung).
+  // This gives users immediate visual feedback before the backend health check
+  // would otherwise fire, and works even when the WebSocket stays technically
+  // open with no data flowing.
+  useEffect(() => {
+    if (!expectsRelayTerminal) {
+      return;
+    }
+    const interval = window.setInterval(() => {
+      const socket = socketRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        setConnectionQuality("offline");
+        return;
+      }
+      const elapsed = Date.now() - lastMessageTimeRef.current;
+      if (elapsed < 5_000) {
+        setConnectionQuality("good");
+      } else if (elapsed < 15_000) {
+        setConnectionQuality("degraded");
+      } else {
+        setConnectionQuality("bad");
+      }
+    }, 2_000);
+    return () => window.clearInterval(interval);
   }, [expectsRelayTerminal]);
 
   useEffect(() => {
@@ -690,6 +721,8 @@ export function RemoteSessionTerminal({
 
           socket.onopen = () => {
             retryAttemptRef.current = 0;
+            lastMessageTimeRef.current = Date.now();
+            setConnectionQuality("good");
             decoderRef.current = new TextDecoder();
             setHasOutput(false);
             if (terminalRef.current) {
@@ -713,6 +746,10 @@ export function RemoteSessionTerminal({
             if (!terminal) {
               return;
             }
+
+            // Track message receipt for connection quality monitoring.
+            lastMessageTimeRef.current = Date.now();
+            setConnectionQuality("good");
 
             const frame = typeof event.data === "string"
               ? new TextEncoder().encode(event.data)
@@ -746,6 +783,7 @@ export function RemoteSessionTerminal({
 
           socket.onclose = () => {
             socketRef.current = null;
+            setConnectionQuality("offline");
             if (terminalRef.current) {
               terminalRef.current.options.disableStdin = true;
               terminalRef.current.options.cursorBlink = false;
@@ -852,6 +890,42 @@ export function RemoteSessionTerminal({
   return (
     <div className="group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="absolute right-2 top-2 z-10 flex items-center gap-2 sm:right-3 sm:top-3">
+        {/* Connection quality dot: visible only for active relay terminals. */}
+        {expectsRelayTerminal ? (
+          <div
+            className="relative flex h-5 w-5 items-center justify-center"
+            title={
+              connectionQuality === "good"
+                ? "Terminal connected"
+                : connectionQuality === "degraded"
+                  ? "Terminal connection degraded (slow data)"
+                  : connectionQuality === "bad"
+                    ? "Terminal connection degraded (no data)"
+                    : "Terminal offline"
+            }
+          >
+            {/* Outer ring — red when bad/offline to draw attention. */}
+            {connectionQuality !== "good" ? (
+              <div
+                className={
+                  connectionQuality === "bad" || connectionQuality === "offline"
+                    ? "absolute inset-0 rounded-full border-2 border-[#ff8f7a]"
+                    : "absolute inset-0 rounded-full border-2 border-[#f0b35d]"
+                }
+              />
+            ) : null}
+            {/* Inner filled dot. */}
+            <div
+              className={
+                connectionQuality === "good"
+                  ? "h-2 w-2 rounded-full bg-[#18c58f]"
+                  : connectionQuality === "degraded"
+                    ? "h-2 w-2 rounded-full bg-[#f0b35d]"
+                    : "h-2 w-2 rounded-full bg-[#ff8f7a]"
+              }
+            />
+          </div>
+        ) : null}
         <Button
           type="button"
           size="icon"
