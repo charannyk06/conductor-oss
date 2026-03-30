@@ -146,13 +146,8 @@ fn detect_package_manager() -> &'static str {
 }
 
 /// Run a foreground install command and collect its stdout + stderr.
-async fn run_install(
-    manager: &str,
-    package: &str,
-    global_flag: &str,
-) -> Result<String, String> {
-    let binary_path =
-        which::which(manager).map_err(|_| format!("{manager} not found on PATH"))?;
+async fn run_install(manager: &str, package: &str, global_flag: &str) -> Result<String, String> {
+    let binary_path = which::which(manager).map_err(|_| format!("{manager} not found on PATH"))?;
 
     let child = Command::new(&binary_path)
         .arg("install")
@@ -190,10 +185,7 @@ fn extract_npm_error_message(output: &str) -> String {
     // blank and NOT a progress line. Find the first meaningful line.
     for line in output.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("npm ")
-            || trimmed.starts_with("pnpm ")
-        {
+        if trimmed.is_empty() || trimmed.starts_with("npm ") || trimmed.starts_with("pnpm ") {
             continue;
         }
         // Skip ANSI control chars.
@@ -291,8 +283,7 @@ pub async fn try_install_missing_executor(kind: AgentKind) -> InstallResult {
                 "binary not found for {:?} ({:?}). \
                 Set CONDUCTOR_AUTO_UPDATE_EXECUTORS=1 to permit auto-install, \
                 or install manually with your package manager.",
-                kind,
-                info.binaries
+                kind, info.binaries
             ),
         };
     }
@@ -411,7 +402,9 @@ mod tests {
         // On macOS/Linux, `true` is always in PATH.
         assert!(binary_exists_on_path(&["true", "false"]));
         // Definitely fake name should not.
-        assert!(!binary_exists_on_path(&["conductor-this-does-not-exist-xyz"]));
+        assert!(!binary_exists_on_path(&[
+            "conductor-this-does-not-exist-xyz"
+        ]));
     }
 
     #[test]
