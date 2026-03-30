@@ -3,6 +3,21 @@ import assert from "node:assert/strict";
 import { ConductorDispatcherClient } from "./client.js";
 import type { DispatcherFeedDelta } from "./types.js";
 
+function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  let i = 0;
+  return new ReadableStream({
+    pull(controller) {
+      if (i >= chunks.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(enc.encode(chunks[i]));
+      i += 1;
+    },
+  });
+}
+
 test("builds feed URL without trailing slashes", async () => {
   const c = new ConductorDispatcherClient({ baseUrl: "http://127.0.0.1:4748///" });
   assert.equal(c.baseUrl, "http://127.0.0.1:4748");
@@ -144,6 +159,34 @@ test("streamFeedDeltas normalizes the initial raw snapshot into replace", async 
     const replace = first.value as Extract<DispatcherFeedDelta, { type: "replace" }>;
     assert.equal(replace.type, "replace");
     assert.deepEqual(replace.payload.entries, []);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("streamFeed parses frames split across chunks and final partial frame", async () => {
+  const c = new ConductorDispatcherClient({ baseUrl: "http://127.0.0.1:1" });
+  const orig = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      streamFromChunks([
+        'data: {"entries":[],"totalEntries":0,"windowLimit":120,"truncated":false}\n\n',
+        'data: {"type":"patch","entryId":"assistant-1","entry":{"id":"assistant-1","kind":"assistant","label":"Assistant","text":"Working on it","createdAt":null,"attachments":[],"source":"runtime","streaming":true,"metadata":{}},"textDelta":" on it","totalEntries":2,"windowLimit":120,"truncated":false,"sessionStatus":"working","approvalState":null,"parserState":null,"runtimeStatus":null,"source":"runtime-output","error":null,"integration":null}\n',
+      ]),
+      {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      },
+    );
+  try {
+    const iter = c.streamFeed("proj-a");
+    const values: unknown[] = [];
+    for await (const value of iter) {
+      values.push(value);
+    }
+    assert.equal(values.length, 2);
+    assert.equal((values[0] as { type?: string }).type, undefined);
+    assert.equal((values[1] as { type?: string }).type, "patch");
   } finally {
     globalThis.fetch = orig;
   }

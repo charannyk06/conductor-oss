@@ -62,32 +62,50 @@ function hasExplicitBindingTarget(query?: DispatcherBindingQuery): boolean {
  * Parse one SSE frame (after the blank line that ends the previous frame).
  * Concatenates multiple `data:` lines per the SSE spec.
  */
+const FRAME_SEPARATOR = /\r?\n\r?\n/;
+
+function parseSseValue(rawValue: string): string {
+  return rawValue.trimStart();
+}
+
+function parseRawSseFrame(rawFrame: string): {
+  event: string | null;
+  data: string;
+} | null {
+  let event: string | null = null;
+  const dataLines: string[] = [];
+  for (const line of rawFrame.split(/\r?\n/)) {
+    if (line.startsWith(":")) {
+      continue;
+    }
+    if (line.startsWith("event:")) {
+      event = parseSseValue(line.slice(6));
+    } else if (line.startsWith("data:")) {
+      dataLines.push(parseSseValue(line.slice(5)));
+    }
+  }
+  if (dataLines.length === 0) {
+    return null;
+  }
+  return { event, data: dataLines.join("\n") };
+}
+
 function parseNextSseFrame(
   buffer: string,
 ): { frame: { event: string | null; data: string } | null; rest: string } {
   let remaining = buffer;
-  const sep = /\r?\n\r?\n/;
   for (;;) {
-    const m = sep.exec(remaining);
+    const m = remaining.match(FRAME_SEPARATOR);
     if (!m) {
       return { frame: null, rest: remaining };
     }
     const rawFrame = remaining.slice(0, m.index);
     remaining = remaining.slice(m.index + m[0].length);
-    sep.lastIndex = 0;
-    let event: string | null = null;
-    const dataLines: string[] = [];
-    for (const line of rawFrame.split(/\r?\n/)) {
-      if (line.startsWith("event:")) {
-        event = line.slice(6).trimStart();
-      } else if (line.startsWith("data:")) {
-        dataLines.push(line.slice(5).trimStart());
-      }
-    }
-    if (dataLines.length === 0) {
+    const frame = parseRawSseFrame(rawFrame);
+    if (!frame) {
       continue;
     }
-    return { frame: { event, data: dataLines.join("\n") }, rest: remaining };
+    return { frame, rest: remaining };
   }
 }
 
@@ -442,8 +460,11 @@ export class ConductorDispatcherClient {
     try {
       for (;;) {
         const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        if (!done && value) {
+          buffer += decoder.decode(value, { stream: true });
+        } else if (done) {
+          buffer += decoder.decode(undefined, { stream: false });
+        }
         for (;;) {
           const { frame, rest } = parseNextSseFrame(buffer);
           buffer = rest;
@@ -456,6 +477,18 @@ export class ConductorDispatcherClient {
           } catch {
             /* ignore malformed chunk */
           }
+        }
+        if (done) {
+          const finalFrame = parseRawSseFrame(buffer);
+          if (finalFrame) {
+            try {
+              const parsed = JSON.parse(finalFrame.data) as DispatcherFeedStreamEvent;
+              yield parsed;
+            } catch {
+              /* ignore malformed chunk */
+            }
+          }
+          break;
         }
       }
     } finally {
