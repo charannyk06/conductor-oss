@@ -342,6 +342,14 @@ pub trait Executor: Send + Sync {
     fn supports_direct_terminal_ui(&self) -> bool {
         false
     }
+
+    /// Whether an interactive live launch can accept the initial prompt via argv.
+    ///
+    /// Most terminal agents support this, but some CLIs only read the first task
+    /// from stdin after the PTY session is attached.
+    fn accepts_prompt_on_launch_when_interactive(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

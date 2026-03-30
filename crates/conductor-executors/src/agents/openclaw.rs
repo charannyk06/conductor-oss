@@ -566,7 +566,6 @@ async fn run_openclaw_turn_inner(
         };
     }
 
-    let mut send_ack_seen = false;
     let mut lifecycle_error: Option<String> = None;
     let mut latest_payload: Option<Value> = None;
 
@@ -597,7 +596,6 @@ async fn run_openclaw_turn_inner(
                         &send_request_id,
                         &client_run_id,
                         &output_tx,
-                        &mut send_ack_seen,
                         &mut lifecycle_error,
                         &mut latest_payload,
                     ).await {
@@ -630,7 +628,6 @@ async fn run_openclaw_turn_inner(
                         &send_request_id,
                         &client_run_id,
                         &output_tx,
-                        &mut send_ack_seen,
                         &mut lifecycle_error,
                         &mut latest_payload,
                     ).await {
@@ -665,7 +662,6 @@ async fn handle_runtime_frame(
     send_request_id: &str,
     client_run_id: &str,
     output_tx: &mpsc::Sender<ExecutorOutput>,
-    send_ack_seen: &mut bool,
     lifecycle_error: &mut Option<String>,
     latest_payload: &mut Option<Value>,
 ) -> ControlFlow {
@@ -704,7 +700,6 @@ async fn handle_runtime_frame(
             payload: _,
             error,
         } if id == send_request_id => {
-            *send_ack_seen = true;
             if ok {
                 ControlFlow::Continue
             } else {

@@ -61,6 +61,10 @@ impl Executor for HermesExecutor {
         true
     }
 
+    fn accepts_prompt_on_launch_when_interactive(&self) -> bool {
+        false
+    }
+
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
         let handle = if options.interactive {
@@ -100,6 +104,8 @@ impl Executor for HermesExecutor {
         args.extend(options.sanitized_extra_args());
 
         if options.interactive {
+            // Hermes interactive chat reads the first task from stdin after the
+            // terminal attaches instead of accepting it as an argv prompt.
             return args;
         }
 
