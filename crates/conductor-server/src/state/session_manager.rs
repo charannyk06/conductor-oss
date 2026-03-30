@@ -1291,6 +1291,10 @@ impl AppState {
             Vec::new()
         };
 
+        let send_initial_prompt_after_runtime_attach = executor.supports_direct_terminal_ui()
+            && !executor.accepts_prompt_on_launch_when_interactive()
+            && !prompt.trim().is_empty();
+
         let runtime_launch = match self
             .spawn_with_runtime(
                 &project,
@@ -1298,7 +1302,11 @@ impl AppState {
                 &session_id,
                 SpawnOptions {
                     cwd: workspace_path.working_directory.clone(),
-                    prompt: prompt.clone(),
+                    prompt: if send_initial_prompt_after_runtime_attach {
+                        String::new()
+                    } else {
+                        prompt.clone()
+                    },
                     model: request.model.clone(),
                     reasoning_effort: request.reasoning_effort.clone(),
                     skip_permissions,
@@ -1557,6 +1565,7 @@ impl AppState {
                 }
             }
         }
+        let runtime_input_tx = input_tx.clone();
         self.attach_terminal_runtime(
             &session_id,
             input_tx,
@@ -1588,6 +1597,10 @@ impl AppState {
                     "failed to synchronize ACP dispatcher state after spawn"
                 );
             }
+        }
+
+        if send_initial_prompt_after_runtime_attach {
+            runtime_input_tx.send(ExecutorInput::Text(prompt)).await?;
         }
 
         Ok(record)

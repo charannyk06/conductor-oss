@@ -5,6 +5,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, ChevronLeft, Loader2 } from "lucide-react";
 import { DispatcherPreferenceChips } from "@/components/dispatcher/DispatcherPreferenceChips";
 import { DispatcherPane } from "@/components/dispatcher/DispatcherPane";
+import {
+  resolveSelectedDispatcherThreadId,
+  sortDispatcherThreadsByActivity,
+  upsertDispatcherThread,
+} from "@/components/dispatcher/threadState";
 import { Button } from "@/components/ui/Button";
 import {
   buildModelSelection,
@@ -13,10 +18,6 @@ import {
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import type { DashboardSession } from "@/lib/types";
-
-function compareSessionsByActivity(left: DashboardSession, right: DashboardSession): number {
-  return new Date(right.lastActivityAt).getTime() - new Date(left.lastActivityAt).getTime();
-}
 
 function readMetadataValue(
   thread: DashboardSession,
@@ -94,22 +95,16 @@ export function ProjectDispatcherPanel({
         throw new Error(payload?.error ?? "Failed to load dispatcher sessions");
       }
       const threads = Array.isArray(payload?.threads)
-        ? ([...(payload.threads as DashboardSession[])]).sort(compareSessionsByActivity)
+        ? sortDispatcherThreadsByActivity(payload.threads as DashboardSession[])
         : [];
       const activeThreadId = typeof payload?.activeThreadId === "string" && payload.activeThreadId.trim().length > 0
         ? payload.activeThreadId
         : null;
 
       setDispatcherThreads(threads);
-      setSelectedThreadId((current) => {
-        if (current && threads.some((thread) => thread.id === current)) {
-          return current;
-        }
-        if (activeThreadId && threads.some((thread) => thread.id === activeThreadId)) {
-          return activeThreadId;
-        }
-        return threads[0]?.id ?? null;
-      });
+      setSelectedThreadId((current) =>
+        resolveSelectedDispatcherThreadId(current, threads, activeThreadId)
+      );
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load dispatcher sessions");
@@ -160,9 +155,7 @@ export function ProjectDispatcherPanel({
       if (!session?.id) {
         throw new Error("Dispatcher response did not include a thread");
       }
-      setDispatcherThreads((current) =>
-        [session, ...current.filter((candidate) => candidate.id !== session.id)].sort(compareSessionsByActivity),
-      );
+      setDispatcherThreads((current) => upsertDispatcherThread(current, session));
       setSelectedThreadId(session.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start dispatcher");

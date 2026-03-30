@@ -1318,4 +1318,83 @@ mod tests {
             vec![Value::String("demo".to_string())]
         );
     }
+
+    #[tokio::test]
+    async fn snapshot_sessions_include_queue_metadata_and_dashboard_shape() {
+        let root =
+            std::env::temp_dir().join(format!("conductor-state-snapshot-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("test root should exist");
+
+        let config = ConductorConfig {
+            workspace: root.clone(),
+            ..ConductorConfig::default()
+        };
+        let config_path = root.join("conductor.yaml");
+        let db = Database::in_memory()
+            .await
+            .expect("in-memory db should open");
+        let state = AppState::new(config_path, config, db).await;
+
+        let mut queued = SessionRecord::builder(
+            "session-queued".to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "prompt".to_string(),
+        )
+        .build();
+        queued.status = SessionStatus::Queued;
+        queued.created_at = "2025-01-01T00:00:00Z".to_string();
+        queued.last_activity_at = "2025-01-01T00:00:00Z".to_string();
+        queued.output = "very large output".repeat(64);
+        queued
+            .metadata
+            .insert("taskId".to_string(), "task-1".to_string());
+
+        let mut running = SessionRecord::builder(
+            "session-running".to_string(),
+            "demo".to_string(),
+            "codex".to_string(),
+            "other prompt".to_string(),
+        )
+        .build();
+        running.status = SessionStatus::Working;
+        running.created_at = "2025-01-02T00:00:00Z".to_string();
+        running.last_activity_at = "2025-01-02T00:00:00Z".to_string();
+
+        state
+            .sessions
+            .write()
+            .await
+            .extend([(queued.id.clone(), queued), (running.id.clone(), running)]);
+
+        let snapshot = state.snapshot_sessions().await;
+        assert_eq!(snapshot.len(), 2);
+
+        let queued_value = snapshot
+            .iter()
+            .find(|session| session.get("id").and_then(Value::as_str) == Some("session-queued"))
+            .expect("queued session should be present");
+        assert_eq!(
+            queued_value
+                .get("metadata")
+                .and_then(|metadata| metadata.get("queuePosition"))
+                .and_then(Value::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            queued_value
+                .get("metadata")
+                .and_then(|metadata| metadata.get("queueDepth"))
+                .and_then(Value::as_str),
+            Some("1")
+        );
+        assert!(
+            queued_value.get("prompt").is_none(),
+            "dashboard snapshots should not expose prompt content"
+        );
+        assert!(
+            queued_value.get("output").is_none(),
+            "dashboard snapshots should not expose session output"
+        );
+    }
 }
