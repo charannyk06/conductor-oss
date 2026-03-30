@@ -674,8 +674,9 @@ func connectBackendTerminal(ctx context.Context, sessionID string) (*websocket.C
 			break
 		}
 
-		if ensureErr := ensureLocalBackendForProxy(); ensureErr != nil && lastErr == nil {
+		if ensureErr := ensureLocalBackendForProxy(); ensureErr != nil {
 			lastErr = ensureErr
+			break
 		}
 
 		timer := time.NewTimer(backoff)
@@ -956,12 +957,17 @@ func proxyAPI(id, method, path string, body interface{}) (apiResponse, error) {
 
 	resp, err := doBackendAPIRequest(method, path, requestBodyBytes, contentType)
 	if err != nil && shouldRetryAfterEnsuringBackend(err) {
-		if ensureErr := ensureLocalBackendForProxy(); ensureErr == nil {
-			resp, err = doBackendAPIRequest(method, path, requestBodyBytes, contentType)
+		if ensureErr := ensureLocalBackendForProxy(); ensureErr != nil {
+			return apiResponse{Status: http.StatusBadGateway, Body: map[string]any{
+				"error": ensureErr.Error(),
+			}}, ensureErr
 		}
+		resp, err = doBackendAPIRequest(method, path, requestBodyBytes, contentType)
 	}
 	if err != nil {
-		return apiResponse{Status: http.StatusBadGateway, Body: nil}, err
+		return apiResponse{Status: http.StatusBadGateway, Body: map[string]any{
+			"error": err.Error(),
+		}}, err
 	}
 	defer resp.Body.Close()
 
