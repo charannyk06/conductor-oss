@@ -147,7 +147,7 @@ fn upsert_lookup(input: &UpsertDispatcherBindingInput) -> DispatcherBindingLooku
         session_id: normalize_optional_text(input.session_id.clone()),
         channel_id: normalize_optional_text(input.channel_id.clone()),
         bridge_id: normalize_optional_text(input.bridge_id.clone()),
-        dispatcher_thread_id: None,
+        dispatcher_thread_id: normalize_optional_text(input.dispatcher_thread_id.clone()),
     }
 }
 
@@ -254,8 +254,14 @@ impl AppState {
         input.implementation_reasoning_effort =
             normalize_optional_text(input.implementation_reasoning_effort);
 
-        if input.thread_id.is_none() && input.session_id.is_none() && input.channel_id.is_none() {
-            return Err(anyhow!("threadId, sessionId, or channelId is required"));
+        if input.thread_id.is_none()
+            && input.session_id.is_none()
+            && input.channel_id.is_none()
+            && input.dispatcher_thread_id.is_none()
+        {
+            return Err(anyhow!(
+                "threadId, sessionId, channelId, or dispatcherThreadId is required"
+            ));
         }
 
         let config = self.config.read().await.clone();
@@ -484,5 +490,29 @@ mod tests {
 
         assert_eq!(lookup.bridge_id.as_deref(), Some("bridge-b"));
         assert_eq!(find_matching_binding_index(&bindings, &lookup), Some(1));
+    }
+
+    #[test]
+    fn upsert_lookup_includes_dispatcher_thread_id() {
+        let lookup = upsert_lookup(&UpsertDispatcherBindingInput {
+            provider: "openclaw".to_string(),
+            dispatcher_thread_id: Some("dispatcher-b".to_string()),
+            ..UpsertDispatcherBindingInput::default()
+        });
+
+        assert_eq!(lookup.dispatcher_thread_id.as_deref(), Some("dispatcher-b"));
+        assert!(lookup.dispatcher_thread_id.is_some());
+    }
+
+    #[test]
+    fn binding_matches_lookup_dispatcher_thread_only() {
+        let binding = binding("a", Some("bridge-a"));
+        let lookup = DispatcherBindingLookup {
+            provider: Some("openclaw".to_string()),
+            dispatcher_thread_id: Some(format!("dispatcher-{}", binding.id)),
+            ..DispatcherBindingLookup::default()
+        };
+
+        assert!(binding_matches_lookup(&binding, &lookup));
     }
 }

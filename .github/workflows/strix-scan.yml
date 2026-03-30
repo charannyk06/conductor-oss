@@ -1,0 +1,97 @@
+name: strix-security-scan
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: "Scan depth"
+        required: true
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - standard
+          - deep
+      target_url:
+        description: "Dashboard URL to scan"
+        required: false
+        default: ""
+        type: string
+
+env:
+  STRIX_LLM: ${{ secrets.STRIX_LLM }}
+  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Strix
+        run: curl -sSL https://strix.ai/install | bash
+
+      - name: Run quick scan (PR gate)
+        if: github.event_name == 'pull_request'
+        env:
+          STRIX_LLM: ${{ secrets.STRIX_LLM }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+        run: |
+          if [ -z "$STRIX_LLM" ]; then
+            echo "::warning::STRIX_LLM is not configured; skipping security scan for pull_request runs."
+            exit 0
+          fi
+
+          strix -n \
+            --target ./ \
+            --scan-mode quick \
+            --instruction-file ./strix-instructions.md
+
+      - name: Run configured scan (manual)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          STRIX_LLM: ${{ secrets.STRIX_LLM }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          TARGET_URL: ${{ github.event.inputs.target_url }}
+          SCAN_MODE: ${{ github.event.inputs.scan_mode }}
+        run: |
+          if [ -z "$STRIX_LLM" ]; then
+            echo "::error::STRIX_LLM is required for manual scan runs."
+            exit 1
+          fi
+
+          if [ -n "$TARGET_URL" ]; then
+            strix -n \
+              --target "$TARGET_URL" \
+              --target ./ \
+              --scan-mode "$SCAN_MODE" \
+              --instruction-file ./strix-instructions.md
+          else
+            strix -n \
+              --target ./ \
+              --scan-mode "$SCAN_MODE" \
+              --instruction-file ./strix-instructions.md
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strix-results
+          path: strix_runs/
+          retention-days: 30
+
+      - name: Check for critical findings
+        if: github.event_name == 'pull_request'
+        run: |
+          if find strix_runs -name "*.json" -exec grep -l '"severity":"critical"' {} + 2>/dev/null; then
+            echo "::error::Critical security findings detected. Review strix_runs/ output."
+            exit 1
+          fi
+          if find strix_runs -name "*.json" -exec grep -l '"severity":"high"' {} + 2>/dev/null; then
+            echo "::warning::High-severity findings detected. Review strix_runs/ output."
+          fi

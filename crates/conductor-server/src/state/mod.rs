@@ -207,6 +207,7 @@ impl AppState {
         state.ensure_session_store();
         state.ensure_dispatcher_store();
         state.load_sessions_from_disk().await;
+        state.start_session_cleanup_janitor();
         state.load_dispatchers_from_disk().await;
         state.load_dispatcher_bindings_from_disk().await;
         state.load_board_collaboration_from_disk().await;
