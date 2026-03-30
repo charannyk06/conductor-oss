@@ -242,6 +242,63 @@ func backendHealthy(ctx context.Context, backendURL *url.URL) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
+// ensureConductorCli tries to install conductor-oss via npm when the binary
+// is not already on PATH. This mirrors the TypeScript ensureConductorCli used
+// in the install.sh route so that new users who only installed the bridge
+// daemon still get a working local backend.
+func ensureConductorCli() error {
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		return fmt.Errorf("npm is not available; install conductor-oss manually or set CONDUCTOR_BRIDGE_BACKEND_COMMAND")
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+
+	npmPrefix := filepath.Join(homeDir, ".conductor", "npm")
+	wrapperDir := filepath.Join(homeDir, ".conductor", "bin")
+	if mkErr := os.MkdirAll(npmPrefix, 0o700); mkErr != nil {
+		return fmt.Errorf("create npm prefix: %w", mkErr)
+	}
+	if mkErr := os.MkdirAll(wrapperDir, 0o700); mkErr != nil {
+		return fmt.Errorf("create wrapper dir: %w", mkErr)
+	}
+
+	fmt.Fprintf(os.Stderr, "Installing conductor-oss CLI via npm...\n")
+	installCmd := exec.Command(npmPath, "install", "-g", "--prefix", npmPrefix,
+		"--registry=https://registry.npmjs.org", "conductor-oss")
+	installCmd.Stdout = os.Stderr
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		// Retry with --force in case of peer-dep conflicts.
+		fmt.Fprintf(os.Stderr, "Retrying conductor-oss install with --force...\n")
+		retryCmd := exec.Command(npmPath, "install", "-g", "--prefix", npmPrefix,
+			"--registry=https://registry.npmjs.org", "conductor-oss", "--force")
+		retryCmd.Stdout = os.Stderr
+		retryCmd.Stderr = os.Stderr
+		if retryErr := retryCmd.Run(); retryErr != nil {
+			return fmt.Errorf("install conductor-oss: %w", err)
+		}
+	}
+
+	// Locate the installed binary and symlink into ~/.conductor/bin.
+	candidate := filepath.Join(npmPrefix, "bin", "conductor")
+	if info, statErr := os.Stat(candidate); statErr != nil || info.IsDir() {
+		return fmt.Errorf("conductor-oss installed but binary not found at %s", candidate)
+	}
+
+	symlinkPath := filepath.Join(wrapperDir, "conductor")
+	_ = os.Remove(symlinkPath) // ignore errors — may not exist
+	if linkErr := os.Symlink(candidate, symlinkPath); linkErr != nil {
+		return fmt.Errorf("create conductor symlink: %w", linkErr)
+	}
+
+	fmt.Fprintf(os.Stderr, "Installed conductor-oss CLI to %s\n", candidate)
+	return nil
+}
+
 func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan, error) {
 	trimmedCommand := strings.TrimSpace(explicitCommand)
 	if trimmedCommand == "" {
@@ -285,6 +342,36 @@ func resolveLaunchPlan(explicitCommand string, backendURL *url.URL) (launchPlan,
 		)
 		launch.env = inferCliUpdateEnv(coPath)
 		return launch, nil
+	}
+
+	// Neither conductor nor co found — try installing conductor-oss via npm.
+	if installErr := ensureConductorCli(); installErr == nil {
+		// Retry binary search after install.
+		if conductorPath := findConductorBinary("conductor"); conductorPath != "" {
+			updateEnv := inferCliUpdateEnv(conductorPath)
+			if nativePath := resolveBundledNativeConductorBinary(conductorPath); nativePath != "" {
+				return launchPlan{
+					cmd:  nativePath,
+					args: []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)},
+					env:  updateEnv,
+				}, nil
+			}
+			args := []string{"--workspace", workspace, "start", "--host", "127.0.0.1", "--port", strconv.Itoa(port)}
+			if isNodeScriptBinary(conductorPath) {
+				args = []string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace}
+			}
+			launch := resolveBinaryLaunch(conductorPath, args)
+			launch.env = updateEnv
+			return launch, nil
+		}
+		if coPath := findConductorBinary("co"); coPath != "" {
+			launch := resolveBinaryLaunch(
+				coPath,
+				[]string{"start", "--no-dashboard", "--backend-port", strconv.Itoa(port), "--workspace", workspace},
+			)
+			launch.env = inferCliUpdateEnv(coPath)
+			return launch, nil
+		}
 	}
 
 	return launchPlan{}, errors.New("could not find `conductor` or `co`; set CONDUCTOR_BRIDGE_BACKEND_COMMAND to start the local backend")
