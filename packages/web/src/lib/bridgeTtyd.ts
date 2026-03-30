@@ -46,6 +46,45 @@ export function buildBridgeTtydProxyUrl(
   return `${url.pathname}${url.search}`;
 }
 
+function injectBridgeTtydHtmlFragmentEarly(html: string, marker: string, fragment: string): string {
+  if (html.includes(marker)) {
+    return html;
+  }
+
+  const headOpenIndex = html.indexOf("<head");
+  if (headOpenIndex >= 0) {
+    const headCloseIndex = html.indexOf(">", headOpenIndex);
+    if (headCloseIndex >= 0) {
+      return `${html.slice(0, headCloseIndex + 1)}${fragment}${html.slice(headCloseIndex + 1)}`;
+    }
+  }
+
+  const scriptOpenIndex = html.indexOf("<script");
+  if (scriptOpenIndex >= 0) {
+    return `${html.slice(0, scriptOpenIndex)}${fragment}${html.slice(scriptOpenIndex)}`;
+  }
+
+  return injectBridgeTtydHtmlFragment(html, marker, fragment);
+}
+
+function injectBridgeTtydHtmlFragment(html: string, marker: string, fragment: string): string {
+  if (html.includes(marker)) {
+    return html;
+  }
+
+  const bodyCloseIndex = html.lastIndexOf("</body>");
+  if (bodyCloseIndex >= 0) {
+    return `${html.slice(0, bodyCloseIndex)}${fragment}${html.slice(bodyCloseIndex)}`;
+  }
+
+  const htmlCloseIndex = html.lastIndexOf("</html>");
+  if (htmlCloseIndex >= 0) {
+    return `${html.slice(0, htmlCloseIndex)}${fragment}${html.slice(htmlCloseIndex)}`;
+  }
+
+  return `${html}${fragment}`;
+}
+
 export async function createBridgeTtydRelayWebSocketUrl(
   request: Request,
   bridgeId: string,
@@ -193,6 +232,7 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
   const RELAY_TTYD_WS_URL = ${relayWsLiteral};
   if (!RELAY_TTYD_WS_URL) return;
 
+  const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
   const previousWebSocket = window.WebSocket;
   if (typeof previousWebSocket !== 'function') return;
 
@@ -200,7 +240,12 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
     let normalizedUrl = String(url);
     try {
       const candidate = new URL(normalizedUrl, window.location.href);
-      if (candidate.pathname === '/' || candidate.pathname === '/ws' || candidate.pathname.endsWith('/ws')) {
+      if (
+        LOOPBACK_HOSTS.has(candidate.hostname) ||
+        candidate.pathname === '/' ||
+        candidate.pathname === '/ws' ||
+        candidate.pathname.endsWith('/ws')
+      ) {
         normalizedUrl = RELAY_TTYD_WS_URL;
       }
     } catch {
@@ -218,15 +263,5 @@ export function injectBridgeTtydRelayShim(html: string, relayTtydWsUrl: string):
 })();
 </script>`;
 
-  const bodyCloseIndex = html.lastIndexOf("</body>");
-  if (bodyCloseIndex >= 0) {
-    return `${html.slice(0, bodyCloseIndex)}${fragment}${html.slice(bodyCloseIndex)}`;
-  }
-
-  const htmlCloseIndex = html.lastIndexOf("</html>");
-  if (htmlCloseIndex >= 0) {
-    return `${html.slice(0, htmlCloseIndex)}${fragment}${html.slice(htmlCloseIndex)}`;
-  }
-
-  return `${html}${fragment}`;
+  return injectBridgeTtydHtmlFragmentEarly(html, marker, fragment);
 }

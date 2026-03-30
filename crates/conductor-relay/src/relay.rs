@@ -2044,75 +2044,114 @@ impl RelayState {
             ));
         }
 
-        let request_id = Uuid::new_v4().to_string();
-        let message = serde_json::to_string(&BrowserToBridgeMessage::ApiRequest {
-            id: request_id.clone(),
-            method: normalized_method,
-            path: normalized_path.to_string(),
-            body,
-        })
-        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+        let max_attempts = if normalized_method == "GET" { 2 } else { 1 };
 
-        let (bridge_tx, receiver) = {
-            let mut inner = self.inner.lock().await;
-            match inner.devices.get(device_id) {
-                Some(device) if device.owner_user_id == user_id => {}
-                Some(_) => {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        "You do not own this device.".to_string(),
-                    ))
+        let request_timeout = device_proxy_timeout_for_url(normalized_path);
+
+        for attempt in 1..=max_attempts {
+            let request_id = Uuid::new_v4().to_string();
+            let message = serde_json::to_string(&BrowserToBridgeMessage::ApiRequest {
+                id: request_id.clone(),
+                method: normalized_method.clone(),
+                path: normalized_path.to_string(),
+                body: body.clone(),
+            })
+            .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+
+            let (bridge_tx, receiver) = {
+                let mut inner = self.inner.lock().await;
+                match inner.devices.get(device_id) {
+                    Some(device) if device.owner_user_id == user_id => {}
+                    Some(_) => {
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            "You do not own this device.".to_string(),
+                        ))
+                    }
+                    None => return Err((StatusCode::NOT_FOUND, "Device not found.".to_string())),
                 }
-                None => return Err((StatusCode::NOT_FOUND, "Device not found.".to_string())),
-            }
 
-            let Some(bridge_tx) = inner
-                .channels
-                .get(device_id)
-                .and_then(|channel| channel.bridge.as_ref().map(|record| record.tx.clone()))
-            else {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Device is offline.".to_string(),
-                ));
+                let Some(bridge_tx) = inner
+                    .channels
+                    .get(device_id)
+                    .and_then(|channel| channel.bridge.as_ref().map(|record| record.tx.clone()))
+                else {
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Device is offline.".to_string(),
+                    ));
+                };
+
+                let (tx, rx) = oneshot::channel();
+                inner.pending_api_requests.insert(
+                    request_id.clone(),
+                    PendingApiRequest {
+                        device_id: device_id.to_string(),
+                        tx,
+                    },
+                );
+
+                (bridge_tx, rx)
             };
 
-            let (tx, rx) = oneshot::channel();
-            inner.pending_api_requests.insert(
-                request_id.clone(),
-                PendingApiRequest {
-                    device_id: device_id.to_string(),
-                    tx,
-                },
-            );
-
-            (bridge_tx, rx)
-        };
-
-        if bridge_tx.send(Message::Text(message.into())).is_err() {
-            let mut inner = self.inner.lock().await;
-            inner.pending_api_requests.remove(&request_id);
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Device connection is unavailable.".to_string(),
-            ));
-        }
-
-        match tokio::time::timeout(device_proxy_timeout_for_url(normalized_path), receiver).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Device connection closed.".to_string(),
-            )),
-            Err(_) => {
+            if bridge_tx.send(Message::Text(message.into())).is_err() {
                 let mut inner = self.inner.lock().await;
                 inner.pending_api_requests.remove(&request_id);
-                Err((
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "Device request timed out.".to_string(),
-                ))
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Device connection is unavailable.".to_string(),
+                ));
+            }
+
+            match await_proxied_api_response(request_timeout, receiver).await {
+                Ok(response) => return Ok(response),
+                Err(ProxyResponseWaitError::Closed) => {
+                    let mut inner = self.inner.lock().await;
+                    inner.pending_api_requests.remove(&request_id);
+                    return Err((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Device connection closed.".to_string(),
+                    ));
+                }
+                Err(ProxyResponseWaitError::TimedOut) => {
+                    warn!(
+                        request_id = %request_id,
+                        attempt = attempt,
+                        path = %normalized_path,
+                        timeout_secs = request_timeout.as_secs(),
+                        "Device API request timed out while waiting for bridge response"
+                    );
+
+                    if attempt < max_attempts {
+                        let mut inner = self.inner.lock().await;
+                        inner.pending_api_requests.remove(&request_id);
+                        drop(inner);
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
+
+                    let mut inner = self.inner.lock().await;
+                    inner.pending_api_requests.remove(&request_id);
+                    return Err((
+                        StatusCode::GATEWAY_TIMEOUT,
+                        format!(
+                            "Device request timed out after {timeout_secs}s for {normalized_path}",
+                            timeout_secs = request_timeout.as_secs(),
+                            normalized_path = normalized_path
+                        ),
+                    ));
+                }
             }
         }
+
+        Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "Device request timed out after {timeout_secs}s for {normalized_path}",
+                timeout_secs = request_timeout.as_secs(),
+                normalized_path = normalized_path
+            ),
+        ))
     }
 
     async fn forward_device_preview_request(
@@ -2246,6 +2285,23 @@ fn device_proxy_timeout_for_url(url: &str) -> Duration {
         Duration::from_secs(90)
     } else {
         DEVICE_PROXY_TIMEOUT
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyResponseWaitError {
+    Closed,
+    TimedOut,
+}
+
+async fn await_proxied_api_response(
+    request_timeout: Duration,
+    receiver: oneshot::Receiver<ProxiedApiResponse>,
+) -> std::result::Result<ProxiedApiResponse, ProxyResponseWaitError> {
+    match tokio::time::timeout(request_timeout, receiver).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(_)) => Err(ProxyResponseWaitError::Closed),
+        Err(_) => Err(ProxyResponseWaitError::TimedOut),
     }
 }
 

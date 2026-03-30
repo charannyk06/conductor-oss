@@ -99,8 +99,9 @@ function parseNextSseFrame(
     if (!m) {
       return { frame: null, rest: remaining };
     }
-    const rawFrame = remaining.slice(0, m.index);
-    remaining = remaining.slice(m.index + m[0].length);
+    const separatorIndex = m.index ?? 0;
+    const rawFrame = remaining.slice(0, separatorIndex);
+    remaining = remaining.slice(separatorIndex + m[0].length);
     const frame = parseRawSseFrame(rawFrame);
     if (!frame) {
       continue;
