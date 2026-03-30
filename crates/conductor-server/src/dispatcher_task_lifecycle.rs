@@ -344,11 +344,21 @@ async fn mutate_existing_dispatcher_task(
     // to the same dispatcher thread that created it (avoids no-ops when caller_session
     // is None, e.g. MCP callers without ACP dispatcher session).
     let dispatch_ctx = DispatcherTaskMutationContext {
-        dispatcher_thread_id: task.dispatcher_thread_id.clone().or(context.dispatcher_thread_id),
+        dispatcher_thread_id: task
+            .dispatcher_thread_id
+            .clone()
+            .or(context.dispatcher_thread_id),
         ..context
     };
-    finalize_dispatcher_task_mutation(state, dispatch_ctx, operation, project_id, task, target_role)
-        .await
+    finalize_dispatcher_task_mutation(
+        state,
+        dispatch_ctx,
+        operation,
+        project_id,
+        task,
+        target_role,
+    )
+    .await
 }
 
 async fn finalize_dispatcher_task_mutation(
