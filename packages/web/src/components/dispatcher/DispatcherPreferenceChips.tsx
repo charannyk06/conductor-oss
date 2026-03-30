@@ -68,7 +68,7 @@ function PreferenceChip({
           disabled={disabled}
           title={title}
           className={cn(
-            "inline-flex h-10 min-w-0 items-center gap-2 rounded-[11px] border px-3 text-[13px] font-medium transition disabled:cursor-not-allowed disabled:opacity-60 sm:h-[30px] sm:gap-1 sm:rounded-[9px] sm:px-2 sm:text-[11.5px]",
+            "inline-flex h-9 min-w-0 items-center gap-1.5 rounded-[11px] border px-2.5 text-[12px] font-medium transition disabled:cursor-not-allowed disabled:opacity-60 sm:h-[30px] sm:gap-1 sm:rounded-[9px] sm:px-2 sm:text-[11.5px]",
             accent
               ? "border-[rgba(214,163,126,0.28)] bg-[rgba(66,44,35,0.94)] text-[#f2d9cd] hover:bg-[rgba(78,52,41,0.98)]"
               : "border-[rgba(255,255,255,0.08)] bg-[#272220] text-[#f3ead8] hover:bg-[#312926]",
@@ -136,8 +136,8 @@ export function DispatcherPreferenceChips({
   const reasoningValue = modelSelection.reasoningEffort.trim().toLowerCase();
 
   return (
-    <div className={cn("grid w-full gap-1.5 sm:flex sm:flex-wrap sm:items-center", className)}>
-      <div className="col-span-2 min-w-0 sm:flex-none">
+    <div className={cn("grid w-full grid-cols-[repeat(auto-fit,minmax(7.25rem,1fr))] gap-1.5 sm:flex sm:flex-wrap sm:items-center", className)}>
+      <div className="min-w-0 sm:flex-none">
         <PreferenceChip
           label={<AgentLabel agent={implementationAgent} />}
           title={`Change coding agent (${getKnownAgent(implementationAgent)?.label ?? implementationAgent})`}
@@ -174,7 +174,7 @@ export function DispatcherPreferenceChips({
       </div>
 
       {showModelControls ? (
-        <div className="col-span-2 min-w-0 sm:flex-none">
+        <div className="min-w-0 sm:flex-none">
           <PreferenceChip
             label={modelLabel}
             title={`Change model${resolvedModel ? ` (${modelLabel})` : ""}`}
@@ -227,7 +227,7 @@ export function DispatcherPreferenceChips({
       ) : null}
 
       {showModelControls && availableReasoningOptions.length > 0 ? (
-        <div className="col-span-2 min-w-0 sm:flex-none">
+        <div className="min-w-0 sm:flex-none">
           <PreferenceChip
             label={(
               <span className="flex items-center gap-1.5">
