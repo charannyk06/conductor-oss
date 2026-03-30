@@ -214,6 +214,12 @@ fn trimmed_query_value(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn trimmed_owned_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn binding_query_lookup(query: &DispatcherBindingQuery) -> DispatcherBindingLookup {
     DispatcherBindingLookup {
         binding_id: query.binding_id.clone(),
@@ -315,10 +321,10 @@ async fn list_dispatchers(
     let threads = state
         .project_dispatcher_threads(&project_id, bridge_id)
         .await;
-    let active_thread_id = state
-        .latest_project_dispatcher_thread(&project_id, bridge_id, None)
-        .await
-        .map(|dispatcher| dispatcher.id);
+    let active_thread_id = threads
+        .iter()
+        .find(|dispatcher| !dispatcher.status.is_terminal())
+        .map(|dispatcher| dispatcher.id.clone());
     let mut payload = Vec::with_capacity(threads.len());
     for thread in threads {
         payload.push(serialize_dispatcher(&state, &thread).await);
@@ -361,7 +367,8 @@ async fn create_dispatcher(
             &project_id,
             CreateDispatcherThreadOptions {
                 bridge_id: body.bridge_id.or(query.bridge_id),
-                dispatcher_agent: body.dispatcher_agent.or(body.agent),
+                dispatcher_agent: trimmed_owned_value(body.dispatcher_agent)
+                    .or_else(|| trimmed_owned_value(body.agent)),
                 implementation_agent: body.implementation_agent,
                 openclaw_config: OpenClawDispatcherConfigPatch {
                     gateway_url: body.openclaw_gateway_url,
@@ -949,8 +956,22 @@ async fn send_to_dispatcher(
     Query(query): Query<DispatcherQuery>,
     Json(body): Json<SendBody>,
 ) -> ApiResponse {
+    let message = body.message;
     let attachments = body.attachments.unwrap_or_default();
-    if body.message.trim().is_empty() && attachments.is_empty() {
+    let model = body.model;
+    let reasoning_effort = body.reasoning_effort;
+
+    let create_turn_request = || {
+        crate::state::DispatcherTurnRequest::plain(
+            message.clone(),
+            attachments.clone(),
+            model.clone(),
+            reasoning_effort.clone(),
+            "dispatcher_ui",
+        )
+    };
+
+    if message.trim().is_empty() && attachments.is_empty() {
         return error(
             StatusCode::BAD_REQUEST,
             "Message or attachments are required",
@@ -978,10 +999,10 @@ async fn send_to_dispatcher(
                             dispatcher_agent: None,
                             implementation_agent: None,
                             openclaw_config: OpenClawDispatcherConfigPatch::default(),
-                            dispatcher_model: body.model.clone(),
-                            dispatcher_reasoning_effort: body.reasoning_effort.clone(),
-                            implementation_model: body.model.clone(),
-                            implementation_reasoning_effort: body.reasoning_effort.clone(),
+                            dispatcher_model: model.clone(),
+                            dispatcher_reasoning_effort: reasoning_effort.clone(),
+                            implementation_model: model.clone(),
+                            implementation_reasoning_effort: reasoning_effort.clone(),
                             force_new: false,
                         },
                     )
@@ -993,20 +1014,33 @@ async fn send_to_dispatcher(
             }
         };
 
+    let already_working_message_fragment = "already working on the current turn";
+
     match state
-        .send_to_dispatcher_thread(
-            &dispatcher.id,
-            crate::state::DispatcherTurnRequest::plain(
-                body.message,
-                attachments,
-                body.model,
-                body.reasoning_effort,
-                "dispatcher_ui",
-            ),
-        )
+        .send_to_dispatcher_thread(&dispatcher.id, create_turn_request())
         .await
     {
         Ok(()) => ok(json!({ "ok": true, "threadId": dispatcher.id })),
+        Err(err)
+            if err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains(&already_working_message_fragment.to_ascii_lowercase()) =>
+        {
+            if let Err(interrupt_error) = state.interrupt_dispatcher(&dispatcher.id).await {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to interrupt busy dispatcher: {interrupt_error}"),
+                );
+            }
+            match state
+                .send_to_dispatcher_thread(&dispatcher.id, create_turn_request())
+                .await
+            {
+                Ok(()) => ok(json!({ "ok": true, "threadId": dispatcher.id })),
+                Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
+            }
+        }
         Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }

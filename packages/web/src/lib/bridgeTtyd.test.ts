@@ -24,7 +24,7 @@ test("buildBridgeTtydProxyUrl preserves session scope and relay ttyd ws", () => 
 });
 
 test("injectBridgeTtydRelayShim rewrites ttyd websocket connects through relay", () => {
-  const html = "<html><body><script>console.log('ttyd');</script></body></html>";
+  const html = "<html><head><script src=\"/refresh.js\"></script></head><body><script>console.log('ttyd');</script></body></html>";
   const injected = injectBridgeTtydRelayShim(
     html,
     "wss://relay.example.com/terminal/abc/browser?jwt=test",
@@ -32,6 +32,12 @@ test("injectBridgeTtydRelayShim rewrites ttyd websocket connects through relay",
 
   assert.match(injected, /conductor-bridge-ttyd-relay-shim/);
   assert.match(injected, /RELAY_TTYD_WS_URL/);
-  assert.match(injected, /candidate\.pathname === '\/ws'/);
+  assert.match(injected, /LOOPBACK_HOSTS/);
+  assert.match(injected, /candidate\.hostname/);
+  assert.match(injected, /candidate\.pathname === '\/'/);
   assert.match(injected, /normalizedUrl = RELAY_TTYD_WS_URL/);
+  assert.ok(
+    injected.indexOf("conductor-bridge-ttyd-relay-shim") < injected.indexOf("<script src=\"/refresh.js\">"),
+    "relay shim should be injected before ttyd bootstrap scripts",
+  );
 });

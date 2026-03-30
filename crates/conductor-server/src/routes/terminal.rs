@@ -470,6 +470,7 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
 
     const STORAGE_KEY = 'conductor.ttyd.token';
     const MESSAGE_TYPE = 'conductor-ttyd-auth-token';
+    const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 
     const readLocationBridgeId = () => {
         try {
@@ -477,6 +478,18 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         } catch {
             return '';
         }
+    };
+
+    const resolveProxyWebSocketUrl = () => {
+        const url = new URL(window.location.href);
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        url.hash = '';
+
+        const normalizedPathname = url.pathname.replace(/\/+$/, '');
+        url.pathname = normalizedPathname.endsWith('/ws')
+            ? normalizedPathname
+            : `${normalizedPathname}/ws`;
+        return url;
     };
 
     const readStoredToken = () => {
@@ -505,15 +518,14 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
     const normalizeWebSocketUrl = (value) => {
         const token = currentToken || readStoredToken();
         const bridgeId = readLocationBridgeId();
-        if (!token && !bridgeId) {
-            return value;
-        }
 
         try {
-            const url = new URL(value, window.location.href);
-            if (url.pathname !== '/ws' && !url.pathname.endsWith('/ws')) {
-                return value;
-            }
+            const candidate = new URL(value, window.location.href);
+            const shouldRewriteToProxy =
+                LOOPBACK_HOSTS.has(candidate.hostname)
+                || candidate.pathname === '/'
+                || candidate.pathname === '/ws';
+            const url = shouldRewriteToProxy ? resolveProxyWebSocketUrl() : candidate;
 
             if (token) {
                 url.searchParams.set('token', token);
@@ -840,12 +852,39 @@ fn inject_ttyd_html_fragment(html: &str, marker: &str, fragment: &str) -> String
     output
 }
 
+fn inject_ttyd_html_fragment_early(html: &str, marker: &str, fragment: &str) -> String {
+    if html.contains(marker) {
+        return html.to_string();
+    }
+
+    if let Some(head_start) = html.find("<head") {
+        if let Some(head_end) = html[head_start..].find('>') {
+            let insert_at = head_start + head_end + 1;
+            let mut output = String::with_capacity(html.len() + fragment.len());
+            output.push_str(&html[..insert_at]);
+            output.push_str(fragment);
+            output.push_str(&html[insert_at..]);
+            return output;
+        }
+    }
+
+    if let Some(script_start) = html.find("<script") {
+        let mut output = String::with_capacity(html.len() + fragment.len());
+        output.push_str(&html[..script_start]);
+        output.push_str(fragment);
+        output.push_str(&html[script_start..]);
+        return output;
+    }
+
+    inject_ttyd_html_fragment(html, marker, fragment)
+}
+
 fn inject_ttyd_resize_shim(html: &str) -> String {
     inject_ttyd_html_fragment(html, TTYD_RESIZE_SHIM_MARKER, TTYD_RESIZE_SHIM)
 }
 
 fn inject_ttyd_auth_sync_shim(html: &str) -> String {
-    inject_ttyd_html_fragment(html, TTYD_AUTH_SYNC_SHIM_MARKER, TTYD_AUTH_SYNC_SHIM)
+    inject_ttyd_html_fragment_early(html, TTYD_AUTH_SYNC_SHIM_MARKER, TTYD_AUTH_SYNC_SHIM)
 }
 
 fn inject_ttyd_paste_shim(html: &str, project_id: &str, session_id: &str) -> String {
@@ -2033,29 +2072,38 @@ mod tests {
     }
 
     #[test]
-    fn inject_ttyd_auth_sync_shim_inserts_before_body_close() {
-        let html = "<html><body><main>terminal</main></body></html>";
+    fn inject_ttyd_auth_sync_shim_inserts_before_head_scripts() {
+        let html = "<html><head><script src=\"/refresh.js\"></script></head><body><main>terminal</main></body></html>";
         let injected = inject_ttyd_auth_sync_shim(html);
 
         assert!(injected.contains(TTYD_AUTH_SYNC_SHIM_MARKER));
         assert!(injected.contains("window.__conductorTtydAuthSyncShimInstalled"));
         assert!(injected.contains("const STORAGE_KEY = 'conductor.ttyd.token';"));
         assert!(injected.contains("const MESSAGE_TYPE = 'conductor-ttyd-auth-token';"));
+        assert!(
+            injected.contains("const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);")
+        );
+        assert!(injected.contains("const resolveProxyWebSocketUrl = () => {"));
         assert!(injected.contains("const readLocationBridgeId = () => {"));
         assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
         assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
         assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));
+        assert!(injected.contains("candidate.pathname === '/'"));
         assert!(injected.contains("url.searchParams.set('token', token);"));
         assert!(injected.contains("url.searchParams.set('bridgeId', bridgeId);"));
         assert!(injected.contains("window.addEventListener('message', handleMessage);"));
         assert!(
-            injected.find(TTYD_AUTH_SYNC_SHIM_MARKER).unwrap() < injected.rfind("</body>").unwrap()
+            injected.find(TTYD_AUTH_SYNC_SHIM_MARKER).unwrap()
+                < injected.find("</script>").unwrap()
+        );
+        assert!(
+            injected.find(TTYD_AUTH_SYNC_SHIM_MARKER).unwrap() < injected.find("</head>").unwrap()
         );
     }
 
     #[test]
     fn inject_ttyd_auth_sync_shim_is_idempotent() {
-        let html = "<html><body><main>terminal</main></body></html>";
+        let html = "<html><head><script src=\"/refresh.js\"></script></head><body><main>terminal</main></body></html>";
         let once = inject_ttyd_auth_sync_shim(html);
         let twice = inject_ttyd_auth_sync_shim(&once);
 

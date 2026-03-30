@@ -129,7 +129,7 @@ export function ProjectDispatcherPanel({
     setError(null);
     try {
       const currentDispatcherAgent = dispatcherSession
-        ? readMetadataValue(dispatcherSession, "agent")
+        ? readMetadataValue(dispatcherSession, "agent", defaultAgent)
         : defaultAgent;
       const nextDispatcherAgent = implementationAgent === "openclaw"
         ? "openclaw"
@@ -164,8 +164,8 @@ export function ProjectDispatcherPanel({
     }
   }, [
     bridgeId,
-    dispatcherSession?.metadata?.agent,
     defaultAgent,
+    dispatcherSession,
     implementationAgent,
     modelSelection.catalogModel,
     modelSelection.customModel,
