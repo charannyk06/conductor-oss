@@ -41,6 +41,11 @@ jobs:
           STRIX_LLM: ${{ secrets.STRIX_LLM }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: |
+          if [ -z "$STRIX_LLM" ]; then
+            echo "::warning::STRIX_LLM is not configured; skipping security scan for pull_request runs."
+            exit 0
+          fi
+
           strix -n \
             --target ./ \
             --scan-mode quick \
@@ -54,6 +59,11 @@ jobs:
           TARGET_URL: ${{ github.event.inputs.target_url }}
           SCAN_MODE: ${{ github.event.inputs.scan_mode }}
         run: |
+          if [ -z "$STRIX_LLM" ]; then
+            echo "::error::STRIX_LLM is required for manual scan runs."
+            exit 1
+          fi
+
           if [ -n "$TARGET_URL" ]; then
             strix -n \
               --target "$TARGET_URL" \
