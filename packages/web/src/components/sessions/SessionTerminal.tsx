@@ -82,6 +82,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     runtimeMode,
     pendingInsert,
     immersiveMobileMode = false,
+    onPendingInsertConsumed,
   } = props;
 
   const promptInputRef = useRef<HTMLInputElement>(null);
@@ -324,6 +325,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
       .then(() => {
         if (!cancelled) {
           setQueuedInsertError(null);
+          onPendingInsertConsumed?.();
         }
       })
       .catch((error) => {
@@ -337,7 +339,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     return () => {
       cancelled = true;
     };
-  }, [bridgeId, pendingInsert, sessionId]);
+  }, [bridgeId, onPendingInsertConsumed, pendingInsert, sessionId]);
 
   useEffect(() => {
     if (!frameLoaded) {
