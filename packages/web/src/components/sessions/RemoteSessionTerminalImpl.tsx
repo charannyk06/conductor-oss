@@ -171,6 +171,7 @@ export function RemoteSessionTerminal({
   runtimeMode,
   pendingInsert,
   immersiveMobileMode = false,
+  onPendingInsertConsumed,
 }: SessionTerminalProps) {
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const promptInputRef = useRef<HTMLInputElement>(null);
@@ -839,10 +840,11 @@ export function RemoteSessionTerminal({
       sendTerminalFrame(encodeInputFrame(`${inlineText} `));
       setError(null);
       setQueuedInsertError(null);
+      onPendingInsertConsumed?.();
     } catch (nextError) {
       setQueuedInsertError(nextError instanceof Error ? nextError.message : "Failed to queue terminal input.");
     }
-  }, [expectsRelayTerminal, pendingInsert, sendTerminalFrame]);
+  }, [expectsRelayTerminal, onPendingInsertConsumed, pendingInsert, sendTerminalFrame]);
 
   const handlePromptSend = useCallback(async () => {
     const message = promptMessage.trim();

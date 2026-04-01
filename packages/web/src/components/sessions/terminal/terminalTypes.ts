@@ -12,6 +12,8 @@ export interface SessionTerminalProps {
   runtimeMode?: string | null;
   pendingInsert: TerminalInsertRequest | null;
   immersiveMobileMode?: boolean;
+  /** Called after the terminal consumes a pending insert so the parent can clear it. */
+  onPendingInsertConsumed?: () => void;
 }
 
 export type TerminalConnectionInfo = {

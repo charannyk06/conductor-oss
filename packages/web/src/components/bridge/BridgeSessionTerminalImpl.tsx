@@ -80,6 +80,7 @@ export function BridgeSessionTerminal({
   sessionState,
   pendingInsert,
   immersiveMobileMode = false,
+  onPendingInsertConsumed,
   scope = "conductor-bridge-control",
   readOnly = false,
 }: BridgeSessionTerminalProps) {
@@ -529,7 +530,8 @@ export function BridgeSessionTerminal({
     }
 
     sendTerminalInput(`${inlineText} `);
-  }, [connected, pendingInsert, sendTerminalInput]);
+    onPendingInsertConsumed?.();
+  }, [connected, onPendingInsertConsumed, pendingInsert, sendTerminalInput]);
 
   const statusLine = connected
     ? bridgeStatus?.connected === false
