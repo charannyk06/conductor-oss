@@ -2,10 +2,12 @@
 
 import {
   AlertCircle,
+  Clipboard,
   ExternalLink,
   Loader2,
   RefreshCw,
   Send,
+  SquareStop,
   X,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -22,7 +24,7 @@ const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "r
 const TOKEN_REFRESH_LEAD_SECONDS = 10;
 const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
 const TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS = 1_500;
-const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 30_000;
+const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 300_000; // 5 minutes - only reload if hidden for 5+ minutes
 
 function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined): number | null {
   if (typeof expiresInSeconds !== "number" || !Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
@@ -30,6 +32,45 @@ function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined)
   }
   const safeSeconds = Math.max(5, expiresInSeconds - TOKEN_REFRESH_LEAD_SECONDS);
   return safeSeconds * 1000;
+}
+
+/**
+ * Check if the new URL differs from the current URL ONLY in the token parameter.
+ * If true, we can update the token via postMessage without reloading the iframe.
+ */
+function isOnlyTokenChanged(
+  current: string | null | undefined,
+  next: string,
+): boolean {
+  if (!current) return false;
+
+  try {
+    const currentUrl = new URL(current);
+    const nextUrl = new URL(next);
+
+    // Must be same origin, path, and all query params except token
+    if (currentUrl.origin !== nextUrl.origin) return false;
+    if (currentUrl.pathname !== nextUrl.pathname) return false;
+
+    // Compare all params except token
+    const currentParams = new URLSearchParams(currentUrl.searchParams);
+    const nextParams = new URLSearchParams(nextUrl.searchParams);
+
+    currentParams.delete("token");
+    nextParams.delete("token");
+
+    // Check if remaining params are the same
+    const currentStr = currentParams.toString();
+    const nextStr = nextParams.toString();
+    if (currentStr !== nextStr) return false;
+
+    // Token must actually be different
+    const currentToken = new URL(current).searchParams.get("token");
+    const nextToken = new URL(next).searchParams.get("token");
+    return currentToken !== nextToken;
+  } catch {
+    return false;
+  }
 }
 
 async function sendTerminalKeys(
@@ -107,7 +148,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
   const [terminalUrl, setTerminalUrl] = useState<string | null>(null);
   const [terminalLinkUrl, setTerminalLinkUrl] = useState<string | null>(null);
-  const [terminalFrameReloadNonce, setTerminalFrameReloadNonce] = useState(0);
   const [resolvingConnection, setResolvingConnection] = useState(expectsLiveTerminal);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [frameLoaded, setFrameLoaded] = useState(false);
@@ -116,6 +156,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [promptSending, setPromptSending] = useState(false);
   const [promptError, setPromptError] = useState<string | null>(null);
   const [queuedInsertError, setQueuedInsertError] = useState<string | null>(null);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
   const terminalUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
 
@@ -142,7 +183,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
     retryAttemptRef.current = 0;
     setTerminalUrl(null);
     setTerminalLinkUrl(null);
-    setTerminalFrameReloadNonce(0);
     setResolvingConnection(expectsLiveTerminal);
     setConnectionError(null);
     setFrameLoaded(false);
@@ -184,12 +224,34 @@ function SessionTerminalView(props: SessionTerminalProps) {
             terminalUrlNeedsReload(terminalUrlRef.current, connection.terminalUrl);
           forceTerminalReloadRef.current = false;
 
+          // Always update the external link URL
           setTerminalLinkUrl(connection.terminalUrl);
+
+          // Check if only the token changed - we can sync without iframe reload
+          const onlyTokenChanged = !shouldReloadTerminal &&
+            terminalUrlRef.current &&
+            isOnlyTokenChanged(terminalUrlRef.current, connection.terminalUrl);
+
           if (shouldReloadTerminal || !terminalUrlRef.current) {
-            setFrameLoaded(false);
+            // Full reload needed - either first load, forced reload, or structural URL change
+            if (!terminalUrlRef.current) {
+              setFrameLoaded(false);
+            }
             setTerminalUrl(connection.terminalUrl);
-            if (shouldReloadTerminal && terminalUrlRef.current) {
-              setTerminalFrameReloadNonce((current) => current + 1);
+          } else if (onlyTokenChanged) {
+            // Token-only refresh: sync via postMessage without reloading iframe
+            const newToken = (() => {
+              try {
+                return new URL(connection.terminalUrl).searchParams.get("token");
+              } catch {
+                return null;
+              }
+            })();
+            if (newToken) {
+              const iframe = terminalHostRef.current?.querySelector<HTMLIFrameElement>("iframe");
+              if (iframe) {
+                postTerminalAuthToken(iframe, newToken);
+              }
             }
           }
           setConnectionError(null);
@@ -272,7 +334,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
       && terminalUrlRef.current
     ) {
       forceTerminalReloadRef.current = true;
-      setFrameLoaded(false);
     }
     setConnectionRefreshTick((current) => current + 1);
   }, [expectsLiveTerminal, syncTerminalAuthToken]);
@@ -379,6 +440,22 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
   }, [bridgeId, promptMessage, promptSending, sessionId]);
 
+  const handleMobilePaste = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        await sendTerminalKeys(sessionId, text, bridgeId);
+      }
+    } catch {
+      // Clipboard read may fail due to permissions or unsupported browser
+    }
+  }, [bridgeId, sessionId]);
+
+  const handleSoftStop = useCallback(async () => {
+    // Send Ctrl+C (0x03) to interrupt the running process
+    await sendTerminalKeys(sessionId, "\x03", bridgeId);
+  }, [bridgeId, sessionId]);
+
   const applyKeyboardAwareTerminalHeight = useCallback(() => {
     const host = terminalHostRef.current;
     if (typeof window === "undefined" || !host) {
@@ -399,6 +476,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
     if (!keyboardVisible) {
       host.style.removeProperty("height");
+      setKeyboardVisible(false);
       return;
     }
 
@@ -408,6 +486,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
 
     host.style.height = `${Math.max(0, Math.round(usableHeight))}px`;
+    setKeyboardVisible(true);
   }, []);
 
   useEffect(() => {
@@ -416,8 +495,16 @@ function SessionTerminalView(props: SessionTerminalProps) {
       return;
     }
 
+    let debounceTimer: number | null = null;
     const applyGeometry = () => {
-      applyKeyboardAwareTerminalHeight();
+      // Debounce rapid viewport changes to prevent flickering
+      if (debounceTimer !== null) {
+        return;
+      }
+      debounceTimer = window.setTimeout(() => {
+        debounceTimer = null;
+        applyKeyboardAwareTerminalHeight();
+      }, 16); // ~60fps debounce
     };
 
     applyGeometry();
@@ -439,6 +526,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
       window.removeEventListener("resize", applyGeometry);
       visualViewport?.removeEventListener("resize", applyGeometry);
       visualViewport?.removeEventListener("scroll", applyGeometry);
+      if (debounceTimer !== null) {
+        window.clearTimeout(debounceTimer);
+      }
       host.style.removeProperty("height");
     };
   }, [applyKeyboardAwareTerminalHeight, expectsLiveTerminal, terminalUrl]);
@@ -460,7 +550,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
         connectionError,
         promptError,
         queuedInsertError,
-        terminalFrameReloadNonce,
       }),
     };
 
@@ -481,7 +570,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
     terminalUrl,
     terminalLinkUrl,
     ttydBacked,
-    terminalFrameReloadNonce,
   ]);
 
   const handleRetry = useCallback(() => {
@@ -525,6 +613,28 @@ function SessionTerminalView(props: SessionTerminalProps) {
             <ExternalLink className="h-3.5 w-3.5" />
           </a>
         ) : null}
+        {typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches ? (
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-7 sm:w-7"
+            onClick={handleMobilePaste}
+            aria-label="Paste from clipboard"
+          >
+            <Clipboard className="h-3.5 w-3.5" />
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] sm:h-7 sm:w-7"
+          onClick={handleSoftStop}
+          aria-label="Soft stop (Ctrl+C)"
+        >
+          <SquareStop className="h-3.5 w-3.5" />
+        </Button>
         <Button
           type="button"
           size="icon"
@@ -562,7 +672,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
               </div>
             ) : null}
             <iframe
-              key={`${sessionId}:${terminalFrameReloadNonce}`}
+              key={sessionId}
               title={`ttyd terminal for ${sessionId}`}
               src={terminalUrl}
               className="h-full w-full border-0 bg-[#060404]"
