@@ -19,6 +19,7 @@ import {
   ChromeReleaseChannel,
   computeSystemExecutablePath,
 } from "@puppeteer/browsers";
+import { resolveRustBackendUrl } from "@/lib/backendUrl";
 import { requestBridgePreview } from "@/lib/bridgeApiProxy";
 import type { BridgePreviewConfig } from "@/lib/previewSession";
 import type {
@@ -29,6 +30,7 @@ import type {
   PreviewLogEntry,
   PreviewStatusResponse,
 } from "@/lib/previewTypes";
+import { getPreviewWorkerClient } from "@/lib/previewWorkerClient";
 
 const VIEWPORT = { width: 1440, height: 960 };
 const LOG_LIMIT = 150;
@@ -1149,9 +1151,50 @@ class PreviewBrowserManager {
   }
 }
 
-export function getPreviewBrowserManager(): PreviewBrowserManager {
+export interface PreviewBrowserManagerClient {
+  configureBridgePreview(
+    sessionId: string,
+    config: BridgePreviewConfig | null,
+    forwardedHeaders?: HeadersInit,
+  ): Promise<void>;
+  destroySession(sessionId: string, options?: { closePage?: boolean }): Promise<void>;
+  runCommand(sessionId: string, command: PreviewCommandRequest): Promise<void>;
+  inspectDom(
+    sessionId: string,
+    frameId?: string | null,
+    interactiveOnly?: boolean,
+  ): Promise<{ frameId: string | null; nodes: PreviewDomNode[]; truncated: boolean }>;
+  takeScreenshot(sessionId: string): Promise<Uint8Array | null>;
+  getStatus(sessionId: string, candidateUrls: string[]): Promise<PreviewStatusResponse>;
+}
+
+export function getLocalPreviewBrowserManager(): PreviewBrowserManager {
   if (!globalForPreviewBrowser._conductorPreviewBrowserManager) {
     globalForPreviewBrowser._conductorPreviewBrowserManager = new PreviewBrowserManager();
   }
   return globalForPreviewBrowser._conductorPreviewBrowserManager;
+}
+
+function shouldUseLocalPreviewBrowser(): boolean {
+  const backendUrl = resolveRustBackendUrl();
+  if (!backendUrl) {
+    return false;
+  }
+
+  try {
+    const hostname = new URL(backendUrl).hostname.toLowerCase();
+    return hostname === "localhost"
+      || hostname === "127.0.0.1"
+      || hostname === "0.0.0.0"
+      || hostname === "::1"
+      || hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+export function getPreviewBrowserManager(): PreviewBrowserManagerClient {
+  return shouldUseLocalPreviewBrowser()
+    ? getLocalPreviewBrowserManager()
+    : getPreviewWorkerClient();
 }
