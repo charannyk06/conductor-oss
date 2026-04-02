@@ -662,7 +662,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         {expectsLiveTerminal && terminalUrl ? (
           <div
             ref={terminalHostRef}
-            className="relative min-h-0 flex-1 w-full overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
+            className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
           >
             {!frameLoaded ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
@@ -676,7 +676,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
               key={sessionId}
               title={`ttyd terminal for ${sessionId}`}
               src={terminalUrl}
-              className="min-h-0 flex-1 w-full border-0 bg-[#060404]"
+              className="block h-full min-h-0 w-full flex-1 border-0 bg-[#060404]"
               allow="clipboard-read; clipboard-write"
               loading="eager"
               onLoad={() => {
