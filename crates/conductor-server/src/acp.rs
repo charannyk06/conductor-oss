@@ -1889,8 +1889,8 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
-    use std::sync::{atomic::AtomicBool, OnceLock};
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{mpsc, oneshot, Mutex};
     use tokio::time::{sleep, Duration};
@@ -2007,8 +2007,7 @@ mod tests {
     }
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        &crate::routes::TEST_ENV_LOCK
     }
 
     #[test]
