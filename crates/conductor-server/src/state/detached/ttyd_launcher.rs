@@ -672,7 +672,7 @@ async fn run_ttyd_session_owner_with_retry(
                         error = %err,
                         "ttyd process is dead, not reconnecting owner"
                     );
-                    return result;
+                    return Ok(());
                 }
 
                 attempt += 1;
@@ -721,33 +721,10 @@ async fn run_ttyd_session_owner_with_retry(
                 let (output_tx, output_rx) = tokio::sync::mpsc::channel::<ExecutorOutput>(8192);
                 let (input_tx, input_rx) = tokio::sync::mpsc::channel::<ExecutorInput>(64);
                 let (resize_tx, resize_rx) = tokio::sync::mpsc::channel::<PtyDimensions>(8);
-                let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
-                // The kill_rx goes to the process monitor and kill_tx is stored in the handle.
+                let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel::<()>();
                 state
                     .attach_terminal_runtime(sid, input_tx, Some(resize_tx), kill_tx)
                     .await;
-
-                // Spawn a new process monitor for the reconnected session.
-                let otx = output_tx.clone();
-                let st = state.clone();
-                let sid_clone = sid.to_string();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        biased;
-                        _ = kill_rx => {
-                            tracing::info!(session_id = %sid_clone, "ttyd reconnect kill received");
-                            let _ = otx.send(ExecutorOutput::Completed { exit_code: 0 }).await;
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                            tracing::warn!(session_id = %sid_clone, "ttyd reconnect monitor timeout");
-                            let _ = otx.send(ExecutorOutput::Failed {
-                                error: "reconnect monitor timeout".to_string(),
-                                exit_code: None,
-                            }).await;
-                        }
-                    }
-                    st.detach_terminal_runtime(&sid_clone).await;
-                });
 
                 // Start consuming output from the new channel.
                 if let Some(session) = state.get_session(sid).await {
@@ -936,11 +913,7 @@ async fn run_ttyd_session_owner(
     if !buf.trim().is_empty() {
         let _ = channels.output_tx.send(executor.parse_output(&buf)).await;
     }
-    let _ = channels
-        .output_tx
-        .send(ExecutorOutput::Completed { exit_code: 0 })
-        .await;
-    Ok(())
+    Err(anyhow!("ttyd session owner disconnected"))
 }
 
 async fn send_input_frame<S>(

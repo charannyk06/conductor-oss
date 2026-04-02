@@ -865,11 +865,12 @@ impl AppState {
 
         let live_handle = self.terminal_hosts.get(session_id).await;
         let signaled_live_runtime = if let Some(handle) = live_handle {
-            if let Some(kill_tx) = handle.kill_tx.lock().await.take() {
-                kill_tx.send(()).is_ok()
-            } else {
-                false
+            let kill_senders = self.terminal_hosts.take_kill_senders(&handle).await;
+            let mut signaled = false;
+            for kill_tx in kill_senders {
+                signaled |= kill_tx.send(()).is_ok();
             }
+            signaled
         } else {
             false
         };
