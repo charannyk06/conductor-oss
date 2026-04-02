@@ -1010,7 +1010,7 @@ mod tests {
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
     use tokio::io::duplex;
     use tokio::sync::Mutex;
     use uuid::Uuid;
@@ -1018,8 +1018,7 @@ mod tests {
     struct MockBackend;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        &crate::routes::TEST_ENV_LOCK
     }
 
     async fn build_app_state(label: &str) -> (std::path::PathBuf, Arc<AppState>) {
