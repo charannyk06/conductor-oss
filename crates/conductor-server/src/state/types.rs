@@ -488,12 +488,13 @@ pub struct LiveSessionHandle {
     pub terminal_persistence: Mutex<TerminalPersistenceState>,
     pub terminal_capture: Mutex<TerminalCaptureState>,
     pub kill_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    /// Stored senders preserved during reconnection to prevent killing the
-    /// runtime when session owners detach and reattach (CR-9). On detach, the
-    /// kill_tx and input_tx are moved here instead of being dropped, keeping
-    /// the old process monitor alive and the PTY pipe open.
-    pub stored_kill_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    pub stored_input_tx: Mutex<Option<mpsc::Sender<ExecutorInput>>>,
+    /// Retained senders preserved across repeated detach and reattach cycles.
+    /// Each detach moves the active channels into these pools instead of
+    /// dropping them. That keeps the original ttyd process monitor alive and
+    /// prevents newer reconnect channels from being dropped on subsequent page
+    /// switches or tab throttling.
+    pub retained_kill_txs: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
+    pub retained_input_txs: Mutex<Vec<mpsc::Sender<ExecutorInput>>>,
 }
 
 pub struct TerminalPersistenceState {
