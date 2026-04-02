@@ -58,3 +58,26 @@ Expected JSON payload:
 ## Manual fallback
 
 If the webhook is not configured yet, the workflow still publishes the image. You can then redeploy the relay host manually by pulling the latest GHCR image and restarting the container.
+
+Critical detail, if your reverse proxy also runs in Docker, the relay container must join the same Docker network as that proxy and keep the `conductor-relay` network alias. If Caddy or Nginx proxies to `conductor-relay:8080` but cannot resolve that hostname inside its own container, the public relay host will return 502 even though the relay container itself is healthy.
+
+Example rollout on a host where Caddy runs inside the `clawcloud_default` network:
+
+```bash
+docker pull ghcr.io/<owner>/conductor-relay:latest
+
+RELAY_TAG=ghcr.io/<owner>/conductor-relay:latest \
+RELAY_NAME=conductor-relay \
+RELAY_NETWORK=clawcloud_default \
+RELAY_NETWORK_ALIAS=conductor-relay \
+RELAY_PORT= \
+RELAY_DETACH=1 \
+./scripts/start-relay.sh
+```
+
+Then verify both the private upstream path and the public health endpoint:
+
+```bash
+docker exec <caddy-container> curl -fsS http://conductor-relay:8080/health
+curl -fsS https://relay.conductross.com/health
+```
