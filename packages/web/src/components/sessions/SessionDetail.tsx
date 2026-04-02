@@ -394,6 +394,7 @@ export function SessionDetail({
                 runtimeMode={session.metadata["runtimeMode"]?.trim() ?? null}
                 pendingInsert={pendingTerminalInsert}
                 immersiveMobileMode={immersiveTerminalActive}
+                onPendingInsertConsumed={() => setPendingTerminalInsert(null)}
               />
             </TabsContent>
           )}
