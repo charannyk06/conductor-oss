@@ -85,9 +85,24 @@ jobs:
     name: Trigger relay rollout
     runs-on: ubuntu-latest
     needs: publish-relay-image
-    if: ${{ secrets.RELAY_DEPLOY_WEBHOOK_URL != '' }}
+    outputs:
+      deploy_enabled: ${{ steps.gate.outputs.deploy_enabled }}
     steps:
+      - name: Detect relay deploy webhook configuration
+        id: gate
+        shell: bash
+        env:
+          RELAY_DEPLOY_WEBHOOK_URL: ${{ secrets.RELAY_DEPLOY_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RELAY_DEPLOY_WEBHOOK_URL:-}" ]; then
+            echo "deploy_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Trigger relay deploy webhook
+        if: ${{ steps.gate.outputs.deploy_enabled == 'true' }}
         shell: bash
         env:
           RELAY_DEPLOY_WEBHOOK_URL: ${{ secrets.RELAY_DEPLOY_WEBHOOK_URL }}
@@ -114,6 +129,7 @@ jobs:
           fi
 
       - name: Summarize relay rollout trigger
+        if: ${{ steps.gate.outputs.deploy_enabled == 'true' }}
         shell: bash
         run: |
           {
@@ -123,13 +139,43 @@ jobs:
             echo "- Image: ${{ needs.publish-relay-image.outputs.image_ref }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Explain next setup step
+        if: ${{ steps.gate.outputs.deploy_enabled != 'true' }}
+        shell: bash
+        run: |
+          {
+            echo "## Relay image published, rollout not triggered"
+            echo
+            echo "The relay image was published, but RELAY_DEPLOY_WEBHOOK_URL is not configured yet."
+            echo
+            echo "Set these repository secrets to enable automatic relay rollout:"
+            echo
+            echo "- RELAY_DEPLOY_WEBHOOK_URL"
+            echo "- RELAY_DEPLOY_WEBHOOK_TOKEN (optional, recommended)"
+            echo "- RELAY_HEALTHCHECK_URL (optional, recommended)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   relay-healthcheck:
     name: Probe relay health
     runs-on: ubuntu-latest
     needs: [publish-relay-image, trigger-relay-deploy]
-    if: ${{ needs.publish-relay-image.result == 'success' && needs.trigger-relay-deploy.result == 'success' && secrets.RELAY_HEALTHCHECK_URL != '' }}
+    if: ${{ needs.publish-relay-image.result == 'success' && needs.trigger-relay-deploy.outputs.deploy_enabled == 'true' }}
     steps:
+      - name: Detect relay healthcheck configuration
+        id: gate
+        shell: bash
+        env:
+          RELAY_HEALTHCHECK_URL: ${{ secrets.RELAY_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "${RELAY_HEALTHCHECK_URL:-}" ]; then
+            echo "healthcheck_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "healthcheck_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Probe relay health endpoint
+        if: ${{ steps.gate.outputs.healthcheck_enabled == 'true' }}
         shell: bash
         env:
           RELAY_HEALTHCHECK_URL: ${{ secrets.RELAY_HEALTHCHECK_URL }}
@@ -145,23 +191,12 @@ jobs:
           echo "Relay health check never became ready"
           exit 1
 
-  relay-webhook-missing:
-    name: Relay deploy webhook missing
-    runs-on: ubuntu-latest
-    needs: publish-relay-image
-    if: ${{ secrets.RELAY_DEPLOY_WEBHOOK_URL == '' }}
-    steps:
-      - name: Explain next setup step
+      - name: Summarize missing relay healthcheck URL
+        if: ${{ steps.gate.outputs.healthcheck_enabled != 'true' }}
         shell: bash
         run: |
           {
-            echo "## Relay image published, rollout not triggered"
+            echo "## Relay health check skipped"
             echo
-            echo "The relay image was published, but RELAY_DEPLOY_WEBHOOK_URL is not configured yet."
-            echo
-            echo "Set these repository secrets to enable automatic relay rollout:"
-            echo
-            echo "- RELAY_DEPLOY_WEBHOOK_URL"
-            echo "- RELAY_DEPLOY_WEBHOOK_TOKEN (optional, recommended)"
-            echo "- RELAY_HEALTHCHECK_URL (optional, recommended)"
+            echo "RELAY_HEALTHCHECK_URL is not configured, so the rollout health probe was skipped."
           } >> "$GITHUB_STEP_SUMMARY"
