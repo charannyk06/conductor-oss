@@ -77,7 +77,7 @@ export function AppShell({
   return (
     <div
       style={shellStyle}
-      className="relative flex h-dvh min-h-[100dvh] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
+      className="relative flex h-svh w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
     >
       {mobileSidebarOpen && (
         <button

@@ -475,13 +475,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
     );
 
     if (!keyboardVisible) {
-      host.style.removeProperty("height");
+      // When keyboard is not visible, use 100% to let flex sizing work properly
+      host.style.height = "100%";
       setKeyboardVisible(false);
       return;
     }
 
     if (usableHeight <= 0) {
-      host.style.removeProperty("height");
+      host.style.height = "100%";
       return;
     }
 
@@ -598,8 +599,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
   return (
     <div
       className={immersiveMobileMode
-        ? "group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[#060404]"
-        : "group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
+        ? "group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden bg-[#060404]"
+        : "group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
     >
       <div className="absolute right-2 top-2 z-10 flex items-center gap-2 sm:right-3 sm:top-3">
         {terminalHref ? (
@@ -654,8 +655,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
       <div
         className={
           immersiveMobileMode
-            ? "min-h-0 min-w-0 flex-1 overflow-hidden px-0 pb-[env(safe-area-inset-bottom)] pt-0 w-full"
-            : "min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"
+            ? "min-h-0 min-w-0 h-0 flex-1 overflow-hidden px-0 pb-[env(safe-area-inset-bottom)] pt-0 w-full"
+            : "min-h-0 min-w-0 h-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"
         }
       >
         {expectsLiveTerminal && terminalUrl ? (

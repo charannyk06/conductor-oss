@@ -167,7 +167,7 @@ export default function SessionPageClient({
 
   if (!params.id) {
     return (
-      <div className="flex h-dvh min-h-[100dvh] items-center justify-center">
+      <div className="flex h-svh items-center justify-center">
         <span className="text-[13px] text-[var(--text-muted)]">No session ID provided</span>
       </div>
     );

@@ -893,7 +893,7 @@ export function RemoteSessionTerminal({
             : `Session status is \`${normalizedSessionStatus}\`. Relay terminals only run while a ttyd runtime is active.`);
 
   return (
-    <div className="group/terminal relative flex h-full min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+    <div className="group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
       <div className="absolute right-2 top-2 z-10 flex items-center gap-2 sm:right-3 sm:top-3">
         {/* Connection quality dot: visible only for active relay terminals. */}
         {expectsRelayTerminal ? (
@@ -947,7 +947,7 @@ export function RemoteSessionTerminal({
         </Button>
       </div>
 
-      <div className="min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full">
+      <div className="min-h-0 min-w-0 h-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full">
         <div
           ref={terminalHostRef}
           className="min-h-0 flex-1 w-full overflow-hidden overscroll-contain rounded-[10px] bg-[#060404] px-2 py-2 text-left touch-pan-y pb-[env(safe-area-inset-bottom)] [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
