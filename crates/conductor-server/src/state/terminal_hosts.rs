@@ -111,6 +111,8 @@ impl TerminalHostRegistry {
             terminal_persistence: tokio::sync::Mutex::new(terminal_persistence),
             terminal_capture: tokio::sync::Mutex::new(TerminalCaptureState::default()),
             kill_tx: tokio::sync::Mutex::new(None),
+            stored_kill_tx: tokio::sync::Mutex::new(None),
+            stored_input_tx: tokio::sync::Mutex::new(None),
         });
         hosts.insert(session_id.to_string(), handle.clone());
         handle
@@ -133,16 +135,45 @@ impl TerminalHostRegistry {
         }
         *handle.input_tx.write().await = Some(input_tx);
         *handle.resize_tx.write().await = resize_tx;
-        *handle.kill_tx.lock().await = Some(kill_tx);
+        // CR-9 fix: only insert if the slot is empty. This preserves the sender
+        // across reconnection. Dropping kill_tx fires the process monitor and kills
+        // the runtime; dropping input_tx closes the PTY pipe and kills the executor.
+        // If the slot is already filled (first owner attached), keep using it.
+        {
+            let mut g = handle.kill_tx.lock().await;
+            if g.is_none() {
+                *g = Some(kill_tx);
+            }
+        }
         let mut tracking = handle.terminal_persistence.lock().await;
         tracking.last_touched_at = Instant::now();
         tracking.last_detached_at = None;
     }
 
     pub(crate) async fn detach_runtime(&self, handle: &Arc<LiveSessionHandle>) {
-        *handle.input_tx.write().await = None;
         *handle.resize_tx.write().await = None;
-        let _ = handle.kill_tx.lock().await.take();
+        // CR-9 fix: take the senders FIRST, then clear the slots.
+        // Taking drops the old value. We MUST preserve the sender across reconnection
+        // (first owner detaches, new owner attaches). Storing them in the stored_*
+        // slots keeps the old process monitor waiting and the PTY pipe open.
+        // Subsequent detaches (from other owners) will also try to store but the
+        // slots are already filled so their senders are dropped (acceptable —
+        // only the first owner's senders matter for keeping the runtime alive).
+        {
+            let taken_input = handle.input_tx.write().await.take();
+            let mut stored = handle.stored_input_tx.lock().await;
+            if stored.is_none() {
+                *stored = taken_input; // Some(...) or None
+            }
+            // If already filled (subsequent owner), taken_input is dropped here.
+            // That's fine — only the first owner's senders keep the runtime alive.
+        }
+        {
+            let mut stored = handle.stored_kill_tx.lock().await;
+            if stored.is_none() {
+                *stored = handle.kill_tx.lock().await.take();
+            }
+        }
         let mut tracking = handle.terminal_persistence.lock().await;
         let now = Instant::now();
         tracking.last_touched_at = now;
