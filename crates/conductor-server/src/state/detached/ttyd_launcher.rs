@@ -34,19 +34,8 @@ use conductor_executors::executor::SpawnOptions;
 const TTYD_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TTYD_OWNER_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TTYD_OWNER_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
-const TTYD_OWNER_RECONNECT_MAX_ATTEMPTS: u32 = 5;
 const TTYD_OWNER_RECONNECT_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
-/// If no WebSocket message (output or pong) arrives for this long, the ttyd
-/// PTY is considered hung and the session owner will exit so it can be
-/// reconnected.  A 30-second window is long enough for interactive commands
-/// but short enough to catch a frozen PTY before it wastes resources.
-const TTYD_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-/// Maximum session lifetime.  After this duration the session is considered
-/// stale and the ttyd process is terminated.  This prevents long-running
-/// sessions from accumulating memory in terminal scrollback and ensures
-/// resources are freed periodically.  4 hours is long enough for most
-/// workflows while still providing a safety net.
-const TTYD_MAX_SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
+const TTYD_OWNER_RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 const TTYD_BINARY_ENV: &str = "CONDUCTOR_TTYD_BINARY";
 const FALLBACK_INTERACTIVE_SHELLS: &[&str] = &["/bin/zsh", "/bin/bash", "/bin/sh"];
 
@@ -590,50 +579,9 @@ async fn run_ttyd_session_owner_with_retry(
 ) -> Result<()> {
     let mut channels = initial_channels;
     let mut attempt: u32 = 0;
-    // Track when this session owner started.  Used to enforce the maximum
-    // Track elapsed session time. On restore, try to use the original start time from
-    // metadata so the 4-hour cap does not reset after backend restart.
-    let session_start = state
-        .get_session(sid)
-        .await
-        .and_then(|s| s.metadata.get("ttyd_session_start_time").cloned())
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(|secs| tokio::time::Instant::now() - std::time::Duration::from_secs(secs))
-        .unwrap_or_else(tokio::time::Instant::now);
 
     loop {
         let result = run_ttyd_session_owner(state, sid, url, executor.clone(), channels).await;
-
-        // Check session duration before deciding to reconnect.
-        let elapsed = session_start.elapsed();
-        if elapsed >= TTYD_MAX_SESSION_DURATION {
-            tracing::warn!(
-                session_id = %sid,
-                duration_secs = elapsed.as_secs(),
-                max_duration_secs = TTYD_MAX_SESSION_DURATION.as_secs(),
-                "session exceeded maximum duration, killing ttyd process"
-            );
-            // Kill the ttyd process group since we're terminating the session.
-            if let Some(session) = state.get_session(sid).await {
-                if let Some(pid_str) = session.metadata.get(TTYD_PID_METADATA_KEY) {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        #[cfg(unix)]
-                        {
-                            unsafe {
-                                libc::kill(-(pid as i32), libc::SIGTERM);
-                            }
-                            // Brief window for graceful shutdown before SIGKILL
-                        }
-                    }
-                }
-            }
-            // Detach so the session can be cleaned up.
-            state.detach_terminal_runtime(sid).await;
-            return Err(anyhow!(
-                "session exceeded maximum duration of {} seconds",
-                TTYD_MAX_SESSION_DURATION.as_secs()
-            ));
-        }
 
         match &result {
             Ok(()) => return Ok(()),
@@ -675,33 +623,8 @@ async fn run_ttyd_session_owner_with_retry(
                     return Ok(());
                 }
 
-                attempt += 1;
-                if attempt >= TTYD_OWNER_RECONNECT_MAX_ATTEMPTS {
-                    tracing::error!(
-                        session_id = %sid,
-                        error = %err,
-                        attempts = attempt,
-                        "ttyd session owner exhausted reconnection attempts, cleaning up"
-                    );
-                    // Detach so the session can be properly cleaned up.
-                    state.detach_terminal_runtime(sid).await;
-                    // Emit a failure event so the session state reflects the failure.
-                    let _ = state
-                        .apply_runtime_event(
-                            sid,
-                            ExecutorOutput::Failed {
-                                error: format!(
-                                    "ttyd reconnect exhausted after {} attempts: {}",
-                                    attempt, err
-                                ),
-                                exit_code: None,
-                            },
-                        )
-                        .await;
-                    return result;
-                }
-
-                let delay = TTYD_OWNER_RECONNECT_BASE_DELAY * attempt;
+                attempt = attempt.saturating_add(1);
+                let delay = owner_reconnect_delay(attempt);
                 tracing::info!(
                     session_id = %sid,
                     error = %err,
@@ -804,83 +727,29 @@ async fn run_ttyd_session_owner(
     let mut buf = String::new();
     let mut input_closed = false;
     let mut resize_closed = false;
-    let mut seen_first_activity = false;
-    let mut last_activity_at: Option<tokio::time::Instant> = None;
-
-    // Health monitor: a resettable watchdog that only starts after the first
-    // activity message is received.  If no message (output or pong) arrives for
-    // TTYD_HEALTH_TIMEOUT after first activity, the PTY is considered hung.
-    //
-    // We do NOT use a spawned task for this because tokio tasks cannot have their
-    // timers reset.  Instead we track last_activity_at inline and re-create the
-    // sleep future on each loop iteration.
-    //
-    // On each message (output or pong), we update last_activity_at.
-    // On first message, we start the timer.
-    // If the socket goes idle for > TTYD_HEALTH_TIMEOUT after being active,
-    // the sleep fires and we return a health failure.
-    //
-    // Because both branches live in the same task, updates to last_activity_at
-    // are immediately visible to the health check on the next iteration.
 
     loop {
         tokio::select! {
-            // Check health: if we've been idle for too long after first activity, PTY is hung.
-            // We use a long sleep that gets cancelled when a message arrives (causing
-            // the select to restart the loop).  On the next iteration, last_activity_at
-            // will be set, so we use sleep_until.
-            _ = async {
-                if let Some(start) = last_activity_at {
-                    tokio::time::sleep_until(start + TTYD_HEALTH_TIMEOUT).await;
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
-                }
-            } => {
-                // Health timeout fired: PTY is hung.
-                tracing::warn!(
-                    session_id = %sid,
-                    timeout_secs = TTYD_HEALTH_TIMEOUT.as_secs(),
-                    "ttyd PTY health check: no activity for {}s after first message, treating as hung",
-                    TTYD_HEALTH_TIMEOUT.as_secs()
-                );
-                return Err(anyhow!(
-                    "ttyd PTY health check failed: no output for {} seconds",
-                    TTYD_HEALTH_TIMEOUT.as_secs()
-                ));
-            }
             message = r.next() => match message {
                 Some(Ok(WsMessage::Binary(data))) if data.len() > 1 && data[0] == ttyd_protocol::CMD_OUTPUT => {
                     let payload = &data[1..];
-                    if !seen_first_activity {
-                        seen_first_activity = true;
-                        last_activity_at = Some(tokio::time::Instant::now());
-                    }
-                        state.emit_terminal_bytes(sid, payload).await;
-                        buf.push_str(&String::from_utf8_lossy(payload));
-                        while let Some(nl) = buf.find('\n') {
-                            let line = buf[..nl].to_string();
-                            buf = buf[nl + 1..].to_string();
-                            if !line.trim().is_empty()
+                    state.emit_terminal_bytes(sid, payload).await;
+                    buf.push_str(&String::from_utf8_lossy(payload));
+                    while let Some(nl) = buf.find('\n') {
+                        let line = buf[..nl].to_string();
+                        buf = buf[nl + 1..].to_string();
+                        if !line.trim().is_empty()
                             && channels.output_tx.send(executor.parse_output(&line)).await.is_err()
                         {
                             return Ok(());
                         }
                     }
                 }
-                Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {
-                    if !seen_first_activity {
-                        seen_first_activity = true;
-                        last_activity_at = Some(tokio::time::Instant::now());
-                    }
-                }
+                Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {}
                 Some(Ok(WsMessage::Ping(payload))) => {
                     // ttyd actively pings idle clients. If the backend-owned
                     // owner websocket does not answer, the live PTY session
                     // gets torn down even though the user only stepped away.
-                    if !seen_first_activity {
-                        seen_first_activity = true;
-                        last_activity_at = Some(tokio::time::Instant::now());
-                    }
                     w.send(WsMessage::Pong(payload))
                         .await
                         .context("ttyd session owner pong send failed")?;
@@ -914,6 +783,12 @@ async fn run_ttyd_session_owner(
         let _ = channels.output_tx.send(executor.parse_output(&buf)).await;
     }
     Err(anyhow!("ttyd session owner disconnected"))
+}
+
+fn owner_reconnect_delay(attempt: u32) -> std::time::Duration {
+    let multiplier = u32::max(attempt, 1);
+    let delay = TTYD_OWNER_RECONNECT_BASE_DELAY.saturating_mul(multiplier);
+    std::cmp::min(delay, TTYD_OWNER_RECONNECT_MAX_DELAY)
 }
 
 async fn send_input_frame<S>(
@@ -952,7 +827,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{build_agent_launch_command, build_ttyd_shell_args, resolve_interactive_shell};
+    use super::{
+        build_agent_launch_command, build_ttyd_shell_args, owner_reconnect_delay,
+        resolve_interactive_shell,
+    };
     use crate::routes::ttyd_protocol;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1012,5 +890,22 @@ mod tests {
     fn ttyd_protocol_handshake_starts_with_json_data_prefix() {
         let frame = ttyd_protocol::encode_handshake(160, 48);
         assert_eq!(frame.first().copied(), Some(ttyd_protocol::CMD_JSON_DATA));
+    }
+
+    #[test]
+    fn owner_reconnect_delay_caps_instead_of_exhausting() {
+        assert_eq!(
+            owner_reconnect_delay(0),
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            owner_reconnect_delay(1),
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(owner_reconnect_delay(4), std::time::Duration::from_secs(2));
+        assert_eq!(
+            owner_reconnect_delay(100),
+            std::time::Duration::from_secs(5)
+        );
     }
 }
