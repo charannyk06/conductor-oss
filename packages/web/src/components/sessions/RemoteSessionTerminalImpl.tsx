@@ -207,6 +207,8 @@ export function RemoteSessionTerminal({
   const expectsRelayTerminal = ttydBacked
     ? !sessionClosed
     : false;
+  const expectsRelayTerminalRef = useRef(expectsRelayTerminal);
+  expectsRelayTerminalRef.current = expectsRelayTerminal;
   const showPromptBar = !ttydBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
   const showStoredOutput = !expectsRelayTerminal;
   const outputFallbackActive = showStoredOutput || relayUnavailableReason !== null;
@@ -452,7 +454,8 @@ export function RemoteSessionTerminal({
     scrollHost?.addEventListener("scroll", syncFollowBottom, { passive: true });
     const cleanupMobileTouchScroll = attachMobileTouchScrollShim(terminal, host);
     const dataSubscription = terminal.onData((data) => {
-      if (!expectsRelayTerminal) {
+      if (!expectsRelayTerminalRef.current) {
+        setError("Terminal is not connected. Input not sent.");
         return;
       }
       try {
@@ -830,14 +833,14 @@ export function RemoteSessionTerminal({
       return;
     }
 
-    lastAppliedInsertNonceRef.current = pendingInsert.nonce;
     const inlineText = pendingInsert.inlineText.trim();
-    if (inlineText.length === 0 || !expectsRelayTerminal) {
+    if (inlineText.length === 0 || !expectsRelayTerminalRef.current) {
       return;
     }
 
     try {
       sendTerminalFrame(encodeInputFrame(`${inlineText} `));
+      lastAppliedInsertNonceRef.current = pendingInsert.nonce;
       setError(null);
       setQueuedInsertError(null);
       onPendingInsertConsumed?.();
@@ -947,7 +950,7 @@ export function RemoteSessionTerminal({
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full">
         <div
           ref={terminalHostRef}
-          className="h-full min-h-0 w-full flex-1 overflow-hidden overscroll-contain rounded-[10px] bg-[#060404] px-2 py-2 text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
+          className="min-h-0 flex-1 w-full overflow-hidden overscroll-contain rounded-[10px] bg-[#060404] px-2 py-2 text-left touch-pan-y pb-[env(safe-area-inset-bottom)] [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
         />
         {!loading && !hasOutput ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#060404]/84 px-4">

@@ -98,6 +98,8 @@ export function BridgeSessionTerminal({
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const bridgeInputRef = useRef({ connected, readOnly, sendTerminalInput });
+  const connectedRef = useRef(connected);
+  connectedRef.current = connected;
   const attachmentContextRef = useRef({ projectId, sessionId, bridgeId });
   const lastAppliedInsertNonceRef = useRef(0);
   const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
@@ -262,11 +264,11 @@ export function BridgeSessionTerminal({
     scrollHost?.addEventListener("scroll", syncFollowBottom, { passive: true });
     const cleanupMobileTouchScroll = attachMobileTouchScrollShim(terminal, host);
     const dataSubscription = terminal.onData((data) => {
-      const bridgeInput = bridgeInputRef.current;
-      if (bridgeInput.readOnly || !bridgeInput.connected) {
+      if (readOnly || !connectedRef.current) {
+        setRequestError("Bridge is not connected. Input not sent.");
         return;
       }
-      bridgeInput.sendTerminalInput(data);
+      bridgeInputRef.current.sendTerminalInput(data);
     });
 
     const handlePaste = async (event: ClipboardEvent) => {
@@ -515,7 +517,7 @@ export function BridgeSessionTerminal({
   }, [connected, requestApi, sessionId]);
 
   useEffect(() => {
-    if (!connected) {
+    if (!connectedRef.current) {
       return;
     }
 
@@ -523,13 +525,13 @@ export function BridgeSessionTerminal({
       return;
     }
 
-    lastAppliedInsertNonceRef.current = pendingInsert.nonce;
     const inlineText = pendingInsert.inlineText.trim();
     if (inlineText.length === 0) {
       return;
     }
 
     sendTerminalInput(`${inlineText} `);
+    lastAppliedInsertNonceRef.current = pendingInsert.nonce;
     onPendingInsertConsumed?.();
   }, [connected, onPendingInsertConsumed, pendingInsert, sendTerminalInput]);
 
@@ -589,13 +591,13 @@ export function BridgeSessionTerminal({
 
       <div
         className={immersiveMobileMode
-          ? "min-h-0 min-w-0 flex-1 overflow-hidden w-full"
+          ? "min-h-0 min-w-0 flex-1 overflow-hidden pb-[env(safe-area-inset-bottom)] w-full"
           : "min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"}
       >
         <div className="relative flex h-full flex-col overflow-hidden rounded-[10px] border border-white/10 bg-[#060404] text-[#efe8e1]">
           <div
             ref={terminalHostRef}
-            className="h-full min-h-0 flex-1 overflow-hidden overscroll-contain px-2 py-2 text-left touch-pan-y [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
+            className="min-h-0 flex-1 overflow-hidden overscroll-contain px-2 py-2 text-left touch-pan-y pb-[env(safe-area-inset-bottom)] [&_.xterm]:h-full [&_.xterm]:w-full [&_.xterm]:px-1 [&_.xterm-screen]:h-full [&_.xterm-screen]:w-full [&_.xterm-viewport]:overflow-y-auto [&_.xterm-viewport]:overscroll-contain [&_.xterm-viewport]:[-webkit-overflow-scrolling:touch] [&_.xterm-scrollable-element]:overscroll-contain [&_.xterm-scrollable-element]:[-webkit-overflow-scrolling:touch]"
           />
 
           {!hasOutput ? (

@@ -213,7 +213,12 @@ async function fetchTerminalToken(
   }
 
   if (!res.ok) {
-    throw new Error(data?.error ?? `Failed to resolve terminal token: ${res.status}`);
+    return {
+      interactive: false,
+      ttydHttpUrl: null,
+      ttydWsUrl: null,
+      reason: data?.error ?? "Terminal unavailable",
+    };
   }
 
   return {

@@ -1152,7 +1152,7 @@ async fn build_terminal_token_response(
     };
     let Some(_ttyd_ws_url) = ttyd_session_ws_url(&session) else {
         return error(
-            StatusCode::CONFLICT,
+            StatusCode::BAD_REQUEST,
             format!("Session {id} does not expose a ttyd terminal"),
         )
         .into_response();

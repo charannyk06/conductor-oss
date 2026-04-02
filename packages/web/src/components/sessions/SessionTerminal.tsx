@@ -654,14 +654,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
       <div
         className={
           immersiveMobileMode
-            ? "min-h-0 min-w-0 flex-1 overflow-hidden px-0 pb-0 pt-0 w-full"
+            ? "min-h-0 min-w-0 flex-1 overflow-hidden px-0 pb-[env(safe-area-inset-bottom)] pt-0 w-full"
             : "min-h-0 min-w-0 flex-1 overflow-hidden px-0.5 pb-0 pt-0.5 lg:px-1.5 lg:pb-1 lg:pt-3 w-full"
         }
       >
         {expectsLiveTerminal && terminalUrl ? (
           <div
             ref={terminalHostRef}
-            className="relative h-full w-full overflow-hidden rounded-[10px] bg-[#060404]"
+            className="relative min-h-0 flex-1 w-full overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
           >
             {!frameLoaded ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
@@ -675,7 +675,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
               key={sessionId}
               title={`ttyd terminal for ${sessionId}`}
               src={terminalUrl}
-              className="h-full w-full border-0 bg-[#060404]"
+              className="min-h-0 flex-1 w-full border-0 bg-[#060404]"
               allow="clipboard-read; clipboard-write"
               loading="eager"
               onLoad={() => {
