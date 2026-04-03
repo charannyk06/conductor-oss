@@ -32,20 +32,37 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Decide whether Strix scan can run
+        id: preflight
+        env:
+          STRIX_LLM: ${{ secrets.STRIX_LLM }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -z "$STRIX_LLM" ]; then
+            echo "run_scan=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::STRIX_LLM is not configured; skipping security scan for pull_request runs."
+          else
+            echo "run_scan=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.preflight.outputs.run_scan == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
       - name: Install Strix
-        run: curl -sSL https://strix.ai/install | bash
+        if: steps.preflight.outputs.run_scan == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install strix-agent==0.8.3
 
       - name: Run quick scan (PR gate)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && steps.preflight.outputs.run_scan == 'true'
         env:
           STRIX_LLM: ${{ secrets.STRIX_LLM }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: |
-          if [ -z "$STRIX_LLM" ]; then
-            echo "::warning::STRIX_LLM is not configured; skipping security scan for pull_request runs."
-            exit 0
-          fi
-
           strix -n \
             --target ./ \
             --scan-mode quick \
