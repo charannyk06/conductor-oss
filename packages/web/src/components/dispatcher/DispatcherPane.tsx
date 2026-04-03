@@ -253,6 +253,10 @@ export function DispatcherPane({
       setUpdatingPreferences(true);
       try {
         const body: Record<string, string> = {
+          dispatcherAgent: nextAgent,
+          dispatcherModel: resolveModelSelectionValue(nextSelection) ?? "",
+          dispatcherReasoningEffort:
+            resolveReasoningSelectionValue(nextSelection) ?? "",
           implementationAgent: nextAgent,
           implementationModel: resolveModelSelectionValue(nextSelection) ?? "",
           implementationReasoningEffort:

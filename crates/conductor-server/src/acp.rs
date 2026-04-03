@@ -348,6 +348,9 @@ impl AcpServer {
                 self.state
                     .update_dispatcher_preferences(
                         &params.session_id,
+                        None,
+                        None,
+                        None,
                         Some(params.value),
                         None,
                         None,

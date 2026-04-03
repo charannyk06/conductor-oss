@@ -126,6 +126,9 @@ struct CreateDispatcherBody {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateDispatcherPreferencesBody {
+    dispatcher_agent: Option<String>,
+    dispatcher_model: Option<String>,
+    dispatcher_reasoning_effort: Option<String>,
     implementation_agent: Option<String>,
     implementation_model: Option<String>,
     implementation_reasoning_effort: Option<String>,
@@ -560,9 +563,22 @@ async fn update_dispatcher_preferences(
         }
     };
 
+    let dispatcher_agent = body
+        .dispatcher_agent
+        .or_else(|| body.implementation_agent.clone());
+    let dispatcher_model = body
+        .dispatcher_model
+        .or_else(|| body.implementation_model.clone());
+    let dispatcher_reasoning_effort = body
+        .dispatcher_reasoning_effort
+        .or_else(|| body.implementation_reasoning_effort.clone());
+
     match state
         .update_dispatcher_preferences(
             &dispatcher.id,
+            dispatcher_agent,
+            dispatcher_model,
+            dispatcher_reasoning_effort,
             body.implementation_agent,
             body.implementation_model,
             body.implementation_reasoning_effort,
