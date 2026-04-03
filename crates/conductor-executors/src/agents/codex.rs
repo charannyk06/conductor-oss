@@ -755,4 +755,214 @@ mod tests {
             seen_events
         );
     }
+
+    #[tokio::test]
+    #[ignore = "requires local conductor checkout, codex binary, and model access"]
+    async fn structured_spawn_with_dispatcher_like_mcp_emits_assistant_message() {
+        let executor = CodexExecutor::new(PathBuf::from("codex"));
+        let conductor_root =
+            PathBuf::from("/Users/charannsrinivas/.openclaw/projects/conductor-oss");
+        let project_cwd =
+            PathBuf::from("/Users/charannsrinivas/Downloads/agent-client-protocol-main");
+        let mut env = HashMap::new();
+        env.insert(
+            "CONDUCTOR_SESSION_ID".to_string(),
+            "dispatcher-smoke-session".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_PROJECT_ID".to_string(),
+            "agent-client-protocol-main".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_SESSION_KIND".to_string(),
+            "project_dispatcher".to_string(),
+        );
+        let extra_args = vec![
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.command=\"{}\"",
+                conductor_root.join("target/debug/conductor").display()
+            ),
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.args=[\"--workspace\",\"{}\",\"-c\",\"{}\",\"mcp-server\"]",
+                conductor_root.display(),
+                conductor_root.join("conductor.yaml").display()
+            ),
+            "-c".to_string(),
+            format!("mcp_servers.conductor.cwd=\"{}\"", conductor_root.display()),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_ID=\"dispatcher-smoke-session\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_PROJECT_ID=\"agent-client-protocol-main\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_KIND=\"project_dispatcher\"".to_string(),
+        ];
+        let handle = executor
+            .spawn(SpawnOptions {
+                cwd: project_cwd,
+                prompt: "Reply with exactly: dispatcher smoke ok".to_string(),
+                model: None,
+                reasoning_effort: None,
+                skip_permissions: false,
+                extra_args,
+                env,
+                branch: None,
+                timeout: Some(Duration::from_secs(90)),
+                interactive: false,
+                structured_output: true,
+                resume_target: None,
+            })
+            .await
+            .expect("dispatcher-like codex structured spawn should start");
+
+        let (_pid, _kind, mut output_rx, _input_tx, _terminal_rx, _resize_tx, _kill_tx) =
+            handle.into_parts();
+
+        let mut saw_assistant = false;
+        let mut seen_events = Vec::new();
+        let result = timeout(Duration::from_secs(90), async {
+            while let Some(event) = output_rx.recv().await {
+                seen_events.push(format!("{event:?}"));
+                match event {
+                    ExecutorOutput::Stdout(text) => {
+                        if text.contains("dispatcher smoke ok") {
+                            saw_assistant = true;
+                            break;
+                        }
+                    }
+                    ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "timed out waiting for dispatcher-like codex output"
+        );
+        assert!(
+            saw_assistant,
+            "expected assistant message from dispatcher-like spawn, saw events: {:?}",
+            seen_events
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local dispatcher state, codex binary, and model access"]
+    async fn structured_spawn_with_full_dispatcher_prompt_emits_assistant_message() {
+        let executor = CodexExecutor::new(PathBuf::from("codex"));
+        let conductor_root =
+            PathBuf::from("/Users/charannsrinivas/.openclaw/projects/conductor-oss");
+        let project_cwd =
+            PathBuf::from("/Users/charannsrinivas/Downloads/agent-client-protocol-main");
+        let thread_path = conductor_root
+            .join(".conductor/rust-backend/dispatchers/4743b5ec-a902-4031-959a-0b45cf4add4e.json");
+        let thread: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&thread_path).expect("dispatcher thread fixture should exist"),
+        )
+        .expect("dispatcher thread fixture should parse");
+        let base_prompt = thread
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .expect("dispatcher prompt should exist");
+        let turn_prompt = concat!(
+            "ACP execution mode: inspect context first, then create or update the necessary board tasks in this same turn when the request is actionable. Use tool calls to review the repo, board, relevant files, and diffs before writing task packets. Only pause for plan-only review when the user explicitly asks for it or the requested mutation would be ambiguous or unsafe.\n\n",
+            "ACP dispatcher preference: prefer `codex` for newly created implementation tasks unless the user explicitly wants another agent.\n",
+            "Default coding model: `gpt-5.4`. Persist it onto implementation tasks with `model:gpt-5.4` unless the user explicitly overrides it.\n",
+            "Default coding reasoning: `high`. Persist it onto implementation tasks with `reasoningEffort:high` unless the user explicitly overrides it.\n\n",
+            "Reply with exactly: dispatcher smoke ok"
+        );
+        let full_prompt = format!("{base_prompt}\n\n## User request\n{turn_prompt}\n");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "CONDUCTOR_SESSION_ID".to_string(),
+            "dispatcher-smoke-session".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_PROJECT_ID".to_string(),
+            "agent-client-protocol-main".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_SESSION_KIND".to_string(),
+            "project_dispatcher".to_string(),
+        );
+        let extra_args = vec![
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.command=\"{}\"",
+                conductor_root.join("target/debug/conductor").display()
+            ),
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.args=[\"--workspace\",\"{}\",\"-c\",\"{}\",\"mcp-server\"]",
+                conductor_root.display(),
+                conductor_root.join("conductor.yaml").display()
+            ),
+            "-c".to_string(),
+            format!("mcp_servers.conductor.cwd=\"{}\"", conductor_root.display()),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_ID=\"dispatcher-smoke-session\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_PROJECT_ID=\"agent-client-protocol-main\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_KIND=\"project_dispatcher\"".to_string(),
+        ];
+
+        let handle = executor
+            .spawn(SpawnOptions {
+                cwd: project_cwd,
+                prompt: full_prompt,
+                model: None,
+                reasoning_effort: None,
+                skip_permissions: false,
+                extra_args,
+                env,
+                branch: None,
+                timeout: Some(Duration::from_secs(120)),
+                interactive: false,
+                structured_output: true,
+                resume_target: None,
+            })
+            .await
+            .expect("full dispatcher-like codex spawn should start");
+
+        let (_pid, _kind, mut output_rx, _input_tx, _terminal_rx, _resize_tx, _kill_tx) =
+            handle.into_parts();
+
+        let mut saw_assistant = false;
+        let mut seen_events = Vec::new();
+        let result = timeout(Duration::from_secs(120), async {
+            while let Some(event) = output_rx.recv().await {
+                seen_events.push(format!("{event:?}"));
+                match event {
+                    ExecutorOutput::Stdout(text) => {
+                        if text.contains("dispatcher smoke ok") {
+                            saw_assistant = true;
+                            break;
+                        }
+                    }
+                    ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "timed out waiting for full dispatcher-like codex output"
+        );
+        assert!(
+            saw_assistant,
+            "expected assistant message from full dispatcher-like spawn, saw events: {:?}",
+            seen_events
+        );
+    }
 }
