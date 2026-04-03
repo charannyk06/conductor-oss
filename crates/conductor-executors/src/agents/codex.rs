@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process;
+use crate::process::{spawn_process, spawn_process_no_stdin};
 
 /// OpenAI Codex CLI executor.
 #[derive(Clone)]
@@ -55,7 +55,11 @@ impl Executor for CodexExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
+        let handle = if options.structured_output {
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        } else {
+            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+        };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
 
         Ok(ExecutorHandle::new(
@@ -81,6 +85,7 @@ impl Executor for CodexExecutor {
             }
 
             args.push("--json".to_string());
+            args.push("--skip-git-repo-check".to_string());
 
             if options.skip_permissions {
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -114,7 +119,10 @@ impl Executor for CodexExecutor {
         }
 
         if options.interactive {
-            let mut args = vec!["--no-alt-screen".to_string()];
+            let mut args = vec![
+                "--no-alt-screen".to_string(),
+                "--skip-git-repo-check".to_string(),
+            ];
 
             if let Some(resume_target) = &options.resume_target {
                 args.push("resume".to_string());
@@ -164,6 +172,7 @@ impl Executor for CodexExecutor {
             "--color".to_string(),
             "never".to_string(),
             "--json".to_string(),
+            "--skip-git-repo-check".to_string(),
         ];
 
         if options.skip_permissions {
@@ -526,6 +535,8 @@ fn extract_text(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::Executor;
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn parse_started_mcp_tool_call_emits_structured_status() {
@@ -606,6 +617,7 @@ mod tests {
         });
 
         assert_eq!(args.first().map(String::as_str), Some("--no-alt-screen"));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args.contains(&"resume".to_string()));
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!args.contains(&"--yolo".to_string()));
@@ -633,6 +645,7 @@ mod tests {
 
         assert_eq!(args.first().map(String::as_str), Some("exec"));
         assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(!args.contains(&"--output-format".to_string()));
         assert!(!args.contains(&"--no-alt-screen".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("hello"));
@@ -686,5 +699,60 @@ mod tests {
             panic!("expected stdout suppression");
         };
         assert!(text.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local codex binary and model access"]
+    async fn structured_spawn_emits_assistant_message() {
+        let executor = CodexExecutor::new(PathBuf::from("codex"));
+        let handle = executor
+            .spawn(SpawnOptions {
+                cwd: std::env::temp_dir(),
+                prompt: "Reply with exactly: codex executor smoke ok".to_string(),
+                model: None,
+                reasoning_effort: None,
+                skip_permissions: false,
+                extra_args: Vec::new(),
+                env: HashMap::new(),
+                branch: None,
+                timeout: Some(Duration::from_secs(60)),
+                interactive: false,
+                structured_output: true,
+                resume_target: None,
+            })
+            .await
+            .expect("codex structured spawn should start");
+
+        let (_pid, _kind, mut output_rx, _input_tx, _terminal_rx, _resize_tx, _kill_tx) =
+            handle.into_parts();
+
+        let mut saw_assistant = false;
+        let mut seen_events = Vec::new();
+        let result = timeout(Duration::from_secs(60), async {
+            while let Some(event) = output_rx.recv().await {
+                seen_events.push(format!("{event:?}"));
+                match event {
+                    ExecutorOutput::Stdout(text) => {
+                        if text.contains("codex executor smoke ok") {
+                            saw_assistant = true;
+                            break;
+                        }
+                    }
+                    ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "timed out waiting for codex structured output"
+        );
+        assert!(
+            saw_assistant,
+            "expected assistant message from codex structured spawn, saw events: {:?}",
+            seen_events
+        );
     }
 }
