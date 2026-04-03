@@ -1533,6 +1533,9 @@ async fn handle_ttyd_frontend_socket(
     session_id: String,
     mut client_socket: WebSocket,
 ) {
+    if let Err(err) = state.ensure_session_live(&session_id).await {
+        tracing::warn!(session_id = %session_id, error = %err, "failed to ensure ttyd session live before frontend attach");
+    }
     let handle = state.ensure_terminal_host(&session_id).await;
     let mut terminal_rx = handle.terminal_tx.subscribe();
     let snapshot = state.current_terminal_restore_snapshot(&session_id).await;
@@ -1686,36 +1689,19 @@ async fn handle_ttyd_frontend_client_message(
         }
         Some(ttyd_protocol::ClientMessage::Input(data)) => {
             let text = String::from_utf8_lossy(&data).into_owned();
-            if let Some(input_tx) = handle.input_tx.read().await.clone() {
-                if let Err(e) = input_tx
-                    .send(conductor_executors::executor::ExecutorInput::Raw(text))
-                    .await
-                {
-                    // The input receiver (terminal runtime) has been dropped.
-                    // Emit an error event so the browser can show a notification
-                    // to the user instead of silently losing their keystrokes.
-                    tracing::warn!(session_id = %session_id, error = %e, "terminal input channel closed, dropping input");
-                    state
-                        .emit_terminal_stream_event(
-                            session_id,
-                            crate::state::TerminalStreamEvent::Error(
-                                "Terminal input channel closed. Please reload the terminal."
-                                    .to_string(),
-                            ),
-                        )
-                        .await;
-                }
-            } else {
-                // No input channel means the terminal runtime was detached.
-                // Notify the browser so it can show the user a message.
-                tracing::warn!(session_id = %session_id, "terminal input channel missing, dropping input");
-                state
-                    .emit_terminal_stream_event(
-                        session_id,
-                        crate::state::TerminalStreamEvent::Error(
-                            "Terminal is not running. Please reload the terminal.".to_string(),
-                        ),
-                    )
+            if let Err(error_message) = send_terminal_input_with_recovery(
+                state,
+                handle,
+                session_id,
+                conductor_executors::executor::ExecutorInput::Raw(text),
+            )
+            .await
+            {
+                let message = format!("\r\n[Conductor] {error_message}\r\n");
+                let _ = client_socket
+                    .send(Message::Binary(
+                        ttyd_protocol::encode_output(message.as_bytes()).into(),
+                    ))
                     .await;
             }
         }
@@ -1742,6 +1728,55 @@ async fn handle_ttyd_frontend_client_message(
     }
 
     Ok(())
+}
+
+async fn send_terminal_input_with_recovery(
+    state: &Arc<AppState>,
+    handle: &Arc<crate::state::LiveSessionHandle>,
+    session_id: &str,
+    input: conductor_executors::executor::ExecutorInput,
+) -> std::result::Result<(), String> {
+    for attempt in 0..2 {
+        if let Some(input_tx) = handle.input_tx.read().await.clone() {
+            match input_tx.send(input.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        attempt,
+                        error = %err,
+                        "terminal input channel closed, attempting recovery"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                session_id = %session_id,
+                attempt,
+                "terminal input channel missing, attempting recovery"
+            );
+        }
+
+        match state.ensure_session_live(session_id).await {
+            Ok(true) => continue,
+            Ok(false) => {
+                return Err("Terminal is not running. Please reload the terminal.".to_string())
+            }
+            Err(err) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    attempt,
+                    error = %err,
+                    "failed to recover terminal input channel"
+                );
+                return Err(
+                    "Terminal input channel closed. Please reload the terminal.".to_string()
+                );
+            }
+        }
+    }
+
+    Err("Terminal input channel closed. Please reload the terminal.".to_string())
 }
 
 fn parse_handshake_dimensions(value: &Value) -> Option<(u16, u16)> {
@@ -1910,7 +1945,10 @@ mod tests {
         (state, root)
     }
 
-    async fn seed_live_terminal_session(state: &Arc<AppState>, session_id: &str) -> SessionRecord {
+    async fn seed_live_terminal_session(
+        state: &Arc<AppState>,
+        session_id: &str,
+    ) -> (SessionRecord, mpsc::Receiver<ExecutorInput>) {
         let session = SessionRecord::builder(
             session_id.to_string(),
             "demo".to_string(),
@@ -1924,7 +1962,7 @@ mod tests {
             .await
             .insert(session.id.clone(), session.clone());
 
-        let (input_tx, _input_rx) = mpsc::channel::<ExecutorInput>(1);
+        let (input_tx, input_rx) = mpsc::channel::<ExecutorInput>(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
         state
             .attach_terminal_runtime(&session.id, input_tx, None, kill_tx)
@@ -1933,7 +1971,7 @@ mod tests {
             .emit_terminal_text(&session.id, "first line\r\nprompt> ")
             .await;
 
-        session
+        (session, input_rx)
     }
 
     #[test]
@@ -2243,7 +2281,7 @@ mod tests {
     #[tokio::test]
     async fn build_terminal_snapshot_prefers_live_terminal_store_and_marks_session_live() {
         let (state, root) = build_test_state().await;
-        let session = seed_live_terminal_session(&state, "session-live").await;
+        let (session, _input_rx) = seed_live_terminal_session(&state, "session-live").await;
 
         let payload = build_terminal_snapshot(&state, &session, 200, 4096, true)
             .await
@@ -2323,7 +2361,7 @@ mod tests {
     #[tokio::test]
     async fn build_terminal_restore_snapshot_keeps_history_and_utf8_boundaries_under_budget() {
         let (state, root) = build_test_state().await;
-        let session = seed_live_terminal_session(&state, "session-restore").await;
+        let (session, _input_rx) = seed_live_terminal_session(&state, "session-restore").await;
         state
             .emit_terminal_text(&session.id, "emoji: 🙂🙂🙂🙂🙂")
             .await;
@@ -2356,7 +2394,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_snapshot_route_exposes_benchmark_headers() {
         let (state, root) = build_test_state().await;
-        let session = seed_live_terminal_session(&state, "session-http").await;
+        let (session, _input_rx) = seed_live_terminal_session(&state, "session-http").await;
 
         let response = router()
             .with_state(state.clone())
