@@ -400,6 +400,7 @@ const DISPATCHER_CODEX_REASONING_OPTIONS: [DispatcherSelectOption; 4] = [
 
 #[derive(Clone)]
 pub(crate) struct DispatcherRuntimeHandle {
+    runtime_id: String,
     pub input_tx: mpsc::Sender<ExecutorInput>,
     accepts_input: bool,
     kill_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -2975,10 +2976,10 @@ impl AppState {
     }
 
     pub(crate) async fn dispatcher_runtime_attached(&self, thread_id: &str) -> bool {
-        let handle = self.dispatcher_runtime_handle(thread_id).await;
-        match handle {
+        let mut runtimes = self.dispatcher_runtimes.lock().await;
+        match runtimes.get(thread_id) {
             Some(handle) if handle.accepts_input && handle.input_tx.is_closed() => {
-                self.clear_dispatcher_runtime(thread_id).await;
+                runtimes.remove(thread_id);
                 false
             }
             Some(_) => true,
@@ -2994,17 +2995,15 @@ impl AppState {
             .cloned()
     }
 
-    async fn dispatcher_runtime_input(
-        &self,
-        thread_id: &str,
-    ) -> Option<mpsc::Sender<ExecutorInput>> {
-        match self.dispatcher_runtime_handle(thread_id).await {
+    async fn dispatcher_runtime_input(&self, thread_id: &str) -> Option<DispatcherRuntimeHandle> {
+        let mut runtimes = self.dispatcher_runtimes.lock().await;
+        match runtimes.get(thread_id) {
             Some(handle) if !handle.accepts_input => None,
             Some(handle) if handle.input_tx.is_closed() => {
-                self.clear_dispatcher_runtime(thread_id).await;
+                runtimes.remove(thread_id);
                 None
             }
-            Some(handle) => Some(handle.input_tx),
+            Some(handle) => Some(handle.clone()),
             None => None,
         }
     }
@@ -3041,19 +3040,33 @@ impl AppState {
         input_tx: mpsc::Sender<ExecutorInput>,
         accepts_input: bool,
         kill_tx: oneshot::Sender<()>,
-    ) {
-        self.dispatcher_runtimes.lock().await.insert(
-            thread_id.to_string(),
-            DispatcherRuntimeHandle {
-                input_tx,
-                accepts_input,
-                kill_tx: Arc::new(Mutex::new(Some(kill_tx))),
-            },
-        );
+    ) -> DispatcherRuntimeHandle {
+        let handle = DispatcherRuntimeHandle {
+            runtime_id: Uuid::new_v4().to_string(),
+            input_tx,
+            accepts_input,
+            kill_tx: Arc::new(Mutex::new(Some(kill_tx))),
+        };
+        self.dispatcher_runtimes
+            .lock()
+            .await
+            .insert(thread_id.to_string(), handle.clone());
+        handle
     }
 
     async fn clear_dispatcher_runtime(&self, thread_id: &str) {
         self.dispatcher_runtimes.lock().await.remove(thread_id);
+    }
+
+    async fn clear_dispatcher_runtime_if(&self, thread_id: &str, runtime_id: &str) {
+        let mut runtimes = self.dispatcher_runtimes.lock().await;
+        if runtimes
+            .get(thread_id)
+            .map(|handle| handle.runtime_id == runtime_id)
+            .unwrap_or(false)
+        {
+            runtimes.remove(thread_id);
+        }
     }
 
     pub(crate) async fn interrupt_dispatcher(self: &Arc<Self>, thread_id: &str) -> Result<()> {
@@ -3219,7 +3232,8 @@ impl AppState {
 
         let (pid, _kind, output_rx, input_tx, terminal_rx, _resize_tx, kill_tx) =
             handle.into_parts();
-        self.store_dispatcher_runtime(&thread.id, input_tx.clone(), !use_headless_turns, kill_tx)
+        let runtime_handle = self
+            .store_dispatcher_runtime(&thread.id, input_tx.clone(), !use_headless_turns, kill_tx)
             .await;
 
         if let Some(mut terminal_rx) = terminal_rx {
@@ -3240,20 +3254,25 @@ impl AppState {
             self.publish_dispatcher_update(&thread.id).await;
         }
 
-        self.start_dispatcher_output_consumer(thread.id.clone(), output_rx);
+        self.start_dispatcher_output_consumer(
+            thread.id.clone(),
+            runtime_handle.runtime_id.clone(),
+            output_rx,
+        );
         Ok(())
     }
 
     fn start_dispatcher_output_consumer(
         self: &Arc<Self>,
         thread_id: String,
+        runtime_id: String,
         mut output_rx: mpsc::Receiver<ExecutorOutput>,
     ) {
         let state = Arc::clone(self);
         tokio::spawn(async move {
             while let Some(event) = output_rx.recv().await {
                 let _ = state
-                    .apply_dispatcher_runtime_event(&thread_id, event)
+                    .apply_dispatcher_runtime_event(&thread_id, &runtime_id, event)
                     .await;
             }
         });
@@ -3262,6 +3281,7 @@ impl AppState {
     async fn apply_dispatcher_runtime_event(
         &self,
         thread_id: &str,
+        runtime_id: &str,
         event: ExecutorOutput,
     ) -> Result<()> {
         let force_memory_sync = matches!(
@@ -3278,14 +3298,16 @@ impl AppState {
         let Some(thread) = threads.get_mut(thread_id) else {
             drop(threads);
             if clear_runtime {
-                self.clear_dispatcher_runtime(thread_id).await;
+                self.clear_dispatcher_runtime_if(thread_id, runtime_id)
+                    .await;
             }
             return Ok(());
         };
         if thread.status.is_terminal() {
             drop(threads);
             if clear_runtime {
-                self.clear_dispatcher_runtime(thread_id).await;
+                self.clear_dispatcher_runtime_if(thread_id, runtime_id)
+                    .await;
             }
             return Ok(());
         }
@@ -3444,7 +3466,8 @@ impl AppState {
         let updated = thread.clone();
         drop(threads);
         if clear_runtime {
-            self.clear_dispatcher_runtime(thread_id).await;
+            self.clear_dispatcher_runtime_if(thread_id, runtime_id)
+                .await;
         }
         self.persist_dispatcher_thread(&updated).await?;
         if should_sync_memory {
@@ -3568,14 +3591,19 @@ impl AppState {
             .await;
 
         if !uses_headless_turns {
-            if let Some(input_tx) = self.dispatcher_runtime_input(thread_id).await {
-                if let Err(err) = input_tx.send(ExecutorInput::Text(runtime_prompt)).await {
+            if let Some(runtime_handle) = self.dispatcher_runtime_input(thread_id).await {
+                if let Err(err) = runtime_handle
+                    .input_tx
+                    .send(ExecutorInput::Text(runtime_prompt))
+                    .await
+                {
                     tracing::warn!(
                         thread_id = %thread_id,
                         error = %err,
                         "dispatcher runtime input channel closed, restarting runtime"
                     );
-                    self.clear_dispatcher_runtime(thread_id).await;
+                    self.clear_dispatcher_runtime_if(thread_id, &runtime_handle.runtime_id)
+                        .await;
                     self.ensure_dispatcher_runtime(
                         &updated,
                         &runtime_message,
@@ -3676,8 +3704,9 @@ impl AppState {
                 tracing::warn!(session_id = %session_id, error = %err, "failed to sync ACP heartbeat state");
             }
             if heartbeat_can_prompt_live_runtime(&updated) {
-                if let Some(input_tx) = self.dispatcher_runtime_input(&session_id).await {
-                    if let Err(err) = input_tx
+                if let Some(runtime_handle) = self.dispatcher_runtime_input(&session_id).await {
+                    if let Err(err) = runtime_handle
+                        .input_tx
                         .send(ExecutorInput::Text(
                             "ACP heartbeat due. Review board state, blockers, deferred follow-ups, and which tasks should be shaped or handed off next.".to_string(),
                         ))
@@ -4267,6 +4296,7 @@ mod tests {
         state
             .apply_dispatcher_runtime_event(
                 &thread.id,
+                "runtime-test",
                 ExecutorOutput::Stdout("assistant update".to_string()),
             )
             .await
@@ -4435,6 +4465,7 @@ mod tests {
         state
             .apply_dispatcher_runtime_event(
                 &thread.id,
+                "runtime-test",
                 ExecutorOutput::StructuredStatus {
                     text: "Thinking".to_string(),
                     metadata: HashMap::new(),
@@ -4489,7 +4520,7 @@ mod tests {
             .expect("dispatcher thread should persist");
         let (input_tx, mut input_rx) = mpsc::channel(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
-        state
+        let _ = state
             .store_dispatcher_runtime(&thread.id, input_tx, true, kill_tx)
             .await;
 
@@ -4575,7 +4606,7 @@ mod tests {
             .expect("dispatcher thread should persist");
         let (input_tx, mut input_rx) = mpsc::channel(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
-        state
+        let _ = state
             .store_dispatcher_runtime(&thread.id, input_tx, true, kill_tx)
             .await;
 
@@ -4616,7 +4647,7 @@ mod tests {
         let (kill_tx, _kill_rx) = oneshot::channel();
         drop(input_rx);
 
-        state
+        let _ = state
             .store_dispatcher_runtime(&thread.id, input_tx, false, kill_tx)
             .await;
 
@@ -4638,7 +4669,7 @@ mod tests {
         let (kill_tx, _kill_rx) = oneshot::channel();
         drop(input_rx);
 
-        state
+        let _ = state
             .store_dispatcher_runtime(&thread.id, input_tx, true, kill_tx)
             .await;
 
@@ -4662,7 +4693,7 @@ mod tests {
         let snapshot = state.dispatcher_snapshot_path(&thread.id);
         let (input_tx, _input_rx) = mpsc::channel(1);
         let (kill_tx, _kill_rx) = oneshot::channel();
-        state
+        let _ = state
             .store_dispatcher_runtime(&thread.id, input_tx, true, kill_tx)
             .await;
         state

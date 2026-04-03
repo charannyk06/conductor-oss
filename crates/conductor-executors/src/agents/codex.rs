@@ -55,7 +55,8 @@ impl Executor for CodexExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle = if options.structured_output {
+        let needs_stdin = options.structured_output && args.iter().any(|arg| arg == "-");
+        let handle = if options.structured_output && !needs_stdin {
             spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
         } else {
             spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
@@ -760,10 +761,8 @@ mod tests {
     #[ignore = "requires local conductor checkout, codex binary, and model access"]
     async fn structured_spawn_with_dispatcher_like_mcp_emits_assistant_message() {
         let executor = CodexExecutor::new(PathBuf::from("codex"));
-        let conductor_root =
-            PathBuf::from("/Users/charannsrinivas/.openclaw/projects/conductor-oss");
-        let project_cwd =
-            PathBuf::from("/Users/charannsrinivas/Downloads/agent-client-protocol-main");
+        let conductor_root = required_smoke_path("CONDUCTOR_ROOT");
+        let project_cwd = required_smoke_path("CODER_SMOKE_PROJECT_CWD");
         let mut env = HashMap::new();
         env.insert(
             "CONDUCTOR_SESSION_ID".to_string(),
@@ -855,12 +854,9 @@ mod tests {
     #[ignore = "requires local dispatcher state, codex binary, and model access"]
     async fn structured_spawn_with_full_dispatcher_prompt_emits_assistant_message() {
         let executor = CodexExecutor::new(PathBuf::from("codex"));
-        let conductor_root =
-            PathBuf::from("/Users/charannsrinivas/.openclaw/projects/conductor-oss");
-        let project_cwd =
-            PathBuf::from("/Users/charannsrinivas/Downloads/agent-client-protocol-main");
-        let thread_path = conductor_root
-            .join(".conductor/rust-backend/dispatchers/4743b5ec-a902-4031-959a-0b45cf4add4e.json");
+        let conductor_root = required_smoke_path("CONDUCTOR_ROOT");
+        let project_cwd = required_smoke_path("CODER_SMOKE_PROJECT_CWD");
+        let thread_path = required_smoke_path("CODER_SMOKE_DISPATCHER_THREAD_PATH");
         let thread: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(&thread_path).expect("dispatcher thread fixture should exist"),
         )
@@ -964,5 +960,11 @@ mod tests {
             "expected assistant message from full dispatcher-like spawn, saw events: {:?}",
             seen_events
         );
+    }
+
+    fn required_smoke_path(name: &str) -> PathBuf {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("set {name} before running this ignored smoke test"))
     }
 }
