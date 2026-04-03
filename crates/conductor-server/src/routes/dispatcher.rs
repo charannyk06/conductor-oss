@@ -17,8 +17,8 @@ use crate::dispatcher_task_lifecycle::{
 };
 use crate::state::{
     build_normalized_chat_feed, is_project_dispatcher_session, AppState,
-    CreateDispatcherThreadOptions, DispatcherBindingLookup, OpenClawDispatcherConfigPatch,
-    SessionRecord, UpsertDispatcherBindingInput,
+    CreateDispatcherThreadOptions, DispatcherBindingLookup, DispatcherPreferencesPatch,
+    OpenClawDispatcherConfigPatch, SessionRecord, UpsertDispatcherBindingInput,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -576,17 +576,19 @@ async fn update_dispatcher_preferences(
     match state
         .update_dispatcher_preferences(
             &dispatcher.id,
-            dispatcher_agent,
-            dispatcher_model,
-            dispatcher_reasoning_effort,
-            body.implementation_agent,
-            body.implementation_model,
-            body.implementation_reasoning_effort,
-            OpenClawDispatcherConfigPatch {
-                gateway_url: body.openclaw_gateway_url,
-                gateway_token: body.openclaw_gateway_token,
-                gateway_scopes: body.openclaw_gateway_scopes,
-                session_key: body.openclaw_session_key,
+            DispatcherPreferencesPatch {
+                dispatcher_agent,
+                dispatcher_model,
+                dispatcher_reasoning_effort,
+                implementation_agent: body.implementation_agent,
+                implementation_model: body.implementation_model,
+                implementation_reasoning_effort: body.implementation_reasoning_effort,
+                openclaw_config: OpenClawDispatcherConfigPatch {
+                    gateway_url: body.openclaw_gateway_url,
+                    gateway_token: body.openclaw_gateway_token,
+                    gateway_scopes: body.openclaw_gateway_scopes,
+                    session_key: body.openclaw_session_key,
+                },
             },
         )
         .await

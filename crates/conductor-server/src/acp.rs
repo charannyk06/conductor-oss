@@ -20,9 +20,9 @@ use crate::state::{
     dispatcher_implementation_reasoning_options, dispatcher_preferred_implementation_agent,
     dispatcher_preferred_implementation_model,
     dispatcher_preferred_implementation_reasoning_effort, parse_acp_mcp_servers,
-    serialize_mcp_servers, AppState, CreateDispatcherThreadOptions, DispatcherSelectOption,
-    DispatcherTurnRequest, OpenClawDispatcherConfigPatch, SessionRecord, SessionStatus,
-    ACP_SESSION_MCP_SERVERS_METADATA_KEY,
+    serialize_mcp_servers, AppState, CreateDispatcherThreadOptions, DispatcherPreferencesPatch,
+    DispatcherSelectOption, DispatcherTurnRequest, OpenClawDispatcherConfigPatch, SessionRecord,
+    SessionStatus, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
 };
 
 const ACP_SERVER_NAME: &str = "conductor-acp";
@@ -348,13 +348,11 @@ impl AcpServer {
                 self.state
                     .update_dispatcher_preferences(
                         &params.session_id,
-                        None,
-                        None,
-                        None,
-                        Some(params.value),
-                        None,
-                        None,
-                        OpenClawDispatcherConfigPatch::default(),
+                        DispatcherPreferencesPatch {
+                            implementation_agent: Some(params.value),
+                            openclaw_config: OpenClawDispatcherConfigPatch::default(),
+                            ..DispatcherPreferencesPatch::default()
+                        },
                     )
                     .await?
             }

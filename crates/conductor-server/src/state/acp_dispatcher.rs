@@ -208,6 +208,17 @@ pub(crate) struct DispatcherSelectOption {
 }
 
 #[derive(Clone, Debug, Default)]
+pub(crate) struct DispatcherPreferencesPatch {
+    pub dispatcher_agent: Option<String>,
+    pub dispatcher_model: Option<String>,
+    pub dispatcher_reasoning_effort: Option<String>,
+    pub implementation_agent: Option<String>,
+    pub implementation_model: Option<String>,
+    pub implementation_reasoning_effort: Option<String>,
+    pub openclaw_config: OpenClawDispatcherConfigPatch,
+}
+
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CreateDispatcherThreadOptions {
     pub bridge_id: Option<String>,
     pub dispatcher_agent: Option<String>,
@@ -2393,13 +2404,13 @@ impl AppState {
                     updated = self
                         .update_dispatcher_preferences(
                             &updated.id,
-                            None,
-                            None,
-                            None,
-                            implementation_agent,
-                            implementation_model,
-                            implementation_reasoning_effort,
-                            openclaw_config.clone(),
+                            DispatcherPreferencesPatch {
+                                implementation_agent,
+                                implementation_model,
+                                implementation_reasoning_effort,
+                                openclaw_config: openclaw_config.clone(),
+                                ..DispatcherPreferencesPatch::default()
+                            },
                         )
                         .await?;
                 }
@@ -2508,18 +2519,22 @@ impl AppState {
     pub(crate) async fn update_dispatcher_preferences(
         self: &Arc<Self>,
         thread_id: &str,
-        dispatcher_agent: Option<String>,
-        dispatcher_model: Option<String>,
-        dispatcher_reasoning_effort: Option<String>,
-        implementation_agent: Option<String>,
-        implementation_model: Option<String>,
-        implementation_reasoning_effort: Option<String>,
-        openclaw_config: OpenClawDispatcherConfigPatch,
+        patch: DispatcherPreferencesPatch,
     ) -> Result<SessionRecord> {
         let mut thread = self
             .get_dispatcher_thread(thread_id)
             .await
             .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
+
+        let DispatcherPreferencesPatch {
+            dispatcher_agent,
+            dispatcher_model,
+            dispatcher_reasoning_effort,
+            implementation_agent,
+            implementation_model,
+            implementation_reasoning_effort,
+            openclaw_config,
+        } = patch;
 
         let current_dispatcher_agent = thread.agent.trim().to_ascii_lowercase();
         let target_dispatcher_agent = dispatcher_agent
@@ -3843,12 +3858,12 @@ mod tests {
         dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
-        CreateDispatcherThreadOptions, OpenClawDispatcherConfigPatch, ACP_APPROVAL_GRANTED,
-        ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
-        ACP_IMPLEMENTATION_AGENT_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
-        OPENCLAW_GATEWAY_SCOPES_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY,
-        OPENCLAW_GATEWAY_TOKEN_METADATA_KEY, OPENCLAW_GATEWAY_URL_METADATA_KEY,
-        OPENCLAW_SESSION_KEY_METADATA_KEY,
+        CreateDispatcherThreadOptions, DispatcherPreferencesPatch, OpenClawDispatcherConfigPatch,
+        ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
+        ACP_HEARTBEAT_INTERVAL, ACP_IMPLEMENTATION_AGENT_METADATA_KEY,
+        ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
+        OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, DispatcherTurnRequest, SessionRecord, SessionStatus};
     use anyhow::Result;
@@ -4428,13 +4443,12 @@ mod tests {
         let updated = state
             .update_dispatcher_preferences(
                 &thread.id,
-                Some("openclaw".to_string()),
-                None,
-                None,
-                Some("openclaw".to_string()),
-                None,
-                None,
-                OpenClawDispatcherConfigPatch::default(),
+                DispatcherPreferencesPatch {
+                    dispatcher_agent: Some("openclaw".to_string()),
+                    implementation_agent: Some("openclaw".to_string()),
+                    openclaw_config: OpenClawDispatcherConfigPatch::default(),
+                    ..DispatcherPreferencesPatch::default()
+                },
             )
             .await
             .expect("dispatcher preferences should update");
@@ -4453,13 +4467,15 @@ mod tests {
         let updated = state
             .update_dispatcher_preferences(
                 &thread.id,
-                Some("codex".to_string()),
-                Some("gpt-5.4".to_string()),
-                Some("high".to_string()),
-                Some("codex".to_string()),
-                Some("gpt-5.4".to_string()),
-                Some("high".to_string()),
-                OpenClawDispatcherConfigPatch::default(),
+                DispatcherPreferencesPatch {
+                    dispatcher_agent: Some("codex".to_string()),
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    dispatcher_reasoning_effort: Some("high".to_string()),
+                    implementation_agent: Some("codex".to_string()),
+                    implementation_model: Some("gpt-5.4".to_string()),
+                    implementation_reasoning_effort: Some("high".to_string()),
+                    openclaw_config: OpenClawDispatcherConfigPatch::default(),
+                },
             )
             .await
             .expect("dispatcher runtime should accept codex selections");
@@ -4539,17 +4555,16 @@ mod tests {
         let updated = state
             .update_dispatcher_preferences(
                 &thread.id,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                OpenClawDispatcherConfigPatch {
-                    gateway_token: Some(String::new()),
-                    gateway_scopes: Some("operator.read,operator.write".to_string()),
-                    session_key: Some("conductor:project_dispatcher:demo:dispatcher-1".to_string()),
-                    ..OpenClawDispatcherConfigPatch::default()
+                DispatcherPreferencesPatch {
+                    openclaw_config: OpenClawDispatcherConfigPatch {
+                        gateway_token: Some(String::new()),
+                        gateway_scopes: Some("operator.read,operator.write".to_string()),
+                        session_key: Some(
+                            "conductor:project_dispatcher:demo:dispatcher-1".to_string(),
+                        ),
+                        ..OpenClawDispatcherConfigPatch::default()
+                    },
+                    ..DispatcherPreferencesPatch::default()
                 },
             )
             .await
