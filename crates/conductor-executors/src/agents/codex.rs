@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
-use crate::process::spawn_process;
+use crate::process::{spawn_process, spawn_process_no_stdin};
 
 /// OpenAI Codex CLI executor.
 #[derive(Clone)]
@@ -55,7 +55,12 @@ impl Executor for CodexExecutor {
 
     async fn spawn(&self, options: SpawnOptions) -> Result<ExecutorHandle> {
         let args = self.build_args(&options);
-        let handle = spawn_process(&self.binary, &args, &options.cwd, &options.env).await?;
+        let needs_stdin = options.structured_output && args.iter().any(|arg| arg == "-");
+        let handle = if options.structured_output && !needs_stdin {
+            spawn_process_no_stdin(&self.binary, &args, &options.cwd, &options.env).await?
+        } else {
+            spawn_process(&self.binary, &args, &options.cwd, &options.env).await?
+        };
         let output_rx = wrap_parsed_output(self.clone(), handle.output_rx);
 
         Ok(ExecutorHandle::new(
@@ -81,6 +86,7 @@ impl Executor for CodexExecutor {
             }
 
             args.push("--json".to_string());
+            args.push("--skip-git-repo-check".to_string());
 
             if options.skip_permissions {
                 args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -114,7 +120,10 @@ impl Executor for CodexExecutor {
         }
 
         if options.interactive {
-            let mut args = vec!["--no-alt-screen".to_string()];
+            let mut args = vec![
+                "--no-alt-screen".to_string(),
+                "--skip-git-repo-check".to_string(),
+            ];
 
             if let Some(resume_target) = &options.resume_target {
                 args.push("resume".to_string());
@@ -164,6 +173,7 @@ impl Executor for CodexExecutor {
             "--color".to_string(),
             "never".to_string(),
             "--json".to_string(),
+            "--skip-git-repo-check".to_string(),
         ];
 
         if options.skip_permissions {
@@ -526,6 +536,8 @@ fn extract_text(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::Executor;
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn parse_started_mcp_tool_call_emits_structured_status() {
@@ -606,6 +618,7 @@ mod tests {
         });
 
         assert_eq!(args.first().map(String::as_str), Some("--no-alt-screen"));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args.contains(&"resume".to_string()));
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!args.contains(&"--yolo".to_string()));
@@ -633,6 +646,7 @@ mod tests {
 
         assert_eq!(args.first().map(String::as_str), Some("exec"));
         assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(!args.contains(&"--output-format".to_string()));
         assert!(!args.contains(&"--no-alt-screen".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("hello"));
@@ -686,5 +700,271 @@ mod tests {
             panic!("expected stdout suppression");
         };
         assert!(text.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local codex binary and model access"]
+    async fn structured_spawn_emits_assistant_message() {
+        let executor = CodexExecutor::new(PathBuf::from("codex"));
+        let handle = executor
+            .spawn(SpawnOptions {
+                cwd: std::env::temp_dir(),
+                prompt: "Reply with exactly: codex executor smoke ok".to_string(),
+                model: None,
+                reasoning_effort: None,
+                skip_permissions: false,
+                extra_args: Vec::new(),
+                env: HashMap::new(),
+                branch: None,
+                timeout: Some(Duration::from_secs(60)),
+                interactive: false,
+                structured_output: true,
+                resume_target: None,
+            })
+            .await
+            .expect("codex structured spawn should start");
+
+        let (_pid, _kind, mut output_rx, _input_tx, _terminal_rx, _resize_tx, _kill_tx) =
+            handle.into_parts();
+
+        let mut saw_assistant = false;
+        let mut seen_events = Vec::new();
+        let result = timeout(Duration::from_secs(60), async {
+            while let Some(event) = output_rx.recv().await {
+                seen_events.push(format!("{event:?}"));
+                match event {
+                    ExecutorOutput::Stdout(text) => {
+                        if text.contains("codex executor smoke ok") {
+                            saw_assistant = true;
+                            break;
+                        }
+                    }
+                    ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "timed out waiting for codex structured output"
+        );
+        assert!(
+            saw_assistant,
+            "expected assistant message from codex structured spawn, saw events: {:?}",
+            seen_events
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local conductor checkout, codex binary, and model access"]
+    async fn structured_spawn_with_dispatcher_like_mcp_emits_assistant_message() {
+        let executor = CodexExecutor::new(PathBuf::from("codex"));
+        let conductor_root = required_smoke_path("CONDUCTOR_ROOT");
+        let project_cwd = required_smoke_path("CODER_SMOKE_PROJECT_CWD");
+        let mut env = HashMap::new();
+        env.insert(
+            "CONDUCTOR_SESSION_ID".to_string(),
+            "dispatcher-smoke-session".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_PROJECT_ID".to_string(),
+            "agent-client-protocol-main".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_SESSION_KIND".to_string(),
+            "project_dispatcher".to_string(),
+        );
+        let extra_args = vec![
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.command=\"{}\"",
+                conductor_root.join("target/debug/conductor").display()
+            ),
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.args=[\"--workspace\",\"{}\",\"-c\",\"{}\",\"mcp-server\"]",
+                conductor_root.display(),
+                conductor_root.join("conductor.yaml").display()
+            ),
+            "-c".to_string(),
+            format!("mcp_servers.conductor.cwd=\"{}\"", conductor_root.display()),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_ID=\"dispatcher-smoke-session\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_PROJECT_ID=\"agent-client-protocol-main\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_KIND=\"project_dispatcher\"".to_string(),
+        ];
+        let handle = executor
+            .spawn(SpawnOptions {
+                cwd: project_cwd,
+                prompt: "Reply with exactly: dispatcher smoke ok".to_string(),
+                model: None,
+                reasoning_effort: None,
+                skip_permissions: false,
+                extra_args,
+                env,
+                branch: None,
+                timeout: Some(Duration::from_secs(90)),
+                interactive: false,
+                structured_output: true,
+                resume_target: None,
+            })
+            .await
+            .expect("dispatcher-like codex structured spawn should start");
+
+        let (_pid, _kind, mut output_rx, _input_tx, _terminal_rx, _resize_tx, _kill_tx) =
+            handle.into_parts();
+
+        let mut saw_assistant = false;
+        let mut seen_events = Vec::new();
+        let result = timeout(Duration::from_secs(90), async {
+            while let Some(event) = output_rx.recv().await {
+                seen_events.push(format!("{event:?}"));
+                match event {
+                    ExecutorOutput::Stdout(text) => {
+                        if text.contains("dispatcher smoke ok") {
+                            saw_assistant = true;
+                            break;
+                        }
+                    }
+                    ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "timed out waiting for dispatcher-like codex output"
+        );
+        assert!(
+            saw_assistant,
+            "expected assistant message from dispatcher-like spawn, saw events: {:?}",
+            seen_events
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local dispatcher state, codex binary, and model access"]
+    async fn structured_spawn_with_full_dispatcher_prompt_emits_assistant_message() {
+        let executor = CodexExecutor::new(PathBuf::from("codex"));
+        let conductor_root = required_smoke_path("CONDUCTOR_ROOT");
+        let project_cwd = required_smoke_path("CODER_SMOKE_PROJECT_CWD");
+        let thread_path = required_smoke_path("CODER_SMOKE_DISPATCHER_THREAD_PATH");
+        let thread: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&thread_path).expect("dispatcher thread fixture should exist"),
+        )
+        .expect("dispatcher thread fixture should parse");
+        let base_prompt = thread
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .expect("dispatcher prompt should exist");
+        let turn_prompt = concat!(
+            "ACP execution mode: inspect context first, then create or update the necessary board tasks in this same turn when the request is actionable. Use tool calls to review the repo, board, relevant files, and diffs before writing task packets. Only pause for plan-only review when the user explicitly asks for it or the requested mutation would be ambiguous or unsafe.\n\n",
+            "ACP dispatcher preference: prefer `codex` for newly created implementation tasks unless the user explicitly wants another agent.\n",
+            "Default coding model: `gpt-5.4`. Persist it onto implementation tasks with `model:gpt-5.4` unless the user explicitly overrides it.\n",
+            "Default coding reasoning: `high`. Persist it onto implementation tasks with `reasoningEffort:high` unless the user explicitly overrides it.\n\n",
+            "Reply with exactly: dispatcher smoke ok"
+        );
+        let full_prompt = format!("{base_prompt}\n\n## User request\n{turn_prompt}\n");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "CONDUCTOR_SESSION_ID".to_string(),
+            "dispatcher-smoke-session".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_PROJECT_ID".to_string(),
+            "agent-client-protocol-main".to_string(),
+        );
+        env.insert(
+            "CONDUCTOR_SESSION_KIND".to_string(),
+            "project_dispatcher".to_string(),
+        );
+        let extra_args = vec![
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.command=\"{}\"",
+                conductor_root.join("target/debug/conductor").display()
+            ),
+            "-c".to_string(),
+            format!(
+                "mcp_servers.conductor.args=[\"--workspace\",\"{}\",\"-c\",\"{}\",\"mcp-server\"]",
+                conductor_root.display(),
+                conductor_root.join("conductor.yaml").display()
+            ),
+            "-c".to_string(),
+            format!("mcp_servers.conductor.cwd=\"{}\"", conductor_root.display()),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_ID=\"dispatcher-smoke-session\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_PROJECT_ID=\"agent-client-protocol-main\""
+                .to_string(),
+            "-c".to_string(),
+            "mcp_servers.conductor.env.CONDUCTOR_SESSION_KIND=\"project_dispatcher\"".to_string(),
+        ];
+
+        let handle = executor
+            .spawn(SpawnOptions {
+                cwd: project_cwd,
+                prompt: full_prompt,
+                model: None,
+                reasoning_effort: None,
+                skip_permissions: false,
+                extra_args,
+                env,
+                branch: None,
+                timeout: Some(Duration::from_secs(120)),
+                interactive: false,
+                structured_output: true,
+                resume_target: None,
+            })
+            .await
+            .expect("full dispatcher-like codex spawn should start");
+
+        let (_pid, _kind, mut output_rx, _input_tx, _terminal_rx, _resize_tx, _kill_tx) =
+            handle.into_parts();
+
+        let mut saw_assistant = false;
+        let mut seen_events = Vec::new();
+        let result = timeout(Duration::from_secs(120), async {
+            while let Some(event) = output_rx.recv().await {
+                seen_events.push(format!("{event:?}"));
+                match event {
+                    ExecutorOutput::Stdout(text) => {
+                        if text.contains("dispatcher smoke ok") {
+                            saw_assistant = true;
+                            break;
+                        }
+                    }
+                    ExecutorOutput::Completed { .. } | ExecutorOutput::Failed { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "timed out waiting for full dispatcher-like codex output"
+        );
+        assert!(
+            saw_assistant,
+            "expected assistant message from full dispatcher-like spawn, saw events: {:?}",
+            seen_events
+        );
+    }
+
+    fn required_smoke_path(name: &str) -> PathBuf {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("set {name} before running this ignored smoke test"))
     }
 }
