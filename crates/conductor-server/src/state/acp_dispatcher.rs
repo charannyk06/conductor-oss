@@ -3240,15 +3240,7 @@ impl AppState {
             self.publish_dispatcher_update(&thread.id).await;
         }
 
-        if use_headless_turns {
-            let mut output_rx = output_rx;
-            while let Some(event) = output_rx.recv().await {
-                self.apply_dispatcher_runtime_event(&thread.id, event)
-                    .await?;
-            }
-        } else {
-            self.start_dispatcher_output_consumer(thread.id.clone(), output_rx);
-        }
+        self.start_dispatcher_output_consumer(thread.id.clone(), output_rx);
         Ok(())
     }
 
@@ -3490,6 +3482,14 @@ impl AppState {
             ));
         }
 
+        let active_skills = self
+            .active_session_skills
+            .lock()
+            .await
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default();
+
         let mut threads = self.dispatcher_threads.write().await;
         let thread = threads
             .get_mut(thread_id)
@@ -3507,13 +3507,6 @@ impl AppState {
         let preferred_implementation_model = dispatcher_preferred_implementation_model(thread);
         let preferred_implementation_reasoning =
             dispatcher_preferred_implementation_reasoning_effort(thread);
-        let active_skills = self
-            .active_session_skills
-            .lock()
-            .await
-            .get(thread_id)
-            .cloned()
-            .unwrap_or_default();
         update_dispatcher_active_skills_metadata(thread, &active_skills);
         let allow_board_mutations = acp_dispatcher_turn_allows_board_mutations(&message);
         thread.metadata.insert(
@@ -3726,20 +3719,93 @@ mod tests {
         OPENCLAW_GATEWAY_TOKEN_METADATA_KEY, OPENCLAW_GATEWAY_URL_METADATA_KEY,
         OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
-    use crate::state::{ConversationEntry, SessionRecord, SessionStatus};
+    use crate::state::{ConversationEntry, DispatcherTurnRequest, SessionRecord, SessionStatus};
+    use anyhow::Result;
+    use async_trait::async_trait;
     use chrono::Utc;
     use conductor_core::{
         config::{ConductorConfig, PreferencesConfig, ProjectConfig},
         types::AgentKind,
     };
     use conductor_db::Database;
-    use conductor_executors::executor::ExecutorOutput;
+    use conductor_executors::executor::{Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
+    use std::path::Path;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
+    use tokio::time::timeout;
     use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct DelayedHeadlessExecutor {
+        assistant_text: String,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl Executor for DelayedHeadlessExecutor {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Codex
+        }
+
+        fn name(&self) -> &str {
+            "DelayedHeadlessExecutor"
+        }
+
+        fn binary_path(&self) -> &Path {
+            Path::new("/tmp/delayed-headless-executor")
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn version(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+
+        async fn spawn(&self, _options: SpawnOptions) -> Result<ExecutorHandle> {
+            let (output_tx, output_rx) = mpsc::channel(8);
+            let (input_tx, _input_rx) = mpsc::channel(1);
+            let (kill_tx, mut kill_rx) = oneshot::channel();
+            let assistant_text = self.assistant_text.clone();
+            let delay = self.delay;
+
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {
+                        let _ = output_tx.send(ExecutorOutput::Stdout(assistant_text)).await;
+                        let _ = output_tx.send(ExecutorOutput::Completed { exit_code: 0 }).await;
+                    }
+                    _ = &mut kill_rx => {
+                        let _ = output_tx.send(ExecutorOutput::Failed {
+                            error: "killed".to_string(),
+                            exit_code: None,
+                        }).await;
+                    }
+                }
+            });
+
+            Ok(ExecutorHandle::new(
+                4242,
+                AgentKind::Codex,
+                output_rx,
+                input_tx,
+                kill_tx,
+            ))
+        }
+
+        fn build_args(&self, _options: &SpawnOptions) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn parse_output(&self, line: &str) -> ExecutorOutput {
+            ExecutorOutput::Stdout(line.to_string())
+        }
+    }
 
     async fn build_test_state(label: &str) -> (std::path::PathBuf, Arc<AppState>) {
         let root = std::env::temp_dir().join(format!("{label}-{}", Uuid::new_v4()));
@@ -4139,6 +4205,55 @@ mod tests {
                 .map(String::as_str),
             Some(ACP_APPROVAL_GRANTED)
         );
+    }
+
+    #[tokio::test]
+    async fn headless_dispatcher_send_returns_before_runtime_finishes() {
+        let (root, state) = build_test_state("acp-headless-send-fast").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        state.executors.write().await.insert(
+            AgentKind::Codex,
+            Arc::new(DelayedHeadlessExecutor {
+                assistant_text: "headless assistant reply".to_string(),
+                delay: Duration::from_millis(250),
+            }),
+        );
+
+        timeout(
+            Duration::from_millis(100),
+            state.send_to_dispatcher_thread(
+                &thread.id,
+                DispatcherTurnRequest::plain(
+                    "Ship the fix".to_string(),
+                    Vec::new(),
+                    None,
+                    None,
+                    "chat",
+                ),
+            ),
+        )
+        .await
+        .expect("headless send should not block on runtime completion")
+        .expect("dispatcher send should succeed");
+
+        tokio::time::sleep(Duration::from_millis(350)).await;
+
+        let updated = state
+            .get_dispatcher_thread(&thread.id)
+            .await
+            .expect("dispatcher thread should still exist");
+        assert!(updated
+            .conversation
+            .iter()
+            .any(|entry| entry.kind == "assistant_message"
+                && entry.text.contains("headless assistant reply")));
+        assert_eq!(updated.status, SessionStatus::NeedsInput);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
