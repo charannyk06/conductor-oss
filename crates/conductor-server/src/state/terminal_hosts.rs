@@ -131,21 +131,37 @@ impl TerminalHostRegistry {
         resize_tx: Option<mpsc::Sender<PtyDimensions>>,
         kill_tx: oneshot::Sender<()>,
     ) {
-        // Guard against race: only skip when the existing sender is still live.
-        // A stale closed sender should be replaced so reconnect and restore paths
-        // can heal after browser tab switches or websocket drops.
-        {
-            let current = handle.input_tx.read().await;
+        // Guard against race: perform the liveness check and replacement under
+        // one write lock so concurrent restores cannot both decide the runtime
+        // is detached and install competing channel sets.
+        let replaced_input = {
+            let mut current = handle.input_tx.write().await;
             if current.as_ref().is_some_and(|tx| !tx.is_closed()) {
                 tracing::warn!(
                     "terminal session already has active runtime attached, skipping attach to prevent channel overwrite"
                 );
                 return;
             }
+            let previous = current.take();
+            *current = Some(input_tx);
+            previous
+        };
+        if let Some(previous_input) = replaced_input {
+            handle.retained_input_txs.lock().await.push(previous_input);
         }
-        *handle.input_tx.write().await = Some(input_tx);
+
         *handle.resize_tx.write().await = resize_tx;
-        *handle.kill_tx.lock().await = Some(kill_tx);
+
+        let replaced_kill = {
+            let mut current = handle.kill_tx.lock().await;
+            let previous = current.take();
+            *current = Some(kill_tx);
+            previous
+        };
+        if let Some(previous_kill) = replaced_kill {
+            handle.retained_kill_txs.lock().await.push(previous_kill);
+        }
+
         let mut tracking = handle.terminal_persistence.lock().await;
         tracking.last_touched_at = Instant::now();
         tracking.last_detached_at = None;
