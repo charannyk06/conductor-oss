@@ -163,6 +163,7 @@ pub struct AppState {
     dispatcher_feed_payload_cache: Mutex<HashMap<String, FeedPayloadCacheEntry>>,
     dispatcher_runtimes: Mutex<HashMap<String, DispatcherRuntimeHandle>>,
     pub active_session_skills: Mutex<HashMap<String, Vec<String>>>,
+    terminal_restore_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl AppState {
@@ -203,6 +204,7 @@ impl AppState {
             dispatcher_feed_payload_cache: Mutex::new(HashMap::new()),
             dispatcher_runtimes: Mutex::new(HashMap::new()),
             active_session_skills: Mutex::new(HashMap::new()),
+            terminal_restore_guards: Mutex::new(HashMap::new()),
         });
         state.ensure_session_store();
         state.ensure_dispatcher_store();

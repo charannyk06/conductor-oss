@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use conductor_executors::executor::{Executor, ExecutorHandle, SpawnOptions};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::state::AppState;
 
@@ -139,6 +140,15 @@ impl AppState {
     }
 
     pub(crate) async fn ensure_session_live(self: &Arc<Self>, session_id: &str) -> Result<bool> {
+        let restore_guard = {
+            let mut guards = self.terminal_restore_guards.lock().await;
+            guards
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _restore_lock = restore_guard.lock().await;
+
         if self.terminal_runtime_attached(session_id).await {
             return Ok(true);
         }

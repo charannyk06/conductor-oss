@@ -52,7 +52,13 @@ impl TerminalHostRegistry {
             .collect::<Vec<_>>();
         let mut attached = Vec::with_capacity(hosts.len());
         for (session_id, handle) in hosts {
-            if handle.input_tx.read().await.is_some() {
+            if handle
+                .input_tx
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|tx| !tx.is_closed())
+            {
                 attached.push(session_id);
             }
         }
@@ -125,17 +131,37 @@ impl TerminalHostRegistry {
         resize_tx: Option<mpsc::Sender<PtyDimensions>>,
         kill_tx: oneshot::Sender<()>,
     ) {
-        // Guard against race: only attach if the channels are currently None.
-        // This prevents a slow reconnect from overwriting a faster new session's channels.
-        if handle.input_tx.read().await.is_some() {
-            tracing::warn!(
-                "terminal session already has active runtime attached, skipping attach to prevent channel overwrite"
-            );
-            return;
+        // Guard against race: perform the liveness check and replacement under
+        // one write lock so concurrent restores cannot both decide the runtime
+        // is detached and install competing channel sets.
+        let replaced_input = {
+            let mut current = handle.input_tx.write().await;
+            if current.as_ref().is_some_and(|tx| !tx.is_closed()) {
+                tracing::warn!(
+                    "terminal session already has active runtime attached, skipping attach to prevent channel overwrite"
+                );
+                return;
+            }
+            let previous = current.take();
+            *current = Some(input_tx);
+            previous
+        };
+        if let Some(previous_input) = replaced_input {
+            handle.retained_input_txs.lock().await.push(previous_input);
         }
-        *handle.input_tx.write().await = Some(input_tx);
+
         *handle.resize_tx.write().await = resize_tx;
-        *handle.kill_tx.lock().await = Some(kill_tx);
+
+        let replaced_kill = {
+            let mut current = handle.kill_tx.lock().await;
+            let previous = current.take();
+            *current = Some(kill_tx);
+            previous
+        };
+        if let Some(previous_kill) = replaced_kill {
+            handle.retained_kill_txs.lock().await.push(previous_kill);
+        }
+
         let mut tracking = handle.terminal_persistence.lock().await;
         tracking.last_touched_at = Instant::now();
         tracking.last_detached_at = None;
@@ -172,7 +198,12 @@ impl TerminalHostRegistry {
         let Some(handle) = self.hosts.read().await.get(session_id).cloned() else {
             return false;
         };
-        let attached = handle.input_tx.read().await.is_some();
+        let attached = handle
+            .input_tx
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|tx| !tx.is_closed());
         if attached {
             Self::touch(&handle).await;
         }
@@ -247,7 +278,13 @@ impl TerminalHostRegistry {
     }
 
     async fn should_evict(handle: &Arc<LiveSessionHandle>, idle_ttl: Duration) -> bool {
-        if handle.input_tx.read().await.is_some() {
+        if handle
+            .input_tx
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|tx| !tx.is_closed())
+        {
             return false;
         }
         if handle.terminal_tx.receiver_count() > 0 {
@@ -370,5 +407,42 @@ mod tests {
             kill_rx_b.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Closed)
         ));
+    }
+
+    #[tokio::test]
+    async fn registry_treats_closed_input_sender_as_detached_and_allows_reattach() {
+        let registry = TerminalHostRegistry::default();
+        let handle = registry.ensure_host("session-1", None).await;
+
+        let (input_tx_a, input_rx_a) = mpsc::channel::<ExecutorInput>(1);
+        let (kill_tx_a, _kill_rx_a) = oneshot::channel();
+        registry
+            .attach_runtime(&handle, input_tx_a, None, kill_tx_a)
+            .await;
+        drop(input_rx_a);
+
+        assert!(!registry.runtime_attached("session-1").await);
+
+        let (input_tx_b, mut input_rx_b) = mpsc::channel::<ExecutorInput>(1);
+        let (kill_tx_b, _kill_rx_b) = oneshot::channel();
+        registry
+            .attach_runtime(&handle, input_tx_b, None, kill_tx_b)
+            .await;
+
+        let active_sender = handle
+            .input_tx
+            .read()
+            .await
+            .clone()
+            .expect("reattach should install a fresh sender");
+        active_sender
+            .send(ExecutorInput::Raw("ping".to_string()))
+            .await
+            .expect("fresh sender should stay open");
+        match input_rx_b.recv().await {
+            Some(ExecutorInput::Raw(value)) => assert_eq!(value, "ping"),
+            other => panic!("unexpected input frame: {other:?}"),
+        }
+        assert!(registry.runtime_attached("session-1").await);
     }
 }
