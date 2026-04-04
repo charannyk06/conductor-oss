@@ -289,6 +289,50 @@ mod tests {
         assert_eq!(dispatcher.queue_len().await, 0);
     }
 
+    #[tokio::test]
+    async fn drain_ready_requeues_requests_when_spawn_limit_is_reached() {
+        let config = DispatcherConfig {
+            max_global_sessions: 1,
+            max_project_sessions: 1,
+            ..Default::default()
+        };
+        let event_bus = EventBus::new(16);
+        let dispatcher = Dispatcher::new(config, event_bus);
+
+        dispatcher
+            .enqueue(DispatchRequest {
+                project_id: "p1".to_string(),
+                card_title: "First".to_string(),
+                prompt: "First".to_string(),
+                agent: AgentKind::Codex,
+                model: None,
+                branch: None,
+            })
+            .await;
+        dispatcher
+            .enqueue(DispatchRequest {
+                project_id: "p2".to_string(),
+                card_title: "Second".to_string(),
+                prompt: "Second".to_string(),
+                agent: AgentKind::Codex,
+                model: None,
+                branch: None,
+            })
+            .await;
+
+        assert_eq!(dispatcher.queue_len().await, 2);
+
+        let first = dispatcher.drain_ready().await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(dispatcher.queue_len().await, 1);
+
+        dispatcher.limiter.release("p1").await;
+
+        let second = dispatcher.drain_ready().await;
+        assert_eq!(second.len(), 1);
+        assert_eq!(dispatcher.queue_len().await, 0);
+    }
+
     #[test]
     fn test_parse_agent_tag() {
         assert_eq!(parse_agent_tag("claude"), Some(AgentKind::ClaudeCode));
