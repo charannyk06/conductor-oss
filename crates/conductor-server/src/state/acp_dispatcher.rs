@@ -293,23 +293,7 @@ const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 4] = [
 
 const DISPATCHER_OPENCLAW_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_OPENCLAW_REASONING_OPTIONS: [DispatcherSelectOption; 0] = [];
-const DISPATCHER_CURSOR_MODEL_OPTIONS: [DispatcherSelectOption; 3] = [
-    DispatcherSelectOption {
-        value: "gpt-5",
-        name: "GPT-5",
-        description: "Cursor Agent's GPT-5 preset alias.",
-    },
-    DispatcherSelectOption {
-        value: "sonnet-4",
-        name: "Sonnet 4",
-        description: "Cursor Agent's Sonnet preset alias.",
-    },
-    DispatcherSelectOption {
-        value: "opus",
-        name: "Opus",
-        description: "Cursor Agent's Opus preset alias.",
-    },
-];
+const DISPATCHER_CURSOR_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 
 const DISPATCHER_CODEX_MODEL_OPTIONS: [DispatcherSelectOption; 8] = [
     DispatcherSelectOption {
@@ -1581,7 +1565,7 @@ fn apply_dispatcher_implementation_preferences(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| match value {
-            "codex" | "claude-code" | "gemini" | "openclaw" => value.to_string(),
+            "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli" => value.to_string(),
             _ => "codex".to_string(),
         })
         .unwrap_or_else(|| previous_agent.clone());
@@ -2635,10 +2619,10 @@ impl AppState {
             .unwrap_or_else(|| dispatcher_preferred_implementation_agent(&thread));
         if !matches!(
             target_implementation_agent.as_str(),
-            "codex" | "claude-code" | "gemini" | "openclaw"
+            "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli"
         ) {
             return Err(anyhow!(
-                "Unsupported implementation agent `{target_implementation_agent}`. Expected codex, claude-code, gemini, or openclaw"
+                "Unsupported implementation agent `{target_implementation_agent}`. Expected codex, claude-code, gemini, openclaw, or cursor-cli"
             ));
         }
         let target_implementation_model = resolve_dispatcher_implementation_model(
