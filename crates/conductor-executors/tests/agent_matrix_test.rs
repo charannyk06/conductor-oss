@@ -172,7 +172,7 @@ fn headless_build_args_include_expected_flags_and_safe_extra_args() {
             "--output-format",
             "stream-json",
             "--model",
-            "gpt-5",
+            "gpt-5.3-codex",
             "cursor",
         ],
     );
@@ -286,7 +286,7 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
 
     let cursor =
         CursorExecutor::new(PathBuf::from("/usr/bin/cursor-agent")).build_args(&interactive);
-    assert_has_pair(&cursor, "--model", "gpt-5");
+    assert_has_pair(&cursor, "--model", "gpt-5.3-codex");
     assert_no_flag(&cursor, "--effort");
     assert_no_flag(&cursor, "--reasoning-effort");
     assert_no_flag(&cursor, "--variant");
@@ -320,7 +320,7 @@ fn interactive_launch_matrix_tracks_model_and_reasoning_parameters() {
 fn cursor_wrapper_binary_uses_agent_subcommand() {
     let args = CursorExecutor::new(PathBuf::from("/usr/bin/cursor")).build_args(&options("cursor"));
     assert_eq!(args.first().map(String::as_str), Some("agent"));
-    assert_has_pair(&args, "--model", "gpt-5");
+    assert_has_pair(&args, "--model", "gpt-5.3-codex");
 }
 
 #[test]

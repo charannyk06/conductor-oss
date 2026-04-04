@@ -120,10 +120,7 @@ impl Executor for CodexExecutor {
         }
 
         if options.interactive {
-            let mut args = vec![
-                "--no-alt-screen".to_string(),
-                "--skip-git-repo-check".to_string(),
-            ];
+            let mut args = vec!["--no-alt-screen".to_string()];
 
             if let Some(resume_target) = &options.resume_target {
                 args.push("resume".to_string());
@@ -618,7 +615,7 @@ mod tests {
         });
 
         assert_eq!(args.first().map(String::as_str), Some("--no-alt-screen"));
-        assert!(args.contains(&"--skip-git-repo-check".to_string()));
+        assert!(!args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args.contains(&"resume".to_string()));
         assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
         assert!(!args.contains(&"--yolo".to_string()));
