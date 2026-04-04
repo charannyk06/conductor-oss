@@ -72,12 +72,37 @@ export function AppShell({
     };
   }, [resizing, sidebarWidth]);
 
-  const shellStyle = { "--workspace-sidebar-width": `${sidebarWidth}px` } as CSSProperties;
+  useEffect(() => {
+    const root = document.documentElement;
+
+    const syncViewportMetrics = () => {
+      const visualViewport = window.visualViewport;
+      const viewportHeight = visualViewport?.height ?? window.innerHeight;
+      root.style.setProperty("--oc-app-shell-height", `${Math.round(viewportHeight)}px`);
+    };
+
+    syncViewportMetrics();
+    const visualViewport = window.visualViewport;
+    visualViewport?.addEventListener("resize", syncViewportMetrics);
+    visualViewport?.addEventListener("scroll", syncViewportMetrics);
+    window.addEventListener("resize", syncViewportMetrics);
+
+    return () => {
+      visualViewport?.removeEventListener("resize", syncViewportMetrics);
+      visualViewport?.removeEventListener("scroll", syncViewportMetrics);
+      window.removeEventListener("resize", syncViewportMetrics);
+    };
+  }, []);
+
+  const shellStyle = {
+    "--workspace-sidebar-width": `${sidebarWidth}px`,
+    "--oc-shell-height": "var(--oc-app-shell-height, 100dvh)",
+  } as CSSProperties;
 
   return (
     <div
       style={shellStyle}
-      className="relative flex h-svh w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
+      className="relative flex h-[var(--oc-shell-height)] min-h-[var(--oc-shell-height)] max-h-[var(--oc-shell-height)] w-full max-w-full overflow-hidden bg-[var(--vk-bg-main)] text-[var(--vk-text-normal)] [padding-top:env(safe-area-inset-top)] [padding-bottom:env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]"
     >
       {mobileSidebarOpen && (
         <button
