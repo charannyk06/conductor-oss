@@ -1473,6 +1473,11 @@ fn dispatcher_model_supported_for_agent(agent: &str, model: &str) -> bool {
                 || normalized.starts_with("claude-")
         }
         "gemini" => normalized.starts_with("gemini"),
+        "cursor-cli" => {
+            // Cursor model IDs are runtime-discovered (e.g. auto, gpt-5.4-medium,
+            // claude-4.6-opus-max-thinking) and not statically enumerated here.
+            true
+        }
         _ => {
             codex_runtime_model_supported(trimmed)
                 || normalized.starts_with("gpt-")
