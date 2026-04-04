@@ -120,9 +120,7 @@ impl Executor for CodexExecutor {
         }
 
         if options.interactive {
-            let mut args = vec![
-                "--no-alt-screen".to_string(),
-            ];
+            let mut args = vec!["--no-alt-screen".to_string()];
 
             if let Some(resume_target) = &options.resume_target {
                 args.push("resume".to_string());

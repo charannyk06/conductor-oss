@@ -412,9 +412,18 @@ mod tests {
 
     #[test]
     fn normalize_cursor_model_maps_common_names() {
-        assert_eq!(normalize_cursor_model(Some("gpt-5")), Some("gpt-5.3-codex".to_string()));
-        assert_eq!(normalize_cursor_model(Some("auto")), Some("auto".to_string()));
-        assert_eq!(normalize_cursor_model(Some("gpt-5.3-codex-high")), Some("gpt-5.3-codex-high".to_string()));
+        assert_eq!(
+            normalize_cursor_model(Some("gpt-5")),
+            Some("gpt-5.3-codex".to_string())
+        );
+        assert_eq!(
+            normalize_cursor_model(Some("auto")),
+            Some("auto".to_string())
+        );
+        assert_eq!(
+            normalize_cursor_model(Some("gpt-5.3-codex-high")),
+            Some("gpt-5.3-codex-high".to_string())
+        );
         assert_eq!(normalize_cursor_model(Some("claude-sonnet-4")), None);
         assert_eq!(normalize_cursor_model(None), None);
     }
