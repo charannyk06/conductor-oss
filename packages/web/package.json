@@ -9,6 +9,7 @@
     "build": "bun run --cwd ../core build && next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "test": "bun test",
     "clean": "rm -rf .next"
   },
   "dependencies": {
