@@ -10,6 +10,26 @@ use super::discover_binary;
 use crate::executor::{wrap_parsed_output, Executor, ExecutorHandle, ExecutorOutput, SpawnOptions};
 use crate::process::{spawn_process, spawn_process_no_stdin};
 
+/// Cursor CLI uses its own model namespace. Map generic model names from
+/// Kanban card metadata to Cursor-accepted identifiers. Returns `None` for
+/// unrecognized names so the agent falls back to `auto` (its default).
+fn normalize_cursor_model(model: Option<&str>) -> Option<String> {
+    let value = model.map(str::trim).filter(|v| !v.is_empty())?;
+    match value {
+        // Cursor-native names pass through unchanged
+        "auto" | "composer-2-fast" | "composer-2" | "composer-1.5" => Some(value.to_string()),
+        // Cursor uses gpt-5.x-codex naming, not bare gpt-5
+        "gpt-5" => Some("gpt-5.3-codex".to_string()),
+        "gpt-5-fast" => Some("gpt-5.3-codex-fast".to_string()),
+        "gpt-5-high" => Some("gpt-5.3-codex-high".to_string()),
+        // Already a Cursor-compatible model id (gpt-5.x-codex-*, etc.)
+        s if s.starts_with("gpt-5.") => Some(value.to_string()),
+        s if s.starts_with("composer-") => Some(value.to_string()),
+        // Unrecognized model: let Cursor pick its default
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct CursorExecutor {
     binary: PathBuf,
@@ -82,9 +102,9 @@ impl Executor for CursorExecutor {
                 args.push("--force".to_string());
             }
 
-            if let Some(model) = &options.model {
+            if let Some(model) = normalize_cursor_model(options.model.as_deref()) {
                 args.push("--model".to_string());
-                args.push(model.clone());
+                args.push(model);
             }
 
             args.extend(options.sanitized_extra_args());
@@ -100,9 +120,9 @@ impl Executor for CursorExecutor {
             "--output-format".to_string(),
             "stream-json".to_string(),
         ]);
-        if let Some(model) = &options.model {
+        if let Some(model) = normalize_cursor_model(options.model.as_deref()) {
             args.push("--model".to_string());
-            args.push(model.clone());
+            args.push(model);
         }
         if options.skip_permissions {
             args.push("--force".to_string());
@@ -363,6 +383,40 @@ mod tests {
         assert!(args.contains(&"--print".to_string()));
         assert!(args.contains(&"stream-json".to_string()));
         assert!(args.contains(&"--force".to_string()));
+        // gpt-5 should be mapped to a Cursor-compatible model name
+        assert!(args.contains(&"gpt-5.3-codex".to_string()));
+        assert!(!args.contains(&"gpt-5".to_string()));
+    }
+
+    #[test]
+    fn build_args_drops_unrecognized_model() {
+        let executor = CursorExecutor::new(PathBuf::from("/usr/bin/cursor-agent"));
+        let args = executor.build_args(&SpawnOptions {
+            cwd: PathBuf::from("/tmp/demo"),
+            prompt: "hello".to_string(),
+            model: Some("claude-sonnet-4".to_string()),
+            reasoning_effort: None,
+            skip_permissions: false,
+            extra_args: Vec::new(),
+            env: HashMap::new(),
+            branch: None,
+            timeout: None,
+            interactive: false,
+            structured_output: false,
+            resume_target: None,
+        });
+
+        assert!(!args.contains(&"--model".to_string()));
+        assert!(!args.contains(&"claude-sonnet-4".to_string()));
+    }
+
+    #[test]
+    fn normalize_cursor_model_maps_common_names() {
+        assert_eq!(normalize_cursor_model(Some("gpt-5")), Some("gpt-5.3-codex".to_string()));
+        assert_eq!(normalize_cursor_model(Some("auto")), Some("auto".to_string()));
+        assert_eq!(normalize_cursor_model(Some("gpt-5.3-codex-high")), Some("gpt-5.3-codex-high".to_string()));
+        assert_eq!(normalize_cursor_model(Some("claude-sonnet-4")), None);
+        assert_eq!(normalize_cursor_model(None), None);
     }
 
     #[test]
