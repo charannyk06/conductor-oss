@@ -9,7 +9,7 @@
     "build": "bun run --cwd ../core build && next build --webpack",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
+    "test": "find src -name '*.test.ts' -print0 | xargs -0 tsx --test",
     "clean": "rm -rf .next"
   },
   "dependencies": {
@@ -50,6 +50,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "tailwindcss": "^4.2.1",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
 }
