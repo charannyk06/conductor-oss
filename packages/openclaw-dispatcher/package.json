@@ -19,7 +19,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/adapter.test.ts src/client.test.ts"
   },
   "devDependencies": {
     "@types/node": "^25.3.3",

@@ -11,7 +11,7 @@ use crate::dispatcher_task_lifecycle::{
     DispatcherTaskUpdateInput,
 };
 use crate::routes::boards::{load_board_response, resolve_board_task_record, split_task_text};
-use crate::state::{AppState, SessionRecord, SessionStatus, SpawnRequest};
+use crate::state::{AppState, SessionRecord, SpawnRequest};
 
 const MCP_SERVER_NAME: &str = "conductor";
 const MCP_SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -118,8 +118,11 @@ impl AppStateMcpBackend {
             .get(ACP_APPROVAL_STATE_METADATA_KEY)
             .map(String::as_str)
             == Some(ACP_APPROVAL_GRANTED);
-        let active_turn = matches!(session.status, SessionStatus::Working);
-        if approved && active_turn {
+        // Approval (plan vs execute) is the real gate. Do not also require
+        // SessionStatus::Working: dispatcher threads can be Idle/NeedsInput briefly
+        // while MCP tools run, and headless agents may not flip status the same way
+        // as interactive PTY sessions.
+        if approved && !session.status.is_terminal() {
             return Ok(());
         }
         bail!("ACP dispatcher board mutations are disabled for this plan-only turn");
@@ -1004,6 +1007,7 @@ pub struct JsonRpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::SessionStatus;
     use chrono::Utc;
     use conductor_core::config::{ConductorConfig, PreferencesConfig, ProjectConfig};
     use conductor_db::Database;

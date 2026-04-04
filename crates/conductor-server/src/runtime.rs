@@ -220,12 +220,15 @@ async fn process_board_change(
     }
 
     let mut board = parse_board(&board_path, &project_id);
-    let ready_tasks = board
-        .columns
-        .iter()
-        .find(|column| column.role == "ready")
-        .map(|column| column.tasks.clone())
-        .unwrap_or_default();
+    // Auto-dispatch from both "Ready" and "To do" (intake). Many boards keep work in
+    // the intake column until it is triaged; ignoring intake meant nothing ran until
+    // cards were moved to Ready.
+    let mut ready_tasks = Vec::new();
+    for column in &board.columns {
+        if column.role == "ready" || column.role == "intake" {
+            ready_tasks.extend(column.tasks.iter().cloned());
+        }
+    }
     if ready_tasks.is_empty() {
         return Ok(());
     }

@@ -7,7 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/auth.test.ts src/lib/security.test.ts"
   },
   "dependencies": {
     "@puppeteer/browsers": "^2.13.0",

@@ -113,8 +113,20 @@ jobs:
       - name: Typecheck web
         run: bun run --cwd packages/web typecheck
 
+      - name: Typecheck preview-worker
+        run: bun run --cwd preview-worker typecheck
+
       - name: Test core
         run: bun run --cwd packages/core test
 
       - name: Test CLI
         run: bun run --cwd packages/cli test
+
+      - name: Test openclaw-dispatcher
+        run: bun run --cwd packages/openclaw-dispatcher test
+
+      - name: Test web
+        run: bun run --cwd packages/web test
+
+      - name: Test preview-worker
+        run: bun run --cwd preview-worker test
