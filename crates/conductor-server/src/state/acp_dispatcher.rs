@@ -293,6 +293,23 @@ const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 4] = [
 
 const DISPATCHER_OPENCLAW_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_OPENCLAW_REASONING_OPTIONS: [DispatcherSelectOption; 0] = [];
+const DISPATCHER_CURSOR_MODEL_OPTIONS: [DispatcherSelectOption; 3] = [
+    DispatcherSelectOption {
+        value: "gpt-5",
+        name: "GPT-5",
+        description: "Cursor Agent's GPT-5 preset alias.",
+    },
+    DispatcherSelectOption {
+        value: "sonnet-4",
+        name: "Sonnet 4",
+        description: "Cursor Agent's Sonnet preset alias.",
+    },
+    DispatcherSelectOption {
+        value: "opus",
+        name: "Opus",
+        description: "Cursor Agent's Opus preset alias.",
+    },
+];
 
 const DISPATCHER_CODEX_MODEL_OPTIONS: [DispatcherSelectOption; 8] = [
     DispatcherSelectOption {
@@ -1281,6 +1298,7 @@ pub(crate) fn dispatcher_implementation_model_options(
         "claude-code" => &DISPATCHER_CLAUDE_MODEL_OPTIONS,
         "gemini" => &DISPATCHER_GEMINI_MODEL_OPTIONS,
         "openclaw" => &DISPATCHER_OPENCLAW_MODEL_OPTIONS,
+        "cursor-cli" => &DISPATCHER_CURSOR_MODEL_OPTIONS,
         _ => &DISPATCHER_CODEX_MODEL_OPTIONS,
     }
 }
@@ -1308,6 +1326,7 @@ pub(crate) fn dispatcher_default_implementation_reasoning_effort(
     match agent.trim() {
         "claude-code" => Some("medium"),
         "codex" => Some("high"),
+        "cursor-cli" => Some("medium"),
         "openclaw" => None,
         _ => None,
     }
