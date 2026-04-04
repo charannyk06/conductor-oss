@@ -293,6 +293,7 @@ const DISPATCHER_IMPLEMENTATION_AGENT_OPTIONS: [DispatcherSelectOption; 4] = [
 
 const DISPATCHER_OPENCLAW_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 const DISPATCHER_OPENCLAW_REASONING_OPTIONS: [DispatcherSelectOption; 0] = [];
+const DISPATCHER_CURSOR_MODEL_OPTIONS: [DispatcherSelectOption; 0] = [];
 
 const DISPATCHER_CODEX_MODEL_OPTIONS: [DispatcherSelectOption; 8] = [
     DispatcherSelectOption {
@@ -1259,7 +1260,9 @@ fn default_implementation_agent(
         .or(project.agent.as_deref())
         .unwrap_or(default_agent);
     match candidate.trim() {
-        "codex" | "claude-code" | "gemini" | "openclaw" => candidate.trim().to_string(),
+        "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli" => {
+            candidate.trim().to_string()
+        }
         _ => "codex".to_string(),
     }
 }
@@ -1281,6 +1284,7 @@ pub(crate) fn dispatcher_implementation_model_options(
         "claude-code" => &DISPATCHER_CLAUDE_MODEL_OPTIONS,
         "gemini" => &DISPATCHER_GEMINI_MODEL_OPTIONS,
         "openclaw" => &DISPATCHER_OPENCLAW_MODEL_OPTIONS,
+        "cursor-cli" => &DISPATCHER_CURSOR_MODEL_OPTIONS,
         _ => &DISPATCHER_CODEX_MODEL_OPTIONS,
     }
 }
@@ -1308,6 +1312,7 @@ pub(crate) fn dispatcher_default_implementation_reasoning_effort(
     match agent.trim() {
         "claude-code" => Some("medium"),
         "codex" => Some("high"),
+        "cursor-cli" => Some("medium"),
         "openclaw" => None,
         _ => None,
     }
@@ -1470,6 +1475,11 @@ fn dispatcher_model_supported_for_agent(agent: &str, model: &str) -> bool {
                 || normalized.starts_with("claude-")
         }
         "gemini" => normalized.starts_with("gemini"),
+        "cursor-cli" => {
+            // Cursor model IDs are runtime-discovered (e.g. auto, gpt-5.4-medium,
+            // claude-4.6-opus-max-thinking) and not statically enumerated here.
+            true
+        }
         _ => {
             codex_runtime_model_supported(trimmed)
                 || normalized.starts_with("gpt-")
@@ -1562,7 +1572,7 @@ fn apply_dispatcher_implementation_preferences(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| match value {
-            "codex" | "claude-code" | "gemini" | "openclaw" => value.to_string(),
+            "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli" => value.to_string(),
             _ => "codex".to_string(),
         })
         .unwrap_or_else(|| previous_agent.clone());
@@ -2616,10 +2626,10 @@ impl AppState {
             .unwrap_or_else(|| dispatcher_preferred_implementation_agent(&thread));
         if !matches!(
             target_implementation_agent.as_str(),
-            "codex" | "claude-code" | "gemini" | "openclaw"
+            "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli"
         ) {
             return Err(anyhow!(
-                "Unsupported implementation agent `{target_implementation_agent}`. Expected codex, claude-code, gemini, or openclaw"
+                "Unsupported implementation agent `{target_implementation_agent}`. Expected codex, claude-code, gemini, openclaw, or cursor-cli"
             ));
         }
         let target_implementation_model = resolve_dispatcher_implementation_model(

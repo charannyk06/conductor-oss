@@ -17,7 +17,7 @@ import { getKnownAgent } from "@/lib/knownAgents";
 import type { RuntimeAgentModelCatalog } from "@/lib/runtimeAgentModelsShared";
 import { formatCurrentModelLabel } from "@/lib/sessionModelCatalog";
 
-const DISPATCHER_AGENT_OPTIONS = ["codex", "claude-code", "gemini", "openclaw"] as const;
+const DISPATCHER_AGENT_OPTIONS = ["codex", "claude-code", "gemini", "cursor-cli", "openclaw"] as const;
 
 function formatReasoningLabel(value: string): string {
   if (value === "xhigh") {
