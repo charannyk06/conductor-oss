@@ -1637,7 +1637,7 @@ export function DispatcherSessionPane({
         )}
       </div>
 
-      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-4 sm:px-4">
+      <div className="border-t border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 sm:px-4 sm:pb-4">
         {showMetaRow ? (
           <div className="mb-3 flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
             {!hideRepositoryControls ? (
@@ -1735,6 +1735,7 @@ export function DispatcherSessionPane({
             void handleSend();
           }}
           className="rounded-[3px] border border-[var(--vk-border)] bg-[#1f1f1f] px-2.5 py-2.5 sm:px-3 sm:py-3"
+          style={{ paddingBottom: "calc(0.625rem + env(safe-area-inset-bottom))" }}
         >
           {composerToolbar ? <div className="mb-2.5 sm:mb-3">{composerToolbar}</div> : null}
           <textarea

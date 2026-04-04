@@ -208,6 +208,17 @@ pub(crate) struct DispatcherSelectOption {
 }
 
 #[derive(Clone, Debug, Default)]
+pub(crate) struct DispatcherPreferencesPatch {
+    pub dispatcher_agent: Option<String>,
+    pub dispatcher_model: Option<String>,
+    pub dispatcher_reasoning_effort: Option<String>,
+    pub implementation_agent: Option<String>,
+    pub implementation_model: Option<String>,
+    pub implementation_reasoning_effort: Option<String>,
+    pub openclaw_config: OpenClawDispatcherConfigPatch,
+}
+
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CreateDispatcherThreadOptions {
     pub bridge_id: Option<String>,
     pub dispatcher_agent: Option<String>,
@@ -1823,19 +1834,30 @@ impl AppState {
             guard.remove(thread_id);
         }
         self.invalidate_dispatcher_caches(thread_id).await;
-
-        let snapshot_path = self.dispatcher_snapshot_path(thread_id);
-        let session_json_path = self.acp_session_memory_json_path(&thread.project_id, thread_id);
-        let session_md_path = self.acp_session_memory_markdown_path(&thread.project_id, thread_id);
-        tokio::try_join!(
-            remove_optional_file(snapshot_path),
-            remove_optional_file(session_json_path),
-            remove_optional_file(session_md_path),
-        )?;
+        self.publish_dispatcher_update(thread_id).await;
 
         let cleanup_state = Arc::clone(self);
         let cleanup_thread_id = thread_id.to_string();
+        let cleanup_project_id = thread.project_id.clone();
         tokio::spawn(async move {
+            let snapshot_path = cleanup_state.dispatcher_snapshot_path(&cleanup_thread_id);
+            let session_json_path =
+                cleanup_state.acp_session_memory_json_path(&cleanup_project_id, &cleanup_thread_id);
+            let session_md_path = cleanup_state
+                .acp_session_memory_markdown_path(&cleanup_project_id, &cleanup_thread_id);
+
+            if let Err(err) = tokio::try_join!(
+                remove_optional_file(snapshot_path),
+                remove_optional_file(session_json_path),
+                remove_optional_file(session_md_path),
+            ) {
+                tracing::warn!(
+                    thread_id = %cleanup_thread_id,
+                    error = %err,
+                    "failed to remove dispatcher artifacts after delete"
+                );
+            }
+
             if let Err(err) = cleanup_state
                 .clear_dispatcher_binding_thread(&cleanup_thread_id)
                 .await
@@ -1848,7 +1870,6 @@ impl AppState {
             }
         });
 
-        self.publish_dispatcher_update(thread_id).await;
         Ok(())
     }
 
@@ -2393,10 +2414,13 @@ impl AppState {
                     updated = self
                         .update_dispatcher_preferences(
                             &updated.id,
-                            implementation_agent,
-                            implementation_model,
-                            implementation_reasoning_effort,
-                            openclaw_config.clone(),
+                            DispatcherPreferencesPatch {
+                                implementation_agent,
+                                implementation_model,
+                                implementation_reasoning_effort,
+                                openclaw_config: openclaw_config.clone(),
+                                ..DispatcherPreferencesPatch::default()
+                            },
                         )
                         .await?;
                 }
@@ -2505,33 +2529,102 @@ impl AppState {
     pub(crate) async fn update_dispatcher_preferences(
         self: &Arc<Self>,
         thread_id: &str,
-        implementation_agent: Option<String>,
-        implementation_model: Option<String>,
-        implementation_reasoning_effort: Option<String>,
-        openclaw_config: OpenClawDispatcherConfigPatch,
+        patch: DispatcherPreferencesPatch,
     ) -> Result<SessionRecord> {
         let mut thread = self
             .get_dispatcher_thread(thread_id)
             .await
             .with_context(|| format!("Unknown dispatcher {thread_id}"))?;
 
-        let target_agent = implementation_agent
+        let DispatcherPreferencesPatch {
+            dispatcher_agent,
+            dispatcher_model,
+            dispatcher_reasoning_effort,
+            implementation_agent,
+            implementation_model,
+            implementation_reasoning_effort,
+            openclaw_config,
+        } = patch;
+
+        let current_dispatcher_agent = thread.agent.trim().to_ascii_lowercase();
+        let target_dispatcher_agent = dispatcher_agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_else(|| current_dispatcher_agent.clone());
+        if !matches!(
+            target_dispatcher_agent.as_str(),
+            "codex" | "claude-code" | "gemini" | "openclaw"
+        ) {
+            return Err(anyhow!(
+                "Unsupported dispatcher agent `{target_dispatcher_agent}`. Expected codex, claude-code, gemini, or openclaw"
+            ));
+        }
+
+        let requested_dispatcher_model = dispatcher_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(model) = requested_dispatcher_model.as_deref() {
+            if !dispatcher_runtime_model_supported_for_agent(&target_dispatcher_agent, model) {
+                return Err(anyhow!(
+                    "Unsupported dispatcher model `{model}` for agent `{target_dispatcher_agent}`"
+                ));
+            }
+        }
+        let next_dispatcher_model = requested_dispatcher_model.or_else(|| {
+            thread.model.as_ref().and_then(|value| {
+                dispatcher_runtime_model_supported_for_agent(&target_dispatcher_agent, value)
+                    .then(|| value.clone())
+            })
+        });
+
+        let requested_dispatcher_reasoning = dispatcher_reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase());
+        if let Some(reasoning_effort) = requested_dispatcher_reasoning.as_deref() {
+            if !dispatcher_runtime_reasoning_supported_for_agent(
+                &target_dispatcher_agent,
+                next_dispatcher_model.as_deref(),
+                reasoning_effort,
+            ) {
+                return Err(anyhow!(
+                    "Unsupported dispatcher reasoning effort `{reasoning_effort}` for agent `{target_dispatcher_agent}`"
+                ));
+            }
+        }
+        let next_dispatcher_reasoning = requested_dispatcher_reasoning.or_else(|| {
+            thread.reasoning_effort.as_ref().and_then(|value| {
+                dispatcher_runtime_reasoning_supported_for_agent(
+                    &target_dispatcher_agent,
+                    next_dispatcher_model.as_deref(),
+                    value,
+                )
+                .then(|| value.clone())
+            })
+        });
+
+        let target_implementation_agent = implementation_agent
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| dispatcher_preferred_implementation_agent(&thread));
         if !matches!(
-            target_agent.as_str(),
+            target_implementation_agent.as_str(),
             "codex" | "claude-code" | "gemini" | "openclaw"
         ) {
             return Err(anyhow!(
-                "Unsupported implementation agent `{target_agent}`. Expected codex, claude-code, gemini, or openclaw"
+                "Unsupported implementation agent `{target_implementation_agent}`. Expected codex, claude-code, gemini, or openclaw"
             ));
         }
-        let target_model = resolve_dispatcher_implementation_model(
+        let target_implementation_model = resolve_dispatcher_implementation_model(
             &thread,
-            &target_agent,
+            &target_implementation_agent,
             implementation_model.as_deref(),
         );
         if let Some(model) = implementation_model
@@ -2539,9 +2632,9 @@ impl AppState {
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            if !dispatcher_model_supported_for_agent(&target_agent, model) {
+            if !dispatcher_model_supported_for_agent(&target_implementation_agent, model) {
                 return Err(anyhow!(
-                    "Unsupported implementation model `{model}` for agent `{target_agent}`"
+                    "Unsupported implementation model `{model}` for agent `{target_implementation_agent}`"
                 ));
             }
         }
@@ -2551,13 +2644,43 @@ impl AppState {
             .filter(|value| !value.is_empty())
         {
             if !dispatcher_reasoning_supported_for_agent(
-                &target_agent,
-                target_model.as_deref(),
+                &target_implementation_agent,
+                target_implementation_model.as_deref(),
                 reasoning_effort,
             ) {
                 return Err(anyhow!(
-                    "Unsupported reasoning effort `{reasoning_effort}` for agent `{target_agent}`"
+                    "Unsupported implementation reasoning effort `{reasoning_effort}` for agent `{target_implementation_agent}`"
                 ));
+            }
+        }
+
+        let runtime_changed = thread.agent != target_dispatcher_agent
+            || thread.model != next_dispatcher_model
+            || thread.reasoning_effort != next_dispatcher_reasoning;
+        if runtime_changed {
+            thread.agent = target_dispatcher_agent.clone();
+            thread.model = next_dispatcher_model.clone();
+            thread.reasoning_effort = next_dispatcher_reasoning.clone();
+            thread
+                .metadata
+                .insert("agent".to_string(), target_dispatcher_agent.clone());
+            match next_dispatcher_model.as_ref() {
+                Some(value) => {
+                    thread.metadata.insert("model".to_string(), value.clone());
+                }
+                None => {
+                    thread.metadata.remove("model");
+                }
+            }
+            match next_dispatcher_reasoning.as_ref() {
+                Some(value) => {
+                    thread
+                        .metadata
+                        .insert("reasoningEffort".to_string(), value.clone());
+                }
+                None => {
+                    thread.metadata.remove("reasoningEffort");
+                }
             }
         }
 
@@ -2568,13 +2691,17 @@ impl AppState {
             implementation_reasoning_effort,
         );
         let openclaw_changed = apply_openclaw_dispatcher_config(&mut thread, &openclaw_config);
-        if !implementation_changed && !openclaw_changed {
+        if !runtime_changed && !implementation_changed && !openclaw_changed {
             return Ok(thread);
         }
 
         thread.last_activity_at = Utc::now().to_rfc3339();
         self.replace_dispatcher_thread(thread.clone()).await?;
         self.sync_acp_dispatcher_state(&thread).await?;
+        if runtime_changed && self.dispatcher_runtime_attached(thread_id).await {
+            let _ = self.interrupt_dispatcher(thread_id).await;
+            self.clear_dispatcher_runtime(thread_id).await;
+        }
         Ok(thread)
     }
 
@@ -3741,12 +3868,12 @@ mod tests {
         dispatcher_supports_interactive_structured_output, dispatcher_uses_headless_turns,
         merge_dispatcher_context_attachments, normalize_loaded_dispatcher_thread,
         prepare_dispatcher_runtime_env, read_json, AcpSessionMemoryState, AppState,
-        CreateDispatcherThreadOptions, OpenClawDispatcherConfigPatch, ACP_APPROVAL_GRANTED,
-        ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY, ACP_HEARTBEAT_INTERVAL,
-        ACP_IMPLEMENTATION_AGENT_METADATA_KEY, ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND,
-        OPENCLAW_GATEWAY_SCOPES_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY,
-        OPENCLAW_GATEWAY_TOKEN_METADATA_KEY, OPENCLAW_GATEWAY_URL_METADATA_KEY,
-        OPENCLAW_SESSION_KEY_METADATA_KEY,
+        CreateDispatcherThreadOptions, DispatcherPreferencesPatch, OpenClawDispatcherConfigPatch,
+        ACP_APPROVAL_GRANTED, ACP_APPROVAL_REQUIRED, ACP_APPROVAL_STATE_METADATA_KEY,
+        ACP_HEARTBEAT_INTERVAL, ACP_IMPLEMENTATION_AGENT_METADATA_KEY,
+        ACP_RESUME_TARGET_METADATA_KEY, ACP_SESSION_KIND, OPENCLAW_GATEWAY_SCOPES_METADATA_KEY,
+        OPENCLAW_GATEWAY_TOKEN_CONFIGURED_METADATA_KEY, OPENCLAW_GATEWAY_TOKEN_METADATA_KEY,
+        OPENCLAW_GATEWAY_URL_METADATA_KEY, OPENCLAW_SESSION_KEY_METADATA_KEY,
     };
     use crate::state::{ConversationEntry, DispatcherTurnRequest, SessionRecord, SessionStatus};
     use anyhow::Result;
@@ -4316,6 +4443,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatcher_preferences_sync_runtime_and_implementation_selection() {
+        let (root, state) = build_test_state("acp-dispatcher-pref-sync").await;
+        let thread = state
+            .create_project_dispatcher_thread("demo", CreateDispatcherThreadOptions::default())
+            .await
+            .expect("dispatcher thread should be created");
+
+        let updated = state
+            .update_dispatcher_preferences(
+                &thread.id,
+                DispatcherPreferencesPatch {
+                    dispatcher_agent: Some("openclaw".to_string()),
+                    implementation_agent: Some("openclaw".to_string()),
+                    openclaw_config: OpenClawDispatcherConfigPatch::default(),
+                    ..DispatcherPreferencesPatch::default()
+                },
+            )
+            .await
+            .expect("dispatcher preferences should update");
+
+        assert_eq!(updated.agent, "openclaw");
+        assert_eq!(updated.model, None);
+        assert_eq!(updated.reasoning_effort, None);
+        assert_eq!(
+            updated
+                .metadata
+                .get(ACP_IMPLEMENTATION_AGENT_METADATA_KEY)
+                .map(String::as_str),
+            Some("openclaw")
+        );
+
+        let updated = state
+            .update_dispatcher_preferences(
+                &thread.id,
+                DispatcherPreferencesPatch {
+                    dispatcher_agent: Some("codex".to_string()),
+                    dispatcher_model: Some("gpt-5.4".to_string()),
+                    dispatcher_reasoning_effort: Some("high".to_string()),
+                    implementation_agent: Some("codex".to_string()),
+                    implementation_model: Some("gpt-5.4".to_string()),
+                    implementation_reasoning_effort: Some("high".to_string()),
+                    openclaw_config: OpenClawDispatcherConfigPatch::default(),
+                },
+            )
+            .await
+            .expect("dispatcher runtime should accept codex selections");
+
+        assert_eq!(updated.agent, "codex");
+        assert_eq!(updated.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(updated.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            updated.metadata.get("model").map(String::as_str),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            updated.metadata.get("reasoningEffort").map(String::as_str),
+            Some("high")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn dispatcher_preferences_store_openclaw_runtime_config() {
         let (root, state) = build_test_state("acp-openclaw-config").await;
         let gateway_token = ["gateway", "-token-", "123"].concat();
@@ -4375,14 +4565,16 @@ mod tests {
         let updated = state
             .update_dispatcher_preferences(
                 &thread.id,
-                None,
-                None,
-                None,
-                OpenClawDispatcherConfigPatch {
-                    gateway_token: Some(String::new()),
-                    gateway_scopes: Some("operator.read,operator.write".to_string()),
-                    session_key: Some("conductor:project_dispatcher:demo:dispatcher-1".to_string()),
-                    ..OpenClawDispatcherConfigPatch::default()
+                DispatcherPreferencesPatch {
+                    openclaw_config: OpenClawDispatcherConfigPatch {
+                        gateway_token: Some(String::new()),
+                        gateway_scopes: Some("operator.read,operator.write".to_string()),
+                        session_key: Some(
+                            "conductor:project_dispatcher:demo:dispatcher-1".to_string(),
+                        ),
+                        ..OpenClawDispatcherConfigPatch::default()
+                    },
+                    ..DispatcherPreferencesPatch::default()
                 },
             )
             .await
@@ -4719,9 +4911,16 @@ mod tests {
             .await
             .iter()
             .all(|candidate| candidate.id != thread.id));
-        assert!(!snapshot.exists());
-        assert!(!session_json.exists());
-        assert!(!session_md.exists());
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if !snapshot.exists() && !session_json.exists() && !session_md.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dispatcher artifacts should be removed asynchronously");
         assert!(project_memory.exists());
         assert!(!state.dispatcher_runtime_attached(&thread.id).await);
         assert!(!state

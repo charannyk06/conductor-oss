@@ -128,22 +128,17 @@ export function ProjectDispatcherPanel({
     setCreating(true);
     setError(null);
     try {
-      const currentDispatcherAgent = dispatcherSession
-        ? readMetadataValue(dispatcherSession, "agent", defaultAgent)
-        : defaultAgent;
-      const nextDispatcherAgent = implementationAgent === "openclaw"
-        ? "openclaw"
-        : currentDispatcherAgent === "openclaw"
-          ? ""
-          : currentDispatcherAgent;
+      const selectedModel = modelSelection.customModel.trim() || modelSelection.catalogModel;
       const response = await fetch(withBridgeQuery(`/api/projects/${projectId}/dispatcher`, bridgeId), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           forceNew,
-          dispatcherAgent: nextDispatcherAgent,
+          dispatcherAgent: implementationAgent,
+          dispatcherModel: selectedModel,
+          dispatcherReasoningEffort: modelSelection.reasoningEffort,
           implementationAgent,
-          implementationModel: modelSelection.customModel.trim() || modelSelection.catalogModel,
+          implementationModel: selectedModel,
           implementationReasoningEffort: modelSelection.reasoningEffort,
         }),
       });

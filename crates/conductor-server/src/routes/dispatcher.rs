@@ -17,8 +17,8 @@ use crate::dispatcher_task_lifecycle::{
 };
 use crate::state::{
     build_normalized_chat_feed, is_project_dispatcher_session, AppState,
-    CreateDispatcherThreadOptions, DispatcherBindingLookup, OpenClawDispatcherConfigPatch,
-    SessionRecord, UpsertDispatcherBindingInput,
+    CreateDispatcherThreadOptions, DispatcherBindingLookup, DispatcherPreferencesPatch,
+    OpenClawDispatcherConfigPatch, SessionRecord, UpsertDispatcherBindingInput,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -118,7 +118,9 @@ struct CreateDispatcherBody {
     openclaw_gateway_scopes: Option<String>,
     openclaw_session_key: Option<String>,
     model: Option<String>,
+    dispatcher_model: Option<String>,
     reasoning_effort: Option<String>,
+    dispatcher_reasoning_effort: Option<String>,
     implementation_model: Option<String>,
     implementation_reasoning_effort: Option<String>,
 }
@@ -126,6 +128,9 @@ struct CreateDispatcherBody {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateDispatcherPreferencesBody {
+    dispatcher_agent: Option<String>,
+    dispatcher_model: Option<String>,
+    dispatcher_reasoning_effort: Option<String>,
     implementation_agent: Option<String>,
     implementation_model: Option<String>,
     implementation_reasoning_effort: Option<String>,
@@ -362,25 +367,54 @@ async fn create_dispatcher(
     Query(query): Query<DispatcherQuery>,
     Json(body): Json<CreateDispatcherBody>,
 ) -> ApiResponse {
+    let CreateDispatcherBody {
+        bridge_id,
+        force_new,
+        agent,
+        dispatcher_agent,
+        implementation_agent,
+        openclaw_gateway_url,
+        openclaw_gateway_token,
+        openclaw_gateway_scopes,
+        openclaw_session_key,
+        model,
+        dispatcher_model,
+        reasoning_effort,
+        dispatcher_reasoning_effort,
+        implementation_model,
+        implementation_reasoning_effort,
+    } = body;
+
+    let normalized_dispatcher_model =
+        trimmed_owned_value(dispatcher_model).or_else(|| trimmed_owned_value(model.clone()));
+    let normalized_dispatcher_reasoning = trimmed_owned_value(dispatcher_reasoning_effort)
+        .or_else(|| trimmed_owned_value(reasoning_effort.clone()));
+    let normalized_implementation_model = trimmed_owned_value(implementation_model)
+        .or_else(|| normalized_dispatcher_model.clone())
+        .or_else(|| trimmed_owned_value(model));
+    let normalized_implementation_reasoning = trimmed_owned_value(implementation_reasoning_effort)
+        .or_else(|| normalized_dispatcher_reasoning.clone())
+        .or_else(|| trimmed_owned_value(reasoning_effort));
+
     match state
         .create_project_dispatcher_thread(
             &project_id,
             CreateDispatcherThreadOptions {
-                bridge_id: body.bridge_id.or(query.bridge_id),
-                dispatcher_agent: trimmed_owned_value(body.dispatcher_agent)
-                    .or_else(|| trimmed_owned_value(body.agent)),
-                implementation_agent: body.implementation_agent,
+                bridge_id: bridge_id.or(query.bridge_id),
+                dispatcher_agent: trimmed_owned_value(dispatcher_agent)
+                    .or_else(|| trimmed_owned_value(agent)),
+                implementation_agent,
                 openclaw_config: OpenClawDispatcherConfigPatch {
-                    gateway_url: body.openclaw_gateway_url,
-                    gateway_token: body.openclaw_gateway_token,
-                    gateway_scopes: body.openclaw_gateway_scopes,
-                    session_key: body.openclaw_session_key,
+                    gateway_url: openclaw_gateway_url,
+                    gateway_token: openclaw_gateway_token,
+                    gateway_scopes: openclaw_gateway_scopes,
+                    session_key: openclaw_session_key,
                 },
-                dispatcher_model: body.model,
-                dispatcher_reasoning_effort: body.reasoning_effort,
-                implementation_model: body.implementation_model,
-                implementation_reasoning_effort: body.implementation_reasoning_effort,
-                force_new: body.force_new,
+                dispatcher_model: normalized_dispatcher_model,
+                dispatcher_reasoning_effort: normalized_dispatcher_reasoning,
+                implementation_model: normalized_implementation_model,
+                implementation_reasoning_effort: normalized_implementation_reasoning,
+                force_new,
             },
         )
         .await
@@ -560,17 +594,32 @@ async fn update_dispatcher_preferences(
         }
     };
 
+    let dispatcher_agent = body
+        .dispatcher_agent
+        .or_else(|| body.implementation_agent.clone());
+    let dispatcher_model = body
+        .dispatcher_model
+        .or_else(|| body.implementation_model.clone());
+    let dispatcher_reasoning_effort = body
+        .dispatcher_reasoning_effort
+        .or_else(|| body.implementation_reasoning_effort.clone());
+
     match state
         .update_dispatcher_preferences(
             &dispatcher.id,
-            body.implementation_agent,
-            body.implementation_model,
-            body.implementation_reasoning_effort,
-            OpenClawDispatcherConfigPatch {
-                gateway_url: body.openclaw_gateway_url,
-                gateway_token: body.openclaw_gateway_token,
-                gateway_scopes: body.openclaw_gateway_scopes,
-                session_key: body.openclaw_session_key,
+            DispatcherPreferencesPatch {
+                dispatcher_agent,
+                dispatcher_model,
+                dispatcher_reasoning_effort,
+                implementation_agent: body.implementation_agent,
+                implementation_model: body.implementation_model,
+                implementation_reasoning_effort: body.implementation_reasoning_effort,
+                openclaw_config: OpenClawDispatcherConfigPatch {
+                    gateway_url: body.openclaw_gateway_url,
+                    gateway_token: body.openclaw_gateway_token,
+                    gateway_scopes: body.openclaw_gateway_scopes,
+                    session_key: body.openclaw_session_key,
+                },
             },
         )
         .await
