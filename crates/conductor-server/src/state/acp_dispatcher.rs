@@ -1834,19 +1834,30 @@ impl AppState {
             guard.remove(thread_id);
         }
         self.invalidate_dispatcher_caches(thread_id).await;
-
-        let snapshot_path = self.dispatcher_snapshot_path(thread_id);
-        let session_json_path = self.acp_session_memory_json_path(&thread.project_id, thread_id);
-        let session_md_path = self.acp_session_memory_markdown_path(&thread.project_id, thread_id);
-        tokio::try_join!(
-            remove_optional_file(snapshot_path),
-            remove_optional_file(session_json_path),
-            remove_optional_file(session_md_path),
-        )?;
+        self.publish_dispatcher_update(thread_id).await;
 
         let cleanup_state = Arc::clone(self);
         let cleanup_thread_id = thread_id.to_string();
+        let cleanup_project_id = thread.project_id.clone();
         tokio::spawn(async move {
+            let snapshot_path = cleanup_state.dispatcher_snapshot_path(&cleanup_thread_id);
+            let session_json_path =
+                cleanup_state.acp_session_memory_json_path(&cleanup_project_id, &cleanup_thread_id);
+            let session_md_path = cleanup_state
+                .acp_session_memory_markdown_path(&cleanup_project_id, &cleanup_thread_id);
+
+            if let Err(err) = tokio::try_join!(
+                remove_optional_file(snapshot_path),
+                remove_optional_file(session_json_path),
+                remove_optional_file(session_md_path),
+            ) {
+                tracing::warn!(
+                    thread_id = %cleanup_thread_id,
+                    error = %err,
+                    "failed to remove dispatcher artifacts after delete"
+                );
+            }
+
             if let Err(err) = cleanup_state
                 .clear_dispatcher_binding_thread(&cleanup_thread_id)
                 .await
@@ -1859,7 +1870,6 @@ impl AppState {
             }
         });
 
-        self.publish_dispatcher_update(thread_id).await;
         Ok(())
     }
 
@@ -4901,9 +4911,16 @@ mod tests {
             .await
             .iter()
             .all(|candidate| candidate.id != thread.id));
-        assert!(!snapshot.exists());
-        assert!(!session_json.exists());
-        assert!(!session_md.exists());
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if !snapshot.exists() && !session_json.exists() && !session_md.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dispatcher artifacts should be removed asynchronously");
         assert!(project_memory.exists());
         assert!(!state.dispatcher_runtime_attached(&thread.id).await);
         assert!(!state
