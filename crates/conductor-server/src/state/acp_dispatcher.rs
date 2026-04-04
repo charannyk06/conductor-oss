@@ -1260,7 +1260,9 @@ fn default_implementation_agent(
         .or(project.agent.as_deref())
         .unwrap_or(default_agent);
     match candidate.trim() {
-        "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli" => candidate.trim().to_string(),
+        "codex" | "claude-code" | "gemini" | "openclaw" | "cursor-cli" => {
+            candidate.trim().to_string()
+        }
         _ => "codex".to_string(),
     }
 }
