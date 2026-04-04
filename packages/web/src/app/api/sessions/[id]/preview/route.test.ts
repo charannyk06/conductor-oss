@@ -84,7 +84,7 @@ test("GET returns disconnected preview state when backend lookup is unavailable"
   assert.equal(payload.connected, false);
   assert.deepEqual(payload.candidateUrls, []);
   assert.equal(payload.currentUrl, null);
-  assert.equal(payload.lastError, "Rust backend URL is not configured");
+  assert.equal(payload.lastError, "Preview worker is not configured");
 });
 
 test("GET forwards dashboard access headers to backend preview lookups", async () => {
@@ -158,6 +158,7 @@ test("GET forwards dashboard access headers to backend preview lookups", async (
 
 test("GET resolves bridge-backed preview session context via the paired device and preserves local bridge candidates", async () => {
   resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
   process.env.CONDUCTOR_BRIDGE_RELAY_URL = "https://relay.example.com";
   process.env.RELAY_JWT_SECRET = "preview-route-test-secret";
   const seenPaths: string[] = [];
