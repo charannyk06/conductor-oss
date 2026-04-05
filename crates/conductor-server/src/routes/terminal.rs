@@ -1561,6 +1561,7 @@ async fn handle_ttyd_frontend_socket(
                             &mut client_ready,
                             &mut last_sequence_sent,
                             &mut paused,
+                            &mut pause_buffer,
                             ttyd_protocol::ClientMessage::from_websocket_frame(&data),
                         )
                         .await
@@ -1579,6 +1580,7 @@ async fn handle_ttyd_frontend_socket(
                             &mut client_ready,
                             &mut last_sequence_sent,
                             &mut paused,
+                            &mut pause_buffer,
                             ttyd_protocol::ClientMessage::from_websocket_frame(text.as_bytes()),
                         )
                         .await
@@ -1676,6 +1678,7 @@ async fn handle_ttyd_frontend_client_message(
     client_ready: &mut bool,
     last_sequence_sent: &mut u64,
     paused: &mut bool,
+    pause_buffer: &mut Vec<crate::state::TerminalStreamChunk>,
     message: Option<ttyd_protocol::ClientMessage>,
 ) -> Result<()> {
     match message {
@@ -1725,6 +1728,19 @@ async fn handle_ttyd_frontend_client_message(
         Some(ttyd_protocol::ClientMessage::Resume) => {
             if *paused {
                 *paused = false;
+                // Replay buffered chunks collected during pause, skipping any
+                // with stale sequence numbers.
+                for chunk in pause_buffer.drain(..) {
+                    if chunk.sequence <= *last_sequence_sent {
+                        continue;
+                    }
+                    *last_sequence_sent = chunk.sequence;
+                    client_socket
+                        .send(Message::Binary(
+                            ttyd_protocol::encode_output(&chunk.bytes).into(),
+                        ))
+                        .await?;
+                }
                 // Send the current snapshot as the authoritative terminal state.
                 // The snapshot includes all output up to this point, so it
                 // provides a smooth transition from the pause gap.

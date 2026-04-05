@@ -441,16 +441,10 @@ pub async fn spawn_ttyd_runtime(
                 ttyd_pid,
                 "ttyd session owner failed to attach, killing ttyd process to prevent leak"
             );
-            #[cfg(unix)]
-            if ttyd_pid > 0 {
-                unsafe {
-                    libc::kill(-(ttyd_pid as i32), libc::SIGTERM);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                unsafe {
-                    libc::kill(-(ttyd_pid as i32), libc::SIGKILL);
-                }
-            }
+            // Use kill_tx to signal the process monitor to shut down ttyd.
+            // This works cross-platform unlike direct signal sending.
+            let _ = kill_tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             return Err(anyhow!(
                 "Timed out waiting for ttyd session owner to attach"
             ));
