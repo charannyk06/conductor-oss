@@ -228,6 +228,9 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shared lock for tests that mutate CONDUCTOR_PROXY_AUTH_SECRET.
+    static PROXY_AUTH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use axum::middleware;
     use axum::routing::{get, post};
     use axum::{response::IntoResponse, Router};
@@ -304,6 +307,7 @@ mod tests {
 
     #[test]
     fn rate_limit_key_prefers_proxy_identity_when_available() {
+        let _guard = PROXY_AUTH_ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("CONDUCTOR_PROXY_AUTH_SECRET", "test-secret");
         }
@@ -375,6 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_allows_authenticated_proxy_requests_even_when_runtime_auth_is_required() {
+        let _guard = PROXY_AUTH_ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("CONDUCTOR_PROXY_AUTH_SECRET", "test-secret");
         }
