@@ -36,6 +36,9 @@ const TTYD_OWNER_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from
 const TTYD_OWNER_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const TTYD_OWNER_RECONNECT_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 const TTYD_OWNER_RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Maximum reconnect attempts before giving up permanently.
+/// Prevents unbounded retry loops and output consumer task leaks.
+const TTYD_OWNER_RECONNECT_MAX_ATTEMPTS: u32 = 20;
 const TTYD_BINARY_ENV: &str = "CONDUCTOR_TTYD_BINARY";
 const FALLBACK_INTERACTIVE_SHELLS: &[&str] = &["/bin/zsh", "/bin/bash", "/bin/sh"];
 
@@ -172,14 +175,31 @@ fn resolve_interactive_shell(env: &HashMap<String, String>) -> PathBuf {
 }
 
 fn reserve_ttyd_port() -> Result<u16> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .context("Failed to reserve a loopback port for ttyd")?;
-    let port = listener
-        .local_addr()
-        .context("Failed to read reserved ttyd port")?
-        .port();
-    drop(listener);
-    Ok(port)
+    // Retry up to 3 times to mitigate the TOCTOU race between port release
+    // and ttyd binding. If another process grabs the port between our release
+    // and ttyd's bind, wait_for_ttyd_startup will fail, and the caller can
+    // retry with a fresh port.
+    for attempt in 0..3 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .context("Failed to reserve a loopback port for ttyd")?;
+        let port = listener
+            .local_addr()
+            .context("Failed to read reserved ttyd port")?
+            .port();
+        drop(listener);
+        // Brief pause to reduce the race window before ttyd tries to bind.
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Verify port is actually free before returning it.
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return Ok(port);
+        }
+        tracing::debug!(attempt, port, "port was grabbed after release, retrying");
+    }
+    Err(anyhow!(
+        "Failed to reserve a free port for ttyd after 3 attempts"
+    ))
 }
 
 async fn wait_for_ttyd_startup(
@@ -311,11 +331,13 @@ pub async fn spawn_ttyd_runtime(
     let (resize_tx, resize_rx) = mpsc::channel::<PtyDimensions>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
-    // Process monitor: wait for ttyd to exit
+    // Process monitor: wait for ttyd to exit, with panic recovery.
+    // A separate health-check task ensures ttyd is still alive even if the
+    // monitor task panics (e.g., due to a tokio runtime issue).
     let otx = output_tx.clone();
     let sid = session_id.to_string();
     let st = state.clone();
-    tokio::spawn(async move {
+    let monitor_handle = tokio::spawn(async move {
         tokio::select! {
             biased;
             _ = kill_rx => {
@@ -352,6 +374,36 @@ pub async fn spawn_ttyd_runtime(
         st.detach_terminal_runtime(&sid).await;
     });
 
+    // Health-check supervisor: if the monitor task panics, detect ttyd exit
+    // via periodic PID checks and clean up.
+    {
+        let st = state.clone();
+        let sid = session_id.to_string();
+        let otx = output_tx.clone();
+        let monitor = monitor_handle;
+        tokio::spawn(async move {
+            // Wait for the monitor to finish normally first.
+            if let Ok(()) = monitor.await {
+                return; // Monitor exited cleanly, no need for health check.
+            }
+            // Monitor panicked. Poll ttyd PID until it dies.
+            tracing::warn!(session_id = %sid, "ttyd process monitor panicked, starting PID health check");
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                #[cfg(unix)]
+                let alive = unsafe { libc::kill(ttyd_pid as i32, 0) } == 0;
+                #[cfg(not(unix))]
+                let alive = false;
+                if !alive {
+                    tracing::info!(session_id = %sid, "ttyd process died (detected by health check)");
+                    let _ = otx.send(ExecutorOutput::Completed { exit_code: -1 }).await;
+                    st.detach_terminal_runtime(&sid).await;
+                    return;
+                }
+            }
+        });
+    }
+
     // Own a single ttyd websocket session inside the backend. ttyd spawns a
     // separate terminal process per websocket client, so Conductor must keep
     // exactly one upstream connection alive and expose that shared session to
@@ -379,10 +431,25 @@ pub async fn spawn_ttyd_runtime(
             tracing::warn!(session_id = %sid2, error = %err, "ttyd session owner exited permanently");
         }
     });
-    tokio::time::timeout(TTYD_OWNER_ATTACH_TIMEOUT, owner_ready_rx)
-        .await
-        .context("Timed out waiting for ttyd session owner to attach")?
-        .map_err(|_| anyhow!("ttyd session owner did not report readiness"))??;
+    let owner_attach = tokio::time::timeout(TTYD_OWNER_ATTACH_TIMEOUT, owner_ready_rx).await;
+    match owner_attach {
+        Ok(Ok(Ok(()))) => {} // Success
+        _ => {
+            // Owner failed to attach: kill the ttyd process to prevent a leak.
+            tracing::warn!(
+                session_id,
+                ttyd_pid,
+                "ttyd session owner failed to attach, killing ttyd process to prevent leak"
+            );
+            // Use kill_tx to signal the process monitor to shut down ttyd.
+            // This works cross-platform unlike direct signal sending.
+            let _ = kill_tx.send(());
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            return Err(anyhow!(
+                "Timed out waiting for ttyd session owner to attach"
+            ));
+        }
+    }
 
     let handle = ExecutorHandle::new(ttyd_pid, executor.kind(), output_rx, input_tx, kill_tx)
         .with_terminal_io(None, Some(resize_tx));
@@ -600,12 +667,29 @@ async fn run_ttyd_session_owner_with_retry(
                             if unsafe { libc::kill(pid as i32, 0) } != 0 {
                                 return false;
                             }
-                            // Then verify it is a ttyd process by checking /proc/<pid>/comm
-                            let comm_path = format!("/proc/{}/comm", pid);
-                            if let Ok(comm) = std::fs::read_to_string(comm_path) {
-                                return comm.trim() == "ttyd";
+                            // Verify it is a ttyd process.
+                            // On Linux, check /proc/<pid>/comm. On macOS (no /proc),
+                            // use `ps -p <pid> -o comm=` to get the process name.
+                            #[cfg(target_os = "linux")]
+                            {
+                                let comm_path = format!("/proc/{}/comm", pid);
+                                if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+                                    return comm.trim() == "ttyd";
+                                }
                             }
-                            true // If we can't read comm, assume it's alive (may be BSD/macOS)
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                if let Ok(output) = std::process::Command::new("ps")
+                                    .args(["-p", &pid.to_string(), "-o", "comm="])
+                                    .output()
+                                {
+                                    if let Ok(name) = String::from_utf8(output.stdout) {
+                                        return name.trim() == "ttyd";
+                                    }
+                                }
+                            }
+                            // If neither check worked, verify PID still exists
+                            unsafe { libc::kill(pid as i32, 0) == 0 }
                         }
                         #[cfg(not(unix))]
                         {
@@ -624,6 +708,14 @@ async fn run_ttyd_session_owner_with_retry(
                 }
 
                 attempt = attempt.saturating_add(1);
+                if attempt > TTYD_OWNER_RECONNECT_MAX_ATTEMPTS {
+                    tracing::warn!(
+                        session_id = %sid,
+                        attempts = attempt,
+                        "ttyd session owner exceeded max reconnect attempts, giving up"
+                    );
+                    return Ok(());
+                }
                 let delay = owner_reconnect_delay(attempt);
                 tracing::info!(
                     session_id = %sid,

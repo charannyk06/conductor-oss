@@ -1542,6 +1542,10 @@ async fn handle_ttyd_frontend_socket(
     let mut last_sequence_sent = 0_u64;
     let mut client_ready = false;
     let mut paused = false;
+    // Buffer recent chunks during pause so we can replay them on resume
+    // instead of only sending a potentially stale snapshot.
+    let mut pause_buffer: Vec<crate::state::TerminalStreamChunk> = Vec::new();
+    const PAUSE_BUFFER_CAPACITY: usize = 256;
 
     loop {
         tokio::select! {
@@ -1557,6 +1561,7 @@ async fn handle_ttyd_frontend_socket(
                             &mut client_ready,
                             &mut last_sequence_sent,
                             &mut paused,
+                            &mut pause_buffer,
                             ttyd_protocol::ClientMessage::from_websocket_frame(&data),
                         )
                         .await
@@ -1575,6 +1580,7 @@ async fn handle_ttyd_frontend_socket(
                             &mut client_ready,
                             &mut last_sequence_sent,
                             &mut paused,
+                            &mut pause_buffer,
                             ttyd_protocol::ClientMessage::from_websocket_frame(text.as_bytes()),
                         )
                         .await
@@ -1604,6 +1610,13 @@ async fn handle_ttyd_frontend_socket(
                 match event {
                     Ok(crate::state::TerminalStreamEvent::Stream(chunk)) => {
                         if paused {
+                            // Buffer recent chunks during pause instead of
+                            // dropping them. On resume, we replay the buffer
+                            // before sending the snapshot for a smooth transition.
+                            if pause_buffer.len() >= PAUSE_BUFFER_CAPACITY {
+                                pause_buffer.remove(0);
+                            }
+                            pause_buffer.push(chunk);
                             continue;
                         }
                         if chunk.sequence <= last_sequence_sent {
@@ -1665,6 +1678,7 @@ async fn handle_ttyd_frontend_client_message(
     client_ready: &mut bool,
     last_sequence_sent: &mut u64,
     paused: &mut bool,
+    pause_buffer: &mut Vec<crate::state::TerminalStreamChunk>,
     message: Option<ttyd_protocol::ClientMessage>,
 ) -> Result<()> {
     match message {
@@ -1714,6 +1728,22 @@ async fn handle_ttyd_frontend_client_message(
         Some(ttyd_protocol::ClientMessage::Resume) => {
             if *paused {
                 *paused = false;
+                // Replay buffered chunks collected during pause, skipping any
+                // with stale sequence numbers.
+                for chunk in pause_buffer.drain(..) {
+                    if chunk.sequence <= *last_sequence_sent {
+                        continue;
+                    }
+                    *last_sequence_sent = chunk.sequence;
+                    client_socket
+                        .send(Message::Binary(
+                            ttyd_protocol::encode_output(&chunk.bytes).into(),
+                        ))
+                        .await?;
+                }
+                // Send the current snapshot as the authoritative terminal state.
+                // The snapshot includes all output up to this point, so it
+                // provides a smooth transition from the pause gap.
                 if let Some(snapshot) = state.current_terminal_restore_snapshot(session_id).await {
                     let bytes = render_restore_snapshot_bytes(&snapshot, last_sequence_sent);
                     if !bytes.is_empty() {
