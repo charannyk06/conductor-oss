@@ -63,10 +63,24 @@ impl GlobalRateLimiter {
         true
     }
 
-    /// Remove entries whose window has expired.
+    /// Remove entries whose window has expired, then evict oldest active
+    /// entries if still over the hard ceiling.
     fn evict_stale(&self, entries: &mut HashMap<String, GlobalRateLimitEntry>, now: Instant) {
         let window = Duration::from_secs(GLOBAL_RATE_LIMIT_WINDOW_SECS);
         entries.retain(|_, entry| now.duration_since(entry.window_start) < window);
+
+        // Hard ceiling: drop oldest active entries until under capacity.
+        if entries.len() > RATE_LIMITER_MAX_ENTRIES {
+            let mut timestamps: Vec<(String, Instant)> = entries
+                .iter()
+                .map(|(k, v)| (k.clone(), v.window_start))
+                .collect();
+            timestamps.sort_by_key(|(_, t)| *t);
+            let excess = entries.len() - RATE_LIMITER_MAX_ENTRIES;
+            for (key, _) in timestamps.into_iter().take(excess) {
+                entries.remove(&key);
+            }
+        }
     }
 }
 

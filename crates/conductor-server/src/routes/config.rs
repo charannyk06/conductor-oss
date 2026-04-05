@@ -387,11 +387,15 @@ pub(crate) fn proxy_request_authorized(headers: &HeaderMap) -> bool {
             .map(|actual| constant_time_equal(actual.trim().as_bytes(), expected.as_bytes()))
             .unwrap_or(false),
         None => {
-            tracing::warn!(
-                "proxy auth: {} is not set — refusing proxy headers. \
-                 Set this env var to enable reverse-proxy authentication.",
-                PROXY_AUTH_SECRET_ENV
-            );
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "proxy auth: {} is not set — refusing proxy headers. \
+                     Set this env var to enable reverse-proxy authentication.",
+                    PROXY_AUTH_SECRET_ENV
+                );
+            }
             false
         }
     }
