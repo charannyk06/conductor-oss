@@ -197,7 +197,9 @@ fn reserve_ttyd_port() -> Result<u16> {
         }
         tracing::debug!(attempt, port, "port was grabbed after release, retrying");
     }
-    Err(anyhow!("Failed to reserve a free port for ttyd after 3 attempts"))
+    Err(anyhow!(
+        "Failed to reserve a free port for ttyd after 3 attempts"
+    ))
 }
 
 async fn wait_for_ttyd_startup(
@@ -429,10 +431,9 @@ pub async fn spawn_ttyd_runtime(
             tracing::warn!(session_id = %sid2, error = %err, "ttyd session owner exited permanently");
         }
     });
-    let owner_attach = tokio::time::timeout(TTYD_OWNER_ATTACH_TIMEOUT, owner_ready_rx)
-        .await;
+    let owner_attach = tokio::time::timeout(TTYD_OWNER_ATTACH_TIMEOUT, owner_ready_rx).await;
     match owner_attach {
-        Ok(Ok(Ok(()))) => {}, // Success
+        Ok(Ok(Ok(()))) => {} // Success
         _ => {
             // Owner failed to attach: kill the ttyd process to prevent a leak.
             tracing::warn!(
@@ -450,7 +451,9 @@ pub async fn spawn_ttyd_runtime(
                     libc::kill(-(ttyd_pid as i32), libc::SIGKILL);
                 }
             }
-            return Err(anyhow!("Timed out waiting for ttyd session owner to attach"));
+            return Err(anyhow!(
+                "Timed out waiting for ttyd session owner to attach"
+            ));
         }
     }
 
