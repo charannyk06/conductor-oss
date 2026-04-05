@@ -23,6 +23,8 @@ import type { SessionTerminalProps } from "./terminal/terminalTypes";
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
 const TOKEN_REFRESH_LEAD_SECONDS = 10;
 const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
+const TERMINAL_RESIZE_DEBOUNCE_MS = 150;
+const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
 const TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS = 1_500;
 const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 300_000; // 5 minutes - only reload if hidden for 5+ minutes
 
@@ -498,14 +500,31 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
     let debounceTimer: number | null = null;
     const applyGeometry = () => {
-      // Debounce rapid viewport changes to prevent flickering
+      // Debounce rapid viewport changes to prevent flickering.
+      // 150ms matches the timing used by Superset.sh and other terminal
+      // embedding tools to batch resize events before triggering layout.
       if (debounceTimer !== null) {
         return;
       }
       debounceTimer = window.setTimeout(() => {
         debounceTimer = null;
         applyKeyboardAwareTerminalHeight();
-      }, 16); // ~60fps debounce
+
+        // After the host div has resized, tell the ttyd iframe to
+        // re-fit its internal xterm.js in the same coordinated step.
+        const iframe = host.querySelector<HTMLIFrameElement>("iframe");
+        if (iframe?.contentWindow) {
+          try {
+            const targetOrigin = new URL(iframe.src).origin;
+            iframe.contentWindow.postMessage(
+              { type: TERMINAL_RESIZE_MESSAGE_TYPE },
+              targetOrigin,
+            );
+          } catch {
+            // If URL parsing fails, skip the coordinated resize.
+          }
+        }
+      }, TERMINAL_RESIZE_DEBOUNCE_MS);
     };
 
     applyGeometry();
@@ -662,7 +681,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         {expectsLiveTerminal && terminalUrl ? (
           <div
             ref={terminalHostRef}
-            className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
+            className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)] transition-[height] duration-150 ease-out"
           >
             {!frameLoaded ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
