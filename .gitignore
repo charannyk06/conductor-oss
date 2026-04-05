@@ -17,6 +17,9 @@ Thumbs.db
 .env.*.local
 conductor.yaml
 
+# Demo video files (host externally)
+*.mp4
+
 # Editor
 .vscode/
 .idea/
@@ -72,4 +75,7 @@ rewrite.py
 research/
 .claude/
 .vercel
+
+# Dead code backups
+bridge-cmd.pre-v2-backup-*
 .env*.local
