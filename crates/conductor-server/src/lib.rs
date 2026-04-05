@@ -6,6 +6,7 @@ pub mod mcp;
 pub mod notifier;
 pub mod routes;
 mod runtime;
+mod session_gc;
 pub mod state;
 mod task_context;
 pub mod tracker;
@@ -152,10 +153,32 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
     }
     let addr = SocketAddr::new(host, config.effective_port());
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
+
+    // Start background session GC
+    let gc_cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    let gc_conductor_dir = config.workspace.join(".conductor");
+    let gc_cancel_clone = gc_cancel.clone();
+    let gc_handle = tokio::spawn(async move {
+        session_gc::run_session_gc(gc_conductor_dir, gc_cancel_clone).await;
+    });
+
+    // Graceful shutdown: ctrl_c triggers GC stop + server drain
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
-    Ok(())
+    );
+
+    tokio::select! {
+        result = server => {
+            gc_cancel.notify_one();
+            let _ = gc_handle.await;
+            result.map_err(Into::into)
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("received shutdown signal");
+            gc_cancel.notify_one();
+            let _ = gc_handle.await;
+            Ok(())
+        }
+    }
 }
