@@ -1,10 +1,12 @@
 import { guardApiAccess } from "@/lib/auth";
-import { guardAndProxy } from "@/lib/guardedRustProxy";
+import { buildForwardedAccessHeaders } from "@/lib/guardedRustProxy";
 import { proxyToBridgeDevice } from "@/lib/bridgeApiProxy";
+import { proxyToRustOrUnavailable } from "@/lib/rustBackendProxy";
 import {
   BRIDGE_TTYD_RELAY_WS_QUERY_PARAM,
   createBridgeTtydRelayWebSocketUrl,
   injectBridgeTtydRelayShim,
+  injectTtydResizeShim,
   resolveBridgeSessionTarget,
 } from "@/lib/bridgeTtyd";
 
@@ -15,6 +17,32 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
+/**
+ * Inject the resize coordination shim into a proxied HTML response.
+ * Falls back to the original response if the content is not HTML or
+ * reading the body fails.
+ */
+async function injectResizeShimIntoResponse(proxied: Response): Promise<Response> {
+  const contentType = proxied.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.startsWith("text/html")) {
+    return proxied;
+  }
+
+  let html: string;
+  try {
+    html = await proxied.text();
+  } catch {
+    return proxied;
+  }
+
+  const patched = injectTtydResizeShim(html);
+  return new Response(patched, {
+    status: proxied.status,
+    statusText: proxied.statusText,
+    headers: new Headers(proxied.headers),
+  });
+}
+
 export async function GET(
   request: Request,
   context: RouteContext,
@@ -22,13 +50,24 @@ export async function GET(
   const { id } = await context.params;
   const target = resolveBridgeSessionTarget(id, request);
   if (!target) {
-    return guardAndProxy(
+    // Non-bridge session: proxy to Rust backend, then inject resize shim into HTML.
+    const denied = await guardApiAccess(request, "viewer");
+    if (denied) {
+      return denied;
+    }
+
+    const proxied = await proxyToRustOrUnavailable(
       request,
       `/api/sessions/${encodeURIComponent(id ?? "")}/terminal/ttyd`,
-      { role: "viewer" },
+      {
+        headers: await buildForwardedAccessHeaders(request),
+      },
     );
+
+    return injectResizeShimIntoResponse(proxied);
   }
 
+  // Bridge session: proxy to bridge device, inject relay shim + resize shim.
   const denied = await guardApiAccess(request, "viewer");
   if (denied) {
     return denied;
@@ -57,8 +96,11 @@ export async function GET(
     );
   }
 
-  const html = await proxied.text();
-  return new Response(injectBridgeTtydRelayShim(html, relayTtydWsUrl), {
+  let html = await proxied.text();
+  html = injectBridgeTtydRelayShim(html, relayTtydWsUrl);
+  html = injectTtydResizeShim(html);
+
+  return new Response(html, {
     status: proxied.status,
     statusText: proxied.statusText,
     headers: new Headers(proxied.headers),
