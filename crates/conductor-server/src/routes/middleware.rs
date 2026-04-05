@@ -64,11 +64,7 @@ impl GlobalRateLimiter {
     }
 
     /// Remove entries whose window has expired.
-    fn evict_stale(
-        &self,
-        entries: &mut HashMap<String, GlobalRateLimitEntry>,
-        now: Instant,
-    ) {
+    fn evict_stale(&self, entries: &mut HashMap<String, GlobalRateLimitEntry>, now: Instant) {
         let window = Duration::from_secs(GLOBAL_RATE_LIMIT_WINDOW_SECS);
         entries.retain(|_, entry| now.duration_since(entry.window_start) < window);
     }

@@ -65,7 +65,13 @@ async fn sweep(sessions_dir: &Path, tmux_dir: &Path, active_ids: &[String]) {
         let mut sweep_state = SweepState::new();
         let active_set: std::collections::HashSet<&str> =
             active_ids.iter().map(|s| s.as_str()).collect();
-        sweep_directory(&sessions_dir, cutoff, &mut sweep_state, "session", &active_set);
+        sweep_directory(
+            &sessions_dir,
+            cutoff,
+            &mut sweep_state,
+            "session",
+            &active_set,
+        );
         sweep_directory(&tmux_dir, cutoff, &mut sweep_state, "tmux", &active_set);
 
         // Clean up empty directories left behind after file removal.
