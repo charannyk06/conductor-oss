@@ -444,6 +444,9 @@ export function RemoteSessionTerminal({
     terminal.loadAddon(fitAddon);
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    // Sync initial stdin/cursor state to current expectsRelayTerminal.
+    terminal.options.disableStdin = !expectsRelayTerminal;
+    terminal.options.cursorBlink = expectsRelayTerminal;
     const scrollHost =
       host.querySelector<HTMLElement>(".xterm-viewport")
       ?? host.querySelector<HTMLElement>(".xterm-scrollable-element");
@@ -574,7 +577,6 @@ export function RemoteSessionTerminal({
     };
   }, [
     applyKeyboardAwareTerminalHeight,
-    expectsRelayTerminal,
     projectId,
     sendTerminalFrame,
     syncTerminalGeometry,
@@ -602,7 +604,16 @@ export function RemoteSessionTerminal({
     }
     clearScheduledLayoutSyncs();
     closeSocket();
-  }, [clearScheduledLayoutSyncs, closeSocket, expectsRelayTerminal, sessionId]);
+  }, [clearScheduledLayoutSyncs, closeSocket, sessionId]);
+
+  // Sync stdin/cursor state when expectsRelayTerminal changes, without disposing
+  // the xterm instance.
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.options.disableStdin = !expectsRelayTerminal;
+      terminalRef.current.options.cursorBlink = expectsRelayTerminal;
+    }
+  }, [expectsRelayTerminal]);
 
   useEffect(() => {
     const host = terminalHostRef.current;

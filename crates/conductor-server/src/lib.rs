@@ -42,14 +42,16 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     state.start_app_update_watchdog();
     state.publish_snapshot().await;
 
-    // Snapshot active session IDs for GC before moving state into the router.
-    let gc_active_ids = state.all_session_ids().await;
+    // GC will query live session IDs on each sweep, so no startup snapshot needed.
 
     // WebSocket routes are merged AFTER the CorsLayer so they bypass CORS.
     // The CorsLayer adds headers (Vary, Access-Control-*) to 101 Switching
     // Protocols responses, which causes browsers to reject the WebSocket
     // upgrade with an error before onopen fires.
     let ws_routes = routes::terminal::ws_router().with_state(state.clone());
+
+    // Clone for GC before state is moved into the router.
+    let gc_state = state.clone();
 
     let app = Router::new()
         .merge(routes::app_update::router())
@@ -162,7 +164,7 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
     let gc_conductor_dir = config.workspace.join(".conductor");
     let gc_cancel_clone = gc_cancel.clone();
     let gc_handle = tokio::spawn(async move {
-        session_gc::run_session_gc(gc_conductor_dir, gc_active_ids, gc_cancel_clone).await;
+        session_gc::run_session_gc(gc_conductor_dir, gc_state, gc_cancel_clone).await;
     });
 
     // Graceful shutdown: ctrl_c triggers GC stop + server drain

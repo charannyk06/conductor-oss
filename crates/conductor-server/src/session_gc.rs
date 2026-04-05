@@ -6,14 +6,16 @@
 //! without bound. This module runs a periodic sweep that removes files for
 //! sessions that look inactive based on file modification time.
 //!
-//! The GC skips files belonging to sessions that are still active in the
-//! in-memory registry, so long-running idle sessions never lose their state.
+//! The GC queries the live session registry on each sweep to avoid deleting
+//! files belonging to sessions that are still active in memory, even if they
+//! have been idle for longer than the TTL.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, info, warn};
+
+use crate::state::AppState;
 
 /// How long to keep session state files after last modification.
 const SESSION_FILE_TTL: Duration = Duration::from_secs(24 * 60 * 60); // 24h
@@ -25,14 +27,16 @@ const GC_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 min
 const MAX_REMOVALS_PER_SWEEP: usize = 500;
 
 /// Run the session GC loop until notified to stop.
+///
+/// On each sweep, queries `state.all_session_ids()` to get the current set of
+/// active sessions, so newly created sessions are always protected.
 pub async fn run_session_gc(
     conductor_dir: PathBuf,
-    active_session_ids: Vec<String>,
+    state: Arc<AppState>,
     cancel: Arc<tokio::sync::Notify>,
 ) {
     let sessions_dir = conductor_dir.join("rust-backend").join("sessions");
     let tmux_dir = conductor_dir.join("rust-backend").join("tmux");
-    let active_set: HashSet<String> = active_session_ids.into_iter().collect();
 
     let mut interval = tokio::time::interval(GC_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -44,32 +48,40 @@ pub async fn run_session_gc(
                 return;
             }
             _ = interval.tick() => {
-                sweep(&sessions_dir, &tmux_dir, &active_set).await;
+                let active_ids = state.all_session_ids().await;
+                sweep(&sessions_dir, &tmux_dir, &active_ids).await;
             }
         }
     }
 }
 
-async fn sweep(sessions_dir: &Path, tmux_dir: &Path, active_ids: &HashSet<String>) {
+async fn sweep(sessions_dir: &Path, tmux_dir: &Path, active_ids: &[String]) {
     let cutoff = SystemTime::now() - SESSION_FILE_TTL;
     let sessions_dir = sessions_dir.to_path_buf();
     let tmux_dir = tmux_dir.to_path_buf();
-    let active_ids = active_ids.clone();
+    let active_ids: Vec<String> = active_ids.to_vec();
 
     let result = tokio::task::spawn_blocking(move || {
-        let mut state = SweepState::new();
-        sweep_directory(&sessions_dir, cutoff, &mut state, "session", &active_ids);
-        sweep_directory(&tmux_dir, cutoff, &mut state, "tmux", &active_ids);
-        state
+        let mut sweep_state = SweepState::new();
+        let active_set: std::collections::HashSet<&str> =
+            active_ids.iter().map(|s| s.as_str()).collect();
+        sweep_directory(&sessions_dir, cutoff, &mut sweep_state, "session", &active_set);
+        sweep_directory(&tmux_dir, cutoff, &mut sweep_state, "tmux", &active_set);
+
+        // Clean up empty directories left behind after file removal.
+        remove_empty_dirs(&sessions_dir);
+        remove_empty_dirs(&tmux_dir);
+
+        sweep_state
     })
     .await;
 
     match result {
-        Ok(state) => {
-            if state.removed > 0 || state.scanned > 0 {
+        Ok(s) => {
+            if s.removed > 0 || s.scanned > 0 {
                 info!(
-                    scanned = state.scanned,
-                    removed = state.removed,
+                    scanned = s.scanned,
+                    removed = s.removed,
                     "session GC sweep complete"
                 );
             } else {
@@ -102,7 +114,7 @@ fn sweep_directory(
     cutoff: SystemTime,
     state: &mut SweepState,
     dir_name: &str,
-    active_ids: &HashSet<String>,
+    active_ids: &std::collections::HashSet<&str>,
 ) {
     if !dir.exists() {
         return;
@@ -117,7 +129,7 @@ fn sweep_directory(
 
             // Skip files belonging to sessions still active in the registry.
             if let Some(session_id) = extract_session_id(&path) {
-                if active_ids.contains(&session_id) {
+                if active_ids.contains(session_id.as_str()) {
                     continue;
                 }
             }
@@ -136,6 +148,22 @@ fn sweep_directory(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Remove immediate subdirectories that are empty (left behind after file cleanup).
+fn remove_empty_dirs(parent: &Path) {
+    if !parent.exists() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Try to remove; fails silently if not empty, which is what we want.
+                let _ = std::fs::remove_dir(&path);
             }
         }
     }

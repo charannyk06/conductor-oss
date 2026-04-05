@@ -181,20 +181,18 @@ function SessionTerminalView(props: SessionTerminalProps) {
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
     retryAttemptRef.current = 0;
-    setTerminalUrl(null);
-    setTerminalLinkUrl(null);
     setResolvingConnection(expectsLiveTerminal);
     setConnectionError(null);
-    setFrameLoaded(false);
     setConnectionRefreshTick(0);
     setPromptMessage("");
     setPromptSending(false);
     setPromptError(null);
     setQueuedInsertError(null);
     forceTerminalReloadRef.current = false;
-    frameLoadedRef.current = false;
     pageHiddenAtRef.current = null;
     lastLifecycleRefreshAtRef.current = 0;
+    // Preserve existing terminal URL/frame across transient expectsLiveTerminal flips.
+    // Only do a full reset when sessionId actually changes.
   }, [expectsLiveTerminal, sessionId]);
 
   useEffect(() => {

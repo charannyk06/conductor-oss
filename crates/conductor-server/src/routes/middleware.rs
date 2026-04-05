@@ -18,6 +18,9 @@ use crate::state::AppState;
 const GLOBAL_RATE_LIMIT_REQUESTS: u64 = 2000;
 const GLOBAL_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
+/// Maximum number of entries before forcing an eviction sweep.
+const RATE_LIMITER_MAX_ENTRIES: usize = 10_000;
+
 struct GlobalRateLimitEntry {
     count: u64,
     window_start: Instant,
@@ -31,6 +34,11 @@ impl GlobalRateLimiter {
     async fn check_rate_limit(&self, key: &str) -> bool {
         let now = Instant::now();
         let mut entries = self.entries.write().await;
+
+        // Evict stale entries when the map grows too large.
+        if entries.len() > RATE_LIMITER_MAX_ENTRIES {
+            self.evict_stale(&mut entries, now);
+        }
 
         let entry = entries
             .entry(key.to_string())
@@ -53,6 +61,16 @@ impl GlobalRateLimiter {
 
         entry.count += 1;
         true
+    }
+
+    /// Remove entries whose window has expired.
+    fn evict_stale(
+        &self,
+        entries: &mut HashMap<String, GlobalRateLimitEntry>,
+        now: Instant,
+    ) {
+        let window = Duration::from_secs(GLOBAL_RATE_LIMIT_WINDOW_SECS);
+        entries.retain(|_, entry| now.duration_since(entry.window_start) < window);
     }
 }
 
@@ -156,7 +174,11 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
     if path.starts_with("/api/sessions/")
         && (path.ends_with("/terminal/ttyd") || path.ends_with("/terminal/ttyd/ws"))
     {
-        return None;
+        return Some(if *method == Method::GET {
+            AccessRole::Viewer
+        } else {
+            AccessRole::Operator
+        });
     }
 
     if path.starts_with("/api/sessions/") && path.ends_with("/terminal/ttyd/token") {
@@ -258,11 +280,11 @@ mod tests {
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd"),
-            None
+            Some(AccessRole::Viewer)
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd/ws"),
-            None
+            Some(AccessRole::Viewer)
         );
         assert_eq!(
             required_access_role(&Method::GET, "/api/sessions/abc/terminal/ttyd/token"),
@@ -272,9 +294,13 @@ mod tests {
 
     #[test]
     fn rate_limit_key_prefers_proxy_identity_when_available() {
+        unsafe {
+            std::env::set_var("CONDUCTOR_PROXY_AUTH_SECRET", "test-secret");
+        }
         let request = Request::builder()
             .uri("/api/events")
             .header("x-conductor-proxy-authorized", "true")
+            .header("x-conductor-proxy-secret", "test-secret")
             .header("x-conductor-access-provider", "clerk")
             .header("x-conductor-access-email", "viewer@example.com")
             .header("x-forwarded-for", "203.0.113.10")
@@ -285,6 +311,9 @@ mod tests {
             extract_rate_limit_key(&request),
             "proxy:clerk:viewer@example.com"
         );
+        unsafe {
+            std::env::remove_var("CONDUCTOR_PROXY_AUTH_SECRET");
+        }
     }
 
     #[test]
@@ -336,6 +365,9 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_allows_authenticated_proxy_requests_even_when_runtime_auth_is_required() {
+        unsafe {
+            std::env::set_var("CONDUCTOR_PROXY_AUTH_SECRET", "test-secret");
+        }
         let state = build_state(DashboardAccessConfig {
             require_auth: true,
             ..DashboardAccessConfig::default()
@@ -358,6 +390,7 @@ mod tests {
                 Request::builder()
                     .uri("/api/preferences")
                     .header("x-conductor-proxy-authorized", "true")
+                    .header("x-conductor-proxy-secret", "test-secret")
                     .header("x-conductor-access-authenticated", "true")
                     .header("x-conductor-access-role", "viewer")
                     .body(Body::empty())
@@ -367,6 +400,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        unsafe {
+            std::env::remove_var("CONDUCTOR_PROXY_AUTH_SECRET");
+        }
     }
 
     #[tokio::test]

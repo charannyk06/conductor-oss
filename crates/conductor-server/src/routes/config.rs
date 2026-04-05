@@ -386,7 +386,14 @@ pub(crate) fn proxy_request_authorized(headers: &HeaderMap) -> bool {
             .and_then(|value| value.to_str().ok())
             .map(|actual| constant_time_equal(actual.trim().as_bytes(), expected.as_bytes()))
             .unwrap_or(false),
-        None => true,
+        None => {
+            tracing::warn!(
+                "proxy auth: {} is not set — refusing proxy headers. \
+                 Set this env var to enable reverse-proxy authentication.",
+                PROXY_AUTH_SECRET_ENV
+            );
+            false
+        }
     }
 }
 
@@ -1722,6 +1729,9 @@ mod tests {
     #[tokio::test]
     async fn resolve_access_identity_accepts_forwarded_proxy_identity() {
         let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        unsafe {
+            env::set_var(super::PROXY_AUTH_SECRET_ENV, "test-secret");
+        }
         let access = DashboardAccessConfig {
             require_auth: true,
             ..DashboardAccessConfig::default()
@@ -1729,6 +1739,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(super::PROXY_AUTHORIZED_HEADER, "true".parse().unwrap());
+        headers.insert(super::PROXY_SECRET_HEADER, "test-secret".parse().unwrap());
         headers.insert(super::PROXY_AUTHENTICATED_HEADER, "false".parse().unwrap());
         headers.insert(super::PROXY_ROLE_HEADER, "admin".parse().unwrap());
         headers.insert(super::PROXY_EMAIL_HEADER, "local".parse().unwrap());
@@ -1739,11 +1750,18 @@ mod tests {
         assert_eq!(identity.role, Some(AccessRole::Admin));
         assert_eq!(identity.email.as_deref(), Some("local"));
         assert_eq!(identity.provider.as_deref(), Some("local"));
+
+        unsafe {
+            env::remove_var(super::PROXY_AUTH_SECRET_ENV);
+        }
     }
 
     #[tokio::test]
     async fn resolve_access_identity_defaults_missing_proxy_authenticated_to_false() {
         let _guard = crate::routes::TEST_ENV_LOCK.lock().await;
+        unsafe {
+            env::set_var(super::PROXY_AUTH_SECRET_ENV, "test-secret");
+        }
         let access = DashboardAccessConfig {
             require_auth: true,
             ..DashboardAccessConfig::default()
@@ -1751,6 +1769,7 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(super::PROXY_AUTHORIZED_HEADER, "true".parse().unwrap());
+        headers.insert(super::PROXY_SECRET_HEADER, "test-secret".parse().unwrap());
         headers.insert(super::PROXY_ROLE_HEADER, "admin".parse().unwrap());
         headers.insert(super::PROXY_EMAIL_HEADER, "local".parse().unwrap());
         headers.insert(super::PROXY_PROVIDER_HEADER, "local".parse().unwrap());
@@ -1760,6 +1779,10 @@ mod tests {
         assert_eq!(identity.role, Some(AccessRole::Admin));
         assert_eq!(identity.email.as_deref(), Some("local"));
         assert_eq!(identity.provider.as_deref(), Some("local"));
+
+        unsafe {
+            env::remove_var(super::PROXY_AUTH_SECRET_ENV);
+        }
     }
 
     #[tokio::test]
