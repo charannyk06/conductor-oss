@@ -20,9 +20,6 @@ conductor.yaml
 # Demo video files (host externally)
 *.mp4
 
-# Conductor runtime state
-.conductor/
-
 # Editor
 .vscode/
 .idea/

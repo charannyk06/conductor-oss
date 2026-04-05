@@ -42,6 +42,9 @@ pub async fn serve(config: &ConductorConfig, db: Database, _event_bus: EventBus)
     state.start_app_update_watchdog();
     state.publish_snapshot().await;
 
+    // Snapshot active session IDs for GC before moving state into the router.
+    let gc_active_ids = state.all_session_ids().await;
+
     // WebSocket routes are merged AFTER the CorsLayer so they bypass CORS.
     // The CorsLayer adds headers (Vary, Access-Control-*) to 101 Switching
     // Protocols responses, which causes browsers to reject the WebSocket
@@ -159,7 +162,7 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
     let gc_conductor_dir = config.workspace.join(".conductor");
     let gc_cancel_clone = gc_cancel.clone();
     let gc_handle = tokio::spawn(async move {
-        session_gc::run_session_gc(gc_conductor_dir, gc_cancel_clone).await;
+        session_gc::run_session_gc(gc_conductor_dir, gc_active_ids, gc_cancel_clone).await;
     });
 
     // Graceful shutdown: ctrl_c triggers GC stop + server drain
@@ -171,13 +174,17 @@ Set the same secret in both the dashboard and backend processes so forwarded aut
     tokio::select! {
         result = server => {
             gc_cancel.notify_one();
-            let _ = gc_handle.await;
+            if let Err(e) = gc_handle.await {
+                tracing::warn!(error = %e, "session GC task panicked during shutdown");
+            }
             result.map_err(Into::into)
         }
         _ = tokio::signal::ctrl_c() => {
             tracing::info!("received shutdown signal");
             gc_cancel.notify_one();
-            let _ = gc_handle.await;
+            if let Err(e) = gc_handle.await {
+                tracing::warn!(error = %e, "session GC task panicked during shutdown");
+            }
             Ok(())
         }
     }

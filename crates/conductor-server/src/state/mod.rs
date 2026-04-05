@@ -494,6 +494,13 @@ impl AppState {
         list
     }
 
+    /// Return just the IDs of all sessions currently in the in-memory registry.
+    /// Used by the session GC to avoid deleting files for active sessions.
+    pub async fn all_session_ids(&self) -> Vec<String> {
+        let sessions = self.sessions.read().await;
+        sessions.keys().cloned().collect()
+    }
+
     pub async fn latest_project_dispatcher_session(
         &self,
         project_id: &str,
