@@ -9,7 +9,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::BroadcastStream;
@@ -38,22 +37,32 @@ const MAX_FEED_WINDOW_LIMIT: usize = 240;
 const BOARD_PLANNING_SESSION_KIND: &str = "board_planning";
 const PROJECT_DISPATCHER_SESSION_KIND: &str = "project_dispatcher";
 
-static SPAWN_RATE_COUNT: AtomicU64 = AtomicU64::new(0);
-static SPAWN_RATE_WINDOW_START: AtomicU64 = AtomicU64::new(0);
+struct SpawnRateState {
+    count: u64,
+    window_start: u64,
+}
+
+static SPAWN_RATE_STATE: std::sync::Mutex<SpawnRateState> = std::sync::Mutex::new(SpawnRateState {
+    count: 0,
+    window_start: 0,
+});
 
 fn spawn_rate_check() -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let window_start = SPAWN_RATE_WINDOW_START.load(Ordering::Relaxed);
-    if now.saturating_sub(window_start) >= SPAWN_RATE_WINDOW_SECS {
-        SPAWN_RATE_WINDOW_START.store(now, Ordering::Relaxed);
-        SPAWN_RATE_COUNT.store(1, Ordering::Relaxed);
+    let mut state = SPAWN_RATE_STATE.lock().unwrap();
+    if now.saturating_sub(state.window_start) >= SPAWN_RATE_WINDOW_SECS {
+        state.window_start = now;
+        state.count = 1;
         return true;
     }
-    let count = SPAWN_RATE_COUNT.fetch_add(1, Ordering::Relaxed);
-    count < SPAWN_RATE_LIMIT
+    if state.count >= SPAWN_RATE_LIMIT {
+        return false;
+    }
+    state.count += 1;
+    true
 }
 
 async fn spawn_rate_limit_middleware(

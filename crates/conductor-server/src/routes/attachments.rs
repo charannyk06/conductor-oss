@@ -92,7 +92,7 @@ async fn upload_attachments(
         );
     }
     let task_ref_component = match task_ref.as_deref().map(normalize_token) {
-        Some(value) if value == "." || value == ".." => {
+        Some(value) if value.is_empty() || value == "." || value == ".." => {
             return error(
                 StatusCode::BAD_REQUEST,
                 "taskRef must not resolve to . or ..",
@@ -142,7 +142,7 @@ async fn upload_attachments(
 }
 
 fn normalize_token(value: &str) -> String {
-    value
+    let result: String = value
         .trim()
         .to_lowercase()
         .chars()
@@ -153,9 +153,17 @@ fn normalize_token(value: &str) -> String {
                 '-'
             }
         })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
+        .collect();
+    let result = result.trim_matches('-');
+
+    // Reject path traversal segments.
+    if result == "." || result == ".." {
+        return String::new();
+    }
+
+    // Strip leading dots to prevent hidden-file or traversal patterns.
+    let result = result.trim_start_matches('.');
+    result.to_string()
 }
 
 fn sanitize_file_name(value: &str) -> String {
@@ -199,8 +207,9 @@ mod tests {
     }
 
     #[test]
-    fn normalize_token_keeps_dot_segments_which_callers_must_reject() {
-        assert_eq!(normalize_token("."), ".");
-        assert_eq!(normalize_token(".."), "..");
+    fn normalize_token_rejects_dot_segments() {
+        assert_eq!(normalize_token("."), "");
+        assert_eq!(normalize_token(".."), "");
+        assert_eq!(normalize_token(".hidden"), "hidden");
     }
 }
