@@ -35,7 +35,7 @@
     "@changesets/cli": "^2.30.0",
     "@types/node": "^25.3.3",
     "puppeteer": "^24.37.5",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.2"
   },
   "overrides": {
     "yauzl": "^3.2.1"
