@@ -1,4 +1,5 @@
 mod helpers;
+pub(crate) mod tunnel_launcher;
 pub(crate) mod ttyd_launcher;
 pub(crate) mod types;
 
@@ -15,6 +16,7 @@ pub(crate) use types::DETACHED_PID_METADATA_KEY;
 use types::DIRECT_RUNTIME_MODE;
 pub(crate) use types::{
     RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
+    TTYD_TUNNEL_URL_METADATA_KEY, TUNNEL_PID_METADATA_KEY,
 };
 
 pub(crate) struct RuntimeLaunch {

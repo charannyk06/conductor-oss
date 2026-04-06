@@ -371,6 +371,8 @@ pub async fn spawn_ttyd_runtime(
                 }
             }
         }
+        // Clean up cloudflared tunnel when the ttyd session ends.
+        super::tunnel_launcher::kill_tunnel(&st, &sid).await;
         st.detach_terminal_runtime(&sid).await;
     });
 
@@ -461,27 +463,82 @@ pub async fn spawn_ttyd_runtime(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
+    let mut metadata = HashMap::from([
+        (
+            RUNTIME_MODE_METADATA_KEY.to_string(),
+            TTYD_RUNTIME_MODE.to_string(),
+        ),
+        (TTYD_PORT_METADATA_KEY.to_string(), port.to_string()),
+        (TTYD_PID_METADATA_KEY.to_string(), ttyd_pid.to_string()),
+        (TTYD_WS_URL_METADATA_KEY.to_string(), ttyd_ws_url),
+        (DETACHED_PID_METADATA_KEY.to_string(), ttyd_pid.to_string()),
+        ("agentLaunchCommand".to_string(), launch_command),
+        (
+            "terminalShell".to_string(),
+            terminal_shell.to_string_lossy().to_string(),
+        ),
+        (
+            "ttyd_session_start_time".to_string(),
+            session_start_secs.to_string(),
+        ),
+    ]);
+
+    // Try to establish a Cloudflare tunnel for direct browser access.
+    // This is non-blocking: if cloudflared is not installed or the tunnel
+    // fails, the session falls back to the existing backend proxy facade.
+    let _tunnel_result = if super::tunnel_launcher::resolve_cloudflared_binary().is_some() {
+        match super::tunnel_launcher::spawn_tunnel(port).await {
+            Ok((mut tunnel_child, tunnel_url)) => {
+                let tunnel_pid = tunnel_child.id().unwrap_or(0);
+                tracing::info!(
+                    session_id,
+                    port,
+                    %tunnel_url,
+                    tunnel_pid,
+                    "Cloudflare tunnel established for session"
+                );
+                metadata.insert(
+                    super::types::TTYD_TUNNEL_URL_METADATA_KEY.to_string(),
+                    tunnel_url.clone(),
+                );
+                metadata.insert(
+                    super::types::TUNNEL_PID_METADATA_KEY.to_string(),
+                    tunnel_pid.to_string(),
+                );
+
+                // Reap the cloudflared process when it exits to prevent zombies.
+                // The tunnel lives until kill_tunnel() is called on session end.
+                let reap_sid = session_id.to_string();
+                let reap_state = state.clone();
+                tokio::spawn(async move {
+                    let _ = tunnel_child.wait().await;
+                    tracing::info!(session_id = %reap_sid, "cloudflared tunnel process exited");
+                    let mut sessions = reap_state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(&reap_sid) {
+                        session.metadata.remove(super::types::TTYD_TUNNEL_URL_METADATA_KEY);
+                        session.metadata.remove(super::types::TUNNEL_PID_METADATA_KEY);
+                    }
+                });
+
+                Some(tunnel_url)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    session_id,
+                    error = %err,
+                    "Cloudflare tunnel failed, falling back to backend proxy"
+                );
+                None
+            }
+        }
+    } else {
+        tracing::debug!(session_id, "cloudflared not found, skipping tunnel");
+        None
+    };
+
     Ok(RuntimeLaunch {
         handle,
-        metadata: HashMap::from([
-            (
-                RUNTIME_MODE_METADATA_KEY.to_string(),
-                TTYD_RUNTIME_MODE.to_string(),
-            ),
-            (TTYD_PORT_METADATA_KEY.to_string(), port.to_string()),
-            (TTYD_PID_METADATA_KEY.to_string(), ttyd_pid.to_string()),
-            (TTYD_WS_URL_METADATA_KEY.to_string(), ttyd_ws_url),
-            (DETACHED_PID_METADATA_KEY.to_string(), ttyd_pid.to_string()),
-            ("agentLaunchCommand".to_string(), launch_command),
-            (
-                "terminalShell".to_string(),
-                terminal_shell.to_string_lossy().to_string(),
-            ),
-            (
-                "ttyd_session_start_time".to_string(),
-                session_start_secs.to_string(),
-            ),
-        ]),
+        metadata,
         streams_terminal_bytes: true,
     })
 }
@@ -573,6 +630,8 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
                 let _ = otx.send(ExecutorOutput::Completed { exit_code: 0 }).await;
             }
         }
+        // Clean up cloudflared tunnel when the restored session ends.
+        super::tunnel_launcher::kill_tunnel(&st, &sid).await;
         st.detach_terminal_runtime(&sid).await;
     });
 

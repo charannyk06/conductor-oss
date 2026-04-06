@@ -93,9 +93,10 @@ type TerminalTokenResult =
     interactive: true;
     ttydHttpUrl: string | null;
     ttydWsUrl: string | null;
+    tunnelUrl: string | null;
     expiresInSeconds: number | null;
   }
-  | { interactive: false; ttydHttpUrl: null; ttydWsUrl: null; reason: string | null };
+  | { interactive: false; ttydHttpUrl: null; ttydWsUrl: null; tunnelUrl: null; reason: string | null };
 
 function resolveProvidedTtydHttpUrl(
   ttydHttpUrl: string | null,
@@ -177,6 +178,7 @@ async function fetchTerminalToken(
       required?: boolean;
       ttydHttpUrl?: string;
       ttydWsUrl?: string;
+      tunnelUrl?: string;
       expiresInSeconds?: number | string | null;
       error?: string;
     }
@@ -188,6 +190,10 @@ async function fetchTerminalToken(
   const ttydWsUrl =
     typeof data?.ttydWsUrl === "string" && data.ttydWsUrl.trim().length > 0
       ? data.ttydWsUrl.trim()
+      : null;
+  const tunnelUrl =
+    typeof data?.tunnelUrl === "string" && data.tunnelUrl.trim().length > 0
+      ? data.tunnelUrl.trim()
       : null;
   const expiresInSeconds = (() => {
     const raw = data?.expiresInSeconds;
@@ -208,6 +214,7 @@ async function fetchTerminalToken(
       interactive: false,
       ttydHttpUrl: null,
       ttydWsUrl: null,
+      tunnelUrl: null,
       reason: data?.error ?? "Terminal access denied",
     };
   }
@@ -217,6 +224,7 @@ async function fetchTerminalToken(
       interactive: false,
       ttydHttpUrl: null,
       ttydWsUrl: null,
+      tunnelUrl: null,
       reason: data?.error ?? "Terminal unavailable",
     };
   }
@@ -225,6 +233,7 @@ async function fetchTerminalToken(
     interactive: true,
     ttydHttpUrl,
     ttydWsUrl,
+    tunnelUrl,
     expiresInSeconds,
   };
 }
@@ -242,7 +251,33 @@ export async function resolveTerminalConnection(
       interactive: false,
       reason: auth.reason,
       expiresInSeconds: null,
+      tunnelUrl: null,
     };
+  }
+
+  // When a cloudflare tunnel URL is available, use it directly instead of the
+  // proxied path. Tunnel URLs bypass the Next.js proxy entirely and connect
+  // the browser straight to ttyd through the tunnel, eliminating proxy
+  // latency and resize coordination overhead.
+  if (auth.tunnelUrl) {
+    try {
+      const tunnelTerminalUrl = new URL(auth.tunnelUrl);
+      // Preserve any token parameter from the backend response.
+      const ttydUrl = new URL(auth.ttydHttpUrl ?? auth.ttydWsUrl ?? "", backendOrigin);
+      const token = ttydUrl.searchParams.get("token");
+      if (token) {
+        tunnelTerminalUrl.searchParams.set("token", token);
+      }
+      return {
+        terminalUrl: appendBridgeIdToTerminalUrl(tunnelTerminalUrl.toString(), options?.bridgeId),
+        interactive: true,
+        reason: null,
+        expiresInSeconds: auth.expiresInSeconds,
+        tunnelUrl: auth.tunnelUrl,
+      };
+    } catch {
+      // If tunnel URL is malformed, fall through to the proxy path.
+    }
   }
 
   // Keep dashboard proxy ttyd routes on the dashboard origin so hosted auth
@@ -267,5 +302,6 @@ export async function resolveTerminalConnection(
     interactive: true,
     reason: null,
     expiresInSeconds: auth.expiresInSeconds,
+    tunnelUrl: auth.tunnelUrl,
   };
 }

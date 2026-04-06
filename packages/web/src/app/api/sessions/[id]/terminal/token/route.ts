@@ -28,6 +28,10 @@ export async function GET(
     return ensured.response;
   }
 
+  const tunnelUrl = typeof ensured.upstreamPayload?.tunnelUrl === "string"
+    ? ensured.upstreamPayload.tunnelUrl
+    : null;
+
   return NextResponse.json({
     required: false,
     expiresInSeconds: null,
@@ -37,5 +41,6 @@ export async function GET(
       ensured.relayTtydWsUrl,
     ),
     ttydWsUrl: ensured.relayTtydWsUrl,
+    tunnelUrl,
   });
 }

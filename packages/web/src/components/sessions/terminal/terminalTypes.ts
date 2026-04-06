@@ -21,6 +21,7 @@ export type TerminalConnectionInfo = {
   interactive: boolean;
   reason: string | null;
   expiresInSeconds?: number | null;
+  tunnelUrl?: string | null;
 };
 
 declare global {
