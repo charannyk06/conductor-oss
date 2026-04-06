@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess } from "@/lib/auth";
-import { guardAndProxyToBridgeDevice } from "@/lib/bridgeApiProxy";
+import { guardAndProxyToBridgeDevice, hasBridgeRelay } from "@/lib/bridgeApiProxy";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
@@ -20,7 +20,7 @@ export async function GET(request: NextRequest, context: RouteParams): Promise<R
 
   // Bridge sessions: proxy to the paired device's backend (has local Puppeteer)
   const bridge = decodeBridgeSessionId(id);
-  if (bridge) {
+  if (bridge && hasBridgeRelay()) {
     const decodedPath = `/api/sessions/${encodeURIComponent(bridge.sessionId)}/preview/screenshot`;
     return guardAndProxyToBridgeDevice(request, bridge.bridgeId, decodedPath);
   }

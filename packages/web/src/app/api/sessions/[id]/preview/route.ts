@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
-import { guardAndProxyToBridgeDevice } from "@/lib/bridgeApiProxy";
+import { guardAndProxyToBridgeDevice, hasBridgeRelay } from "@/lib/bridgeApiProxy";
 import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
 import { decodeBridgeSessionId } from "@/lib/bridgeSessionIds";
 import { getPreviewBrowserManager } from "@/lib/devPreviewBrowser";
@@ -22,6 +22,7 @@ type RouteParams = { params: Promise<{ id: string }> };
 async function tryProxyBridgePreview(request: NextRequest, id: string, options?: { requireActionGuard?: boolean }): Promise<Response | null> {
   const bridge = decodeBridgeSessionId(id);
   if (!bridge) return null;
+  if (!hasBridgeRelay()) return null;
 
   const decodedPath = `/api/sessions/${encodeURIComponent(bridge.sessionId)}/preview`;
   return guardAndProxyToBridgeDevice(request, bridge.bridgeId, decodedPath, {
