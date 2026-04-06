@@ -132,6 +132,7 @@ type TerminalTokenPayload = {
   expiresInSeconds?: unknown;
   ttydHttpUrl?: unknown;
   ttydWsUrl?: unknown;
+  tunnelUrl?: unknown;
   error?: unknown;
 };
 
@@ -220,9 +221,13 @@ export async function ensureBridgeTtydSession(
  * Inject a resize coordination shim into the proxied ttyd HTML.
  *
  * The shim listens for a `conductor-terminal-resize` postMessage from the
- * parent frame. When received, it locates ttyd's internal xterm.js Terminal
- * instance and calls `fit()` + PTY resize in the same animation frame so the
- * outer container resize and the inner terminal resize happen in lockstep.
+ * parent frame. When received, it dispatches a synthetic `resize` event so
+ * that ttyd's internal xterm.js FitAddon re-fits the terminal. This mirrors
+ * the approach used in the Rust backend's TTYD_RESIZE_SHIM but is needed for
+ * the bridge (proxied) path where the Rust shim is not injected.
+ *
+ * Additionally, it attempts a direct xterm fit+refresh if the terminal
+ * instance can be located, providing a belt-and-suspenders approach.
  */
 export function injectTtydResizeShim(html: string): string {
   const marker = "conductor-ttyd-resize-shim";
@@ -238,22 +243,36 @@ export function injectTtydResizeShim(html: string): string {
 
   var RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
   var pendingRaf = null;
+  var burstTimers = [];
+
+  function clearBurstTimers() {
+    for (var i = 0; i < burstTimers.length; i++) {
+      window.clearTimeout(burstTimers[i]);
+    }
+    burstTimers = [];
+  }
+
+  function dispatchResize() {
+    window.dispatchEvent(new Event("resize"));
+  }
+
+  function scheduleResizeBurst() {
+    clearBurstTimers();
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(dispatchResize);
+    } else {
+      dispatchResize();
+    }
+    burstTimers.push(window.setTimeout(dispatchResize, 120));
+    burstTimers.push(window.setTimeout(dispatchResize, 360));
+  }
 
   function findXtermTerminal() {
-    // ttyd stores the terminal instance on its internal app object.
-    // Try the global ttyd object first, then search for xterm containers.
     if (typeof ttyd !== "undefined" && ttyd.terminal) return ttyd.terminal;
-
-    // Walk all elements looking for an xterm instance attached to the DOM.
-    // ttyd creates a single xterm Terminal and stores it as a property.
     var container = document.querySelector(".terminal");
     if (container && container._xterm) return container._xterm;
-
-    // Fallback: search for the xterm Term class instance on the window.
-    // ttyd's bundle often exposes it through its module system.
     var termEl = document.querySelector(".xterm");
     if (termEl && termEl.__xterm) return termEl.__xterm;
-
     return null;
   }
 
@@ -261,18 +280,24 @@ export function injectTtydResizeShim(html: string): string {
     if (!event || !event.data) return;
     if (event.data.type !== RESIZE_MESSAGE_TYPE) return;
 
+    // Guard: skip if viewport has collapsed to near-zero (tab switch, minimize).
+    var vw = Math.max(0, window.innerWidth || 0);
+    var vh = Math.max(0, window.innerHeight || 0);
+    if (vw < 10 || vh < 10) return;
+
+    // Primary: dispatch synthetic resize events so ttyd's FitAddon re-fits.
+    // This mirrors the Rust backend shim's scheduleResizeBurst pattern.
+    scheduleResizeBurst();
+
+    // Secondary: direct xterm fit+refresh if we can find the instance.
     if (pendingRaf !== null) return;
     pendingRaf = requestAnimationFrame(function() {
       pendingRaf = null;
       var terminal = findXtermTerminal();
       if (!terminal) return;
-
-      // Find the FitAddon if ttyd exposes one
       if (terminal._fitAddon) {
         try { terminal._fitAddon.fit(); } catch(e) {}
       }
-
-      // Force a full refresh of visible rows to clear stale glyphs
       try {
         var rows = terminal.rows;
         if (rows > 0) terminal.refresh(0, rows - 1);
@@ -281,6 +306,10 @@ export function injectTtydResizeShim(html: string): string {
   }
 
   window.addEventListener("message", handleResizeMessage, false);
+
+  window.addEventListener("beforeunload", function() {
+    clearBurstTimers();
+  }, { once: true });
 })();
 </script>`;
 

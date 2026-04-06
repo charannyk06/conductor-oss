@@ -161,6 +161,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const terminalUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
+  const resizeSuppressUntilRef = useRef(0);
 
   const syncTerminalAuthToken = useCallback(() => {
     const token = extractTerminalAuthToken(terminalLinkUrl);
@@ -197,6 +198,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     frameLoadedRef.current = false;
     pageHiddenAtRef.current = null;
     lastLifecycleRefreshAtRef.current = 0;
+    resizeSuppressUntilRef.current = 0;
   }, [expectsLiveTerminal, sessionId]);
 
   useEffect(() => {
@@ -348,10 +350,15 @@ function SessionTerminalView(props: SessionTerminalProps) {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
         pageHiddenAtRef.current = window.Date.now();
+        // Suppress resize for 250ms to avoid ResizeObserver firing with
+        // zero/intermediate heights during tab switch transitions.
+        resizeSuppressUntilRef.current = window.Date.now() + 250;
         return;
       }
 
       if (document.visibilityState === "visible") {
+        // Briefly suppress on visible too so layout settles before we fit.
+        resizeSuppressUntilRef.current = window.Date.now() + 100;
         requestLifecycleRefresh();
       }
     };
@@ -500,6 +507,21 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
     let debounceTimer: number | null = null;
     const applyGeometry = () => {
+      // Guard: skip if we're in the suppression window after a tab switch.
+      // This prevents ResizeObserver from fitting to zero/intermediate
+      // heights that occur when the container is briefly hidden.
+      if (typeof window !== "undefined" && window.Date.now() < resizeSuppressUntilRef.current) {
+        return;
+      }
+
+      // Guard: skip if the host container has collapsed to near-zero height.
+      // This happens during tab switches or when the terminal is in a hidden
+      // tab panel. Fitting to zero causes xterm to lose its content layout.
+      const hostRect = host.getBoundingClientRect();
+      if (hostRect.height < 10 || hostRect.width < 10) {
+        return;
+      }
+
       // Debounce rapid viewport changes to prevent flickering.
       // 150ms matches the timing used by Superset.sh and other terminal
       // embedding tools to batch resize events before triggering layout.
@@ -508,6 +530,15 @@ function SessionTerminalView(props: SessionTerminalProps) {
       }
       debounceTimer = window.setTimeout(() => {
         debounceTimer = null;
+        // Re-check suppression and minimum size after debounce elapses.
+        if (typeof window !== "undefined" && window.Date.now() < resizeSuppressUntilRef.current) {
+          return;
+        }
+        const currentRect = host.getBoundingClientRect();
+        if (currentRect.height < 10 || currentRect.width < 10) {
+          return;
+        }
+
         applyKeyboardAwareTerminalHeight();
 
         // After the host div has resized, tell the ttyd iframe to
@@ -681,7 +712,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         {expectsLiveTerminal && terminalUrl ? (
           <div
             ref={terminalHostRef}
-            className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)] transition-[height] duration-150 ease-out"
+            className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
           >
             {!frameLoaded ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">

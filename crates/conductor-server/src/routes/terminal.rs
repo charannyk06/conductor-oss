@@ -19,7 +19,8 @@ use crate::routes::ttyd_protocol;
 use crate::state::{
     sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
     DETACHED_LOG_PATH_METADATA_KEY, RUNTIME_MODE_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
+    TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_TUNNEL_URL_METADATA_KEY,
+    TTYD_WS_URL_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);
@@ -405,6 +406,10 @@ const TTYD_RESIZE_SHIM: &str = r#"
         const height = Math.max(0, Math.round(window.innerHeight || 0));
         const devicePixelRatio = window.devicePixelRatio || 1;
 
+        // Guard: skip if viewport has collapsed to near-zero (tab switch, minimize).
+        // Fitting xterm to zero causes content layout to break.
+        if (width < 10 || height < 10) return;
+
         if (
             width === lastWidth
             && height === lastHeight
@@ -448,6 +453,12 @@ const TTYD_RESIZE_SHIM: &str = r#"
             })
             .catch(() => {});
     }
+
+    window.addEventListener('message', (event) => {
+        if (!event || !event.data) return;
+        if (event.data.type !== 'conductor-terminal-resize') return;
+        scheduleResizeBurst();
+    }, false);
 
     syncViewportSize();
     scheduleResizeBurst();
@@ -1159,6 +1170,7 @@ async fn build_terminal_token_response(
     };
     let ttyd_http_url = ttyd_frontend_proxy_path(&id, token.as_deref());
     let ttyd_ws_url = ttyd_frontend_proxy_ws_path(&id, token.as_deref());
+    let tunnel_url = session.metadata.get(TTYD_TUNNEL_URL_METADATA_KEY).cloned();
 
     Json(json!({
         "token": token,
@@ -1166,6 +1178,7 @@ async fn build_terminal_token_response(
         "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
         "ttydHttpUrl": ttyd_http_url,
         "ttydWsUrl": ttyd_ws_url,
+        "tunnelUrl": tunnel_url,
     }))
     .into_response()
 }
@@ -2148,6 +2161,7 @@ mod tests {
         assert!(injected.contains("document.addEventListener('visibilitychange', () => {"));
         assert!(injected.contains("window.requestAnimationFrame(dispatchResize);"));
         assert!(injected.contains("window.dispatchEvent(new Event('resize'));"));
+        assert!(injected.contains("event.data.type !== 'conductor-terminal-resize'"));
         assert!(
             injected.find(TTYD_RESIZE_SHIM_MARKER).unwrap() < injected.rfind("</body>").unwrap()
         );

@@ -7,3 +7,8 @@ pub(crate) const TTYD_PORT_METADATA_KEY: &str = "ttydPort";
 pub(crate) const TTYD_WS_URL_METADATA_KEY: &str = "ttydWsUrl";
 pub(crate) const TTYD_PID_METADATA_KEY: &str = "ttydPid";
 pub(crate) const DETACHED_LOG_PATH_METADATA_KEY: &str = "detachedLogPath";
+/// Public HTTPS tunnel URL for direct browser access to the session's ttyd.
+/// When set, the frontend can load ttyd directly (no backend proxy needed).
+pub(crate) const TTYD_TUNNEL_URL_METADATA_KEY: &str = "ttydTunnelUrl";
+/// PID of the cloudflared child process for this session (for cleanup).
+pub(crate) const TUNNEL_PID_METADATA_KEY: &str = "tunnelPid";
