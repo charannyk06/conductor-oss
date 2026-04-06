@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, type ReactNode } from "react";
-import { Settings } from "lucide-react";
+import { Settings, MessageSquare } from "lucide-react";
 
 interface TopBarProps {
   title?: string;
@@ -22,7 +22,17 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
           {rightContent}
         </div>
       ) : null}
-      {onOpenPreferences ? (
+          <a
+            href="https://discord.gg/sA4QCWNR"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            aria-label="Join Discord community"
+            title="Community"
+          >
+            <MessageSquare className="h-4 w-4" />
+          </a>
+          {onOpenPreferences ? (
         <div className="ml-1 flex shrink-0">
           <button
             type="button"

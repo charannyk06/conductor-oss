@@ -1,3 +1,4 @@
+import { MessageSquare } from "lucide-react";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
@@ -51,6 +52,15 @@ export default async function UnlockPage({ searchParams }: UnlockPageProps) {
               Requested path: <code>{nextPath}</code>
             </p>
           ) : null}
+          <a
+            href="https://discord.gg/sA4QCWNR"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-6 inline-flex items-center gap-2 rounded-[var(--radius-md)] border border-[var(--border-soft)] px-4 py-2 text-sm font-medium text-[var(--text-muted)] transition hover:border-[var(--border-default)] hover:text-[var(--text-normal)]"
+          >
+            <MessageSquare className="h-4 w-4" />
+            Join Community
+          </a>
         </PublicPanel>
       </div>
     </PublicPageShell>

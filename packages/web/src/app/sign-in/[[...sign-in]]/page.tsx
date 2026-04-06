@@ -1,7 +1,7 @@
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { Check, HardDrive, ShieldCheck, Workflow } from "lucide-react";
+import { Check, HardDrive, MessageSquare, ShieldCheck, Workflow } from "lucide-react";
 import { SignInExperience } from "./SignInExperience";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { Button } from "@/components/ui/Button";
@@ -103,9 +103,15 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             <ShieldCheck className="h-4 w-4 text-[var(--status-ready)]" />
             Production auth with paired-device execution
           </div>
-          <div className="flex flex-wrap gap-3 pt-2">
+          <div className="mt-6 flex flex-wrap gap-3">
             <Button asChild variant="primary" size="lg">
               <Link href="https://conductross.com">Read the product story</Link>
+            </Button>
+            <Button asChild variant="secondary" size="lg">
+              <a href="https://discord.gg/sA4QCWNR" target="_blank" rel="noopener noreferrer">
+                <MessageSquare className="mr-2 h-4 w-4" />
+                Join Discord
+              </a>
             </Button>
           </div>
         </PublicSection>
