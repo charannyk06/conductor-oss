@@ -1,7 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "echo '=== PWD ===' && pwd && echo '=== LS packages/ ===' && ls -la packages/ && echo '=== BUILD CORE ===' && cd packages/core && bun run build && echo '=== BUILD WEB ===' && cd ../../packages/web && bun run build",
-  "installCommand": "bun install",
+  "buildCommand": "cd ../core && bun run build && cd ../web && bun run build",
   "framework": "nextjs",
   "regions": ["iad1"]
 }
