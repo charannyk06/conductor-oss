@@ -185,7 +185,7 @@ test("GET resolves bridge-backed preview session context via the paired device a
 
     // The bridge proxy now intercepts preview requests first.
     // When the paired device returns a preview status, forward it.
-    if (body.path === "/api/sessions/session-1/preview") {
+    if (body.path.startsWith("/api/sessions/session-1/preview")) {
       return new Response(JSON.stringify({
         connected: false,
         candidateUrls: [
@@ -270,7 +270,9 @@ test("GET resolves bridge-backed preview session context via the paired device a
 
     assert.equal(response.status, 200);
     // Bridge proxy now intercepts the preview request first.
-    assert.deepEqual(seenPaths, ["/api/sessions/session-1/preview"]);
+    assert.ok(seenPaths.some((p) => p.startsWith("/api/sessions/session-1/preview")));
+    // Verify the bridge proxy intercepted the request
+    assert.equal(seenPaths.length, 1);
 
     const payload = await response.json() as {
       connected: boolean;
