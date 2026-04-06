@@ -28,8 +28,8 @@ pub(crate) use bridge_registry::{BridgeConnectionRecord, BridgeConnectionStatus}
 pub(crate) use detached::DETACHED_LOG_PATH_METADATA_KEY;
 pub(crate) use detached::DETACHED_PID_METADATA_KEY;
 pub(crate) use detached::{
-    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
-    TTYD_TUNNEL_URL_METADATA_KEY, TUNNEL_PID_METADATA_KEY,
+    RUNTIME_MODE_METADATA_KEY, TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE,
+    TTYD_TUNNEL_URL_METADATA_KEY, TTYD_WS_URL_METADATA_KEY,
 };
 pub(crate) use dispatcher_bindings::{
     DispatcherBindingLookup, DispatcherBindingRecord, UpsertDispatcherBindingInput,

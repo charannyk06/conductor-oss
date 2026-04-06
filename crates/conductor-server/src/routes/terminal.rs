@@ -19,8 +19,8 @@ use crate::routes::ttyd_protocol;
 use crate::state::{
     sanitize_terminal_text, trim_lines_tail, AppState, SessionRecord, TerminalRestoreSnapshot,
     DETACHED_LOG_PATH_METADATA_KEY, RUNTIME_MODE_METADATA_KEY, TERMINAL_RESTORE_SNAPSHOT_FORMAT,
-    TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_WS_URL_METADATA_KEY,
-    TTYD_TUNNEL_URL_METADATA_KEY,
+    TTYD_PID_METADATA_KEY, TTYD_RUNTIME_MODE, TTYD_TUNNEL_URL_METADATA_KEY,
+    TTYD_WS_URL_METADATA_KEY,
 };
 
 type ApiResponse = (StatusCode, Json<Value>);

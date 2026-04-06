@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::process::{Child, Command};
 
-use crate::state::AppState;
 use super::types::{TTYD_TUNNEL_URL_METADATA_KEY, TUNNEL_PID_METADATA_KEY};
+use crate::state::AppState;
 
 /// Maximum time to wait for cloudflared to print the tunnel URL.
 const TUNNEL_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
@@ -73,7 +73,10 @@ pub async fn spawn_tunnel(port: u16) -> Result<(Child, String)> {
         .spawn()
         .context("Failed to spawn cloudflared")?;
 
-    let stderr = child.stderr.take().context("cloudflared stderr not captured")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("cloudflared stderr not captured")?;
     let reader = BufReader::new(stderr);
     use tokio::io::AsyncBufReadExt;
     let mut lines = reader.lines();
@@ -86,7 +89,9 @@ pub async fn spawn_tunnel(port: u16) -> Result<(Child, String)> {
                 return Ok(url);
             }
         }
-        Err(anyhow::anyhow!("cloudflared exited before printing tunnel URL"))
+        Err(anyhow::anyhow!(
+            "cloudflared exited before printing tunnel URL"
+        ))
     })
     .await
     .context("Timed out waiting for cloudflared tunnel URL")?
@@ -148,6 +153,7 @@ pub async fn kill_tunnel(state: &Arc<AppState>, session_id: &str) {
 
 /// Start a tunnel for an existing ttyd session and store the URL in metadata.
 /// Returns the tunnel URL on success, or the error if tunnel setup failed.
+#[allow(dead_code)]
 pub async fn start_tunnel_for_session(
     state: &Arc<AppState>,
     session_id: &str,
@@ -191,6 +197,7 @@ pub async fn start_tunnel_for_session(
 }
 
 /// Get the tunnel URL for a session, if one is active.
+#[allow(dead_code)]
 pub async fn get_tunnel_url(state: &Arc<AppState>, session_id: &str) -> Option<String> {
     let sessions = state.sessions.read().await;
     sessions
@@ -228,7 +235,8 @@ mod tests {
 
     #[test]
     fn test_extract_tunnel_url_mid_line() {
-        let line = "Your quick Tunnel has been created! Visit it at https://abc-def.trycloudflare.com now";
+        let line =
+            "Your quick Tunnel has been created! Visit it at https://abc-def.trycloudflare.com now";
         assert_eq!(
             extract_tunnel_url(line),
             Some("https://abc-def.trycloudflare.com".to_string())

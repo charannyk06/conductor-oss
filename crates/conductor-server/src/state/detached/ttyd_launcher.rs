@@ -515,8 +515,12 @@ pub async fn spawn_ttyd_runtime(
                     tracing::info!(session_id = %reap_sid, "cloudflared tunnel process exited");
                     let mut sessions = reap_state.sessions.write().await;
                     if let Some(session) = sessions.get_mut(&reap_sid) {
-                        session.metadata.remove(super::types::TTYD_TUNNEL_URL_METADATA_KEY);
-                        session.metadata.remove(super::types::TUNNEL_PID_METADATA_KEY);
+                        session
+                            .metadata
+                            .remove(super::types::TTYD_TUNNEL_URL_METADATA_KEY);
+                        session
+                            .metadata
+                            .remove(super::types::TUNNEL_PID_METADATA_KEY);
                     }
                 });
 
