@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "bun run --cwd packages/core build && bun run --cwd packages/web build",
+  "installCommand": "bun install --frozen-lockfile",
+  "outputDirectory": "packages/web/.next",
+  "framework": "nextjs",
+  "regions": ["iad1"],
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- packages/web/ packages/core/ package.json bun.lock"
+}
