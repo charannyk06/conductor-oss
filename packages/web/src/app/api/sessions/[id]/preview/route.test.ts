@@ -183,6 +183,31 @@ test("GET resolves bridge-backed preview session context via the paired device a
     };
     seenPaths.push(body.path);
 
+    // The bridge proxy now intercepts preview requests first.
+    // When the paired device returns a preview status, forward it.
+    if (body.path === "/api/sessions/session-1/preview") {
+      return new Response(JSON.stringify({
+        connected: false,
+        candidateUrls: [
+          "http://127.0.0.1:3000/",
+          "https://deploy-preview.example.com/",
+          "http://localhost:3002/",
+        ],
+        currentUrl: null,
+        title: null,
+        frames: [],
+        activeFrameId: null,
+        selectedElement: null,
+        consoleLogs: [],
+        networkLogs: [],
+        lastError: null,
+        screenshotKey: `${Date.now()}`,
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      });
+    }
+
     if (body.path === "/api/sessions/session-1") {
       return new Response(JSON.stringify({
         id: "session-1",
@@ -244,10 +269,8 @@ test("GET resolves bridge-backed preview session context via the paired device a
     );
 
     assert.equal(response.status, 200);
-    assert.deepEqual(seenPaths, [
-      "/api/sessions/session-1",
-      "/api/sessions/session-1/output?lines=400",
-    ]);
+    // Bridge proxy now intercepts the preview request first.
+    assert.deepEqual(seenPaths, ["/api/sessions/session-1/preview"]);
 
     const payload = await response.json() as {
       connected: boolean;
