@@ -83,6 +83,11 @@ query($login:String!, $endCursor:String) {
       }
     }
   }
+}
+"#;
+
+const GITHUB_ORG_PROJECTS_QUERY: &str = r#"
+query($login:String!, $endCursor:String) {
   organization(login: $login) {
     projectsV2(first: 50, after: $endCursor, orderBy: { field: UPDATED_AT, direction: DESC }) {
       nodes {
@@ -934,12 +939,27 @@ async fn fetch_owner_projects(owner_login: &str) -> anyhow::Result<Vec<GitHubPro
         if let Some(value) = cursor.as_ref() {
             optional_vars.push(("endCursor", value.clone()));
         }
-        let response = run_github_graphql(
+
+        // Try user query first, then org as fallback. Separate queries avoid
+        // the GraphQL error that occurs when querying organization(login: X) for
+        // a personal account (not an org).
+        let response = match run_github_graphql(
             GITHUB_OWNER_PROJECTS_QUERY,
             &[("login", owner_login.to_string())],
             &optional_vars,
         )
-        .await?;
+        .await
+        {
+            Ok(resp) => resp,
+            Err(_) => {
+                run_github_graphql(
+                    GITHUB_ORG_PROJECTS_QUERY,
+                    &[("login", owner_login.to_string())],
+                    &optional_vars,
+                )
+                .await?
+            }
+        };
 
         let data = response
             .get("data")
