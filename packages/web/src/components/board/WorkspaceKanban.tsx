@@ -2,6 +2,7 @@
 
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  type ChangeEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -2324,10 +2325,31 @@ export function WorkspaceKanban({
     };
   }, [loadBoard, projectId]);
 
+  const githubProjectSyncBarOpen =
+    projectSyncOpen || Boolean(board?.githubProject?.id?.trim());
+
+  const githubProjectSelectOptions = useMemo(() => {
+    const fromApi = projectSyncData?.projects ?? [];
+    const linked =
+      board?.githubProject ?? projectSyncData?.linkedProject ?? null;
+    const out: GitHubProjectLink[] = [...fromApi];
+    if (linked?.id?.trim()) {
+      const lid = linked.id.trim();
+      if (!out.some((p) => p.id === lid)) {
+        out.unshift({ ...linked, id: lid });
+      }
+    }
+    return out;
+  }, [
+    board?.githubProject,
+    projectSyncData?.linkedProject,
+    projectSyncData?.projects,
+  ]);
+
   useEffect(() => {
-    if (!projectSyncOpen || !projectId) return;
+    if (!githubProjectSyncBarOpen || !projectId) return;
     void loadGitHubProjects();
-  }, [loadGitHubProjects, projectId, projectSyncOpen]);
+  }, [githubProjectSyncBarOpen, loadGitHubProjects, projectId]);
 
   const allColumns = board?.columns ?? [];
 
@@ -2936,6 +2958,26 @@ export function WorkspaceKanban({
     } finally {
       setProjectSyncSaving(false);
     }
+  }
+
+  function handleGitHubProjectSelectChange(
+    event: ChangeEvent<HTMLSelectElement>
+  ) {
+    const id = event.target.value.trim();
+    setSelectedGitHubProjectId(id);
+    if (!id || !projectId || projectSyncSaving) {
+      return;
+    }
+    const project =
+      githubProjectSelectOptions.find((item) => item.id === id) ?? null;
+    if (!project?.id) {
+      return;
+    }
+    const currentId = board?.githubProject?.id?.trim() ?? "";
+    if (project.id === currentId) {
+      return;
+    }
+    void handleSaveGitHubProjectLink(project);
   }
 
   async function handleGitHubProjectSync(direction: "pull" | "push") {
@@ -3664,61 +3706,38 @@ export function WorkspaceKanban({
           </div>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setProjectSyncOpen((current) => !current)}
-            className="inline-flex h-[38px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px]"
-          >
-            <span className="hidden sm:inline">GitHub Project</span>
-            <span className="sm:hidden">GitHub</span>
-            <span className="text-[var(--vk-text-muted)]">
-              {board?.githubProject?.id
-                ? formatGitHubProjectLabel(board.githubProject)
-                : "Connect"}
-            </span>
-          </button>
-
-          {board?.githubProject?.url ? (
-            <a
-              href={board.githubProject.url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex h-[38px] items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px]"
-            >
-              <span>Open Project</span>
-              <ExternalLink className="h-3.5 w-3.5" />
-            </a>
-          ) : null}
-        </div>
-
-        {boardLayout === "kanban" && !dragEnabled && (
-          <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">
-            Clear search to reorder cards.
-          </p>
-        )}
-
-        {projectSyncOpen && (
-          <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="min-w-0 flex-1">
-                <span className="mb-1 block text-[11px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                  Linked project
+        <div className="mt-3 flex flex-col gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {!githubProjectSyncBarOpen ? (
+              <button
+                type="button"
+                onClick={() => setProjectSyncOpen(true)}
+                className="inline-flex h-[38px] items-center gap-2 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] sm:h-[31px]"
+              >
+                <span className="hidden sm:inline">GitHub Project</span>
+                <span className="sm:hidden">GitHub</span>
+                <span className="text-[var(--vk-text-muted)]">Connect</span>
+              </button>
+            ) : (
+              <>
+                <span className="hidden text-[13px] text-[var(--vk-text-muted)] sm:inline">
+                  GitHub Project
                 </span>
                 <select
+                  aria-label="GitHub Project"
                   value={selectedGitHubProjectId}
-                  onChange={(event) =>
-                    setSelectedGitHubProjectId(event.target.value)
-                  }
+                  onChange={handleGitHubProjectSelectChange}
                   disabled={projectSyncLoading || projectSyncSaving}
-                  className="h-9 w-full rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)]"
+                  className="h-9 min-w-0 flex-1 rounded-[3px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-2 text-[14px] text-[var(--vk-text-normal)] outline-none focus:border-[var(--vk-orange)] sm:min-w-[220px] sm:max-w-md sm:flex-none"
                 >
                   <option value="">
                     {projectSyncLoading
                       ? "Loading GitHub Projects..."
-                      : "Select a GitHub Project"}
+                      : githubProjectSelectOptions.length === 0
+                        ? "No GitHub Projects found"
+                        : "Select a GitHub Project"}
                   </option>
-                  {(projectSyncData?.projects ?? []).map((project) => (
+                  {githubProjectSelectOptions.map((project) => (
                     <option
                       key={project.id ?? "unknown"}
                       value={project.id ?? ""}
@@ -3727,131 +3746,143 @@ export function WorkspaceKanban({
                     </option>
                   ))}
                 </select>
-              </label>
 
-              <button
-                type="button"
-                disabled={
-                  !selectedGitHubProjectId ||
-                  projectSyncLoading ||
-                  projectSyncSaving
-                }
-                onClick={() => {
-                  const project =
-                    projectSyncData?.projects.find(
-                      (item) => item.id === selectedGitHubProjectId
-                    ) ?? null;
-                  void handleSaveGitHubProjectLink(project);
-                }}
-                className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
-              >
-                {projectSyncSaving ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  "Connect"
-                )}
-              </button>
+                <button
+                  type="button"
+                  disabled={!board?.githubProject?.id || projectSyncSaving}
+                  onClick={() => {
+                    void handleSaveGitHubProjectLink(null);
+                    setProjectSyncOpen(false);
+                  }}
+                  className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                >
+                  Disconnect
+                </button>
 
-              <button
-                type="button"
-                disabled={!board?.githubProject?.id || projectSyncSaving}
-                onClick={() => void handleSaveGitHubProjectLink(null)}
-                className="inline-flex h-9 items-center rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
-              >
-                Disconnect
-              </button>
+                <button
+                  type="button"
+                  disabled={!board?.githubProject?.id || projectSyncSaving}
+                  onClick={() => void handleGitHubProjectSync("pull")}
+                  className="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                >
+                  {projectSyncSaving ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                  Pull
+                </button>
 
-              <button
-                type="button"
-                disabled={!board?.githubProject?.id || projectSyncSaving}
-                onClick={() => void handleGitHubProjectSync("pull")}
-                className="inline-flex h-9 items-center gap-2 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
-              >
-                {projectSyncSaving ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4" />
-                )}
-                Pull
-              </button>
+                <button
+                  type="button"
+                  disabled={!board?.githubProject?.id || projectSyncSaving}
+                  onClick={() => void handleGitHubProjectSync("push")}
+                  className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
+                >
+                  Push
+                </button>
 
-              <button
-                type="button"
-                disabled={!board?.githubProject?.id || projectSyncSaving}
-                onClick={() => void handleGitHubProjectSync("push")}
-                className="inline-flex h-9 items-center rounded-[3px] bg-[var(--vk-bg-active)] px-3 text-[13px] text-[var(--vk-text-strong)] hover:bg-[var(--vk-bg-hover)] disabled:opacity-50"
-              >
-                Push
-              </button>
-            </div>
+                {board?.githubProject?.url ? (
+                  <a
+                    href={board.githubProject.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex h-9 items-center gap-1 rounded-[3px] border border-[var(--vk-border)] px-3 text-[13px] text-[var(--vk-text-normal)] hover:bg-[var(--vk-bg-hover)]"
+                  >
+                    <span>Open</span>
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                ) : null}
 
-            <div className="mt-2 flex flex-wrap items-center gap-3 text-[12px] text-[var(--vk-text-muted)]">
-              <span>
-                Repository:{" "}
-                {board?.repository?.trim() ||
-                  projectSyncData?.repository?.trim() ||
-                  "Not configured"}
-              </span>
-              {projectSyncData?.ownerLogin ? (
-                <span>Owner: {projectSyncData.ownerLogin}</span>
-              ) : null}
-            </div>
-
-            {projectSyncError && (
-              <p className="mt-2 text-[12px] text-[var(--vk-red)]">
-                {projectSyncError}
-              </p>
-            )}
-
-            {(board?.recentWebhookDeliveries?.length ?? 0) > 0 && (
-              <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <h3 className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
-                    Webhook diagnostics
-                  </h3>
-                  <span className="text-[11px] text-[var(--vk-text-muted)]">
-                    {(board?.recentWebhookDeliveries ?? []).length}
-                  </span>
-                </div>
-
-                <div className="space-y-2">
-                  {(board?.recentWebhookDeliveries ?? [])
-                    .slice(0, 6)
-                    .map((delivery) => (
-                      <div
-                        key={delivery.id}
-                        className="rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2"
-                      >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span
-                            className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${webhookStatusClass(
-                              delivery.status
-                            )}`}
-                          >
-                            {formatWebhookStatus(delivery.status)}
-                          </span>
-                          <span className="text-[12px] text-[var(--vk-text-normal)]">
-                            {delivery.event}
-                            {delivery.action ? ` / ${delivery.action}` : ""}
-                          </span>
-                          <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">
-                            {formatActivityTime(delivery.timestamp)}
-                          </span>
-                        </div>
-                        <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
-                          {delivery.detail}
-                        </p>
-                        {delivery.repository ? (
-                          <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
-                            Repo: {delivery.repository}
-                          </p>
-                        ) : null}
-                      </div>
-                    ))}
-                </div>
-              </div>
+                {!board?.githubProject?.id ? (
+                  <button
+                    type="button"
+                    onClick={() => setProjectSyncOpen(false)}
+                    className="inline-flex h-9 items-center rounded-[3px] px-2 text-[13px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+              </>
             )}
           </div>
+
+          {githubProjectSyncBarOpen ? (
+            <div className="rounded-[6px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] p-3">
+              <div className="flex flex-wrap items-center gap-3 text-[12px] text-[var(--vk-text-muted)]">
+                <span>
+                  Repository:{" "}
+                  {board?.repository?.trim() ||
+                    projectSyncData?.repository?.trim() ||
+                    "Not configured"}
+                </span>
+                {projectSyncData?.ownerLogin ? (
+                  <span>Owner: {projectSyncData.ownerLogin}</span>
+                ) : null}
+              </div>
+
+              {projectSyncError ? (
+                <p className="mt-2 text-[12px] text-[var(--vk-red)]">
+                  {projectSyncError}
+                </p>
+              ) : null}
+
+              {(board?.recentWebhookDeliveries?.length ?? 0) > 0 ? (
+                <div className="mt-3 rounded-[6px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <h3 className="text-[12px] uppercase tracking-[0.08em] text-[var(--vk-text-muted)]">
+                      Webhook diagnostics
+                    </h3>
+                    <span className="text-[11px] text-[var(--vk-text-muted)]">
+                      {(board?.recentWebhookDeliveries ?? []).length}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {(board?.recentWebhookDeliveries ?? [])
+                      .slice(0, 6)
+                      .map((delivery) => (
+                        <div
+                          key={delivery.id}
+                          className="rounded-[4px] border border-[var(--vk-border)] bg-[rgba(255,255,255,0.02)] p-2"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className={`inline-flex h-5 items-center rounded-[3px] border px-2 text-[10px] ${webhookStatusClass(
+                                delivery.status
+                              )}`}
+                            >
+                              {formatWebhookStatus(delivery.status)}
+                            </span>
+                            <span className="text-[12px] text-[var(--vk-text-normal)]">
+                              {delivery.event}
+                              {delivery.action ? ` / ${delivery.action}` : ""}
+                            </span>
+                            <span className="ml-auto text-[11px] text-[var(--vk-text-muted)]">
+                              {formatActivityTime(delivery.timestamp)}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-[12px] text-[var(--vk-text-muted)]">
+                            {delivery.detail}
+                          </p>
+                          {delivery.repository ? (
+                            <p className="mt-1 text-[11px] text-[var(--vk-text-muted)]">
+                              Repo: {delivery.repository}
+                            </p>
+                          ) : null}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+        {boardLayout === "kanban" && !dragEnabled && (
+          <p className="pt-2 text-[12px] text-[var(--vk-text-muted)]">
+            Clear search to reorder cards.
+          </p>
         )}
 
       </header>
