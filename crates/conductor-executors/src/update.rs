@@ -399,8 +399,8 @@ mod tests {
 
     #[test]
     fn binary_exists_on_path_is_sane() {
-        // On macOS/Linux, `true` is always in PATH.
-        assert!(binary_exists_on_path(&["true", "false"]));
+        // `sh` is available in all CI runners and developer environments.
+        assert!(binary_exists_on_path(&["sh"]));
         // Definitely fake name should not.
         assert!(!binary_exists_on_path(&[
             "conductor-this-does-not-exist-xyz"
