@@ -108,11 +108,15 @@ function postTerminalAuthToken(
     return;
   }
 
-  let targetOrigin = "*";
+  let targetOrigin: string;
   try {
     targetOrigin = new URL(iframe.src).origin;
   } catch {
-    // Fall back to wildcard postMessage delivery if the iframe src is not yet normalized.
+    // Same-origin dashboard: never use "*" for auth tokens (avoids leaking to embedded content).
+    targetOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  }
+  if (!targetOrigin || targetOrigin === "null") {
+    return;
   }
 
   iframe.contentWindow.postMessage(
@@ -125,10 +129,13 @@ function postTerminalResizeMessage(iframe: HTMLIFrameElement | null | undefined)
   if (!iframe?.contentWindow) {
     return;
   }
-  let targetOrigin = "*";
+  let targetOrigin: string;
   try {
     targetOrigin = new URL(iframe.src).origin;
   } catch {
+    targetOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  }
+  if (!targetOrigin || targetOrigin === "null") {
     return;
   }
   try {
