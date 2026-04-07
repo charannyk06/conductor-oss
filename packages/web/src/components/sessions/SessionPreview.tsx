@@ -355,13 +355,15 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       }
     })();
 
+    const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
+    const pollInterval = isMobile ? STATUS_POLL_INTERVAL_MS * 2 : STATUS_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
       void loadStatus().catch((error: unknown) => {
         if (mounted) {
           setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
         }
       });
-    }, STATUS_POLL_INTERVAL_MS);
+    }, pollInterval);
 
     return () => {
       mounted = false;

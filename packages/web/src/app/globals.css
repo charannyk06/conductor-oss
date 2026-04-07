@@ -98,9 +98,19 @@
   border-color: var(--border-soft);
 }
 
+button,
+a,
+[role="button"],
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
 html,
 body {
   min-height: 100%;
+  overscroll-behavior: none;
 }
 
 body {

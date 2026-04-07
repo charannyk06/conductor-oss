@@ -1044,6 +1044,7 @@ export function SessionDiff({ sessionId, active }: SessionDiffProps) {
               onClick={() => openFilePreview(entry.fileKey)}
               className={cn(
                 "flex w-full items-start gap-2 border-l-2 px-3 py-2.5 text-left transition",
+                "[content-visibility:auto] [contain-intrinsic-size:52px]",
                 isSelected
                   ? "border-l-[var(--status-working)] bg-[rgba(108,168,255,0.08)]"
                   : "border-l-transparent hover:bg-[var(--vk-bg-hover)]",

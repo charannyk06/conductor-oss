@@ -1140,7 +1140,10 @@ export default function DashboardClient({
     }
 
     let cancelled = false;
-    const refreshIntervalMs = bridgeScopePending ? 4_000 : 15_000;
+    const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
+    const refreshIntervalMs = bridgeScopePending
+      ? (isMobile ? 8_000 : 4_000)
+      : (isMobile ? 30_000 : 15_000);
 
     async function refreshBridges() {
       try {
