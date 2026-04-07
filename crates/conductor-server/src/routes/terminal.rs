@@ -372,11 +372,19 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
         return true;
     };
 
-    const observer = new MutationObserver(() => {
+    let mutationFlushScheduled = false;
+    const flushMutations = () => {
+        mutationFlushScheduled = false;
         bindTouchScroll();
         stickToBottomIfNeeded();
         syncTouchActionMode();
-    });
+    };
+    const scheduleMutationFlush = () => {
+        if (mutationFlushScheduled) return;
+        mutationFlushScheduled = true;
+        requestAnimationFrame(flushMutations);
+    };
+    const observer = new MutationObserver(() => scheduleMutationFlush());
     bindTouchScroll();
     syncTouchActionMode();
     observer.observe(document.documentElement, { childList: true, subtree: true });

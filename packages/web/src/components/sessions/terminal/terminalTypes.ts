@@ -12,6 +12,11 @@ export interface SessionTerminalProps {
   runtimeMode?: string | null;
   pendingInsert: TerminalInsertRequest | null;
   immersiveMobileMode?: boolean;
+  /**
+   * When false, the terminal panel is not visible (e.g. another session tab is active).
+   * Skips resize spam and clears cached host size so refit runs when the tab returns.
+   */
+  panelVisible?: boolean;
   /** Called after the terminal consumes a pending insert so the parent can clear it. */
   onPendingInsertConsumed?: () => void;
 }
