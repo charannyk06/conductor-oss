@@ -154,6 +154,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     runtimeMode,
     pendingInsert,
     immersiveMobileMode = false,
+    panelVisible = true,
     onPendingInsertConsumed,
   } = props;
 
@@ -198,6 +199,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const resizeSuppressUntilRef = useRef(0);
   /** Last host box we told the ttyd iframe to fit to — avoids spamming resize (xterm refit jumps scroll). */
   const lastPostedTerminalHostSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const prevPanelVisibleRef = useRef<boolean | null>(null);
 
   const clearBurstResizeTimers = useCallback(() => {
     if (typeof window === "undefined") {
@@ -307,7 +309,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
     let retryTimer: number | null = null;
     let refreshTimer: number | null = null;
     const abortController = new AbortController();
-    setResolvingConnection(true);
+    const showBlockingConnectionUi =
+      !terminalUrlRef.current || forceTerminalReloadRef.current;
+    if (showBlockingConnectionUi) {
+      setResolvingConnection(true);
+    }
     setConnectionError(null);
 
     void resolveTerminalConnection(sessionId, {
@@ -410,6 +416,28 @@ function SessionTerminalView(props: SessionTerminalProps) {
     };
   }, [bridgeId, connectionRefreshTick, expectsLiveTerminal, sessionId]);
 
+  useEffect(() => {
+    const previous = prevPanelVisibleRef.current;
+    prevPanelVisibleRef.current = panelVisible;
+    if (!panelVisible) {
+      return;
+    }
+    // Radix keeps inactive tabs mounted but hidden (0×0). Cached host size would skip
+    // maybePostTerminalResize when the user returns — clear and refit after layout.
+    if (previous === false) {
+      lastPostedTerminalHostSizeRef.current = null;
+      if (typeof window !== "undefined") {
+        resizeSuppressUntilRef.current = window.Date.now() + 120;
+      }
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          syncTerminalAuthToken();
+          scheduleTerminalResizeBurst();
+        });
+      });
+    }
+  }, [panelVisible, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
+
   const requestLifecycleRefresh = useCallback(() => {
     if (!expectsLiveTerminal || typeof window === "undefined") {
       return;
@@ -426,6 +454,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
       : now - pageHiddenAtRef.current;
     pageHiddenAtRef.current = null;
 
+    // Do not bump connectionRefreshTick here: refetching the token endpoint on every
+    // focus/visibility event causes resolving-state flicker and fights the iframe.
+    // Token rotation stays on its timer; we only re-sync the known token and refit xterm.
     syncTerminalAuthToken();
     scheduleTerminalResizeBurst();
     if (
@@ -434,8 +465,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
       && terminalUrlRef.current
     ) {
       forceTerminalReloadRef.current = true;
+      setConnectionRefreshTick((current) => current + 1);
     }
-    setConnectionRefreshTick((current) => current + 1);
   }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
 
   useEffect(() => {
@@ -458,20 +489,23 @@ function SessionTerminalView(props: SessionTerminalProps) {
         requestLifecycleRefresh();
       }
     };
-    const handleFocus = () => {
+    const handlePageShow = () => {
       requestLifecycleRefresh();
     };
 
+    const handleOnline = () => {
+      // Network back: refresh token URL from the server (silent if already connected).
+      setConnectionRefreshTick((current) => current + 1);
+    };
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", handleFocus);
-    window.addEventListener("pageshow", handleFocus);
-    window.addEventListener("online", handleFocus);
+    window.addEventListener("pageshow", handlePageShow);
+    window.addEventListener("online", handleOnline);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("pageshow", handleFocus);
-      window.removeEventListener("online", handleFocus);
+      window.removeEventListener("pageshow", handlePageShow);
+      window.removeEventListener("online", handleOnline);
     };
   }, [requestLifecycleRefresh]);
 
@@ -652,6 +686,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
     let debounceTimer: number | null = null;
     const applyGeometry = () => {
+      if (!panelVisible) {
+        return;
+      }
       // Guard: skip if we're in the suppression window after a tab switch.
       // This prevents ResizeObserver from fitting to zero/intermediate
       // heights that occur when the container is briefly hidden.
@@ -716,7 +753,13 @@ function SessionTerminalView(props: SessionTerminalProps) {
       }
       host.style.removeProperty("height");
     };
-  }, [applyKeyboardAwareTerminalHeight, expectsLiveTerminal, maybePostTerminalResize, terminalUrl]);
+  }, [
+    applyKeyboardAwareTerminalHeight,
+    expectsLiveTerminal,
+    maybePostTerminalResize,
+    panelVisible,
+    terminalUrl,
+  ]);
 
   useEffect(() => {
     if (process.env.NODE_ENV !== "development") return;
@@ -1063,6 +1106,7 @@ function sessionTerminalPropsEqual(
     && previous.sessionState === next.sessionState
     && previous.runtimeMode === next.runtimeMode
     && previous.immersiveMobileMode === next.immersiveMobileMode
+    && (previous.panelVisible ?? true) === (next.panelVisible ?? true)
     && arePendingInsertRequestsEqual(previous.pendingInsert, next.pendingInsert)
   );
 }

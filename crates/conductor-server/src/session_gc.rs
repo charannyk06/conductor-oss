@@ -192,6 +192,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // MAX_REMOVALS_PER_SWEEP is a const; still document intent
     fn constants_are_reasonable() {
         assert!(SESSION_FILE_TTL >= Duration::from_secs(3600)); // at least 1h
         assert!(GC_INTERVAL >= Duration::from_secs(60)); // at least 1min

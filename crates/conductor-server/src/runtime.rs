@@ -470,7 +470,8 @@ mod tests {
     where
         F: FnMut() -> Option<T>,
     {
-        timeout(Duration::from_secs(10), async move {
+        // Board automation can take longer on busy hosts (CI runners, parallel `cargo test`).
+        timeout(Duration::from_secs(30), async move {
             loop {
                 if let Some(value) = check() {
                     return value;
