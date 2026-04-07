@@ -307,6 +307,13 @@ export function injectTtydResizeShim(html: string): string {
 
   window.addEventListener("message", handleResizeMessage, false);
 
+  // Neutralize ttyd's built-in beforeunload handler that warns about leaving
+  // the page. When embedded in the Conductor dashboard iframe, this dialog
+  // is confusing and unnecessary since the terminal session persists.
+  window.addEventListener('beforeunload', function(e) {
+    e.stopImmediatePropagation();
+  }, true);
+
   window.addEventListener("beforeunload", function() {
     clearBurstTimers();
   }, { once: true });
