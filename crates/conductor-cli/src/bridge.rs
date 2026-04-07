@@ -30,6 +30,9 @@ const DEFAULT_BACKEND_URL: &str = "http://127.0.0.1:4749";
 const BRIDGE_STATE_FILENAME: &str = "bridge-state.json";
 const BRIDGE_TOKEN_FILENAME: &str = "bridge-token";
 const CONTROL_SCOPE: &str = "conductor-bridge-control";
+const MAX_PREVIEW_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PREVIEW_REQUEST_BODY_BYTES: usize = 5 * 1024 * 1024;
+const PREVIEW_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct BridgeRuntimeState {
@@ -44,6 +47,13 @@ struct BridgeRuntimeState {
 struct BackendProxyResponse {
     status: u16,
     body: Value,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewProxyResponse {
+    status: u16,
+    headers: std::collections::BTreeMap<String, String>,
+    body_base64: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +316,292 @@ async fn proxy_request(
     };
 
     Ok(BackendProxyResponse { status, body })
+}
+
+async fn proxy_preview_request(
+    client: &reqwest::Client,
+    session_id: &str,
+    method: &str,
+    url: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+    body_base64: Option<&str>,
+) -> Result<PreviewProxyResponse> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        anyhow::bail!("preview session id is required");
+    }
+
+    let method_str = method.trim().to_uppercase();
+    // Cloudflare allowlist: only safe methods, block CONNECT/TRACE/TRACK
+    match method_str.as_str() {
+        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" => {}
+        _ => anyhow::bail!("forbidden HTTP method: {method_str}"),
+    }
+    let method = method_str
+        .parse::<reqwest::Method>()
+        .context("invalid HTTP method")?;
+
+    let url_str = url.trim();
+    let parsed_url = Url::parse(url_str).context("invalid preview URL")?;
+
+    // Scheme allowlist — block data:, javascript:, file:, etc.
+    match parsed_url.scheme() {
+        "http" | "https" => {}
+        _ => anyhow::bail!(
+            "forbidden URL scheme: {}. only http/https are allowed",
+            parsed_url.scheme()
+        ),
+    }
+
+    // SSRF protection — check host before any connection is made
+    let host = parsed_url.host_str().unwrap_or("");
+    if let Some(blocked) = check_host_for_ssrf(host, parsed_url.port()) {
+        tracing::warn!(target: "conductor-bridge", "ssrf blocked: {}", blocked);
+        anyhow::bail!("request to {} is not allowed", host);
+    }
+
+    // Block URLs with userinfo (e.g., http://user:pass@evil.com/)
+    if !parsed_url.username().is_empty() {
+        anyhow::bail!("URLs with userinfo are not allowed");
+    }
+
+    // Decode and size-check request body before sending
+    let body_bytes: Option<Vec<u8>> = if let Some(raw_body) = body_base64 {
+        if !raw_body.trim().is_empty() {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(raw_body.as_bytes())
+                .context("decode preview request body")?;
+            if decoded.len() > MAX_PREVIEW_REQUEST_BODY_BYTES {
+                anyhow::bail!(
+                    "preview request body exceeded {MAX_PREVIEW_REQUEST_BODY_BYTES} bytes"
+                );
+            }
+            Some(decoded)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Sanitize request headers — strip CR/LF to prevent header injection
+    let sanitized_headers = sanitize_preview_request_headers(headers)
+        .map_err(|e| anyhow::anyhow!("header sanitization failed: {e}"))?;
+
+    let timeout = Duration::from_secs(PREVIEW_REQUEST_TIMEOUT_SECS);
+    let mut request = client.request(method, parsed_url).timeout(timeout);
+
+    for (name, value) in &sanitized_headers {
+        let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .context(format!("invalid header name: {name}"))?;
+        let header_value = reqwest::header::HeaderValue::from_str(value)
+            .context(format!("invalid header value for {name}"))?;
+        request = request.header(header_name, header_value);
+    }
+
+    if let Some(body) = body_bytes {
+        request = request.body(body);
+    }
+
+    let response = request.send().await?;
+    let status = response.status().as_u16();
+    let response_headers = sanitize_preview_response_headers(response.headers());
+    let bytes = response.bytes().await?;
+    if bytes.len() > MAX_PREVIEW_RESPONSE_BYTES {
+        anyhow::bail!("preview response exceeded {MAX_PREVIEW_RESPONSE_BYTES} bytes");
+    }
+
+    Ok(PreviewProxyResponse {
+        status,
+        headers: response_headers,
+        body_base64: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+    })
+}
+
+/// Returns true if the IP is in a private, loopback, link-local, or reserved range.
+fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || is_cloud_metadata_ip(&std::net::IpAddr::V4(*v4))
+                || is_broadcast_ip(&std::net::IpAddr::V4(*v4))
+                || is_documentation_ip(&std::net::IpAddr::V4(*v4))
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unicast_link_local()
+                || v6.is_multicast()
+                || is_ipv6_unique_local(&std::net::IpAddr::V6(*v6))
+                || is_ipv6_teredo(&std::net::IpAddr::V6(*v6))
+        }
+    }
+}
+
+fn is_cloud_metadata_ip(ip: &std::net::IpAddr) -> bool {
+    // 169.254.169.254, 169.254.169.253, 169.254.169.255 — AWS/GCP/Azure metadata endpoints
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 169 && octets[1] == 254 && octets[2] == 169
+        }
+        _ => false,
+    }
+}
+
+fn is_broadcast_ip(ip: &std::net::IpAddr) -> bool {
+    // 255.255.255.255
+    matches!(ip, std::net::IpAddr::V4(v4) if v4.octets() == [255, 255, 255, 255])
+}
+
+fn is_documentation_ip(ip: &std::net::IpAddr) -> bool {
+    // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 — RFC 5737 documentation ranges
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 192 && octets[1] == 0 && octets[2] == 2
+                || octets[0] == 198 && octets[1] == 51 && octets[2] == 100
+                || octets[0] == 203 && octets[1] == 0 && octets[2] == 113
+        }
+        _ => false,
+    }
+}
+
+fn is_ipv6_unique_local(ip: &std::net::IpAddr) -> bool {
+    // fc00::/7 — IPv6 unique local addresses
+    matches!(ip, std::net::IpAddr::V6(v6) if v6.segments()[0] & 0xfe00 == 0xfc00)
+}
+
+fn is_ipv6_teredo(ip: &std::net::IpAddr) -> bool {
+    // 2001::/32 — IPv6 Teredo tunnel addresses
+    matches!(ip, std::net::IpAddr::V6(v6) if v6.segments()[0] == 0x2001)
+}
+
+/// Resolve a hostname and check all resulting IPs against blocked ranges.
+/// Returns the first blocked IP found, if any.
+fn check_host_for_ssrf(host: &str, port: Option<u16>) -> Option<String> {
+    // Block obvious internal hostnames before DNS lookup
+    let host_lower = host.to_ascii_lowercase();
+    if host_lower == "localhost"
+        || host_lower == "ip6-localhost"
+        || host_lower == "ip6-loopback"
+        || host_lower == "[::1]"
+        || host_lower == "0.0.0.0"
+        || host_lower == "*"
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".private")
+    {
+        return Some(format!("blocked hostname: {host}"));
+    }
+
+    // Try to parse as IP directly first
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_blocked_ip(&ip) {
+            return Some(format!("blocked IP: {host}"));
+        }
+        return None;
+    }
+
+    // Strip brackets from IPv6 hosts in URL format
+    let host_for_dns = host.trim_start_matches('[').trim_end_matches(']');
+
+    // Attempt DNS resolution and check all IPs against blocked ranges
+    let ip_addrs: Vec<std::net::SocketAddr> =
+        match std::net::ToSocketAddrs::to_socket_addrs(&(host_for_dns, port.unwrap_or(0))) {
+            Ok(addrs) => addrs.collect(),
+            Err(_) => return None, // Let reqwest handle invalid hostnames
+        };
+
+    for addr in &ip_addrs {
+        if is_blocked_ip(&addr.ip()) {
+            return Some(format!("DNS resolved to blocked IP: {host} -> {addr}"));
+        }
+    }
+
+    None
+}
+
+/// Strips CR/LF characters from header names and values to prevent response splitting attacks.
+fn sanitize_header_value(value: &str) -> String {
+    value.chars().filter(|&c| c != '\r' && c != '\n').collect()
+}
+
+fn sanitize_preview_request_headers(
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let mut sanitized = std::collections::BTreeMap::new();
+    for (name, value) in headers {
+        // Reject headers containing CR/LF (header injection)
+        if name.contains('\r') || name.contains('\n') {
+            return Err(format!(
+                "invalid header name with control character: {name}"
+            ));
+        }
+        let clean_value = sanitize_header_value(value);
+        sanitized.insert(name.clone(), clean_value);
+    }
+    Ok(sanitized)
+}
+
+fn sanitize_preview_response_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> std::collections::BTreeMap<String, String> {
+    let mut sanitized = std::collections::BTreeMap::new();
+    for (name, value) in headers.iter() {
+        let name = name.as_str().to_ascii_lowercase();
+        match name.as_str() {
+            // Strip all hop-by-hop headers (RFC 7230 §6.1)
+            "connection"
+            | "proxy-connection"
+            | "keep-alive"
+            | "transfer-encoding"
+            | "content-length"
+            | "content-encoding"
+            | "upgrade"
+            | "proxy-authenticate"
+            | "proxy-authentication-info"
+            | "proxy-authorization"
+            | "te"
+            | "trailers"
+            | "upgrade-insecure-requests"
+            | "x-served-by"
+            | "x-cache" => {
+                continue;
+            }
+            _ => {}
+        }
+
+        let value = match value.to_str() {
+            Ok(value) => sanitize_header_value(value),
+            Err(_) => continue,
+        };
+
+        // Don't let through any header that could be used for response splitting
+        if value.contains('\r') || value.contains('\n') {
+            continue;
+        }
+
+        sanitized.insert(name, value);
+    }
+
+    // Inject defense-in-depth security headers (Cloudflare pattern)
+    sanitized.insert("x-content-type-options".to_string(), "nosniff".to_string());
+    sanitized.insert("x-frame-options".to_string(), "DENY".to_string());
+    sanitized.insert("x-xss-protection".to_string(), "1; mode=block".to_string());
+    sanitized.insert(
+        "referrer-policy".to_string(),
+        "strict-origin-when-cross-origin".to_string(),
+    );
+    sanitized.insert(
+        "content-security-policy".to_string(),
+        "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+            .to_string(),
+    );
+
+    sanitized
 }
 
 fn extract_session_id(path: &str) -> Option<String> {
@@ -605,18 +901,45 @@ async fn run_bridge_connection_once(
                                             }
                                         }
                                     }
-                                    BrowserToBridgeMessage::PreviewRequest { id, .. } => {
-                                        let payload = BridgeToBrowserMessage::PreviewResponse {
-                                            id,
-                                            status: StatusCode::NOT_IMPLEMENTED.as_u16(),
-                                            headers: std::collections::BTreeMap::from([(
-                                                "content-type".to_string(),
-                                                "text/plain; charset=utf-8".to_string(),
-                                            )]),
-                                            body_base64: Some(
-                                                base64::engine::general_purpose::STANDARD
-                                                    .encode("Preview proxy is not implemented in this bridge runtime."),
-                                            ),
+                                    BrowserToBridgeMessage::PreviewRequest {
+                                        id,
+                                        session_id,
+                                        method,
+                                        url,
+                                        headers,
+                                        body_base64,
+                                    } => {
+                                        let payload = match proxy_preview_request(
+                                            &client,
+                                            &session_id,
+                                            &method,
+                                            &url,
+                                            &headers,
+                                            body_base64.as_deref(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(response) => BridgeToBrowserMessage::PreviewResponse {
+                                                id,
+                                                status: response.status,
+                                                headers: response.headers,
+                                                body_base64: response.body_base64,
+                                            },
+                                            Err(err) => {
+                                                let status = StatusCode::BAD_GATEWAY.as_u16();
+                                                BridgeToBrowserMessage::PreviewResponse {
+                                                    id,
+                                                    status,
+                                                    headers: std::collections::BTreeMap::from([(
+                                                        "content-type".to_string(),
+                                                        "text/plain; charset=utf-8".to_string(),
+                                                    )]),
+                                                    body_base64: Some(
+                                                        base64::engine::general_purpose::STANDARD
+                                                            .encode(err.to_string()),
+                                                    ),
+                                                }
+                                            }
                                         };
                                         let _ = tx.send(Message::Text(serde_json::to_string(&payload)?.into()));
                                     }
