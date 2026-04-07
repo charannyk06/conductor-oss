@@ -167,8 +167,8 @@ export function AppUpdateNotice() {
   const restarting = Boolean(update?.restarting) || reconnecting;
   const visible = useMemo(() => {
     if (!update) return false;
-    if (restarting || update.jobStatus === "running") return true;
     if (hiddenForVersion) return false;
+    if (restarting || update.jobStatus === "running") return true;
     if (update.jobStatus === "completed" || update.jobStatus === "failed") return true;
     if (!update.enabled && update.reason) return true;
     return update.updateAvailable;
