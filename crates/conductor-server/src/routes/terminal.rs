@@ -11,7 +11,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use url::Host;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
 use crate::routes::config::access_control_enabled;
@@ -39,6 +40,25 @@ const TERMINAL_SNAPSHOT_RESTORED_HEADER: &str = "x-conductor-terminal-snapshot-r
 const TERMINAL_SNAPSHOT_FORMAT_HEADER: &str = "x-conductor-terminal-snapshot-format";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+/// HTTP client for fetching ttyd's bundled HTML from the local ttyd process only.
+static TTYD_UPSTREAM_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(4)
+        .build()
+        .expect("TTYD_UPSTREAM_CLIENT")
+});
+
+/// ttyd HTML is small; cap memory use if metadata were wrong or upstream misbehaves.
+const MAX_TTYD_HTML_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+/// Max binary/text WebSocket frame from the browser terminal facade (DoS guard).
+const MAX_TTYD_BROWSER_WS_FRAME_BYTES: usize = 512 * 1024;
+/// Max bytes accepted from `/api/sessions/:id/keys` and similar inject paths.
+const MAX_TERMINAL_KEYS_PAYLOAD_BYTES: usize = 65_536;
+/// Max raw input chunk forwarded to the PTY per WebSocket message.
+const MAX_TTYD_INPUT_CHUNK_BYTES: usize = 256 * 1024;
 const TTYD_MOBILE_TOUCH_SHIM_MARKER: &str = "conductor-ttyd-mobile-touch-shim";
 const TTYD_MOBILE_TOUCH_SHIM: &str = r#"
 <!-- conductor-ttyd-mobile-touch-shim -->
@@ -142,9 +162,9 @@ html.conductor-ttyd-touch-shim-enabled.conductor-ttyd-wheel-mode .xterm-screen {
             return;
         }
 
-        if (scrollHost.scrollTop !== lastStableScrollTop) {
-            scrollHost.scrollTop = lastStableScrollTop;
-        }
+        // When the user is reading scrollback, do not clamp scroll on every mutation.
+        // xterm updates the DOM on each keystroke/echo; forcing scrollTop to a stale
+        // value fights the renderer and causes jitter or broken input after idle.
     };
 
     const bindTouchScroll = () => {
@@ -467,7 +487,6 @@ const TTYD_RESIZE_SHIM: &str = r#"
     window.addEventListener('resize', syncViewportSize);
     window.addEventListener('orientationchange', syncViewportSize);
     window.addEventListener('pageshow', scheduleResizeBurst);
-    window.addEventListener('focus', scheduleResizeBurst);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             scheduleResizeBurst();
@@ -639,6 +658,8 @@ fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
+    let project_id_lit = serde_json::to_string(project_id).unwrap_or_else(|_| "\"\"".to_string());
+    let session_id_lit = serde_json::to_string(session_id).unwrap_or_else(|_| "\"\"".to_string());
     let script = format!(
         r#"<!-- conductor-ttyd-paste-shim -->
 <script>
@@ -646,8 +667,8 @@ fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
     if (window.__conductorTtydPasteShimInstalled) return;
     window.__conductorTtydPasteShimInstalled = true;
 
-    const PROJECT_ID = "{project_id}";
-    const SESSION_ID = "{session_id}";
+    const PROJECT_ID = {project_id_lit};
+    const SESSION_ID = {session_id_lit};
     const TIMESTAMP = {timestamp};
 
     async function uploadImage(blob) {{
@@ -768,8 +789,8 @@ fn ttyd_paste_shim_script(project_id: &str, session_id: &str) -> String {
     }}, true);
 }})(document);
 </script>"#,
-        project_id = project_id,
-        session_id = session_id,
+        project_id_lit = project_id_lit,
+        session_id_lit = session_id_lit,
         timestamp = timestamp
     );
     script
@@ -787,8 +808,36 @@ fn ttyd_session_ws_url(session: &SessionRecord) -> Option<String> {
     session.metadata.get(TTYD_WS_URL_METADATA_KEY).cloned()
 }
 
+/// ttyd is always bound to loopback. Reject anything else so session metadata cannot be turned into SSRF.
+fn is_safe_conductor_ttyd_upstream_url(url: &reqwest::Url) -> bool {
+    if !url.username().is_empty() {
+        return false;
+    }
+    if url.password().is_some_and(|password| !password.is_empty()) {
+        return false;
+    }
+
+    let scheme = url.scheme();
+    if !matches!(scheme, "ws" | "wss" | "http" | "https") {
+        return false;
+    }
+
+    let Some(host) = url.host() else {
+        return false;
+    };
+
+    match host {
+        Host::Ipv4(ip) => ip.is_loopback(),
+        Host::Ipv6(ip) => ip.is_loopback(),
+        Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+    }
+}
+
 fn ttyd_http_url_from_ws_url(ws_url: &str) -> Option<String> {
     let mut url = reqwest::Url::parse(ws_url).ok()?;
+    if !is_safe_conductor_ttyd_upstream_url(&url) {
+        return None;
+    }
     match url.scheme() {
         "ws" => {
             let _ = url.set_scheme("http");
@@ -816,6 +865,9 @@ fn ttyd_http_url_from_ws_url(ws_url: &str) -> Option<String> {
     url.set_path(&normalized_path);
     url.set_query(None);
     url.set_fragment(None);
+    if !is_safe_conductor_ttyd_upstream_url(&url) {
+        return None;
+    }
     Some(url.to_string())
 }
 
@@ -1251,7 +1303,27 @@ async fn terminal_ttyd_frontend(
         .into_response();
     };
 
-    let upstream = match reqwest::get(&ttyd_http_url).await {
+    let parsed_upstream = match reqwest::Url::parse(&ttyd_http_url) {
+        Ok(url) => url,
+        Err(err) => {
+            tracing::warn!(session_id = %id, error = %err, "Malformed ttyd HTTP URL");
+            return error(
+                StatusCode::BAD_GATEWAY,
+                "Malformed ttyd upstream URL".to_string(),
+            )
+            .into_response();
+        }
+    };
+    if !is_safe_conductor_ttyd_upstream_url(&parsed_upstream) {
+        tracing::error!(session_id = %id, "Rejected ttyd upstream URL (not loopback)");
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "Refusing unsafe ttyd upstream URL".to_string(),
+        )
+        .into_response();
+    }
+
+    let upstream = match TTYD_UPSTREAM_CLIENT.get(parsed_upstream).send().await {
         Ok(upstream) => upstream,
         Err(err) => {
             tracing::warn!(session_id = %id, error = %err, "Failed to load ttyd frontend HTML");
@@ -1262,6 +1334,17 @@ async fn terminal_ttyd_frontend(
             .into_response();
         }
     };
+
+    if upstream
+        .content_length()
+        .is_some_and(|len| len > MAX_TTYD_HTML_RESPONSE_BYTES as u64)
+    {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "ttyd frontend response is too large".to_string(),
+        )
+        .into_response();
+    }
 
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1281,6 +1364,13 @@ async fn terminal_ttyd_frontend(
             .into_response();
         }
     };
+    if body.len() > MAX_TTYD_HTML_RESPONSE_BYTES {
+        return error(
+            StatusCode::BAD_GATEWAY,
+            "ttyd frontend response is too large".to_string(),
+        )
+        .into_response();
+    }
     let body = if content_type_is_html(&content_type) {
         let mut html = String::from_utf8_lossy(&body).into_owned();
         html = inject_ttyd_paste_shim(&html, &session.project_id, &id);
@@ -1593,6 +1683,14 @@ async fn handle_ttyd_frontend_socket(
             client_message = client_socket.recv() => {
                 match client_message {
                     Some(Ok(Message::Binary(data))) => {
+                        if data.len() > MAX_TTYD_BROWSER_WS_FRAME_BYTES {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                len = data.len(),
+                                "ttyd browser WebSocket frame too large"
+                            );
+                            break;
+                        }
                         if handle_ttyd_frontend_client_message(
                             &state,
                             &handle,
@@ -1612,6 +1710,14 @@ async fn handle_ttyd_frontend_socket(
                         }
                     }
                     Some(Ok(Message::Text(text))) => {
+                        if text.len() > MAX_TTYD_BROWSER_WS_FRAME_BYTES {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                len = text.len(),
+                                "ttyd browser WebSocket text frame too large"
+                            );
+                            break;
+                        }
                         if handle_ttyd_frontend_client_message(
                             &state,
                             &handle,
@@ -1742,7 +1848,10 @@ async fn handle_ttyd_frontend_client_message(
                 }
             }
         }
-        Some(ttyd_protocol::ClientMessage::Input(data)) => {
+        Some(ttyd_protocol::ClientMessage::Input(mut data)) => {
+            if data.len() > MAX_TTYD_INPUT_CHUNK_BYTES {
+                data.truncate(MAX_TTYD_INPUT_CHUNK_BYTES);
+            }
             let text = String::from_utf8_lossy(&data).into_owned();
             if let Err(error_message) = send_terminal_input_with_recovery(
                 state,
@@ -1851,8 +1960,13 @@ async fn send_terminal_input_with_recovery(
 }
 
 fn parse_handshake_dimensions(value: &Value) -> Option<(u16, u16)> {
-    let columns = value.get("columns")?.as_u64()? as u16;
-    let rows = value.get("rows")?.as_u64()? as u16;
+    let columns = u16::try_from(value.get("columns")?.as_u64()?).ok()?;
+    let rows = u16::try_from(value.get("rows")?.as_u64()?).ok()?;
+    if !(1..=ttyd_protocol::MAX_TERMINAL_COLUMNS).contains(&columns)
+        || !(1..=ttyd_protocol::MAX_TERMINAL_ROWS).contains(&rows)
+    {
+        return None;
+    }
     Some((columns, rows))
 }
 
@@ -1861,25 +1975,39 @@ pub(crate) fn resolve_terminal_keys(
     special: Option<String>,
 ) -> Result<String> {
     if let Some(keys) = keys {
+        if keys.len() > MAX_TERMINAL_KEYS_PAYLOAD_BYTES {
+            return Err(anyhow!(
+                "keys payload exceeds {} bytes",
+                MAX_TERMINAL_KEYS_PAYLOAD_BYTES
+            ));
+        }
         return Ok(keys);
     }
 
     let special = special.ok_or_else(|| anyhow!("keys or special is required"))?;
     let mapped = match special.as_str() {
-        "Enter" => "\r",
-        "Tab" => "\t",
-        "Backspace" => "\u{7f}",
-        "Escape" => "\u{1b}",
-        "ArrowUp" => "\u{1b}[A",
-        "ArrowDown" => "\u{1b}[B",
-        "ArrowRight" => "\u{1b}[C",
-        "ArrowLeft" => "\u{1b}[D",
-        "C-c" => "\u{3}",
-        "C-d" => "\u{4}",
-        other => other,
+        "Enter" => "\r".to_string(),
+        "Tab" => "\t".to_string(),
+        "Backspace" => "\u{7f}".to_string(),
+        "Escape" => "\u{1b}".to_string(),
+        "ArrowUp" => "\u{1b}[A".to_string(),
+        "ArrowDown" => "\u{1b}[B".to_string(),
+        "ArrowRight" => "\u{1b}[C".to_string(),
+        "ArrowLeft" => "\u{1b}[D".to_string(),
+        "C-c" => "\u{3}".to_string(),
+        "C-d" => "\u{4}".to_string(),
+        other => {
+            if other.len() > 128 {
+                return Err(anyhow!("special key name is too long"));
+            }
+            if other.chars().any(|ch| ch.is_control()) {
+                return Err(anyhow!("special key contains control characters"));
+            }
+            other.to_string()
+        }
     };
 
-    Ok(mapped.to_string())
+    Ok(mapped)
 }
 
 async fn authorize_terminal_access(
@@ -2061,6 +2189,27 @@ mod tests {
         assert_eq!(enter, "\r");
         assert_eq!(ctrl_c, "\u{3}");
         assert_eq!(arrow_up, "\u{1b}[A");
+    }
+
+    #[test]
+    fn resolve_terminal_keys_rejects_oversized_literal() {
+        let huge = "x".repeat(MAX_TERMINAL_KEYS_PAYLOAD_BYTES + 1);
+        assert!(resolve_terminal_keys(Some(huge), None).is_err());
+    }
+
+    #[test]
+    fn resolve_terminal_keys_rejects_control_chars_in_special_other() {
+        assert!(resolve_terminal_keys(None, Some("x\u{0}".to_string())).is_err());
+    }
+
+    #[test]
+    fn ttyd_http_url_from_ws_url_accepts_loopback_only() {
+        assert!(ttyd_http_url_from_ws_url("ws://127.0.0.1:4100/ws").is_some());
+        assert!(ttyd_http_url_from_ws_url("ws://localhost:4100/ws").is_some());
+        assert!(ttyd_http_url_from_ws_url("ws://[::1]:4100/ws").is_some());
+        assert!(ttyd_http_url_from_ws_url("ws://192.168.0.1/ws").is_none());
+        assert!(ttyd_http_url_from_ws_url("ws://example.com/ws").is_none());
+        assert!(ttyd_http_url_from_ws_url("ws://user:pass@127.0.0.1:9/ws").is_none());
     }
 
     #[test]

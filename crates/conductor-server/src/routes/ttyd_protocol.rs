@@ -46,12 +46,19 @@ pub fn encode_handshake(cols: u16, rows: u16) -> Vec<u8> {
 }
 
 /// Parse RESIZE_TERMINAL message: '1' + JSON{columns, rows}
+/// Hard caps for terminal dimensions (defense against malicious resize frames).
+pub const MAX_TERMINAL_COLUMNS: u16 = 4096;
+pub const MAX_TERMINAL_ROWS: u16 = 2048;
+
 pub fn parse_resize_message(payload: &[u8]) -> Option<(u16, u16)> {
     let json_str = std::str::from_utf8(payload).ok()?;
     let value: Value = serde_json::from_str(json_str).ok()?;
 
-    let columns = value.get("columns")?.as_u64()? as u16;
-    let rows = value.get("rows")?.as_u64()? as u16;
+    let columns = u16::try_from(value.get("columns")?.as_u64()?).ok()?;
+    let rows = u16::try_from(value.get("rows")?.as_u64()?).ok()?;
+    if !(1..=MAX_TERMINAL_COLUMNS).contains(&columns) || !(1..=MAX_TERMINAL_ROWS).contains(&rows) {
+        return None;
+    }
 
     Some((columns, rows))
 }
@@ -178,6 +185,16 @@ mod tests {
         let (cols, rows) = parse_resize_message(json).unwrap();
         assert_eq!(cols, 120);
         assert_eq!(rows, 40);
+    }
+
+    #[test]
+    fn test_parse_resize_message_rejects_oob_dimensions() {
+        let json = format!(
+            r#"{{"columns":{},"rows":{}}}"#,
+            MAX_TERMINAL_COLUMNS as u32 + 1,
+            40
+        );
+        assert!(parse_resize_message(json.as_bytes()).is_none());
     }
 
     #[test]
