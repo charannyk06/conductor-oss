@@ -36,6 +36,23 @@ N/A - internal maintenance only
   assert.deepEqual(validatePrDescription({ title: "fix: test", body }).errors, []);
 });
 
+test("validatePrDescription allows release notes that look like scopes but are not commit prefixes", () => {
+  const body = `## User-Facing Release Notes
+
+- **Terminal (ttyd)**: Attach photos from the toolbar.
+
+## Type of Change
+
+- [x] New feature
+- [ ] Bug fix
+`;
+
+  assert.deepEqual(
+    validatePrDescription({ title: "feat(web): ttyd attachments", body }).errors,
+    [],
+  );
+});
+
 test("validatePrDescription rejects agent attribution prefixes in PR titles", () => {
   const body = `## User-Facing Release Notes
 
