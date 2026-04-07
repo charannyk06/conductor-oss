@@ -1,7 +1,8 @@
 "use client";
 
 import { memo, type ReactNode } from "react";
-import { Settings, MessageSquare } from "lucide-react";
+import { Settings } from "lucide-react";
+import { DiscordMark } from "@/components/DiscordMark";
 
 interface TopBarProps {
   title?: string;
@@ -30,7 +31,7 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
             aria-label="Join Discord community"
             title="Community"
           >
-            <MessageSquare className="h-4 w-4" />
+            <DiscordMark className="h-4 w-4" />
           </a>
           {onOpenPreferences ? (
         <div className="ml-1 flex shrink-0">

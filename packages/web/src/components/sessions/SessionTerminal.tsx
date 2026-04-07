@@ -25,8 +25,11 @@ const TOKEN_REFRESH_LEAD_SECONDS = 10;
 const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
 const TERMINAL_RESIZE_DEBOUNCE_MS = 150;
 const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
+/** Staggered fits so xterm catches up after ttyd boot, layout, and fonts. */
+const TERMINAL_RESIZE_BURST_DELAYS_MS = [0, 50, 150, 400, 1000] as const;
 const TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS = 1_500;
 const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 300_000; // 5 minutes - only reload if hidden for 5+ minutes
+const TERMINAL_IFRAME_LOAD_TIMEOUT_MS = 25_000;
 
 function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined): number | null {
   if (typeof expiresInSeconds !== "number" || !Number.isFinite(expiresInSeconds) || expiresInSeconds <= 0) {
@@ -117,6 +120,23 @@ function postTerminalAuthToken(
   );
 }
 
+function postTerminalResizeMessage(iframe: HTMLIFrameElement | null | undefined): void {
+  if (!iframe?.contentWindow) {
+    return;
+  }
+  let targetOrigin = "*";
+  try {
+    targetOrigin = new URL(iframe.src).origin;
+  } catch {
+    return;
+  }
+  try {
+    iframe.contentWindow.postMessage({ type: TERMINAL_RESIZE_MESSAGE_TYPE }, targetOrigin);
+  } catch {
+    // Iframe may have navigated or origin may be opaque.
+  }
+}
+
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
@@ -132,6 +152,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const lastAppliedInsertNonceRef = useRef(0);
   const retryAttemptRef = useRef(0);
   const terminalHostRef = useRef<HTMLDivElement>(null);
+  const ttydIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const burstResizeTimersRef = useRef<number[]>([]);
   const frameLoadedRef = useRef(false);
   const pageHiddenAtRef = useRef<number | null>(null);
   const lastLifecycleRefreshAtRef = useRef(0);
@@ -163,13 +185,39 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const forceTerminalReloadRef = useRef(false);
   const resizeSuppressUntilRef = useRef(0);
 
+  const clearBurstResizeTimers = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    for (const id of burstResizeTimersRef.current) {
+      window.clearTimeout(id);
+    }
+    burstResizeTimersRef.current = [];
+  }, []);
+
+  const scheduleTerminalResizeBurst = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const iframe = ttydIframeRef.current;
+    if (!iframe?.contentWindow) {
+      return;
+    }
+    clearBurstResizeTimers();
+    for (const delay of TERMINAL_RESIZE_BURST_DELAYS_MS) {
+      burstResizeTimersRef.current.push(
+        window.setTimeout(() => postTerminalResizeMessage(iframe), delay),
+      );
+    }
+  }, [clearBurstResizeTimers]);
+
   const syncTerminalAuthToken = useCallback(() => {
     const token = extractTerminalAuthToken(terminalLinkUrl);
     if (!token) {
       return;
     }
 
-    const iframe = terminalHostRef.current?.querySelector<HTMLIFrameElement>("iframe");
+    const iframe = ttydIframeRef.current;
     postTerminalAuthToken(iframe, token);
   }, [terminalLinkUrl]);
 
@@ -199,7 +247,12 @@ function SessionTerminalView(props: SessionTerminalProps) {
     pageHiddenAtRef.current = null;
     lastLifecycleRefreshAtRef.current = 0;
     resizeSuppressUntilRef.current = 0;
-  }, [expectsLiveTerminal, sessionId]);
+    clearBurstResizeTimers();
+  }, [clearBurstResizeTimers, expectsLiveTerminal, sessionId]);
+
+  useEffect(() => {
+    return () => clearBurstResizeTimers();
+  }, [clearBurstResizeTimers]);
 
   useEffect(() => {
     if (!expectsLiveTerminal) {
@@ -252,9 +305,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
               }
             })();
             if (newToken) {
-              const iframe = terminalHostRef.current?.querySelector<HTMLIFrameElement>("iframe");
+              const iframe = ttydIframeRef.current;
               if (iframe) {
                 postTerminalAuthToken(iframe, newToken);
+                scheduleTerminalResizeBurst();
               }
             }
           }
@@ -332,6 +386,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     pageHiddenAtRef.current = null;
 
     syncTerminalAuthToken();
+    scheduleTerminalResizeBurst();
     if (
       hiddenDuration >= TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS
       && frameLoadedRef.current
@@ -340,7 +395,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
       forceTerminalReloadRef.current = true;
     }
     setConnectionRefreshTick((current) => current + 1);
-  }, [expectsLiveTerminal, syncTerminalAuthToken]);
+  }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof document === "undefined") {
@@ -418,6 +473,20 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
     syncTerminalAuthToken();
   }, [frameLoaded, syncTerminalAuthToken]);
+
+  useEffect(() => {
+    if (!expectsLiveTerminal || !terminalUrl || frameLoaded) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (!frameLoadedRef.current) {
+        setConnectionError(
+          "The terminal view did not finish loading in time. Try reload or open in a new tab.",
+        );
+      }
+    }, TERMINAL_IFRAME_LOAD_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [expectsLiveTerminal, frameLoaded, terminalUrl]);
 
   const handlePromptSend = useCallback(async () => {
     const message = promptMessage.trim();
@@ -522,11 +591,11 @@ function SessionTerminalView(props: SessionTerminalProps) {
         return;
       }
 
-      // Debounce rapid viewport changes to prevent flickering.
-      // 150ms matches the timing used by Superset.sh and other terminal
-      // embedding tools to batch resize events before triggering layout.
+      // Trailing debounce: reset the timer on every resize so the final
+      // layout wins after bursts (split view, keyboard, animations).
       if (debounceTimer !== null) {
-        return;
+        window.clearTimeout(debounceTimer);
+        debounceTimer = null;
       }
       debounceTimer = window.setTimeout(() => {
         debounceTimer = null;
@@ -543,18 +612,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
         // After the host div has resized, tell the ttyd iframe to
         // re-fit its internal xterm.js in the same coordinated step.
-        const iframe = host.querySelector<HTMLIFrameElement>("iframe");
-        if (iframe?.contentWindow) {
-          try {
-            const targetOrigin = new URL(iframe.src).origin;
-            iframe.contentWindow.postMessage(
-              { type: TERMINAL_RESIZE_MESSAGE_TYPE },
-              targetOrigin,
-            );
-          } catch {
-            // If URL parsing fails, skip the coordinated resize.
-          }
-        }
+        postTerminalResizeMessage(ttydIframeRef.current);
       }, TERMINAL_RESIZE_DEBOUNCE_MS);
     };
 
@@ -724,16 +782,21 @@ function SessionTerminalView(props: SessionTerminalProps) {
             ) : null}
             <iframe
               key={sessionId}
+              ref={ttydIframeRef}
               title={`ttyd terminal for ${sessionId}`}
               src={terminalUrl}
               className="block h-full min-h-0 w-full flex-1 border-0 bg-[#060404]"
               allow="clipboard-read; clipboard-write"
               loading="eager"
+              onError={() => {
+                setConnectionError("Failed to load the terminal frame. Try reload or open in a new tab.");
+              }}
               onLoad={() => {
                 setFrameLoaded(true);
                 setConnectionError(null);
                 applyKeyboardAwareTerminalHeight();
                 syncTerminalAuthToken();
+                scheduleTerminalResizeBurst();
               }}
             />
           </div>
