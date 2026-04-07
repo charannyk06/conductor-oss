@@ -10,6 +10,7 @@ type AgentIconKey =
   | "codex"
   | "copilot"
   | "cursor"
+  | "discord"
   | "droid"
   | "gemini"
   | "hermes"
@@ -34,6 +35,7 @@ const AGENT_ICON_ALIASES: Record<AgentIconKey, string[]> = {
   codex: ["codex", "openai-codex", "codex-cli", "codexcli", "openai", "agent-codex"],
   copilot: ["copilot", "github-copilot", "githubcopilot", "copilot-cli", "agent-github-copilot"],
   cursor: ["cursor", "cursor-cli", "cursor-agent", "cursoragent", "agent-cursor-cli"],
+  discord: ["discord"],
   droid: ["droid", "factory-droid", "factory_droid", "agent-droid"],
   gemini: ["gemini", "gemini-cli", "google-gemini", "googlegemini", "agent-gemini"],
   hermes: ["hermes", "hermes-agent", "nous-hermes", "agent-hermes"],
@@ -48,6 +50,7 @@ const AGENT_LOCAL_ICON_SOURCES: Record<AgentIconKey, string[]> = {
   codex: ["/agents/codex-dark.svg", "/agents/codex-light.svg"],
   copilot: ["/agents/copilot-dark.svg", "/agents/copilot-light.svg"],
   cursor: ["/agents/cursor-dark.svg", "/agents/cursor-light.svg"],
+  discord: ["/agents/discord-dark.svg", "/agents/discord-light.svg"],
   droid: ["/agents/droid-dark.svg", "/agents/droid-light.svg"],
   gemini: ["/agents/gemini-dark.svg", "/agents/gemini-light.svg"],
   hermes: ["/agents/hermes.png"],
