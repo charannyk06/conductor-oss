@@ -189,6 +189,8 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const terminalUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
   const resizeSuppressUntilRef = useRef(0);
+  /** Last host box we told the ttyd iframe to fit to — avoids spamming resize (xterm refit jumps scroll). */
+  const lastPostedTerminalHostSizeRef = useRef<{ w: number; h: number } | null>(null);
 
   const clearBurstResizeTimers = useCallback(() => {
     if (typeof window === "undefined") {
@@ -200,21 +202,42 @@ function SessionTerminalView(props: SessionTerminalProps) {
     burstResizeTimersRef.current = [];
   }, []);
 
+  const maybePostTerminalResize = useCallback(() => {
+    const iframe = ttydIframeRef.current;
+    const host = terminalHostRef.current;
+    if (typeof window === "undefined" || !iframe?.contentWindow || !host) {
+      return;
+    }
+    const rect = host.getBoundingClientRect();
+    const w = Math.round(rect.width);
+    const h = Math.round(rect.height);
+    if (w < 10 || h < 10) {
+      return;
+    }
+    const last = lastPostedTerminalHostSizeRef.current;
+    if (last && last.w === w && last.h === h) {
+      return;
+    }
+    lastPostedTerminalHostSizeRef.current = { w, h };
+    postTerminalResizeMessage(iframe);
+  }, []);
+
   const scheduleTerminalResizeBurst = useCallback(() => {
     if (typeof window === "undefined") {
       return;
     }
-    const iframe = ttydIframeRef.current;
-    if (!iframe?.contentWindow) {
+    if (!ttydIframeRef.current?.contentWindow) {
       return;
     }
     clearBurstResizeTimers();
     for (const delay of TERMINAL_RESIZE_BURST_DELAYS_MS) {
       burstResizeTimersRef.current.push(
-        window.setTimeout(() => postTerminalResizeMessage(iframe), delay),
+        window.setTimeout(() => {
+          maybePostTerminalResize();
+        }, delay),
       );
     }
-  }, [clearBurstResizeTimers]);
+  }, [clearBurstResizeTimers, maybePostTerminalResize]);
 
   const syncTerminalAuthToken = useCallback(() => {
     const token = extractTerminalAuthToken(terminalLinkUrl);
@@ -254,8 +277,13 @@ function SessionTerminalView(props: SessionTerminalProps) {
     pageHiddenAtRef.current = null;
     lastLifecycleRefreshAtRef.current = 0;
     resizeSuppressUntilRef.current = 0;
+    lastPostedTerminalHostSizeRef.current = null;
     clearBurstResizeTimers();
   }, [clearBurstResizeTimers, expectsLiveTerminal, sessionId]);
+
+  useEffect(() => {
+    lastPostedTerminalHostSizeRef.current = null;
+  }, [terminalUrl]);
 
   useEffect(() => {
     return () => clearBurstResizeTimers();
@@ -315,7 +343,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
               const iframe = ttydIframeRef.current;
               if (iframe) {
                 postTerminalAuthToken(iframe, newToken);
-                scheduleTerminalResizeBurst();
               }
             }
           }
@@ -654,7 +681,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
         // After the host div has resized, tell the ttyd iframe to
         // re-fit its internal xterm.js in the same coordinated step.
-        postTerminalResizeMessage(ttydIframeRef.current);
+        maybePostTerminalResize();
       }, TERMINAL_RESIZE_DEBOUNCE_MS);
     };
 
@@ -682,7 +709,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
       }
       host.style.removeProperty("height");
     };
-  }, [applyKeyboardAwareTerminalHeight, expectsLiveTerminal, terminalUrl]);
+  }, [applyKeyboardAwareTerminalHeight, expectsLiveTerminal, maybePostTerminalResize, terminalUrl]);
 
   useEffect(() => {
     if (process.env.NODE_ENV !== "development") return;
