@@ -229,8 +229,6 @@ fn required_access_role(method: &Method, path: &str) -> Option<AccessRole> {
 mod tests {
     use super::*;
 
-    /// Shared lock for tests that mutate CONDUCTOR_PROXY_AUTH_SECRET.
-    static PROXY_AUTH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use axum::middleware;
     use axum::routing::{get, post};
     use axum::{response::IntoResponse, Router};
@@ -239,6 +237,38 @@ mod tests {
     };
     use conductor_db::Database;
     use tower::util::ServiceExt;
+
+    /// Serialize with `crate::routes::TEST_ENV_LOCK` (used by `config` tests) and always clear the
+    /// secret on drop so parallel tests and panics cannot leave env poisoned.
+    struct ProxyAuthSecretScope {
+        _guard: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ProxyAuthSecretScope {
+        async fn set(secret: &str) -> Self {
+            let guard = crate::routes::TEST_ENV_LOCK.lock().await;
+            unsafe {
+                std::env::set_var(crate::routes::config::PROXY_AUTH_SECRET_ENV, secret);
+            }
+            Self { _guard: guard }
+        }
+
+        fn set_blocking(secret: &str) -> Self {
+            let guard = crate::routes::TEST_ENV_LOCK.blocking_lock();
+            unsafe {
+                std::env::set_var(crate::routes::config::PROXY_AUTH_SECRET_ENV, secret);
+            }
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for ProxyAuthSecretScope {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(crate::routes::config::PROXY_AUTH_SECRET_ENV);
+            }
+        }
+    }
 
     async fn build_state(access: DashboardAccessConfig) -> Arc<AppState> {
         let config = ConductorConfig {
@@ -307,10 +337,7 @@ mod tests {
 
     #[test]
     fn rate_limit_key_prefers_proxy_identity_when_available() {
-        let _guard = PROXY_AUTH_ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("CONDUCTOR_PROXY_AUTH_SECRET", "test-secret");
-        }
+        let _proxy_env = ProxyAuthSecretScope::set_blocking("test-secret");
         let request = Request::builder()
             .uri("/api/events")
             .header("x-conductor-proxy-authorized", "true")
@@ -325,9 +352,6 @@ mod tests {
             extract_rate_limit_key(&request),
             "proxy:clerk:viewer@example.com"
         );
-        unsafe {
-            std::env::remove_var("CONDUCTOR_PROXY_AUTH_SECRET");
-        }
     }
 
     #[test]
@@ -379,10 +403,7 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_allows_authenticated_proxy_requests_even_when_runtime_auth_is_required() {
-        let _guard = PROXY_AUTH_ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("CONDUCTOR_PROXY_AUTH_SECRET", "test-secret");
-        }
+        let _proxy_env = ProxyAuthSecretScope::set("test-secret").await;
         let state = build_state(DashboardAccessConfig {
             require_auth: true,
             ..DashboardAccessConfig::default()
@@ -415,9 +436,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-        unsafe {
-            std::env::remove_var("CONDUCTOR_PROXY_AUTH_SECRET");
-        }
     }
 
     #[tokio::test]
