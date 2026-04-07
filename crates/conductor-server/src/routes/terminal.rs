@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use url::Host;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+use url::Host;
 
 use crate::routes::config::access_control_enabled;
 use crate::routes::ttyd_protocol;
