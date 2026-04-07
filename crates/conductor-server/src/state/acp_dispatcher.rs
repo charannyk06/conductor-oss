@@ -1838,6 +1838,14 @@ impl AppState {
             .await;
         });
         self.clear_dispatcher_runtime(thread_id).await;
+
+        // Kill the process directly if it's still running
+        if let Some(pid) = thread.pid.filter(|p| *p > 1) {
+            if is_process_alive(pid) {
+                terminate_process(pid);
+            }
+        }
+
         self.active_session_skills.lock().await.remove(thread_id);
         {
             let mut guard = self.dispatcher_threads.write().await;
@@ -2406,35 +2414,40 @@ impl AppState {
                 )
                 .await
             {
-                let mut updated = existing;
-                if dispatcher_model.is_some() || dispatcher_reasoning_effort.is_some() {
-                    updated = self
-                        .update_dispatcher_runtime_preferences(
-                            &updated.id,
-                            dispatcher_model,
-                            dispatcher_reasoning_effort,
-                        )
-                        .await?;
+                // Don't reuse errored or killed threads
+                if existing.status.is_terminal() {
+                    // Fall through to create a new thread
+                } else {
+                    let mut updated = existing;
+                    if dispatcher_model.is_some() || dispatcher_reasoning_effort.is_some() {
+                        updated = self
+                            .update_dispatcher_runtime_preferences(
+                                &updated.id,
+                                dispatcher_model,
+                                dispatcher_reasoning_effort,
+                            )
+                            .await?;
+                    }
+                    if implementation_agent.is_some()
+                        || implementation_model.is_some()
+                        || implementation_reasoning_effort.is_some()
+                        || has_openclaw_dispatcher_config_patch(&openclaw_config)
+                    {
+                        updated = self
+                            .update_dispatcher_preferences(
+                                &updated.id,
+                                DispatcherPreferencesPatch {
+                                    implementation_agent,
+                                    implementation_model,
+                                    implementation_reasoning_effort,
+                                    openclaw_config: openclaw_config.clone(),
+                                    ..DispatcherPreferencesPatch::default()
+                                },
+                            )
+                            .await?;
+                    }
+                    return Ok(updated);
                 }
-                if implementation_agent.is_some()
-                    || implementation_model.is_some()
-                    || implementation_reasoning_effort.is_some()
-                    || has_openclaw_dispatcher_config_patch(&openclaw_config)
-                {
-                    updated = self
-                        .update_dispatcher_preferences(
-                            &updated.id,
-                            DispatcherPreferencesPatch {
-                                implementation_agent,
-                                implementation_model,
-                                implementation_reasoning_effort,
-                                openclaw_config: openclaw_config.clone(),
-                                ..DispatcherPreferencesPatch::default()
-                            },
-                        )
-                        .await?;
-                }
-                return Ok(updated);
             }
         }
 
@@ -3353,7 +3366,7 @@ impl AppState {
                 prompt,
                 model,
                 reasoning_effort,
-                skip_permissions: false,
+                skip_permissions: true,
                 extra_args,
                 env: spawn_env,
                 branch: None,
