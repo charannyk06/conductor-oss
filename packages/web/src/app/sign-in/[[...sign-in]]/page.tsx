@@ -1,7 +1,8 @@
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { Check, HardDrive, MessageSquare, ShieldCheck, Workflow } from "lucide-react";
+import { Check, HardDrive, ShieldCheck, Workflow } from "lucide-react";
+import { DiscordMark } from "@/components/DiscordMark";
 import { SignInExperience } from "./SignInExperience";
 import { PublicPageShell, PublicPanel, PublicSection } from "@/components/public/PublicPageShell";
 import { Button } from "@/components/ui/Button";
@@ -109,7 +110,7 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
             </Button>
             <Button asChild variant="outline" size="lg">
               <a href="https://discord.gg/sA4QCWNR" target="_blank" rel="noopener noreferrer">
-                <MessageSquare className="mr-2 h-4 w-4" />
+                <DiscordMark className="mr-2 h-4 w-4" />
                 Join Discord
               </a>
             </Button>

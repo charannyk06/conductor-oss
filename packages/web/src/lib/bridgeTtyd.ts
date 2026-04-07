@@ -238,7 +238,8 @@ export function injectTtydResizeShim(html: string): string {
   const fragment = `<!-- ${marker} -->
 <script>
 (function() {
-  if (window.__conductorTtydResizeShimPatched) return;
+  if (window.__conductorTtydResizeShimInstalled || window.__conductorTtydResizeShimPatched) return;
+  window.__conductorTtydResizeShimInstalled = true;
   window.__conductorTtydResizeShimPatched = true;
 
   var RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
@@ -268,7 +269,8 @@ export function injectTtydResizeShim(html: string): string {
   }
 
   function findXtermTerminal() {
-    if (typeof ttyd !== "undefined" && ttyd.terminal) return ttyd.terminal;
+    if (typeof window !== "undefined" && window.ttyd && window.ttyd.terminal) return window.ttyd.terminal;
+    if (typeof window !== "undefined" && window.term) return window.term;
     var container = document.querySelector(".terminal");
     if (container && container._xterm) return container._xterm;
     var termEl = document.querySelector(".xterm");
@@ -276,20 +278,7 @@ export function injectTtydResizeShim(html: string): string {
     return null;
   }
 
-  function handleResizeMessage(event) {
-    if (!event || !event.data) return;
-    if (event.data.type !== RESIZE_MESSAGE_TYPE) return;
-
-    // Guard: skip if viewport has collapsed to near-zero (tab switch, minimize).
-    var vw = Math.max(0, window.innerWidth || 0);
-    var vh = Math.max(0, window.innerHeight || 0);
-    if (vw < 10 || vh < 10) return;
-
-    // Primary: dispatch synthetic resize events so ttyd's FitAddon re-fits.
-    // This mirrors the Rust backend shim's scheduleResizeBurst pattern.
-    scheduleResizeBurst();
-
-    // Secondary: direct xterm fit+refresh if we can find the instance.
+  function queueXtermFit() {
     if (pendingRaf !== null) return;
     pendingRaf = requestAnimationFrame(function() {
       pendingRaf = null;
@@ -305,17 +294,64 @@ export function injectTtydResizeShim(html: string): string {
     });
   }
 
+  function handleResizeMessage(event) {
+    if (!event || !event.data) return;
+    if (event.data.type !== RESIZE_MESSAGE_TYPE) return;
+
+    var vw = Math.max(0, window.innerWidth || 0);
+    var vh = Math.max(0, window.innerHeight || 0);
+    if (vw < 10 || vh < 10) return;
+
+    scheduleResizeBurst();
+    queueXtermFit();
+  }
+
+  var lastViewportKey = "";
+  function syncViewportSizeEmbedded() {
+    var width = Math.max(0, Math.round(window.innerWidth || 0));
+    var height = Math.max(0, Math.round(window.innerHeight || 0));
+    var dpr = window.devicePixelRatio || 1;
+    if (width < 10 || height < 10) return;
+    var key = width + ":" + height + ":" + dpr;
+    if (key === lastViewportKey) return;
+    lastViewportKey = key;
+    scheduleResizeBurst();
+    queueXtermFit();
+  }
+
+  var viewportObserver = typeof ResizeObserver !== "undefined" && document.documentElement
+    ? new ResizeObserver(syncViewportSizeEmbedded)
+    : null;
+  if (viewportObserver) {
+    viewportObserver.observe(document.documentElement);
+    if (document.body && document.body !== document.documentElement) {
+      viewportObserver.observe(document.body);
+    }
+  }
+  window.addEventListener("resize", syncViewportSizeEmbedded);
+  window.addEventListener("orientationchange", syncViewportSizeEmbedded);
+  window.addEventListener("pageshow", scheduleResizeBurst);
+  window.addEventListener("focus", scheduleResizeBurst);
+  document.addEventListener("visibilitychange", function() {
+    if (document.visibilityState === "visible") {
+      scheduleResizeBurst();
+      queueXtermFit();
+    }
+  });
+  if (document.fonts && document.fonts.ready) {
+    void document.fonts.ready.then(function() { scheduleResizeBurst(); queueXtermFit(); }).catch(function() {});
+  }
+  syncViewportSizeEmbedded();
+
   window.addEventListener("message", handleResizeMessage, false);
 
-  // Neutralize ttyd's built-in beforeunload handler that warns about leaving
-  // the page. When embedded in the Conductor dashboard iframe, this dialog
-  // is confusing and unnecessary since the terminal session persists.
   window.addEventListener('beforeunload', function(e) {
     e.stopImmediatePropagation();
   }, true);
 
   window.addEventListener("beforeunload", function() {
     clearBurstTimers();
+    if (viewportObserver) viewportObserver.disconnect();
   }, { once: true });
 })();
 </script>`;
