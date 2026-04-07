@@ -18,34 +18,34 @@ export const TopBar = memo(function TopBar({ title, onOpenPreferences, rightCont
           {title ?? "All Projects"}
         </span>
       </div>
-      {rightContent ? (
-        <div className="ml-1 flex shrink-0 items-center gap-1.5">
-          {rightContent}
-        </div>
-      ) : null}
-          <a
-            href="https://discord.gg/sA4QCWNR"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
-            aria-label="Join Discord community"
-            title="Community"
-          >
-            <DiscordMark className="h-4 w-4" />
-          </a>
-          {onOpenPreferences ? (
-        <div className="ml-1 flex shrink-0">
+      <div className="ml-auto flex shrink-0 items-center gap-0.5">
+        {rightContent ? (
+          <div className="flex items-center gap-1.5">
+            {rightContent}
+          </div>
+        ) : null}
+        <a
+          href="https://discord.gg/sA4QCWNR"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+          aria-label="Join Discord community"
+          title="Community"
+        >
+          <DiscordMark className="h-4 w-4" />
+        </a>
+        {onOpenPreferences ? (
           <button
             type="button"
             onClick={onOpenPreferences}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
+            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[4px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
             aria-label="Open preferences"
             title="Preferences"
           >
             <Settings className="h-4 w-4" />
           </button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </header>
   );
 });
