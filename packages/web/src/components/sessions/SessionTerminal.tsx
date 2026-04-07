@@ -3,15 +3,16 @@
 import {
   AlertCircle,
   Clipboard,
-  ExternalLink,
   Loader2,
+  Paperclip,
   RefreshCw,
   Send,
   SquareStop,
   X,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Button } from "@/components/ui/Button";
+import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
@@ -140,6 +141,7 @@ function postTerminalResizeMessage(iframe: HTMLIFrameElement | null | undefined)
 function SessionTerminalView(props: SessionTerminalProps) {
   const {
     sessionId,
+    projectId,
     bridgeId,
     sessionState,
     runtimeMode,
@@ -149,6 +151,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   } = props;
 
   const promptInputRef = useRef<HTMLInputElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const lastAppliedInsertNonceRef = useRef(0);
   const retryAttemptRef = useRef(0);
   const terminalHostRef = useRef<HTMLDivElement>(null);
@@ -180,10 +183,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const [promptSending, setPromptSending] = useState(false);
   const [promptError, setPromptError] = useState<string | null>(null);
   const [queuedInsertError, setQueuedInsertError] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const terminalUrlRef = useRef<string | null>(null);
   const forceTerminalReloadRef = useRef(false);
   const resizeSuppressUntilRef = useRef(0);
+  /** Last host box we told the ttyd iframe to fit to — avoids spamming resize (xterm refit jumps scroll). */
+  const lastPostedTerminalHostSizeRef = useRef<{ w: number; h: number } | null>(null);
 
   const clearBurstResizeTimers = useCallback(() => {
     if (typeof window === "undefined") {
@@ -195,21 +202,42 @@ function SessionTerminalView(props: SessionTerminalProps) {
     burstResizeTimersRef.current = [];
   }, []);
 
+  const maybePostTerminalResize = useCallback(() => {
+    const iframe = ttydIframeRef.current;
+    const host = terminalHostRef.current;
+    if (typeof window === "undefined" || !iframe?.contentWindow || !host) {
+      return;
+    }
+    const rect = host.getBoundingClientRect();
+    const w = Math.round(rect.width);
+    const h = Math.round(rect.height);
+    if (w < 10 || h < 10) {
+      return;
+    }
+    const last = lastPostedTerminalHostSizeRef.current;
+    if (last && last.w === w && last.h === h) {
+      return;
+    }
+    lastPostedTerminalHostSizeRef.current = { w, h };
+    postTerminalResizeMessage(iframe);
+  }, []);
+
   const scheduleTerminalResizeBurst = useCallback(() => {
     if (typeof window === "undefined") {
       return;
     }
-    const iframe = ttydIframeRef.current;
-    if (!iframe?.contentWindow) {
+    if (!ttydIframeRef.current?.contentWindow) {
       return;
     }
     clearBurstResizeTimers();
     for (const delay of TERMINAL_RESIZE_BURST_DELAYS_MS) {
       burstResizeTimersRef.current.push(
-        window.setTimeout(() => postTerminalResizeMessage(iframe), delay),
+        window.setTimeout(() => {
+          maybePostTerminalResize();
+        }, delay),
       );
     }
-  }, [clearBurstResizeTimers]);
+  }, [clearBurstResizeTimers, maybePostTerminalResize]);
 
   const syncTerminalAuthToken = useCallback(() => {
     const token = extractTerminalAuthToken(terminalLinkUrl);
@@ -242,13 +270,20 @@ function SessionTerminalView(props: SessionTerminalProps) {
     setPromptSending(false);
     setPromptError(null);
     setQueuedInsertError(null);
+    setAttachmentError(null);
+    setAttachmentUploading(false);
     forceTerminalReloadRef.current = false;
     frameLoadedRef.current = false;
     pageHiddenAtRef.current = null;
     lastLifecycleRefreshAtRef.current = 0;
     resizeSuppressUntilRef.current = 0;
+    lastPostedTerminalHostSizeRef.current = null;
     clearBurstResizeTimers();
   }, [clearBurstResizeTimers, expectsLiveTerminal, sessionId]);
+
+  useEffect(() => {
+    lastPostedTerminalHostSizeRef.current = null;
+  }, [terminalUrl]);
 
   useEffect(() => {
     return () => clearBurstResizeTimers();
@@ -308,7 +343,6 @@ function SessionTerminalView(props: SessionTerminalProps) {
               const iframe = ttydIframeRef.current;
               if (iframe) {
                 postTerminalAuthToken(iframe, newToken);
-                scheduleTerminalResizeBurst();
               }
             }
           }
@@ -529,6 +563,41 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
   }, [bridgeId, sessionId]);
 
+  const handleAttachmentPick = useCallback(() => {
+    attachmentInputRef.current?.click();
+  }, []);
+
+  const handleAttachmentFiles = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const { files } = event.target;
+      event.target.value = "";
+      if (!files || files.length === 0) {
+        return;
+      }
+
+      setAttachmentError(null);
+      setAttachmentUploading(true);
+      try {
+        const uploadedPaths = await uploadProjectAttachments({
+          files: Array.from(files),
+          projectId,
+          taskRef: sessionId,
+          bridgeId,
+        });
+        for (const path of uploadedPaths) {
+          await sendTerminalKeys(sessionId, `\r\n[attached file: ${path}]\r\n`, bridgeId);
+        }
+      } catch (error) {
+        setAttachmentError(
+          error instanceof Error ? error.message : "Failed to upload attachment.",
+        );
+      } finally {
+        setAttachmentUploading(false);
+      }
+    },
+    [bridgeId, projectId, sessionId],
+  );
+
   const handleSoftStop = useCallback(async () => {
     // Send Ctrl+C (0x03) to interrupt the running process
     await sendTerminalKeys(sessionId, "\x03", bridgeId);
@@ -612,7 +681,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
 
         // After the host div has resized, tell the ttyd iframe to
         // re-fit its internal xterm.js in the same coordinated step.
-        postTerminalResizeMessage(ttydIframeRef.current);
+        maybePostTerminalResize();
       }, TERMINAL_RESIZE_DEBOUNCE_MS);
     };
 
@@ -640,7 +709,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
       }
       host.style.removeProperty("height");
     };
-  }, [applyKeyboardAwareTerminalHeight, expectsLiveTerminal, terminalUrl]);
+  }, [applyKeyboardAwareTerminalHeight, expectsLiveTerminal, maybePostTerminalResize, terminalUrl]);
 
   useEffect(() => {
     if (process.env.NODE_ENV !== "development") return;
@@ -711,17 +780,35 @@ function SessionTerminalView(props: SessionTerminalProps) {
         : "group/terminal relative flex min-h-0 min-w-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-[#060404] lg:rounded-[14px] lg:border lg:border-white/10 lg:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"}
     >
       <div className="absolute right-2 top-2 z-10 flex items-center gap-2 sm:right-3 sm:top-3">
-        {terminalHref ? (
-          <a
-            href={terminalHref}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm transition hover:bg-[#201818] sm:h-7 sm:w-7"
-            aria-label="Open ttyd terminal in a new tab"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-        ) : null}
+        <input
+          ref={attachmentInputRef}
+          type="file"
+          multiple
+          accept="*/*"
+          className="sr-only"
+          tabIndex={-1}
+          aria-hidden
+          onChange={(event) => void handleAttachmentFiles(event)}
+        />
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          disabled={
+            !expectsLiveTerminal
+            || !terminalUrl
+            || attachmentUploading
+          }
+          className="h-9 w-9 rounded-full border border-white/10 bg-[#141010]/92 text-[#c9c0b7] backdrop-blur-sm hover:bg-[#201818] disabled:opacity-40 sm:h-7 sm:w-7"
+          onClick={handleAttachmentPick}
+          aria-label="Attach photos or files"
+        >
+          {attachmentUploading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Paperclip className="h-3.5 w-3.5" />
+          )}
+        </Button>
         {typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches ? (
           <Button
             type="button"
@@ -833,19 +920,34 @@ function SessionTerminalView(props: SessionTerminalProps) {
         )}
       </div>
 
-      {!showPromptBar && queuedInsertError ? (
+      {!showPromptBar && (queuedInsertError || attachmentError) ? (
         <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/12 bg-[#161212] px-3 py-2 text-[11px] text-[#ffb39e] backdrop-blur-sm [padding-bottom:env(safe-area-inset-bottom)]">
-          <div className="flex items-center gap-1.5">
-            <AlertCircle className="h-3 w-3 shrink-0" />
-            <span className="truncate">{queuedInsertError}</span>
-            <button
-              type="button"
-              className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
-              onClick={() => setQueuedInsertError(null)}
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </div>
+          {queuedInsertError ? (
+            <div className="flex items-center gap-1.5">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{queuedInsertError}</span>
+              <button
+                type="button"
+                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+                onClick={() => setQueuedInsertError(null)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : null}
+          {attachmentError ? (
+            <div className={`flex items-center gap-1.5 ${queuedInsertError ? "mt-2" : ""}`}>
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{attachmentError}</span>
+              <button
+                type="button"
+                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+                onClick={() => setAttachmentError(null)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -859,6 +961,19 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 type="button"
                 className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
                 onClick={() => setQueuedInsertError(null)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : null}
+          {attachmentError ? (
+            <div className="flex items-center gap-1.5 px-3 pt-1.5 text-[11px] text-[#ffb39e]">
+              <AlertCircle className="h-3 w-3 shrink-0" />
+              <span className="truncate">{attachmentError}</span>
+              <button
+                type="button"
+                className="ml-auto shrink-0 text-[#8e847d] hover:text-[#c9c0b7]"
+                onClick={() => setAttachmentError(null)}
               >
                 <X className="h-3 w-3" />
               </button>

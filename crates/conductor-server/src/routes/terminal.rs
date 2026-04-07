@@ -385,8 +385,36 @@ const TTYD_RESIZE_SHIM: &str = r#"
         burstTimers.clear();
     };
 
+    const findXtermScrollHost = () => document.querySelector('.xterm-viewport')
+        || document.querySelector('.xterm-scrollable-element');
+
     const dispatchResize = () => {
+        const scrollHost = findXtermScrollHost();
+        if (!scrollHost) {
+            window.dispatchEvent(new Event('resize'));
+            return;
+        }
+
+        const maxScroll = Math.max(0, scrollHost.scrollHeight - scrollHost.clientHeight);
+        const atBottom = maxScroll <= 0 || maxScroll - scrollHost.scrollTop < 12;
+        const scrollRatio = maxScroll > 0 ? scrollHost.scrollTop / maxScroll : 1;
+
         window.dispatchEvent(new Event('resize'));
+
+        const restore = () => {
+            const sh = findXtermScrollHost();
+            if (!sh) return;
+            const newMax = Math.max(0, sh.scrollHeight - sh.clientHeight);
+            if (newMax <= 0) return;
+            if (atBottom) {
+                sh.scrollTop = newMax;
+            } else {
+                sh.scrollTop = Math.round(scrollRatio * newMax);
+            }
+        };
+        requestAnimationFrame(() => {
+            requestAnimationFrame(restore);
+        });
     };
 
     const scheduleResizeBurst = () => {

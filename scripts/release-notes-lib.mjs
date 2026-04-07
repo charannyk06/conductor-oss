@@ -2,7 +2,9 @@ const CODE_RABBIT_BLOCK_RE =
   /<!-- This is an auto-generated comment: release notes by coderabbit\.ai -->[\s\S]*?<!-- end of auto-generated comment: release notes by coderabbit\.ai -->/gi;
 const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
 const HEADING_RE = /^(#{1,6})\s+(.+?)\s*$/;
-const CONVENTIONAL_PREFIX_RE = /^[a-z]+(?:\([^)]+\))?!?:\s*/i;
+/** Match real conventional-commit prefixes only (not labels like "Terminal (ttyd):"). */
+const CONVENTIONAL_PREFIX_RE =
+  /^(?:feat|fix|docs|doc|chore|ci|build|refactor|perf|test|style|revert)(?:\([^)]+\))?!?:\s*/i;
 const TITLE_PR_SUFFIX_RE = /\s+\(#\d+\)\s*$/;
 const PR_TITLE_AGENT_ATTRIBUTION_PATTERNS = [
   /^\s*\[(?:codex|claude(?:\s*code)?|cursor|gemini|qwen(?:\s*code)?|copilot|amp|droid|opencode|ccr)\]\s*/i,
