@@ -3,10 +3,10 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SEC_WEBSOCKET_PROTOCOL, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
-use base64::Engine as _;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -1381,7 +1381,12 @@ async fn build_terminal_token_response(
 
     if token_required {
         if let Some(token_value) = token.as_ref() {
-            push_terminal_auth_set_cookie(response.headers_mut(), request_headers, &id, token_value);
+            push_terminal_auth_set_cookie(
+                response.headers_mut(),
+                request_headers,
+                &id,
+                token_value,
+            );
         }
     }
 
@@ -1398,8 +1403,7 @@ async fn terminal_ttyd_frontend(
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
-    if let Err(err) =
-        authorize_terminal_access(&state, &id, &headers, query.token.as_deref()).await
+    if let Err(err) = authorize_terminal_access(&state, &id, &headers, query.token.as_deref()).await
     {
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
@@ -2829,16 +2833,12 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            response
-                .headers()
-                .get_all(SET_COOKIE)
-                .iter()
-                .any(|value| {
-                    value
-                        .to_str()
-                        .map(|text| text.contains(TERMINAL_AUTH_COOKIE_NAME))
-                        .unwrap_or(false)
-                }),
+            response.headers().get_all(SET_COOKIE).iter().any(|value| {
+                value
+                    .to_str()
+                    .map(|text| text.contains(TERMINAL_AUTH_COOKIE_NAME))
+                    .unwrap_or(false)
+            }),
             "Set-Cookie should issue terminal auth cookie"
         );
         let body = to_bytes(response.into_body(), usize::MAX)
