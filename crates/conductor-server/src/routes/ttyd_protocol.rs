@@ -50,8 +50,8 @@ pub fn connect_request_with_auth(
     request
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", WsHeaderValue::from_static("tty"));
-    let credentials = base64::engine::general_purpose::STANDARD
-        .encode(format!("{username}:{password}"));
+    let credentials =
+        base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
     request.headers_mut().insert(
         "Authorization",
         WsHeaderValue::from_str(&format!("Basic {credentials}"))

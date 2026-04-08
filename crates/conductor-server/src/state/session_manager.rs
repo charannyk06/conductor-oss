@@ -2873,12 +2873,19 @@ mod tests {
         build_state_with_runtime(root, project, project_id, None).await
     }
 
-    async fn build_state_with_runtime(root: &Path, project: ProjectConfig, project_id: &str, runtime_override: Option<&str>) -> Arc<AppState> {
+    async fn build_state_with_runtime(
+        root: &Path,
+        project: ProjectConfig,
+        project_id: &str,
+        runtime_override: Option<&str>,
+    ) -> Arc<AppState> {
         let mut project = project;
         if project.runtime.is_none() {
-            project.runtime = Some(runtime_override
-                .map(str::to_string)
-                .unwrap_or_else(|| crate::state::detached::TTYD_RUNTIME_MODE.to_string()));
+            project.runtime = Some(
+                runtime_override
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::state::detached::TTYD_RUNTIME_MODE.to_string()),
+            );
         }
         let config = ConductorConfig {
             workspace: root.to_path_buf(),
@@ -3118,9 +3125,7 @@ mod tests {
         // This test exercises the session messaging path, not the terminal runtime.
         // Skip when ttyd is available to avoid the real ttyd process lifecycle
         // racing with the test assertions.
-        if crate::state::ttyd_binary_available(
-            &std::env::temp_dir().join("conductor-ttyd-check"),
-        ) {
+        if crate::state::ttyd_binary_available(&std::env::temp_dir().join("conductor-ttyd-check")) {
             return;
         }
         let root =
@@ -3238,9 +3243,7 @@ mod tests {
         // This test exercises the session messaging path, not the terminal runtime.
         // Skip when ttyd is available to avoid the real ttyd process lifecycle
         // racing with the test assertions.
-        if crate::state::ttyd_binary_available(
-            &std::env::temp_dir().join("conductor-ttyd-check"),
-        ) {
+        if crate::state::ttyd_binary_available(&std::env::temp_dir().join("conductor-ttyd-check")) {
             return;
         }
         let root = std::env::temp_dir().join(format!("conductor-acp-ui-test-{}", Uuid::new_v4()));
