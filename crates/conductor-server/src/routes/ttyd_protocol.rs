@@ -204,6 +204,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_connect_request_with_auth_sets_expected_headers() {
+        let request = connect_request_with_auth("ws://127.0.0.1:7681/ws", "user", "pass").unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get("Sec-WebSocket-Protocol")
+                .and_then(|v| v.to_str().ok()),
+            Some("tty")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("Authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Basic dXNlcjpwYXNz")
+        );
+    }
+
+    #[test]
     fn test_parse_resize_message() {
         let json = br#"{"columns":120,"rows":40}"#;
         let (cols, rows) = parse_resize_message(json).unwrap();

@@ -1034,12 +1034,13 @@ async fn run_ttyd_session_owner(
             ));
         }
     }
-    if !buf.trim().is_empty() {
-        let _ = channels.output_tx.send(executor.parse_output(&buf)).await;
-    }
     // Flush any remaining batched output before disconnecting.
     for output in output_batch.drain(..) {
         let _ = channels.output_tx.send(output).await;
+    }
+    // Send trailing partial line after the batch is fully drained.
+    if !buf.trim().is_empty() {
+        let _ = channels.output_tx.send(executor.parse_output(&buf)).await;
     }
     Err(anyhow!("ttyd session owner disconnected"))
 }
