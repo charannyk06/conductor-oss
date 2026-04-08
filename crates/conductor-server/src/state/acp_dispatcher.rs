@@ -791,10 +791,12 @@ fn enforce_conversation_limit(session: &mut SessionRecord) {
     session.conversation.drain(..excess);
 }
 
-fn clear_parser_state(session: &mut SessionRecord) {
-    session.metadata.remove(PARSER_STATE_KEY);
-    session.metadata.remove(PARSER_STATE_MESSAGE_KEY);
-    session.metadata.remove(PARSER_STATE_COMMAND_KEY);
+fn clear_parser_state(session: &mut SessionRecord) -> bool {
+    let mut dirty = false;
+    dirty |= session.metadata.remove(PARSER_STATE_KEY).is_some();
+    dirty |= session.metadata.remove(PARSER_STATE_MESSAGE_KEY).is_some();
+    dirty |= session.metadata.remove(PARSER_STATE_COMMAND_KEY).is_some();
+    dirty
 }
 
 fn update_dispatcher_active_skills_metadata(session: &mut SessionRecord, active_skills: &[String]) {
@@ -826,26 +828,40 @@ fn set_parser_state(
     kind: &str,
     message: &str,
     command: Option<String>,
-) {
+) -> bool {
     let trimmed = message.trim();
     if trimmed.is_empty() {
-        clear_parser_state(session);
-        return;
+        return clear_parser_state(session);
     }
 
-    session
+    let mut changed = false;
+    changed |= session
         .metadata
-        .insert(PARSER_STATE_KEY.to_string(), kind.to_string());
-    session
+        .insert(PARSER_STATE_KEY.to_string(), kind.to_string())
+        .is_some_and(|value| value != kind);
+    changed |= session
         .metadata
-        .insert(PARSER_STATE_MESSAGE_KEY.to_string(), trimmed.to_string());
+        .insert(PARSER_STATE_MESSAGE_KEY.to_string(), trimmed.to_string())
+        .is_some_and(|value| value != trimmed);
+
     if let Some(value) = command.filter(|value| !value.trim().is_empty()) {
-        session
+        changed |= session
             .metadata
-            .insert(PARSER_STATE_COMMAND_KEY.to_string(), value);
+            .insert(PARSER_STATE_COMMAND_KEY.to_string(), value.to_string())
+            .is_some_and(|current| current != value);
     } else {
-        session.metadata.remove(PARSER_STATE_COMMAND_KEY);
+        changed |= session.metadata.remove(PARSER_STATE_COMMAND_KEY).is_some();
     }
+
+    changed
+}
+
+fn parser_state_signature(session: &SessionRecord) -> (Option<String>, Option<String>, Option<String>) {
+    (
+        session.metadata.get(PARSER_STATE_KEY).cloned(),
+        session.metadata.get(PARSER_STATE_MESSAGE_KEY).cloned(),
+        session.metadata.get(PARSER_STATE_COMMAND_KEY).cloned(),
+    )
 }
 
 fn auth_command_hint(agent: &str, text: &str) -> Option<String> {
@@ -937,17 +953,17 @@ fn append_runtime_status_entry_with_metadata(
     session: &mut SessionRecord,
     text: &str,
     explicit_metadata: Option<HashMap<String, Value>>,
-) {
+) -> bool {
     let sanitized = sanitize_terminal_text(text);
     let trimmed = sanitized.trim();
     if trimmed.is_empty() {
-        return;
+        return false;
     }
 
     if let Some(last) = session.conversation.last() {
         if last.kind == "status_message" && last.source == "runtime" && last.text.trim() == trimmed
         {
-            return;
+            return false;
         }
     }
 
@@ -972,24 +988,25 @@ fn append_runtime_status_entry_with_metadata(
         metadata,
     });
     enforce_conversation_limit(session);
+    true
 }
 
-fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) {
-    append_runtime_status_entry_with_metadata(session, text, None);
+fn append_runtime_status_entry(session: &mut SessionRecord, text: &str) -> bool {
+    append_runtime_status_entry_with_metadata(session, text, None)
 }
 
-fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
+fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) -> bool {
     let sanitized = sanitize_terminal_text(text);
     let normalized = sanitized.trim_end();
     if normalized.trim().is_empty() {
-        return;
+        return false;
     }
 
     if let Some(last) = session.conversation.last_mut() {
         if last.kind == "assistant_message" && last.source == "runtime" {
             merge_assistant_fragment(&mut last.text, normalized);
             last.created_at = Utc::now().to_rfc3339();
-            return;
+            return true;
         }
     }
 
@@ -1003,45 +1020,86 @@ fn append_runtime_assistant_entry(session: &mut SessionRecord, text: &str) {
         metadata: HashMap::new(),
     });
     enforce_conversation_limit(session);
+    true
 }
 
-fn append_runtime_assistant_break(session: &mut SessionRecord) {
+fn append_runtime_assistant_break(session: &mut SessionRecord) -> bool {
+    let mut changed = false;
     if let Some(last) = session.conversation.last_mut() {
         if last.kind == "assistant_message" && last.source == "runtime" {
+            let old = last.text.clone();
             if !last.text.ends_with("\n\n") {
                 if last.text.ends_with('\n') {
                     last.text.push('\n');
                 } else {
                     last.text.push_str("\n\n");
                 }
+                changed = true;
             }
             last.created_at = Utc::now().to_rfc3339();
+            if last.text != old {
+                changed = true;
+            }
+            return changed;
         }
     }
+
+    false
 }
 
-fn apply_dispatcher_stdout_event(session: &mut SessionRecord, line: &str) {
+fn apply_dispatcher_stdout_event(session: &mut SessionRecord, line: &str) -> bool {
+    let mut feed_dirty = false;
+    let previous_status = session.status.clone();
+    let previous_output_empty = session.output.is_empty();
+
     touch_acp_dispatcher_heartbeat(session);
     if !session.status.is_terminal() {
-        session.status = SessionStatus::Working;
+        if session.status != SessionStatus::Working {
+            session.status = SessionStatus::Working;
+            feed_dirty = true;
+        }
         session.activity = Some("active".to_string());
     }
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        append_runtime_assistant_break(session);
-        return;
+        if append_runtime_assistant_break(session) {
+            feed_dirty = true;
+        }
+        if previous_status != session.status {
+            feed_dirty = true;
+        }
+        if previous_output_empty != session.output.is_empty() {
+            feed_dirty = true;
+        }
+        return feed_dirty;
     }
+    let parser_state_before = parser_state_signature(session);
 
     if detect_parser_state(session, trimmed) || is_runtime_status_line(trimmed) {
-        append_runtime_status_entry(session, trimmed);
+        if append_runtime_status_entry(session, trimmed) {
+            feed_dirty = true;
+        }
     } else {
-        clear_parser_state(session);
-        append_runtime_assistant_entry(session, line.trim_end());
+        let parser_state_cleared = clear_parser_state(session);
+        if parser_state_cleared {
+            feed_dirty = true;
+        }
+        if append_runtime_assistant_entry(session, line.trim_end()) {
+            feed_dirty = true;
+        }
+    }
+    if parser_state_signature(session) != parser_state_before {
+        feed_dirty = true;
     }
     session.summary = Some(trimmed.to_string());
-    session
-        .metadata
-        .insert("summary".to_string(), trimmed.to_string());
+    session.metadata.insert("summary".to_string(), trimmed.to_string());
+    if previous_status != session.status {
+        feed_dirty = true;
+    }
+    if previous_output_empty != session.output.is_empty() {
+        feed_dirty = true;
+    }
+    feed_dirty
 }
 
 fn persisted_output_line(event: &ExecutorOutput) -> Option<String> {
@@ -1893,7 +1951,33 @@ impl AppState {
 
     pub(crate) async fn publish_dispatcher_update(&self, thread_id: &str) {
         self.invalidate_dispatcher_caches(thread_id).await;
-        let _ = self.dispatcher_updates.send(thread_id.to_string());
+        let pending_updates: Arc<tokio::sync::Mutex<HashMap<String, u64>>> = Arc::clone(&self.pending_dispatcher_updates);
+        let dispatcher_updates = self.dispatcher_updates.clone();
+        let notify_seq = {
+            let mut pending = self.pending_dispatcher_updates.lock().await;
+            let next_seq = pending.get(thread_id).copied().unwrap_or_default().saturating_add(1);
+            pending.insert(thread_id.to_string(), next_seq);
+            next_seq
+        };
+
+        let thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let should_send = {
+                let mut pending = pending_updates.lock().await;
+                match pending.get(&thread_id).copied() {
+                    Some(current) if current == notify_seq => {
+                        pending.remove(&thread_id);
+                        true
+                    }
+                    _ => false,
+                }
+            };
+
+            if should_send {
+                let _ = dispatcher_updates.send(thread_id.clone());
+            }
+        });
     }
 
     pub(crate) async fn record_dispatcher_task_lifecycle_event(
@@ -3469,23 +3553,36 @@ impl AppState {
             return Ok(());
         }
 
+        let mut feed_dirty = false;
+        let previous_status = thread.status.clone();
+        let parser_state_before = parser_state_signature(thread);
+
         if let Some(line) = persisted_output_line(&event) {
+            let was_empty = thread.output.is_empty();
             append_output(&mut thread.output, &line);
+            if was_empty {
+                feed_dirty = true;
+            }
         }
         thread.last_activity_at = Utc::now().to_rfc3339();
         touch_acp_dispatcher_heartbeat(thread);
 
         match event {
             ExecutorOutput::Stdout(line) => {
-                apply_dispatcher_stdout_event(thread, &line);
+                if apply_dispatcher_stdout_event(thread, &line) {
+                    feed_dirty = true;
+                }
             }
             ExecutorOutput::Stderr(line) => {
-                if detect_parser_state(thread, &line) {
-                    append_runtime_status_entry(thread, &line);
-                    thread.summary = Some(line.trim().to_string());
+                let trimmed = line.trim();
+                if detect_parser_state(thread, &trimmed) {
+                    if append_runtime_status_entry(thread, trimmed) {
+                        feed_dirty = true;
+                    }
+                    thread.summary = Some(trimmed.to_string());
                     thread
                         .metadata
-                        .insert("summary".to_string(), line.trim().to_string());
+                        .insert("summary".to_string(), trimmed.to_string());
                 }
                 thread.metadata.insert("lastStderr".to_string(), line);
             }
@@ -3523,34 +3620,53 @@ impl AppState {
                     );
                 }
                 if !thread.status.is_terminal() {
-                    thread.status = SessionStatus::Working;
+                    if thread.status != SessionStatus::Working {
+                        thread.status = SessionStatus::Working;
+                        feed_dirty = true;
+                    }
                     thread.activity = Some("active".to_string());
                 }
                 let is_thread_started =
                     metadata.get("eventKind").and_then(Value::as_str) == Some("thread_started");
                 if !is_thread_started {
-                    append_runtime_status_entry_with_metadata(thread, &text, Some(metadata));
+                    if append_runtime_status_entry_with_metadata(
+                        thread,
+                        &text,
+                        Some(metadata),
+                    ) {
+                        feed_dirty = true;
+                    }
                 }
             }
             ExecutorOutput::NeedsInput(prompt) => {
-                thread.status = SessionStatus::NeedsInput;
+                if thread.status != SessionStatus::NeedsInput {
+                    thread.status = SessionStatus::NeedsInput;
+                    feed_dirty = true;
+                }
                 thread.activity = Some("waiting_input".to_string());
                 thread.summary = Some(prompt.clone());
                 thread
                     .metadata
                     .insert("summary".to_string(), prompt.clone());
-                append_runtime_status_entry(thread, &prompt);
+                if append_runtime_status_entry(thread, &prompt) {
+                    feed_dirty = true;
+                }
                 if !detect_parser_state(thread, &prompt) {
-                    set_parser_state(thread, "needs_input", &prompt, None);
+                    feed_dirty |= set_parser_state(thread, "needs_input", &prompt, None);
                 }
             }
             ExecutorOutput::Completed { exit_code } => {
-                clear_parser_state(thread);
+                if clear_parser_state(thread) {
+                    feed_dirty = true;
+                }
                 thread
                     .metadata
                     .insert("exitCode".to_string(), exit_code.to_string());
                 if exit_code == 0 {
-                    thread.status = SessionStatus::NeedsInput;
+                    if thread.status != SessionStatus::NeedsInput {
+                        thread.status = SessionStatus::NeedsInput;
+                        feed_dirty = true;
+                    }
                     thread.activity = Some("waiting_input".to_string());
                     thread
                         .metadata
@@ -3567,7 +3683,10 @@ impl AppState {
                             .insert("summary".to_string(), "Ready for follow-up".to_string());
                     }
                 } else {
-                    thread.status = SessionStatus::Errored;
+                    if thread.status != SessionStatus::Errored {
+                        thread.status = SessionStatus::Errored;
+                        feed_dirty = true;
+                    }
                     thread.activity = Some("exited".to_string());
                     thread
                         .metadata
@@ -3613,10 +3732,19 @@ impl AppState {
                         .insert("exitCode".to_string(), code.to_string());
                 }
                 if !parser_state_detected && requested_kill {
-                    clear_parser_state(thread);
+                    if clear_parser_state(thread) {
+                        feed_dirty = true;
+                    }
                 }
             }
             ExecutorOutput::Composite(_) => {}
+        }
+
+        if thread.status != previous_status {
+            feed_dirty = true;
+        }
+        if parser_state_signature(thread) != parser_state_before {
+            feed_dirty = true;
         }
 
         let should_sync_memory = should_sync_dispatcher_session_memory(thread, force_memory_sync);
@@ -3630,7 +3758,9 @@ impl AppState {
         if should_sync_memory {
             self.sync_acp_dispatcher_state(&updated).await?;
         }
-        self.publish_dispatcher_update(thread_id).await;
+        if feed_dirty {
+            self.publish_dispatcher_update(thread_id).await;
+        }
         Ok(())
     }
 
