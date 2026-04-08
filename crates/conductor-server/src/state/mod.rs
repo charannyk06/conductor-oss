@@ -1,4 +1,7 @@
 mod acp_dispatcher;
+mod acp_heartbeat;
+mod acp_memory;
+mod acp_parser;
 mod app_update;
 mod board_collaboration;
 mod bridge_registry;
