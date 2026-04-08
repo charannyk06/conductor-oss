@@ -172,10 +172,10 @@ pub struct AppState {
 impl AppState {
     pub async fn new(config_path: PathBuf, config: ConductorConfig, db: Database) -> Arc<Self> {
         let workspace_path = resolve_workspace_path(&config_path, &config.workspace);
-        let (event_snapshots, _) = broadcast::channel(256);
-        let (output_updates, _) = broadcast::channel(512);
-        let (feed_updates, _) = broadcast::channel(512);
-        let (dispatcher_updates, _) = broadcast::channel(2048);
+        let (event_snapshots, _) = broadcast::channel(512);
+        let (output_updates, _) = broadcast::channel(1024);
+        let (feed_updates, _) = broadcast::channel(1024);
+        let (dispatcher_updates, _) = broadcast::channel(4096);
         let app_update_config = AppUpdateConfig::from_env();
         let app_update_state = app_update::AppUpdateRuntime::new(&app_update_config);
         let state = Arc::new(Self {

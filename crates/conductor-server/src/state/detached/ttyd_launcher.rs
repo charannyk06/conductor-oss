@@ -290,6 +290,12 @@ pub async fn spawn_ttyd_runtime(
     let ttyd_shell_args = build_ttyd_shell_args(&terminal_shell, Some(&binary), &args);
     let (port_listener, port) = reserve_ttyd_port()?;
 
+    // TODO(P3): Add ttyd -c credential flag to prevent unauthorized local
+    // connections to the terminal port. Requires updating the session owner
+    // WebSocket handshake to include Basic auth. Currently blocked by ttyd's
+    // auth flow requiring a JSON handshake step after HTTP upgrade.
+    // let ttyd_auth_token = hex::encode(uuid::Uuid::new_v4().as_bytes());
+
     let mut cmd = tokio::process::Command::new(ttyd_binary);
     cmd.arg("-p")
         .arg(port.to_string())
@@ -435,6 +441,7 @@ pub async fn spawn_ttyd_runtime(
             &st2,
             &sid2,
             &url2,
+            None,
             owner_executor,
             TtydSessionOwnerChannels {
                 output_tx,
@@ -628,7 +635,7 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
         .ok_or_else(|| anyhow!("Executor '{}' is not available", session.agent))?;
     drop(executors);
 
-    let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(1024);
+    let (output_tx, output_rx) = mpsc::channel::<ExecutorOutput>(8192);
     let (input_tx, input_rx) = mpsc::channel::<ExecutorInput>(64);
     let (resize_tx, resize_rx) = mpsc::channel::<PtyDimensions>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -683,6 +690,7 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
             &st2,
             &sid2,
             &url2,
+            None,
             owner_executor,
             TtydSessionOwnerChannels {
                 output_tx,
@@ -738,6 +746,7 @@ async fn run_ttyd_session_owner_with_retry(
     state: &Arc<AppState>,
     sid: &str,
     url: &str,
+    ttyd_auth_token: Option<&str>,
     executor: Arc<dyn Executor>,
     initial_channels: TtydSessionOwnerChannels,
 ) -> Result<()> {
@@ -762,7 +771,7 @@ async fn run_ttyd_session_owner_with_retry(
 
     loop {
         let result =
-            run_ttyd_session_owner(state, sid, url, executor.clone(), channels, session_start)
+            run_ttyd_session_owner(state, sid, url, ttyd_auth_token, executor.clone(), channels, session_start)
                 .await;
 
         match &result {
@@ -894,6 +903,7 @@ async fn run_ttyd_session_owner(
     state: &Arc<AppState>,
     sid: &str,
     url: &str,
+    _ttyd_auth_token: Option<&str>,
     executor: Arc<dyn Executor>,
     mut channels: TtydSessionOwnerChannels,
     session_start: tokio::time::Instant,
@@ -936,6 +946,15 @@ async fn run_ttyd_session_owner(
     let mut input_closed = false;
     let mut resize_closed = false;
 
+    // Batch terminal output lines before sending to the output consumer.
+    // Draining line-by-line from ttyd generates many small sends under heavy
+    // output (e.g. cargo build). Batching amortises channel send overhead
+    // and reduces wakeups in the output consumer task.
+    let mut output_batch: Vec<ExecutorOutput> = Vec::with_capacity(64);
+    let mut batch_flush_interval = tokio::time::interval(std::time::Duration::from_millis(16));
+    batch_flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut batch_dirty = false;
+
     loop {
         tokio::select! {
             message = r.next() => match message {
@@ -949,11 +968,19 @@ async fn run_ttyd_session_owner(
                     while let Some(nl) = buf.find('\n') {
                         let line = buf[..nl].to_string();
                         buf = buf[nl + 1..].to_string();
-                        if !line.trim().is_empty()
-                            && channels.output_tx.send(executor.parse_output(&line)).await.is_err()
-                        {
-                            return Ok(());
+                        if !line.trim().is_empty() {
+                            output_batch.push(executor.parse_output(&line));
+                            batch_dirty = true;
                         }
+                    }
+                    // Flush immediately when batch is large to avoid memory pressure.
+                    if output_batch.len() >= 64 {
+                        for output in output_batch.drain(..) {
+                            if channels.output_tx.send(output).await.is_err() {
+                                return Ok(());
+                            }
+                        }
+                        batch_dirty = false;
                     }
                 }
                 Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {}
@@ -988,6 +1015,14 @@ async fn run_ttyd_session_owner(
                     resize_closed = true;
                 }
             },
+            _ = batch_flush_interval.tick(), if batch_dirty => {
+                for output in output_batch.drain(..) {
+                    if channels.output_tx.send(output).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                batch_dirty = false;
+            },
         }
         // Session duration check after each select iteration.
         if session_start.elapsed() >= TTYD_MAX_SESSION_DURATION {
@@ -1005,6 +1040,10 @@ async fn run_ttyd_session_owner(
     }
     if !buf.trim().is_empty() {
         let _ = channels.output_tx.send(executor.parse_output(&buf)).await;
+    }
+    // Flush any remaining batched output before disconnecting.
+    for output in output_batch.drain(..) {
+        let _ = channels.output_tx.send(output).await;
     }
     Err(anyhow!("ttyd session owner disconnected"))
 }

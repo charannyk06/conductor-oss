@@ -9,6 +9,7 @@
 // - '{' (0x7B): JSON_DATA / handshake (client->server)
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
@@ -33,6 +34,29 @@ pub fn connect_request(ws_url: &str) -> Result<tokio_tungstenite::tungstenite::h
     request
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", WsHeaderValue::from_static("tty"));
+    Ok(request)
+}
+
+/// Build a WebSocket connect request with HTTP Basic auth for ttyd sessions
+/// that require authentication.
+pub fn connect_request_with_auth(
+    ws_url: &str,
+    username: &str,
+    password: &str,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
+    let mut request = ws_url
+        .into_client_request()
+        .context("Failed to create ttyd WebSocket request")?;
+    request
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", WsHeaderValue::from_static("tty"));
+    let credentials = base64::engine::general_purpose::STANDARD
+        .encode(format!("{username}:{password}"));
+    request.headers_mut().insert(
+        "Authorization",
+        WsHeaderValue::from_str(&format!("Basic {credentials}"))
+            .unwrap_or_else(|_| WsHeaderValue::from_static("")),
+    );
     Ok(request)
 }
 
