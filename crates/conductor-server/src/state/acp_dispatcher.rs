@@ -856,7 +856,9 @@ fn set_parser_state(
     changed
 }
 
-fn parser_state_signature(session: &SessionRecord) -> (Option<String>, Option<String>, Option<String>) {
+fn parser_state_signature(
+    session: &SessionRecord,
+) -> (Option<String>, Option<String>, Option<String>) {
     (
         session.metadata.get(PARSER_STATE_KEY).cloned(),
         session.metadata.get(PARSER_STATE_MESSAGE_KEY).cloned(),
@@ -1092,7 +1094,9 @@ fn apply_dispatcher_stdout_event(session: &mut SessionRecord, line: &str) -> boo
         feed_dirty = true;
     }
     session.summary = Some(trimmed.to_string());
-    session.metadata.insert("summary".to_string(), trimmed.to_string());
+    session
+        .metadata
+        .insert("summary".to_string(), trimmed.to_string());
     if previous_status != session.status {
         feed_dirty = true;
     }
@@ -1951,11 +1955,16 @@ impl AppState {
 
     pub(crate) async fn publish_dispatcher_update(&self, thread_id: &str) {
         self.invalidate_dispatcher_caches(thread_id).await;
-        let pending_updates: Arc<tokio::sync::Mutex<HashMap<String, u64>>> = Arc::clone(&self.pending_dispatcher_updates);
+        let pending_updates: Arc<tokio::sync::Mutex<HashMap<String, u64>>> =
+            Arc::clone(&self.pending_dispatcher_updates);
         let dispatcher_updates = self.dispatcher_updates.clone();
         let notify_seq = {
             let mut pending = self.pending_dispatcher_updates.lock().await;
-            let next_seq = pending.get(thread_id).copied().unwrap_or_default().saturating_add(1);
+            let next_seq = pending
+                .get(thread_id)
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(1);
             pending.insert(thread_id.to_string(), next_seq);
             next_seq
         };
@@ -3629,11 +3638,7 @@ impl AppState {
                 let is_thread_started =
                     metadata.get("eventKind").and_then(Value::as_str) == Some("thread_started");
                 if !is_thread_started {
-                    if append_runtime_status_entry_with_metadata(
-                        thread,
-                        &text,
-                        Some(metadata),
-                    ) {
+                    if append_runtime_status_entry_with_metadata(thread, &text, Some(metadata)) {
                         feed_dirty = true;
                     }
                 }

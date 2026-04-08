@@ -793,8 +793,7 @@ fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> O
         .take(shared_prefix_len)
         .zip(next_entries.iter().take(shared_prefix_len))
         .all(|(left, right)| {
-            left.get("id").and_then(Value::as_str)
-                == right.get("id").and_then(Value::as_str)
+            left.get("id").and_then(Value::as_str) == right.get("id").and_then(Value::as_str)
         })
     {
         return None;
@@ -872,8 +871,7 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
             .iter()
             .zip(next_entries.iter())
             .all(|(left, right)| {
-                left.get("id").and_then(Value::as_str)
-                    == right.get("id").and_then(Value::as_str)
+                left.get("id").and_then(Value::as_str) == right.get("id").and_then(Value::as_str)
             });
 
     let can_append = ids_match
