@@ -193,13 +193,19 @@ fn reserve_ttyd_port() -> Result<(std::net::TcpListener, u16)> {
     {
         use std::os::unix::io::AsRawFd;
         let optval: libc::c_int = 1;
-        unsafe {
+        let ret = unsafe {
             libc::setsockopt(
                 listener.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_REUSEADDR,
                 &optval as *const _ as *const libc::c_void,
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            tracing::debug!(
+                "SO_REUSEADDR setsockopt failed: {}",
+                std::io::Error::last_os_error()
             );
         }
     }
@@ -744,7 +750,14 @@ async fn run_ttyd_session_owner_with_retry(
         .await
         .and_then(|s| s.metadata.get("ttyd_session_start_time").cloned())
         .and_then(|v| v.parse::<u64>().ok())
-        .map(|secs| tokio::time::Instant::now() - std::time::Duration::from_secs(secs))
+        .map(|stored_epoch_secs| {
+            let current_epoch_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let elapsed_secs = current_epoch_secs.saturating_sub(stored_epoch_secs);
+            tokio::time::Instant::now() - std::time::Duration::from_secs(elapsed_secs)
+        })
         .unwrap_or_else(tokio::time::Instant::now);
 
     loop {
