@@ -441,7 +441,6 @@ pub async fn spawn_ttyd_runtime(
             &st2,
             &sid2,
             &url2,
-            None,
             owner_executor,
             TtydSessionOwnerChannels {
                 output_tx,
@@ -690,7 +689,6 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
             &st2,
             &sid2,
             &url2,
-            None,
             owner_executor,
             TtydSessionOwnerChannels {
                 output_tx,
@@ -746,7 +744,6 @@ async fn run_ttyd_session_owner_with_retry(
     state: &Arc<AppState>,
     sid: &str,
     url: &str,
-    ttyd_auth_token: Option<&str>,
     executor: Arc<dyn Executor>,
     initial_channels: TtydSessionOwnerChannels,
 ) -> Result<()> {
@@ -771,7 +768,7 @@ async fn run_ttyd_session_owner_with_retry(
 
     loop {
         let result =
-            run_ttyd_session_owner(state, sid, url, ttyd_auth_token, executor.clone(), channels, session_start)
+            run_ttyd_session_owner(state, sid, url, executor.clone(), channels, session_start)
                 .await;
 
         match &result {
@@ -903,7 +900,6 @@ async fn run_ttyd_session_owner(
     state: &Arc<AppState>,
     sid: &str,
     url: &str,
-    _ttyd_auth_token: Option<&str>,
     executor: Arc<dyn Executor>,
     mut channels: TtydSessionOwnerChannels,
     session_start: tokio::time::Instant,
