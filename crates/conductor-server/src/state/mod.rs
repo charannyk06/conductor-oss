@@ -40,7 +40,7 @@ pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
 pub(crate) use mcp_config::{
-    build_codex_mcp_config_args, deserialize_mcp_servers, merge_mcp_servers, parse_acp_mcp_servers,
+    build_claude_mcp_config_json, build_codex_mcp_config_args, deserialize_mcp_servers, merge_mcp_servers, parse_acp_mcp_servers,
     serialize_mcp_servers, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
@@ -300,6 +300,32 @@ impl AppState {
             internal,
         );
         build_codex_mcp_config_args(&merged)
+    }
+
+    pub(crate) fn claude_mcp_extra_args(
+        &self,
+        config: &ConductorConfig,
+        project: &ProjectConfig,
+        session_id: &str,
+        project_id: &str,
+        session_kind: Option<&str>,
+        session_mcp_servers: &std::collections::BTreeMap<String, McpServerConfig>,
+    ) -> Vec<String> {
+        let internal = if session_kind == Some("project_dispatcher") {
+            self.internal_conductor_mcp_server(session_id, project_id)
+        } else {
+            None
+        };
+        let merged = merge_mcp_servers(
+            &config.defaults.mcp_servers,
+            &project.mcp_servers,
+            session_mcp_servers,
+            internal,
+        );
+        match build_claude_mcp_config_json(&merged) {
+            Some(json_str) => vec!["--mcp-config".to_string(), json_str],
+            None => Vec::new(),
+        }
     }
 
     pub async fn update_preferences(
