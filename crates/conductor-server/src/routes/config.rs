@@ -570,7 +570,7 @@ async fn get_cloudflare_jwks(
     if !force_refresh {
         if let Some(cached) = CLOUDFLARE_JWKS_CACHE
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(team_domain)
             .cloned()
         {
@@ -581,13 +581,16 @@ async fn get_cloudflare_jwks(
     }
 
     let keys = fetch_cloudflare_jwks(team_domain).await?;
-    CLOUDFLARE_JWKS_CACHE.lock().unwrap().insert(
-        team_domain.to_string(),
-        CloudflareJwksCacheEntry {
-            keys: keys.clone(),
-            fetched_at: Instant::now(),
-        },
-    );
+    CLOUDFLARE_JWKS_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(
+            team_domain.to_string(),
+            CloudflareJwksCacheEntry {
+                keys: keys.clone(),
+                fetched_at: Instant::now(),
+            },
+        );
     Ok(keys)
 }
 
