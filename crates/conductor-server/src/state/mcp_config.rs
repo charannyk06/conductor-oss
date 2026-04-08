@@ -353,7 +353,10 @@ mod tests {
         );
         assert!(parsed["mcpServers"]["conductor"]["args"].is_array());
         assert!(parsed["mcpServers"]["conductor"]["env"].is_object());
-        assert_eq!(parsed["mcpServers"]["conductor"]["env"]["CONDUCTOR_SESSION_ID"], "session-1");
+        assert_eq!(
+            parsed["mcpServers"]["conductor"]["env"]["CONDUCTOR_SESSION_ID"],
+            "session-1"
+        );
         assert!(parsed["mcpServers"]["disabled-server"].is_null());
     }
 

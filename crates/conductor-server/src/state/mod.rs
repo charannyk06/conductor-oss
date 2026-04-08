@@ -40,8 +40,9 @@ pub use helpers::{
     build_normalized_chat_feed, resolve_board_file, session_to_dashboard_value, trim_lines_tail,
 };
 pub(crate) use mcp_config::{
-    build_claude_mcp_config_json, build_codex_mcp_config_args, deserialize_mcp_servers, merge_mcp_servers, parse_acp_mcp_servers,
-    serialize_mcp_servers, ACP_SESSION_MCP_SERVERS_METADATA_KEY,
+    build_claude_mcp_config_json, build_codex_mcp_config_args, deserialize_mcp_servers,
+    merge_mcp_servers, parse_acp_mcp_servers, serialize_mcp_servers,
+    ACP_SESSION_MCP_SERVERS_METADATA_KEY,
 };
 pub use runtime_status::{build_session_runtime_status, SessionRuntimeStatus};
 pub(crate) use session_manager::OutputConsumerConfig;
