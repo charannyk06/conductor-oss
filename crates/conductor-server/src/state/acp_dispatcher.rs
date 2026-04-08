@@ -3326,17 +3326,24 @@ impl AppState {
                 .map(String::as_str),
         )
         .unwrap_or_default();
-        let extra_args = if executor.kind() == AgentKind::Codex {
-            self.codex_mcp_extra_args(
+        let extra_args = match executor.kind() {
+            AgentKind::Codex | AgentKind::QwenCode => self.codex_mcp_extra_args(
                 &config,
                 &project,
                 &thread.id,
                 &thread.project_id,
                 Some(ACP_SESSION_KIND),
                 &session_mcp_servers,
-            )
-        } else {
-            Vec::new()
+            ),
+            AgentKind::ClaudeCode => self.claude_mcp_extra_args(
+                &config,
+                &project,
+                &thread.id,
+                &thread.project_id,
+                Some(ACP_SESSION_KIND),
+                &session_mcp_servers,
+            ),
+            _ => Vec::new(),
         };
         let use_headless_turns = dispatcher_uses_headless_turns(&executor.kind());
         let structured_output = if use_headless_turns {

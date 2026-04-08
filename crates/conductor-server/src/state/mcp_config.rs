@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use conductor_core::config::McpServerConfig;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 pub(crate) const ACP_SESSION_MCP_SERVERS_METADATA_KEY: &str = "acpMcpServers";
@@ -141,6 +141,40 @@ pub(crate) fn merge_mcp_servers(
     normalized_servers(merged)
 }
 
+/// Build a Claude Code compatible MCP config JSON string for `--mcp-config`.
+/// Claude Code expects `--mcp-config <json>` where json is `{ "mcpServers": { ... } }`.
+pub(crate) fn build_claude_mcp_config_json(
+    servers: &BTreeMap<String, McpServerConfig>,
+) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+    let mut mcp_servers = serde_json::Map::new();
+    for (name, server) in servers {
+        if !server.enabled {
+            continue;
+        }
+        let mut entry = serde_json::Map::new();
+        entry.insert("command".to_string(), json!(server.command));
+        if !server.args.is_empty() {
+            entry.insert("args".to_string(), json!(server.args));
+        }
+        if let Some(cwd) = &server.cwd {
+            entry.insert("cwd".to_string(), json!(cwd));
+        }
+        if !server.env.is_empty() {
+            entry.insert("env".to_string(), json!(server.env));
+        }
+        mcp_servers.insert(name.clone(), Value::Object(entry));
+    }
+    if mcp_servers.is_empty() {
+        return None;
+    }
+    let mut root = serde_json::Map::new();
+    root.insert("mcpServers".to_string(), Value::Object(mcp_servers));
+    Some(serde_json::to_string(&Value::Object(root)).unwrap_or_default())
+}
+
 pub(crate) fn build_codex_mcp_config_args(
     servers: &BTreeMap<String, McpServerConfig>,
 ) -> Vec<String> {
@@ -276,5 +310,58 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| { arg == "mcp_servers.conductor.env.CONDUCTOR_SESSION_ID=\"session-1\"" }));
+    }
+
+    #[test]
+    fn build_claude_mcp_config_json_generates_valid_claude_config() {
+        let servers = BTreeMap::from([
+            (
+                "conductor".to_string(),
+                McpServerConfig {
+                    command: "/usr/local/bin/conductor-server".to_string(),
+                    args: vec![
+                        "--workspace".to_string(),
+                        "/tmp/ws".to_string(),
+                        "mcp-server".to_string(),
+                    ],
+                    env: BTreeMap::from([(
+                        "CONDUCTOR_SESSION_ID".to_string(),
+                        "session-1".to_string(),
+                    )]),
+                    cwd: Some("/tmp/ws".to_string()),
+                    enabled: true,
+                },
+            ),
+            (
+                "disabled-server".to_string(),
+                McpServerConfig {
+                    command: "/bin/false".to_string(),
+                    enabled: false,
+                    ..McpServerConfig::default()
+                },
+            ),
+        ]);
+
+        let json_str = build_claude_mcp_config_json(&servers).unwrap();
+        let parsed: Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.get("mcpServers").is_some());
+        assert!(parsed["mcpServers"]["conductor"].is_object());
+        assert_eq!(
+            parsed["mcpServers"]["conductor"]["command"],
+            "/usr/local/bin/conductor-server"
+        );
+        assert!(parsed["mcpServers"]["conductor"]["args"].is_array());
+        assert!(parsed["mcpServers"]["conductor"]["env"].is_object());
+        assert_eq!(
+            parsed["mcpServers"]["conductor"]["env"]["CONDUCTOR_SESSION_ID"],
+            "session-1"
+        );
+        assert!(parsed["mcpServers"]["disabled-server"].is_null());
+    }
+
+    #[test]
+    fn build_claude_mcp_config_json_returns_none_for_empty_servers() {
+        assert!(build_claude_mcp_config_json(&BTreeMap::new()).is_none());
     }
 }
