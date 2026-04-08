@@ -609,20 +609,48 @@ function resolveExpectedActionHost(request: NextRequest): string {
   return request.nextUrl.host.trim().toLowerCase() || request.headers.get("host")?.trim().toLowerCase() || "";
 }
 
+function sameSiteActionsAllowed(): boolean {
+  const v = (process.env.CONDUCTOR_ALLOW_SAME_SITE_ACTIONS ?? "").trim().toLowerCase();
+  return v === "true" || v === "1" || v === "yes";
+}
+
 function guardActionOrigin(request: NextRequest): NextResponse | null {
   const expectedHost = resolveExpectedActionHost(request);
   if (!expectedHost) return null;
   const allowedHosts = getAllowedActionHosts(expectedHost);
 
   const secFetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
-  if (secFetchSite && secFetchSite !== "none" && secFetchSite !== "same-origin" && secFetchSite !== "same-site") {
-    return NextResponse.json(
-      {
-        error: "Invalid request context",
-        reason: "Cross-site requests are not allowed for agent-control actions.",
-      },
-      { status: 403 },
-    );
+  if (secFetchSite) {
+    if (secFetchSite === "cross-site") {
+      return NextResponse.json(
+        {
+          error: "Invalid request context",
+          reason: "Cross-site requests are not allowed for agent-control actions.",
+        },
+        { status: 403 },
+      );
+    }
+    // Default: block same-site (sibling subdomains on the same registrable domain).
+    // Set CONDUCTOR_ALLOW_SAME_SITE_ACTIONS=true if you rely on that fetch pattern.
+    if (secFetchSite === "same-site" && !sameSiteActionsAllowed()) {
+      return NextResponse.json(
+        {
+          error: "Invalid request context",
+          reason:
+            "Same-site cross-subdomain requests are not allowed for agent-control actions. Set CONDUCTOR_ALLOW_SAME_SITE_ACTIONS=true if you need this.",
+        },
+        { status: 403 },
+      );
+    }
+    if (secFetchSite !== "none" && secFetchSite !== "same-origin" && secFetchSite !== "same-site") {
+      return NextResponse.json(
+        {
+          error: "Invalid request context",
+          reason: "Unrecognized Sec-Fetch-Site value for agent-control actions.",
+        },
+        { status: 403 },
+      );
+    }
   }
 
   const originHeader = request.headers.get("origin");

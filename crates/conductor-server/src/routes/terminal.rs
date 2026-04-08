@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::header::{CONTENT_TYPE, SEC_WEBSOCKET_PROTOCOL};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SEC_WEBSOCKET_PROTOCOL, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use base64::Engine as _;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -40,6 +41,102 @@ const TERMINAL_SNAPSHOT_RESTORED_HEADER: &str = "x-conductor-terminal-snapshot-r
 const TERMINAL_SNAPSHOT_FORMAT_HEADER: &str = "x-conductor-terminal-snapshot-format";
 static PROCESS_TERMINAL_TOKEN_SECRET: LazyLock<String> =
     LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+
+/// HttpOnly cookie carrying the HMAC terminal token (avoids `?token=` in URLs and logs).
+const TERMINAL_AUTH_COOKIE_NAME: &str = "conductor_ttyd_auth";
+
+fn terminal_token_in_query_enabled() -> bool {
+    std::env::var("CONDUCTOR_TERMINAL_TOKEN_IN_QUERY")
+        .map(|value| value.trim().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn terminal_auth_cookie_encoded(token: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token.as_bytes())
+}
+
+fn terminal_auth_token_from_cookie(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(trimmed.as_bytes()) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    Some(trimmed.to_string())
+}
+
+fn parse_cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
+    for part in cookies.split(';') {
+        let part = part.trim();
+        let (key, value) = part.split_once('=')?;
+        if key.trim() == name {
+            return Some(value.trim());
+        }
+    }
+    None
+}
+
+fn bearer_authorization_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let rest = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))?;
+    let token = rest.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+fn resolve_terminal_auth_token(headers: &HeaderMap, query_token: Option<&str>) -> Option<String> {
+    if let Some(token) = query_token.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(token.to_string());
+    }
+    if let Some(token) = bearer_authorization_token(headers) {
+        return Some(token);
+    }
+    let cookie_header = headers.get(COOKIE)?.to_str().ok()?;
+    let raw = parse_cookie_value(cookie_header, TERMINAL_AUTH_COOKIE_NAME)?;
+    terminal_auth_token_from_cookie(raw)
+}
+
+fn request_expects_secure_cookie(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+fn push_terminal_auth_set_cookie(
+    response_headers: &mut HeaderMap,
+    request_headers: &HeaderMap,
+    session_id: &str,
+    token: &str,
+) {
+    let value = terminal_auth_cookie_encoded(token);
+    let path = format!("/api/sessions/{session_id}/terminal");
+    let mut parts = vec![
+        format!("{TERMINAL_AUTH_COOKIE_NAME}={value}"),
+        format!("Path={path}"),
+        "HttpOnly".to_string(),
+        "SameSite=Lax".to_string(),
+        format!("Max-Age={TERMINAL_TOKEN_TTL_SECONDS}"),
+    ];
+    if request_expects_secure_cookie(request_headers) {
+        parts.push("Secure".to_string());
+    }
+    let joined = parts.join("; ");
+    if let Ok(header_value) = HeaderValue::from_str(&joined) {
+        response_headers.append(SET_COOKIE, header_value);
+    }
+}
 
 /// HTTP client for fetching ttyd's bundled HTML from the local ttyd process only.
 static TTYD_UPSTREAM_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -1162,7 +1259,8 @@ async fn terminal_ttyd_frontend_websocket(
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
-    if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
+    if let Err(err) = authorize_terminal_access(&state, &id, &headers, query.token.as_deref()).await
+    {
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
 
@@ -1201,14 +1299,19 @@ async fn terminal_ttyd_frontend_websocket(
     ws.on_upgrade(move |socket| handle_ttyd_frontend_socket(state, id, socket))
 }
 
-async fn terminal_token(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    build_terminal_token_response(state, id, TerminalTokenScope::Control).await
+async fn terminal_token(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    build_terminal_token_response(state, id, TerminalTokenScope::Control, &headers).await
 }
 
 async fn build_terminal_token_response(
     state: Arc<AppState>,
     id: String,
     scope: TerminalTokenScope,
+    request_headers: &HeaderMap,
 ) -> Response {
     let Some(initial_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
@@ -1256,11 +1359,17 @@ async fn build_terminal_token_response(
         )
         .into_response();
     };
-    let ttyd_http_url = ttyd_frontend_proxy_path(&id, token.as_deref());
-    let ttyd_ws_url = ttyd_frontend_proxy_ws_path(&id, token.as_deref());
+    let embed_token_in_urls = !token_required || terminal_token_in_query_enabled();
+    let url_token = if embed_token_in_urls {
+        token.as_deref()
+    } else {
+        None
+    };
+    let ttyd_http_url = ttyd_frontend_proxy_path(&id, url_token);
+    let ttyd_ws_url = ttyd_frontend_proxy_ws_path(&id, url_token);
     let tunnel_url = session.metadata.get(TTYD_TUNNEL_URL_METADATA_KEY).cloned();
 
-    Json(json!({
+    let mut response = Json(json!({
         "token": token,
         "required": token_required,
         "expiresInSeconds": token.as_ref().map(|_| TERMINAL_TOKEN_TTL_SECONDS),
@@ -1268,19 +1377,30 @@ async fn build_terminal_token_response(
         "ttydWsUrl": ttyd_ws_url,
         "tunnelUrl": tunnel_url,
     }))
-    .into_response()
+    .into_response();
+
+    if token_required {
+        if let Some(token_value) = token.as_ref() {
+            push_terminal_auth_set_cookie(response.headers_mut(), request_headers, &id, token_value);
+        }
+    }
+
+    response
 }
 
 async fn terminal_ttyd_frontend(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<TerminalQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let Some(_session) = state.get_session(&id).await else {
         return error(StatusCode::NOT_FOUND, format!("Session {id} not found")).into_response();
     };
 
-    if let Err(err) = authorize_terminal_access(&state, &id, query.token.as_deref()).await {
+    if let Err(err) =
+        authorize_terminal_access(&state, &id, &headers, query.token.as_deref()).await
+    {
         return error(StatusCode::UNAUTHORIZED, err.to_string()).into_response();
     }
 
@@ -2021,15 +2141,17 @@ pub(crate) fn resolve_terminal_keys(
 async fn authorize_terminal_access(
     state: &Arc<AppState>,
     session_id: &str,
-    token: Option<&str>,
+    headers: &HeaderMap,
+    query_token: Option<&str>,
 ) -> Result<()> {
     let access = state.config.read().await.access.clone();
     if !access_control_enabled(&access) {
         return Ok(());
     }
 
-    let token = token.ok_or_else(|| anyhow!("Terminal token is required"))?;
-    if verify_terminal_token(session_id, token)? {
+    let token = resolve_terminal_auth_token(headers, query_token)
+        .ok_or_else(|| anyhow!("Terminal token is required"))?;
+    if verify_terminal_token(session_id, &token)? {
         return Ok(());
     }
 
@@ -2701,32 +2823,40 @@ mod tests {
             state.clone(),
             session.id.clone(),
             TerminalTokenScope::Control,
+            &HeaderMap::new(),
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get_all(SET_COOKIE)
+                .iter()
+                .any(|value| {
+                    value
+                        .to_str()
+                        .map(|text| text.contains(TERMINAL_AUTH_COOKIE_NAME))
+                        .unwrap_or(false)
+                }),
+            "Set-Cookie should issue terminal auth cookie"
+        );
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("token response body should read");
         let payload: Value =
             serde_json::from_slice(&body).expect("token response should be valid json");
 
-        let token = payload["token"]
+        let _token = payload["token"]
             .as_str()
             .expect("token should be included in ttyd token response");
         assert_eq!(
             payload["ttydHttpUrl"],
-            Value::String(format!(
-                "/api/sessions/{}/terminal/ttyd?token={token}",
-                session.id
-            ))
+            Value::String(format!("/api/sessions/{}/terminal/ttyd", session.id))
         );
         assert_eq!(
             payload["ttydWsUrl"],
-            Value::String(format!(
-                "/api/sessions/{}/terminal/ttyd/ws?token={token}",
-                session.id
-            ))
+            Value::String(format!("/api/sessions/{}/terminal/ttyd/ws", session.id))
         );
         assert!(payload.get("token").is_some());
 
