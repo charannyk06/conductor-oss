@@ -3584,7 +3584,7 @@ impl AppState {
             }
             ExecutorOutput::Stderr(line) => {
                 let trimmed = line.trim();
-                if detect_parser_state(thread, &trimmed) {
+                if detect_parser_state(thread, trimmed) {
                     if append_runtime_status_entry(thread, trimmed) {
                         feed_dirty = true;
                     }
@@ -3637,10 +3637,10 @@ impl AppState {
                 }
                 let is_thread_started =
                     metadata.get("eventKind").and_then(Value::as_str) == Some("thread_started");
-                if !is_thread_started {
-                    if append_runtime_status_entry_with_metadata(thread, &text, Some(metadata)) {
-                        feed_dirty = true;
-                    }
+                if !is_thread_started
+                    && append_runtime_status_entry_with_metadata(thread, &text, Some(metadata))
+                {
+                    feed_dirty = true;
                 }
             }
             ExecutorOutput::NeedsInput(prompt) => {
@@ -3736,10 +3736,8 @@ impl AppState {
                         .metadata
                         .insert("exitCode".to_string(), code.to_string());
                 }
-                if !parser_state_detected && requested_kill {
-                    if clear_parser_state(thread) {
-                        feed_dirty = true;
-                    }
+                if !parser_state_detected && requested_kill && clear_parser_state(thread) {
+                    feed_dirty = true;
                 }
             }
             ExecutorOutput::Composite(_) => {}
