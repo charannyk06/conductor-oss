@@ -39,6 +39,10 @@ const TTYD_OWNER_RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration:
 /// Maximum reconnect attempts before giving up permanently.
 /// Prevents unbounded retry loops and output consumer task leaks.
 const TTYD_OWNER_RECONNECT_MAX_ATTEMPTS: u32 = 20;
+/// Maximum session lifetime.  After this duration the session is considered
+/// stale and the ttyd process is terminated.  4 hours is long enough for most
+/// workflows while still providing a safety net.
+const TTYD_MAX_SESSION_DURATION: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
 const TTYD_BINARY_ENV: &str = "CONDUCTOR_TTYD_BINARY";
 const FALLBACK_INTERACTIVE_SHELLS: &[&str] = &["/bin/zsh", "/bin/bash", "/bin/sh"];
 
@@ -174,32 +178,36 @@ fn resolve_interactive_shell(env: &HashMap<String, String>) -> PathBuf {
     PathBuf::from("/bin/sh")
 }
 
-fn reserve_ttyd_port() -> Result<u16> {
-    // Retry up to 3 times to mitigate the TOCTOU race between port release
-    // and ttyd binding. If another process grabs the port between our release
-    // and ttyd's bind, wait_for_ttyd_startup will fail, and the caller can
-    // retry with a fresh port.
-    for attempt in 0..3 {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .context("Failed to reserve a loopback port for ttyd")?;
-        let port = listener
-            .local_addr()
-            .context("Failed to read reserved ttyd port")?
-            .port();
-        drop(listener);
-        // Brief pause to reduce the race window before ttyd tries to bind.
-        if attempt > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+/// Reserve a loopback port for ttyd.  The listener is kept alive (returned
+/// alongside the port number) to prevent other sessions from stealing the port
+/// between reservation and ttyd binding.  SO_REUSEADDR lets ttyd bind the
+/// same port while our listener is still held.  This eliminates the TOCTOU
+/// race entirely rather than retrying around it.
+fn reserve_ttyd_port() -> Result<(std::net::TcpListener, u16)> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .context("Failed to reserve a loopback port for ttyd")?;
+    listener
+        .set_nonblocking(true)
+        .context("Failed to set listener non-blocking")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let optval: libc::c_int = 1;
+        unsafe {
+            libc::setsockopt(
+                listener.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
         }
-        // Verify port is actually free before returning it.
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return Ok(port);
-        }
-        tracing::debug!(attempt, port, "port was grabbed after release, retrying");
     }
-    Err(anyhow!(
-        "Failed to reserve a free port for ttyd after 3 attempts"
-    ))
+    let port = listener
+        .local_addr()
+        .context("Failed to read reserved ttyd port")?
+        .port();
+    Ok((listener, port))
 }
 
 async fn wait_for_ttyd_startup(
@@ -274,7 +282,7 @@ pub async fn spawn_ttyd_runtime(
     let launch_command = build_agent_launch_command(&binary, &args);
     let terminal_shell = resolve_interactive_shell(&options.env);
     let ttyd_shell_args = build_ttyd_shell_args(&terminal_shell, Some(&binary), &args);
-    let port = reserve_ttyd_port()?;
+    let (port_listener, port) = reserve_ttyd_port()?;
 
     let mut cmd = tokio::process::Command::new(ttyd_binary);
     cmd.arg("-p")
@@ -323,6 +331,7 @@ pub async fn spawn_ttyd_runtime(
         tokio::spawn(drain_ttyd_log(session_id.to_string(), "stderr", stderr));
     }
     wait_for_ttyd_startup(&mut child, port, session_id).await?;
+    drop(port_listener);
     let ttyd_ws_url = ttyd_protocol::upstream_ws_url(port);
     tracing::info!(session_id, ttyd_pid, port, "ttyd launched");
 
@@ -573,7 +582,26 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
 
     // Check if ttyd process is still alive
     #[cfg(unix)]
-    let alive = pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0;
+    let alive = if pid > 0 && unsafe { libc::kill(pid as i32, 0) } == 0 {
+        // Verify it's actually a ttyd process (not a reused PID).
+        let comm_path = format!("/proc/{}/comm", pid);
+        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+            comm.trim() == "ttyd"
+        } else {
+            // No /proc (macOS) — fall back to verifying the port is reachable
+            if let Some(port_str) = session.metadata.get(TTYD_PORT_METADATA_KEY) {
+                if let Ok(port_num) = port_str.parse::<u16>() {
+                    TcpStream::connect(("127.0.0.1", port_num)).await.is_ok()
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+    } else {
+        false
+    };
     #[cfg(not(unix))]
     let alive = false;
 
@@ -709,9 +737,20 @@ async fn run_ttyd_session_owner_with_retry(
 ) -> Result<()> {
     let mut channels = initial_channels;
     let mut attempt: u32 = 0;
+    // Track elapsed session time. On restore, try to use the original start time
+    // from metadata so the 4-hour cap does not reset after backend restart.
+    let session_start = state
+        .get_session(sid)
+        .await
+        .and_then(|s| s.metadata.get("ttyd_session_start_time").cloned())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|secs| tokio::time::Instant::now() - std::time::Duration::from_secs(secs))
+        .unwrap_or_else(tokio::time::Instant::now);
 
     loop {
-        let result = run_ttyd_session_owner(state, sid, url, executor.clone(), channels).await;
+        let result =
+            run_ttyd_session_owner(state, sid, url, executor.clone(), channels, session_start)
+                .await;
 
         match &result {
             Ok(()) => return Ok(()),
@@ -844,6 +883,7 @@ async fn run_ttyd_session_owner(
     url: &str,
     executor: Arc<dyn Executor>,
     mut channels: TtydSessionOwnerChannels,
+    session_start: tokio::time::Instant,
 ) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
     let connect_deadline = tokio::time::Instant::now() + TTYD_OWNER_ATTACH_TIMEOUT;
@@ -889,7 +929,10 @@ async fn run_ttyd_session_owner(
                 Some(Ok(WsMessage::Binary(data))) if data.len() > 1 && data[0] == ttyd_protocol::CMD_OUTPUT => {
                     let payload = &data[1..];
                     state.emit_terminal_bytes(sid, payload).await;
-                    buf.push_str(&String::from_utf8_lossy(payload));
+                    match std::str::from_utf8(payload) {
+                        Ok(s) => buf.push_str(s),
+                        Err(_) => buf.push_str(&String::from_utf8_lossy(payload)),
+                    }
                     while let Some(nl) = buf.find('\n') {
                         let line = buf[..nl].to_string();
                         buf = buf[nl + 1..].to_string();
@@ -932,6 +975,19 @@ async fn run_ttyd_session_owner(
                     resize_closed = true;
                 }
             },
+        }
+        // Session duration check after each select iteration.
+        if session_start.elapsed() >= TTYD_MAX_SESSION_DURATION {
+            tracing::warn!(
+                session_id = %sid,
+                duration_secs = session_start.elapsed().as_secs(),
+                max_duration_secs = TTYD_MAX_SESSION_DURATION.as_secs(),
+                "session exceeded maximum duration during active connection"
+            );
+            return Err(anyhow!(
+                "session exceeded maximum duration of {} seconds",
+                TTYD_MAX_SESSION_DURATION.as_secs()
+            ));
         }
     }
     if !buf.trim().is_empty() {
