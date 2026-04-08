@@ -3122,12 +3122,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_to_session_records_structured_preference_updates() {
-        // This test exercises the session messaging path, not the terminal runtime.
-        // Skip when ttyd is available to avoid the real ttyd process lifecycle
-        // racing with the test assertions.
-        if crate::state::ttyd_binary_available(&std::env::temp_dir().join("conductor-ttyd-check")) {
-            return;
-        }
+        // Use direct runtime to avoid ttyd process lifecycle racing with
+        // test assertions on any platform (CI has no ttyd; local has ttyd).
         let root =
             std::env::temp_dir().join(format!("conductor-pref-event-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
@@ -3139,7 +3135,7 @@ mod tests {
             default_branch: "main".to_string(),
             ..ProjectConfig::default()
         };
-        let state = build_state(&root, project, "demo").await;
+        let state = build_state_with_runtime(&root, project, "demo", Some("direct")).await;
 
         let session = state
             .spawn_session_now(
@@ -3240,12 +3236,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_to_session_keeps_acp_context_runtime_only() {
-        // This test exercises the session messaging path, not the terminal runtime.
-        // Skip when ttyd is available to avoid the real ttyd process lifecycle
-        // racing with the test assertions.
-        if crate::state::ttyd_binary_available(&std::env::temp_dir().join("conductor-ttyd-check")) {
-            return;
-        }
+        // Use direct runtime to avoid ttyd process lifecycle racing with
+        // test assertions on any platform (CI has no ttyd; local has ttyd).
         let root = std::env::temp_dir().join(format!("conductor-acp-ui-test-{}", Uuid::new_v4()));
         let repo = root.join("repo");
         seed_git_repo(&repo);
@@ -3256,7 +3248,7 @@ mod tests {
             default_branch: "main".to_string(),
             ..ProjectConfig::default()
         };
-        let state = build_state(&root, project, "demo").await;
+        let state = build_state_with_runtime(&root, project, "demo", Some("direct")).await;
 
         let session = state
             .spawn_session_now(
