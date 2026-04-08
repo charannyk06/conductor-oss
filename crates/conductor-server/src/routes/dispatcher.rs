@@ -792,6 +792,17 @@ fn streaming_tail_patch(previous_entries: &[Value], next_entries: &[Value]) -> O
         .iter()
         .take(shared_prefix_len)
         .zip(next_entries.iter().take(shared_prefix_len))
+        .all(|(left, right)| {
+            left.get("id").and_then(Value::as_str) == right.get("id").and_then(Value::as_str)
+        })
+    {
+        return None;
+    }
+
+    if !previous_entries
+        .iter()
+        .take(shared_prefix_len)
+        .zip(next_entries.iter().take(shared_prefix_len))
         .all(|(left, right)| left == right)
     {
         return None;
@@ -855,7 +866,15 @@ fn build_feed_delta_event(previous: &Value, next: &Value) -> Value {
         .cloned()
         .unwrap_or_default();
 
-    let can_append = previous_entries.len() <= next_entries.len()
+    let ids_match = previous_entries.len() <= next_entries.len()
+        && previous_entries
+            .iter()
+            .zip(next_entries.iter())
+            .all(|(left, right)| {
+                left.get("id").and_then(Value::as_str) == right.get("id").and_then(Value::as_str)
+            });
+
+    let can_append = ids_match
         && previous_entries
             .iter()
             .zip(next_entries.iter())

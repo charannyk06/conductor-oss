@@ -1297,6 +1297,7 @@ export function DispatcherSessionPane({
 
       const delta = normalizeFeedDelta(parsed);
       if (!delta) {
+        void loadFeed();
         return;
       }
 
