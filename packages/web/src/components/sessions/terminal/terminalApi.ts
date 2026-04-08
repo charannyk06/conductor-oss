@@ -170,6 +170,7 @@ async function fetchTerminalToken(
     withBridgeQuery(`/api/sessions/${encodeURIComponent(sessionId)}/terminal/token`, options?.bridgeId),
     {
       cache: "no-store",
+      credentials: "same-origin",
       signal: options?.signal,
     },
   );
