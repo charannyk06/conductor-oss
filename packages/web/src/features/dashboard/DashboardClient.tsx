@@ -2357,8 +2357,8 @@ export default function DashboardClient({
                 key={sessionId}
                 aria-hidden={!sessionActive}
                 className={sessionActive
-                  ? "relative h-full min-w-0"
-                  : "pointer-events-none absolute inset-0 overflow-hidden invisible"}
+                  ? "relative z-10 h-full min-w-0"
+                  : "pointer-events-none absolute inset-0 overflow-hidden opacity-0 select-none"}
               >
                 <SessionDetail
                   sessionId={sessionId}
