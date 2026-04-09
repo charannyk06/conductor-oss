@@ -262,6 +262,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     force?: boolean;
     resetResizeCache?: boolean;
     syncCurrentToken?: boolean;
+    resolveConnection?: boolean;
   }) => {
     if (!expectsLiveTerminal || typeof window === "undefined") {
       return;
@@ -285,7 +286,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
       scheduleTerminalResizeBurst();
     }
 
-    setConnectionRefreshTick((current) => current + 1);
+    if (options?.resolveConnection) {
+      setConnectionRefreshTick((current) => current + 1);
+    }
   }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
 
   useEffect(() => {
@@ -456,7 +459,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     // instead of showing a blocking reload path. This keeps reconnects feeling attached
     // to the same terminal surface.
     if (previous === false) {
-      requestSilentConnectionRefresh({ resetResizeCache: true });
+      requestSilentConnectionRefresh({ resetResizeCache: true, resolveConnection: false });
     }
   }, [panelVisible, requestSilentConnectionRefresh]);
 
@@ -471,9 +474,13 @@ function SessionTerminalView(props: SessionTerminalProps) {
       : now - pageHiddenAtRef.current;
     pageHiddenAtRef.current = null;
 
+    // Passive lifecycle events should keep the current terminal identity hot without
+    // minting a brand-new ttyd/relay target. If the embedded terminal actually lost
+    // its websocket, the iframe shim will request an active refresh explicitly.
     requestSilentConnectionRefresh({
       force: hiddenDuration > 0,
       resetResizeCache: hiddenDuration > 0,
+      resolveConnection: false,
     });
   }, [expectsLiveTerminal, requestSilentConnectionRefresh]);
 
@@ -532,7 +539,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         return;
       }
 
-      requestSilentConnectionRefresh();
+      requestSilentConnectionRefresh({ force: true, resetResizeCache: true, resolveConnection: true });
     };
 
     window.addEventListener("message", handleMessage);
