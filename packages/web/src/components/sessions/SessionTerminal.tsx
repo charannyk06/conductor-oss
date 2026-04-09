@@ -1099,15 +1099,30 @@ function sessionTerminalPropsEqual(
   previous: SessionTerminalProps,
   next: SessionTerminalProps,
 ): boolean {
+  const previousPanelVisible = previous.panelVisible ?? true;
+  const nextPanelVisible = next.panelVisible ?? true;
+
+  if (
+    previous.sessionId !== next.sessionId
+    || previous.projectId !== next.projectId
+    || previous.bridgeId !== next.bridgeId
+    || previousPanelVisible !== nextPanelVisible
+    || !arePendingInsertRequestsEqual(previous.pendingInsert, next.pendingInsert)
+  ) {
+    return false;
+  }
+
+  // Lunel-style behavior: once a terminal surface is inactive, stop re-rendering it on
+  // background session-status churn. Apply the latest runtime/status only when it becomes
+  // visible again.
+  if (!previousPanelVisible && !nextPanelVisible) {
+    return true;
+  }
+
   return (
-    previous.sessionId === next.sessionId
-    && previous.projectId === next.projectId
-    && previous.bridgeId === next.bridgeId
-    && previous.sessionState === next.sessionState
+    previous.sessionState === next.sessionState
     && previous.runtimeMode === next.runtimeMode
     && previous.immersiveMobileMode === next.immersiveMobileMode
-    && (previous.panelVisible ?? true) === (next.panelVisible ?? true)
-    && arePendingInsertRequestsEqual(previous.pendingInsert, next.pendingInsert)
   );
 }
 

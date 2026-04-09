@@ -2252,15 +2252,33 @@ export default function DashboardClient({
               ) : null}
               {selectedSessionId ? (
                 dockedBoardSession ? (
-                  <SessionDetail
-                    key={selectedSessionId}
-                    sessionId={selectedSessionId}
-                    initialSession={dockedBoardSession}
-                    bridgeId={effectiveBridgeId}
-                    active
-                    suppressPreviewAutoOpen={launchpadSessionIdRef.current === selectedSessionId}
-                    immersiveMobileMode={immersiveMobileMode}
-                  />
+                  <div className="relative min-h-0 h-full min-w-0 flex-1 overflow-hidden">
+                    {mountedSessionIds.map((sessionId) => {
+                      const sessionActive = sessionId === selectedSessionId;
+                      const initialSession = sessionActive ? dockedBoardSession : sessionsById.get(sessionId) ?? null;
+                      if (!initialSession || initialSession.projectId !== selectedProject.id) {
+                        return null;
+                      }
+                      return (
+                        <div
+                          key={sessionId}
+                          aria-hidden={!sessionActive}
+                          className={sessionActive
+                            ? "relative z-10 h-full min-w-0"
+                            : "pointer-events-none absolute inset-0 overflow-hidden opacity-0 select-none"}
+                        >
+                          <SessionDetail
+                            sessionId={sessionId}
+                            initialSession={initialSession}
+                            bridgeId={effectiveBridgeId}
+                            active={sessionActive}
+                            suppressPreviewAutoOpen={sessionActive && launchpadSessionIdRef.current === sessionId}
+                            immersiveMobileMode={sessionActive && immersiveMobileMode}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
                 ) : (
                   <div className="flex h-full items-center justify-center bg-[var(--vk-bg-panel)] text-[13px] text-[var(--vk-text-muted)]">
                     Loading session workspace...
@@ -2317,11 +2335,14 @@ export default function DashboardClient({
     dockedBoardSession,
     effectiveBridgeId,
     handleToggleDispatcherCollapsed,
+    immersiveMobileMode,
+    mountedSessionIds,
     navigateDashboard,
     resolvedCodingAgent,
     selectedProject,
     selectedProjectSessions,
     selectedSessionId,
+    sessionsById,
     wideBoardViewport,
     workspaceMainPanel,
     workspaceView,
