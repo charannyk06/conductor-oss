@@ -36,6 +36,7 @@ const TTYD_OWNER_ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from
 const TTYD_OWNER_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const TTYD_OWNER_RECONNECT_BASE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 const TTYD_OWNER_RECONNECT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+const TTYD_OWNER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 /// Maximum reconnect attempts before giving up permanently.
 /// Prevents unbounded retry loops and output consumer task leaks.
 const TTYD_OWNER_RECONNECT_MAX_ATTEMPTS: u32 = 20;
@@ -909,7 +910,10 @@ async fn run_ttyd_session_owner(
     let (ws, _) = loop {
         let request = ttyd_protocol::connect_request(url).context("mirror request")?;
         match tokio_tungstenite::connect_async(request).await {
-            Ok(connection) => break connection,
+            Ok(connection) => {
+                tracing::info!(session_id = %sid, "ttyd session owner connected to ttyd");
+                break connection;
+            }
             Err(err) => {
                 if tokio::time::Instant::now() >= connect_deadline {
                     let error = anyhow!(err).context("ttyd session owner connect");
@@ -950,11 +954,22 @@ async fn run_ttyd_session_owner(
     let mut batch_flush_interval = tokio::time::interval(std::time::Duration::from_millis(16));
     batch_flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut batch_dirty = false;
+    let mut read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
 
     loop {
         tokio::select! {
+            biased;
             message = r.next() => match message {
+                Some(Ok(WsMessage::Ping(payload))) => {
+                    tracing::debug!(session_id = %sid, "ttyd session owner received ping");
+                    w.send(WsMessage::Pong(payload))
+                        .await
+                        .context("ttyd session owner pong send failed")?;
+                    tracing::debug!(session_id = %sid, "ttyd session owner sent pong");
+                    read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
+                }
                 Some(Ok(WsMessage::Binary(data))) if data.len() > 1 && data[0] == ttyd_protocol::CMD_OUTPUT => {
+                    read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
                     let payload = &data[1..];
                     state.emit_terminal_bytes(sid, payload).await;
                     match std::str::from_utf8(payload) {
@@ -979,17 +994,15 @@ async fn run_ttyd_session_owner(
                         batch_dirty = false;
                     }
                 }
-                Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {}
-                Some(Ok(WsMessage::Ping(payload))) => {
-                    // ttyd actively pings idle clients. If the backend-owned
-                    // owner websocket does not answer, the live PTY session
-                    // gets torn down even though the user only stepped away.
-                    w.send(WsMessage::Pong(payload))
-                        .await
-                        .context("ttyd session owner pong send failed")?;
+                Some(Ok(WsMessage::Binary(_))) | Some(Ok(WsMessage::Text(_))) | Some(Ok(WsMessage::Pong(_))) | Some(Ok(WsMessage::Frame(_))) => {
+                    read_deadline = tokio::time::Instant::now() + TTYD_OWNER_READ_TIMEOUT;
                 }
                 Some(Ok(WsMessage::Close(_))) | None => break,
                 Some(Err(err)) => return Err(err.into()),
+            },
+            _ = tokio::time::sleep_until(read_deadline) => {
+                tracing::info!(session_id = %sid, timeout_secs = TTYD_OWNER_READ_TIMEOUT.as_secs(), "ttyd session owner detected a stale connection");
+                return Err(anyhow!("ttyd session owner read timeout"));
             },
             input = channels.input_rx.recv(), if !input_closed => match input {
                 Some(input) => {

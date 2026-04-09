@@ -356,6 +356,11 @@ impl Executor for CodexExecutor {
 }
 
 fn is_internal_codex_log_line(line: &str) -> bool {
+    // Filter non-JSON stderr noise that Codex emits after process completion.
+    if line == "Reading additional input from stdin..." {
+        return true;
+    }
+
     let mut parts = line.split_whitespace();
     let Some(timestamp) = parts.next() else {
         return false;
