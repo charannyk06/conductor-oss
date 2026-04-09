@@ -1,5 +1,10 @@
 "use client";
 
+/**
+ * Supported live terminal: one iframe to the ttyd HTML/WebSocket facade. Wired from
+ * `SessionDetail` via `sessionTerminalRouting` (same-origin embed; Polyscope and similar hosts depend on this path).
+ */
+
 import {
   AlertCircle,
   Clipboard,
@@ -266,6 +271,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
     frameLoadedRef.current = frameLoaded;
   }, [frameLoaded]);
 
+  // Reset only when navigating to a different session. Including `expectsLiveTerminal`
+  // here caused full iframe teardown whenever status/metadata flickered during SSE
+  // updates — wiping the live ttyd attach and showing a false "reconnecting" state.
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
     retryAttemptRef.current = 0;
@@ -288,7 +296,18 @@ function SessionTerminalView(props: SessionTerminalProps) {
     resizeSuppressUntilRef.current = 0;
     lastPostedTerminalHostSizeRef.current = null;
     clearBurstResizeTimers();
-  }, [clearBurstResizeTimers, expectsLiveTerminal, sessionId]);
+  }, [clearBurstResizeTimers, sessionId]);
+
+  useEffect(() => {
+    if (!TERMINAL_CLOSED_STATUSES.has(normalizedSessionStatus)) {
+      return;
+    }
+    setTerminalUrl(null);
+    setTerminalLinkUrl(null);
+    setFrameLoaded(false);
+    setConnectionError(null);
+    forceTerminalReloadRef.current = false;
+  }, [normalizedSessionStatus, sessionId]);
 
   useEffect(() => {
     lastPostedTerminalHostSizeRef.current = null;

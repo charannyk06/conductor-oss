@@ -186,6 +186,8 @@ export function RemoteSessionTerminal({
   const scheduledLayoutSyncTimersRef = useRef<number[]>([]);
   const followBottomRef = useRef(true);
   const lastMessageTimeRef = useRef<number>(0);
+  /** After the first successful WebSocket open for this session, reconnects must not clear xterm. */
+  const wsEverOpenedRef = useRef(false);
   type ConnectionQuality = "good" | "degraded" | "bad" | "offline";
   const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>("offline");
   const [hasOutput, setHasOutput] = useState(false);
@@ -595,6 +597,7 @@ export function RemoteSessionTerminal({
     setPromptError(null);
     setQueuedInsertError(null);
     decoderRef.current = new TextDecoder();
+    wsEverOpenedRef.current = false;
     if (terminalRef.current) {
       resetTerminalOutput(terminalRef.current, "", true);
       terminalRef.current.options.disableStdin = !expectsRelayTerminal;
@@ -728,9 +731,15 @@ export function RemoteSessionTerminal({
             lastMessageTimeRef.current = Date.now();
             setConnectionQuality("good");
             decoderRef.current = new TextDecoder();
-            setHasOutput(false);
+            const isReconnect = wsEverOpenedRef.current;
+            wsEverOpenedRef.current = true;
+            if (!isReconnect) {
+              setHasOutput(false);
+              if (terminalRef.current) {
+                resetTerminalOutput(terminalRef.current, "", followBottomRef.current);
+              }
+            }
             if (terminalRef.current) {
-              resetTerminalOutput(terminalRef.current, "", followBottomRef.current);
               terminalRef.current.options.disableStdin = false;
               terminalRef.current.options.cursorBlink = true;
             }
@@ -793,7 +802,7 @@ export function RemoteSessionTerminal({
               terminalRef.current.options.cursorBlink = false;
             }
             if (!cancelled) {
-              setError("Relay terminal disconnected.");
+              setError("Reconnecting to relay terminal…");
               scheduleReconnect();
             }
           };

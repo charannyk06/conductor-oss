@@ -631,9 +631,23 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
     if (window.__conductorTtydAuthSyncShimInstalled) return;
     window.__conductorTtydAuthSyncShimInstalled = true;
 
-    const STORAGE_KEY = 'conductor.ttyd.token';
+    const LEGACY_STORAGE_KEY = 'conductor.ttyd.token';
     const MESSAGE_TYPE = 'conductor-ttyd-auth-token';
     const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+    const sessionIdFromPath = () => {
+        try {
+            const m = window.location.pathname.match(/\/api\/sessions\/([^/]+)\/terminal\/ttyd/);
+            return m ? m[1] : '';
+        } catch {
+            return '';
+        }
+    };
+
+    const storageKey = () => {
+        const sid = sessionIdFromPath();
+        return sid ? `conductor.ttyd.token.v2:${sid}` : 'conductor.ttyd.token.v2:unknown';
+    };
 
     const readLocationBridgeId = () => {
         try {
@@ -657,7 +671,13 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
 
     const readStoredToken = () => {
         try {
-            return window.localStorage.getItem(STORAGE_KEY)?.trim() || '';
+            const key = storageKey();
+            const scoped = window.localStorage.getItem(key)?.trim() || '';
+            if (scoped) {
+                return scoped;
+            }
+            const legacy = window.localStorage.getItem(LEGACY_STORAGE_KEY)?.trim() || '';
+            return legacy;
         } catch {
             return '';
         }
@@ -669,10 +689,11 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         currentToken = token;
 
         try {
+            const key = storageKey();
             if (token) {
-                window.localStorage.setItem(STORAGE_KEY, token);
+                window.localStorage.setItem(key, token);
             } else {
-                window.localStorage.removeItem(STORAGE_KEY);
+                window.localStorage.removeItem(key);
             }
         } catch {
         }
@@ -2498,7 +2519,9 @@ mod tests {
 
         assert!(injected.contains(TTYD_AUTH_SYNC_SHIM_MARKER));
         assert!(injected.contains("window.__conductorTtydAuthSyncShimInstalled"));
-        assert!(injected.contains("const STORAGE_KEY = 'conductor.ttyd.token';"));
+        assert!(injected.contains("const LEGACY_STORAGE_KEY = 'conductor.ttyd.token';"));
+        assert!(injected.contains("const sessionIdFromPath = () => {"));
+        assert!(injected.contains("const storageKey = () => {"));
         assert!(injected.contains("const MESSAGE_TYPE = 'conductor-ttyd-auth-token';"));
         assert!(
             injected.contains("const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);")
