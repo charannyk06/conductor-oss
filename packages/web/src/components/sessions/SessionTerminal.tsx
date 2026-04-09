@@ -1,5 +1,10 @@
 "use client";
 
+/**
+ * Supported live terminal: one iframe to the ttyd HTML/WebSocket facade. Wired from
+ * `SessionDetail` via `sessionTerminalRouting` (same-origin embed; Polyscope and similar hosts depend on this path).
+ */
+
 import {
   AlertCircle,
   Clipboard,
@@ -181,6 +186,12 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const showPromptBar =
     !ttydBacked && !immersiveMobileMode && RESUMABLE_STATUSES.has(normalizedSessionStatus);
 
+  /** Read inside async token resolution so SSE churn does not abort in-flight fetches. */
+  const expectsLiveTerminalRef = useRef(expectsLiveTerminal);
+  expectsLiveTerminalRef.current = expectsLiveTerminal;
+  const terminalTokenFetchAbortRef = useRef<AbortController | null>(null);
+  const prevExpectsLiveTerminalRef = useRef<boolean | null>(null);
+
   const [terminalUrl, setTerminalUrl] = useState<string | null>(null);
   const [terminalLinkUrl, setTerminalLinkUrl] = useState<string | null>(null);
   const [resolvingConnection, setResolvingConnection] = useState(expectsLiveTerminal);
@@ -266,6 +277,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
     frameLoadedRef.current = frameLoaded;
   }, [frameLoaded]);
 
+  // Reset only when navigating to a different session. Including `expectsLiveTerminal`
+  // here caused full iframe teardown whenever status/metadata flickered during SSE
+  // updates — wiping the live ttyd attach and showing a false "reconnecting" state.
   useEffect(() => {
     lastAppliedInsertNonceRef.current = 0;
     retryAttemptRef.current = 0;
@@ -288,7 +302,18 @@ function SessionTerminalView(props: SessionTerminalProps) {
     resizeSuppressUntilRef.current = 0;
     lastPostedTerminalHostSizeRef.current = null;
     clearBurstResizeTimers();
-  }, [clearBurstResizeTimers, expectsLiveTerminal, sessionId]);
+  }, [clearBurstResizeTimers, sessionId]);
+
+  useEffect(() => {
+    if (!TERMINAL_CLOSED_STATUSES.has(normalizedSessionStatus)) {
+      return;
+    }
+    setTerminalUrl(null);
+    setTerminalLinkUrl(null);
+    setFrameLoaded(false);
+    setConnectionError(null);
+    forceTerminalReloadRef.current = false;
+  }, [normalizedSessionStatus, sessionId]);
 
   useEffect(() => {
     lastPostedTerminalHostSizeRef.current = null;
@@ -298,10 +323,23 @@ function SessionTerminalView(props: SessionTerminalProps) {
     return () => clearBurstResizeTimers();
   }, [clearBurstResizeTimers]);
 
+  // When the session stops being live, abort token fetch; when it becomes live again, refetch.
   useEffect(() => {
-    if (!expectsLiveTerminal) {
+    const prev = prevExpectsLiveTerminalRef.current;
+    prevExpectsLiveTerminalRef.current = expectsLiveTerminal;
+    if (!expectsLiveTerminal && prev === true) {
+      terminalTokenFetchAbortRef.current?.abort();
       setResolvingConnection(false);
       setConnectionError(null);
+    }
+    if (expectsLiveTerminal && prev === false) {
+      setConnectionRefreshTick((current) => current + 1);
+    }
+  }, [expectsLiveTerminal]);
+
+  useEffect(() => {
+    if (!expectsLiveTerminalRef.current) {
+      setResolvingConnection(false);
       return;
     }
 
@@ -309,6 +347,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
     let retryTimer: number | null = null;
     let refreshTimer: number | null = null;
     const abortController = new AbortController();
+    terminalTokenFetchAbortRef.current = abortController;
     const showBlockingConnectionUi =
       !terminalUrlRef.current || forceTerminalReloadRef.current;
     if (showBlockingConnectionUi) {
@@ -321,7 +360,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
       bridgeId,
     })
       .then((connection) => {
-        if (cancelled) return;
+        if (cancelled || !expectsLiveTerminalRef.current) return;
         retryAttemptRef.current = 0;
         if (connection.interactive && connection.terminalUrl) {
           const shouldReloadTerminal =
@@ -370,6 +409,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
           return;
         }
 
+        if (!expectsLiveTerminalRef.current) return;
         if (!terminalUrlRef.current) {
           setTerminalUrl(null);
           setTerminalLinkUrl(null);
@@ -378,7 +418,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         setConnectionError(connection.reason ?? "Live ttyd terminal is unavailable.");
       })
       .catch((error) => {
-        if (cancelled) return;
+        if (cancelled || !expectsLiveTerminalRef.current) return;
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
@@ -399,7 +439,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         }, delay);
       })
       .finally(() => {
-        if (!cancelled) {
+        if (!cancelled && expectsLiveTerminalRef.current) {
           setResolvingConnection(false);
         }
       });
@@ -407,6 +447,9 @@ function SessionTerminalView(props: SessionTerminalProps) {
     return () => {
       cancelled = true;
       abortController.abort();
+      if (terminalTokenFetchAbortRef.current === abortController) {
+        terminalTokenFetchAbortRef.current = null;
+      }
       if (retryTimer !== null) {
         window.clearTimeout(retryTimer);
       }
@@ -414,7 +457,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         window.clearTimeout(refreshTimer);
       }
     };
-  }, [bridgeId, connectionRefreshTick, expectsLiveTerminal, sessionId]);
+  }, [bridgeId, connectionRefreshTick, sessionId]);
 
   useEffect(() => {
     const previous = prevPanelVisibleRef.current;
