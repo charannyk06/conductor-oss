@@ -45,7 +45,7 @@ const ACP_WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 const ACP_APPROVAL_STATE_METADATA_KEY: &str = "acpPlanApprovalState";
 const ACP_APPROVAL_REQUIRED: &str = "approval_required";
 const ACP_APPROVAL_GRANTED: &str = "approved_for_next_mutation";
-const ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY: &str = "acpSessionMemorySyncedAt";
+pub(crate) const ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY: &str = "acpSessionMemorySyncedAt";
 pub(crate) const ACP_ACTIVE_SKILLS_METADATA_KEY: &str = "acpActiveSkills";
 pub(crate) const ACP_IMPLEMENTATION_AGENT_METADATA_KEY: &str = "acpImplementationAgent";
 pub(crate) const ACP_IMPLEMENTATION_MODEL_METADATA_KEY: &str = "acpImplementationModel";
@@ -467,7 +467,7 @@ pub(crate) struct AcpDispatcherArtifacts {
     pub board_display: String,
 }
 
-fn is_acp_dispatcher_thread(session: &SessionRecord) -> bool {
+pub(crate) fn is_acp_dispatcher_thread(session: &SessionRecord) -> bool {
     session.metadata.get("sessionKind").map(String::as_str) == Some(ACP_SESSION_KIND)
 }
 
