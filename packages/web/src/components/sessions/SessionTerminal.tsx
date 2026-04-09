@@ -22,14 +22,14 @@ import { calculateMobileTerminalViewportMetrics } from "./sessionTerminalUtils";
 import type { SessionTerminalProps } from "./terminal/terminalTypes";
 
 const TERMINAL_CLOSED_STATUSES = new Set(["archived", "killed", "terminated", "restored"]);
-const TOKEN_REFRESH_LEAD_SECONDS = 10;
+const TOKEN_REFRESH_LEAD_SECONDS = 30;
 const TTYD_AUTH_TOKEN_MESSAGE_TYPE = "conductor-ttyd-auth-token";
 const TERMINAL_RESIZE_DEBOUNCE_MS = 150;
 const TERMINAL_RESIZE_MESSAGE_TYPE = "conductor-terminal-resize";
 /** Staggered fits so xterm catches up after ttyd boot, layout, and fonts. */
 const TERMINAL_RESIZE_BURST_DELAYS_MS = [0, 50, 150, 400, 1000] as const;
 const TERMINAL_LIFECYCLE_REFRESH_THROTTLE_MS = 1_500;
-const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 300_000; // 5 minutes - only reload if hidden for 5+ minutes
+const TERMINAL_LIFECYCLE_REATTACH_THRESHOLD_MS = 1_800_000; // 30 minutes - only reload if hidden for 30+ minutes
 const TERMINAL_IFRAME_LOAD_TIMEOUT_MS = 25_000;
 
 function computeTokenRefreshDelayMs(expiresInSeconds: number | null | undefined): number | null {
