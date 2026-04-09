@@ -1,5 +1,7 @@
 //! Heartbeat timing and maintenance for ACP dispatcher sessions.
 
+#![allow(dead_code)]
+
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 
 use super::acp_dispatcher::ACP_SESSION_MEMORY_SYNCED_AT_METADATA_KEY;

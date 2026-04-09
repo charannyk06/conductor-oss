@@ -3,6 +3,8 @@
 //! Detects when agent output indicates auth-required or interactive-terminal
 //! states that need user intervention.
 
+#![allow(dead_code)]
+
 use super::SessionRecord;
 
 pub(crate) const PARSER_STATE_KEY: &str = "parserState";

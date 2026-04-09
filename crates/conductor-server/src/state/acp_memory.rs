@@ -3,7 +3,9 @@
 //! Handles project memory (long-term directives, task refs) and session memory
 //! (heartbeat state, recent conversation, board activity).
 
-use chrono::{Duration as ChronoDuration, Utc};
+#![allow(dead_code)]
+
+use chrono::Duration as ChronoDuration;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -270,13 +272,10 @@ pub(crate) fn update_active_skills_metadata(
     }
 
     if let Ok(serialized) = serde_json::to_string(&sanitized) {
-        session.metadata.insert(
-            ACP_ACTIVE_SKILLS_METADATA_KEY.to_string(),
-            serialized,
-        );
-    } else {
         session
             .metadata
-            .remove(ACP_ACTIVE_SKILLS_METADATA_KEY);
+            .insert(ACP_ACTIVE_SKILLS_METADATA_KEY.to_string(), serialized);
+    } else {
+        session.metadata.remove(ACP_ACTIVE_SKILLS_METADATA_KEY);
     }
 }
