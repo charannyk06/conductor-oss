@@ -633,6 +633,8 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
 
     const STORAGE_KEY = 'conductor.ttyd.token';
     const MESSAGE_TYPE = 'conductor-ttyd-auth-token';
+    const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';
+    const TOKEN_REQUEST_THROTTLE_MS = 1500;
     const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 
     const readLocationBridgeId = () => {
@@ -664,6 +666,8 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
     };
 
     let currentToken = '';
+    let lastTokenRequestAt = 0;
+    let unloading = false;
     const setToken = (value) => {
         const token = typeof value === 'string' ? value.trim() : '';
         currentToken = token;
@@ -674,6 +678,26 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
             } else {
                 window.localStorage.removeItem(STORAGE_KEY);
             }
+        } catch {
+        }
+    };
+
+    const requestFreshToken = (reason) => {
+        if (unloading || !window.parent || window.parent === window) {
+            return;
+        }
+
+        const now = Date.now();
+        if (now - lastTokenRequestAt < TOKEN_REQUEST_THROTTLE_MS) {
+            return;
+        }
+        lastTokenRequestAt = now;
+
+        try {
+            window.parent.postMessage({
+                type: REQUEST_MESSAGE_TYPE,
+                reason,
+            }, '*');
         } catch {
         }
     };
@@ -702,14 +726,29 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
         }
     };
 
+    const attachSocketListeners = (socket) => {
+        if (!socket || socket.__conductorTokenRefreshHookAttached) {
+            return socket;
+        }
+
+        socket.__conductorTokenRefreshHookAttached = true;
+        socket.addEventListener('close', () => {
+            requestFreshToken('websocket-close');
+        });
+        socket.addEventListener('error', () => {
+            requestFreshToken('websocket-error');
+        });
+        return socket;
+    };
+
     const nativeWebSocket = window.WebSocket;
     if (typeof nativeWebSocket === 'function' && !window.__conductorTtydWebSocketPatched) {
         const patchedWebSocket = function(url, protocols) {
             const normalizedUrl = normalizeWebSocketUrl(String(url));
             if (arguments.length > 1) {
-                return new nativeWebSocket(normalizedUrl, protocols);
+                return attachSocketListeners(new nativeWebSocket(normalizedUrl, protocols));
             }
-            return new nativeWebSocket(normalizedUrl);
+            return attachSocketListeners(new nativeWebSocket(normalizedUrl));
         };
 
         Object.setPrototypeOf(patchedWebSocket, nativeWebSocket);
@@ -752,6 +791,7 @@ const TTYD_AUTH_SYNC_SHIM: &str = r#"
 
     window.addEventListener('message', handleMessage);
     window.addEventListener('beforeunload', () => {
+        unloading = true;
         window.removeEventListener('message', handleMessage);
     }, { once: true });
 })();
@@ -2500,6 +2540,8 @@ mod tests {
         assert!(injected.contains("window.__conductorTtydAuthSyncShimInstalled"));
         assert!(injected.contains("const STORAGE_KEY = 'conductor.ttyd.token';"));
         assert!(injected.contains("const MESSAGE_TYPE = 'conductor-ttyd-auth-token';"));
+        assert!(injected.contains("const REQUEST_MESSAGE_TYPE = 'conductor-ttyd-auth-token-request';"));
+        assert!(injected.contains("const TOKEN_REQUEST_THROTTLE_MS = 1500;"));
         assert!(
             injected.contains("const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);")
         );
@@ -2507,6 +2549,10 @@ mod tests {
         assert!(injected.contains("const resolveProxyWebSocketUrl = () => {"));
         assert!(injected.contains("window.__conductorTtydWebSocketPatched"));
         assert!(injected.contains("const nativeWebSocket = window.WebSocket;"));
+        assert!(injected.contains("const requestFreshToken = (reason) => {"));
+        assert!(injected.contains("const attachSocketListeners = (socket) => {"));
+        assert!(injected.contains("requestFreshToken('websocket-close');"));
+        assert!(injected.contains("requestFreshToken('websocket-error');"));
         assert!(injected.contains("const normalizeWebSocketUrl = (value) => {"));
         assert!(injected.contains("const url = new URL(window.location.href);"));
         assert!(injected.contains("candidate.hostname"));
