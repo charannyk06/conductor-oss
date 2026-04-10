@@ -1269,7 +1269,7 @@ function sessionTerminalPropsEqual(
     return false;
   }
 
-  // Lunel-style behavior: once a terminal surface is inactive, stop re-rendering it on
+  // Keep inactive terminal surfaces stable so tab switches do not thrash the embedded iframe.
   // background session-status churn. Apply the latest runtime/status only when it becomes
   // visible again.
   if (!previousPanelVisible && !nextPanelVisible) {

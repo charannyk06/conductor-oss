@@ -1445,7 +1445,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
             <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-3">
               <div>
                 <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Preview info</div>
-                <div className="text-[11px] text-[var(--vk-text-muted)]">A cleaner Lunel-style snapshot of page, worker, navigation, and element state.</div>
+                <div className="text-[11px] text-[var(--vk-text-muted)]">A cleaner snapshot of page, worker, navigation, and element state.</div>
               </div>
               <Button
                 type="button"
@@ -1921,7 +1921,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 <Boxes className="h-4 w-4 shrink-0 text-[var(--vk-text-muted)]" />
                 <div className="min-w-0">
                   <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Browser tools</div>
-                  <div className="truncate text-[11px] text-[var(--vk-text-muted)]">Hidden by default on mobile, browser first like Lunel.</div>
+                  <div className="truncate text-[11px] text-[var(--vk-text-muted)]">Hidden by default on mobile so the browser stays front and center.</div>
                 </div>
               </div>
               <Button
