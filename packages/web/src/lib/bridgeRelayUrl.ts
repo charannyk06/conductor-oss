@@ -1,3 +1,5 @@
+import { BRIDGE_RELAY_URL_NOT_CONFIGURED_ERROR } from "@/lib/bridgeRelayErrors";
+
 const DEFAULT_LOCAL_BRIDGE_RELAY_URL = "http://127.0.0.1:8080";
 
 function normalizeHttpUrl(value: string | null | undefined): string | null {
@@ -35,7 +37,7 @@ export function resolveBridgeRelayUrl(): string | null {
 export function requireBridgeRelayUrl(): string {
   const relayUrl = resolveBridgeRelayUrl();
   if (!relayUrl) {
-    throw new Error("Bridge relay URL is not configured");
+    throw new Error(BRIDGE_RELAY_URL_NOT_CONFIGURED_ERROR);
   }
   return relayUrl;
 }

@@ -293,10 +293,7 @@ export function SessionDetail({
   const previewTabActive = active && activeTab === "preview";
   const reviewTabActive = active && activeTab === "diff";
   const tabTriggerClass = "min-h-[38px] gap-1.5 px-2.5 text-[12px] sm:min-h-0 sm:px-3";
-  const compactDisplaySessionId = useMemo(
-    () => getDisplaySessionId(sessionId).slice(0, 7),
-    [sessionId],
-  );
+  const compactDisplaySessionId = getDisplaySessionId(sessionId).slice(0, 7);
 
   const sessionTabs = (
     <TabsList className="flex w-full overflow-x-auto sm:w-fit sm:inline-flex">

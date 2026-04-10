@@ -34,6 +34,7 @@ const SPAWN_RATE_LIMIT: u64 = 10;
 const SPAWN_RATE_WINDOW_SECS: u64 = 60;
 const DEFAULT_FEED_WINDOW_LIMIT: usize = 120;
 const MAX_FEED_WINDOW_LIMIT: usize = 240;
+const TERMINAL_OUTPUT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const BOARD_PLANNING_SESSION_KIND: &str = "board_planning";
 const PROJECT_DISPATCHER_SESSION_KIND: &str = "project_dispatcher";
 
@@ -797,9 +798,15 @@ async fn get_output(
     Query(query): Query<OutputQuery>,
 ) -> ApiResponse {
     match state.get_session(&id).await {
-        Some(session) => ok(json!({
-            "output": trim_lines_tail(&session.output, query.lines.unwrap_or(500)),
-        })),
+        Some(session) => {
+            let lines = query.lines.unwrap_or(500);
+            let output = state
+                .current_terminal_transcript(&id, lines, TERMINAL_OUTPUT_MAX_BYTES)
+                .await
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| trim_lines_tail(&session.output, lines));
+            ok(json!({ "output": output }))
+        }
         None => error(StatusCode::NOT_FOUND, format!("Session {id} not found")),
     }
 }
@@ -809,11 +816,17 @@ async fn output_stream(
     Path(id): Path<String>,
     Query(query): Query<OutputQuery>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>> {
-    let initial_output = state
-        .get_session(&id)
-        .await
-        .map(|session| trim_lines_tail(&session.output, query.lines.unwrap_or(500)))
-        .unwrap_or_default();
+    let initial_output = match state.get_session(&id).await {
+        Some(session) => {
+            let lines = query.lines.unwrap_or(500);
+            state
+                .current_terminal_transcript(&id, lines, TERMINAL_OUTPUT_MAX_BYTES)
+                .await
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| trim_lines_tail(&session.output, lines))
+        }
+        None => String::new(),
+    };
     let initial_stream = stream::iter(vec![Ok(
         SseEvent::default().data(json!({ "type": "output", "output": initial_output }).to_string())
     )]);
@@ -1245,11 +1258,30 @@ async fn send_keys(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_feed_delta_event, resolve_feed_window_limit, session_cleanup_eligible,
-        session_matches_list_filters,
+        build_feed_delta_event, get_output, resolve_feed_window_limit, session_cleanup_eligible,
+        session_matches_list_filters, OutputQuery,
     };
-    use crate::state::{SessionRecord, SessionStatus};
+    use crate::state::{AppState, SessionRecord, SessionStatus};
+    use axum::extract::{Path as AxumPath, Query as AxumQuery, State as AxumState};
+    use axum::http::StatusCode;
+    use conductor_core::config::ConductorConfig;
+    use conductor_db::Database;
     use serde_json::json;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    async fn build_state(root: &std::path::Path) -> Arc<AppState> {
+        let config = ConductorConfig {
+            workspace: root.to_path_buf(),
+            ..ConductorConfig::default()
+        };
+        AppState::new(
+            root.join("conductor.yaml"),
+            config,
+            Database::in_memory().await.unwrap(),
+        )
+        .await
+    }
 
     fn build_session(id: &str, status: SessionStatus, activity: Option<&str>) -> SessionRecord {
         let mut session = SessionRecord::new(
@@ -1413,5 +1445,38 @@ mod tests {
             delta.get("textDelta").and_then(|value| value.as_str()),
             Some(" on it")
         );
+    }
+
+    #[tokio::test]
+    async fn get_output_prefers_terminal_capture_transcript() {
+        let root = std::env::temp_dir().join(format!(
+            "conductor-session-output-route-test-{}",
+            Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+
+        let state = build_state(&root).await;
+        let mut session = build_session("output-route", SessionStatus::Working, Some("active"));
+        session.output = "conversation-only tail".to_string();
+        state.replace_session(session).await.unwrap();
+
+        state
+            .emit_terminal_bytes("output-route", b"terminal hello\r\nterminal world\r\n")
+            .await;
+
+        let (status, body) = get_output(
+            AxumState(state),
+            AxumPath("output-route".to_string()),
+            AxumQuery(OutputQuery { lines: Some(10) }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let output = body.0["output"].as_str().unwrap_or("");
+        assert!(output.contains("terminal hello"));
+        assert!(output.contains("terminal world"));
+        assert!(!output.contains("conversation-only tail"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
     }
 }

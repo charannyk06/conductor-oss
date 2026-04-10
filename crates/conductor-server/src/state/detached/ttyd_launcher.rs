@@ -726,7 +726,7 @@ pub async fn restore_ttyd_runtime(state: &Arc<AppState>, session_id: &str) -> Re
         crate::state::OutputConsumerConfig {
             terminal_rx,
             mirror_terminal_output: false,
-            output_is_parsed: true,
+            output_is_parsed: false,
             timeout: None,
         },
     );
@@ -878,7 +878,7 @@ async fn run_ttyd_session_owner_with_retry(
                             crate::state::OutputConsumerConfig {
                                 terminal_rx: None,
                                 mirror_terminal_output: false,
-                                output_is_parsed: true,
+                                output_is_parsed: false,
                                 timeout: None,
                             },
                         );
@@ -901,7 +901,7 @@ async fn run_ttyd_session_owner(
     state: &Arc<AppState>,
     sid: &str,
     url: &str,
-    executor: Arc<dyn Executor>,
+    _executor: Arc<dyn Executor>,
     mut channels: TtydSessionOwnerChannels,
     session_start: tokio::time::Instant,
 ) -> Result<()> {
@@ -980,7 +980,7 @@ async fn run_ttyd_session_owner(
                         let line = buf[..nl].to_string();
                         buf = buf[nl + 1..].to_string();
                         if !line.trim().is_empty() {
-                            output_batch.push(executor.parse_output(&line));
+                            output_batch.push(ExecutorOutput::Stdout(line));
                             batch_dirty = true;
                         }
                     }
@@ -1053,7 +1053,7 @@ async fn run_ttyd_session_owner(
     }
     // Send trailing partial line after the batch is fully drained.
     if !buf.trim().is_empty() {
-        let _ = channels.output_tx.send(executor.parse_output(&buf)).await;
+        let _ = channels.output_tx.send(ExecutorOutput::Stdout(buf)).await;
     }
     Err(anyhow!("ttyd session owner disconnected"))
 }

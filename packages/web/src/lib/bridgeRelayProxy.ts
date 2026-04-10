@@ -2,6 +2,7 @@ import type { DashboardRole } from "@conductor-oss/core/types";
 import { NextRequest, NextResponse } from "next/server";
 import { guardApiAccess, guardApiActionAccess } from "@/lib/auth";
 import { buildBridgeRelayAuthHeaders } from "@/lib/bridgeRelayAuth";
+import { isBridgeRelayConfigurationError } from "@/lib/bridgeRelayErrors";
 import { requireBridgeRelayUrl, resolveBridgeRelayUrl } from "@/lib/bridgeRelayUrl";
 
 const BLOCKED_REQUEST_HEADERS = new Set<string>([
@@ -128,9 +129,10 @@ export async function guardAndProxyToBridgeRelay(
       headers: await buildBridgeRelayHeaders(request),
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to reach bridge relay";
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to reach bridge relay" },
-      { status: 502 },
+      { error: message },
+      { status: isBridgeRelayConfigurationError(message) ? 503 : 502 },
     );
   }
 }

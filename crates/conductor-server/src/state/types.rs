@@ -520,6 +520,7 @@ impl Default for TerminalPersistenceState {
 #[derive(Default)]
 pub struct TerminalCaptureState {
     pub writer: Option<BufWriter<File>>,
+    pub pending: Vec<u8>,
     pub dirty: bool,
     pub pending_bytes: usize,
     pub last_flushed_at: Option<Instant>,

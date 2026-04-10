@@ -19,6 +19,7 @@ import {
   requestBridgeRepair,
   requestBridgeServiceRestart,
 } from "@/lib/bridgeDeviceControl";
+import { isBridgeRelayConfigurationError } from "@/lib/bridgeRelayErrors";
 import {
   buildBridgeInstallScriptUrl,
   buildBridgeRepairHref,
@@ -114,9 +115,10 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     status: "idle",
     message: null,
   });
+  const [relayUnavailableReason, setRelayUnavailableReason] = useState<string | null>(null);
   const autoUpdatedDeviceIdsRef = useRef<Set<string>>(new Set());
   const relayUrl = resolveBridgeRelayUrl();
-  const relayConfigured = Boolean(relayUrl);
+  const relayConfigured = Boolean(relayUrl) && relayUnavailableReason === null;
 
   const refreshDevices = useCallback(async (showSpinner: boolean) => {
     if (!relayConfigured) {
@@ -135,9 +137,16 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
       const response = await fetch("/api/bridge/devices", { cache: "no-store" });
       const payload = await response.json().catch(() => null) as DevicesResponse | null;
       if (!response.ok) {
+        if (isBridgeRelayConfigurationError(payload?.error)) {
+          setRelayUnavailableReason(payload?.error ?? null);
+          setDevices([]);
+          setError(null);
+          return;
+        }
         throw new Error(payload?.error ?? `Failed to load bridge devices (${response.status})`);
       }
       setDevices(normalizeBridgeDevices(payload?.devices));
+      setRelayUnavailableReason(null);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load bridge devices.");
@@ -222,7 +231,7 @@ function BridgeStatusDropdown({ className }: { className?: string }) {
     : BRIDGE_CONNECT_PATH;
   const connected = connectedDevices.length > 0;
   const title = !relayConfigured
-    ? "Bridge relay URL is not configured"
+    ? relayUnavailableReason ?? "Bridge relay URL is not configured"
     : error
     ?? (connected
       ? `${connectedDevices.length} bridge${connectedDevices.length === 1 ? "" : "s"} online`
