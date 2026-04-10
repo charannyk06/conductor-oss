@@ -1175,8 +1175,8 @@ impl RelayState {
                         bridge: None,
                         bridge_ready_waiters: vec![bridge_ready_tx],
                         browser_disconnected_at: None,
-                    browser_paused: false,
-                    pause_buffer: Vec::new(),
+                        browser_paused: false,
+                        pause_buffer: Vec::new(),
                     },
                 );
 
@@ -1399,7 +1399,9 @@ impl RelayState {
                         // Forward PAUSE to bridge so upstream can also pause if supported.
                         let bridge_tx = {
                             let inner = self.inner.lock().await;
-                            inner.terminal_sessions.get(terminal_id)
+                            inner
+                                .terminal_sessions
+                                .get(terminal_id)
                                 .and_then(|s| s.bridge.as_ref().map(|r| r.tx.clone()))
                         };
                         if let Some(tx) = bridge_tx {
@@ -1422,7 +1424,9 @@ impl RelayState {
                         // Replay buffered messages to the browser.
                         let browser_tx = {
                             let inner = self.inner.lock().await;
-                            inner.terminal_sessions.get(terminal_id)
+                            inner
+                                .terminal_sessions
+                                .get(terminal_id)
                                 .and_then(|s| s.browser.as_ref().map(|r| r.tx.clone()))
                         };
                         if let Some(tx) = browser_tx {
@@ -1435,7 +1439,9 @@ impl RelayState {
                         // Forward RESUME to bridge so upstream can also resume if supported.
                         let bridge_tx = {
                             let inner = self.inner.lock().await;
-                            inner.terminal_sessions.get(terminal_id)
+                            inner
+                                .terminal_sessions
+                                .get(terminal_id)
                                 .and_then(|s| s.bridge.as_ref().map(|r| r.tx.clone()))
                         };
                         if let Some(tx) = bridge_tx {
@@ -1448,10 +1454,14 @@ impl RelayState {
                         info!(%terminal_id, "relay terminal browser sent RESIZE");
                         let bridge_tx = {
                             let inner = self.inner.lock().await;
-                            inner.terminal_sessions.get(terminal_id)
+                            inner
+                                .terminal_sessions
+                                .get(terminal_id)
                                 .and_then(|s| s.bridge.as_ref().map(|r| r.tx.clone()))
                         };
-                        if let (Some(tx), Some(cloned)) = (bridge_tx, clone_websocket_message(message)) {
+                        if let (Some(tx), Some(cloned)) =
+                            (bridge_tx, clone_websocket_message(message))
+                        {
                             let _ = tx.send(cloned);
                         }
                         return;
@@ -1465,7 +1475,9 @@ impl RelayState {
         if peer_kind == TerminalPeerKind::Bridge {
             let should_buffer = {
                 let inner = self.inner.lock().await;
-                inner.terminal_sessions.get(terminal_id)
+                inner
+                    .terminal_sessions
+                    .get(terminal_id)
                     .map(|s| s.browser_paused)
                     .unwrap_or(false)
             };
