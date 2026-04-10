@@ -47,6 +47,34 @@ export async function handleWorkerCommand(
         kind: "status",
         ...(await manager.buildStatus(session, [])),
       };
+    case "goBack":
+      try {
+        await session.page.goBack({ waitUntil: "domcontentloaded", timeout: 1_500 });
+        session.selectedElement = null;
+        session.lastError = null;
+        session.activeFrameId = manager.ensureFrameId(session, session.page.mainFrame());
+      } catch (error) {
+        session.lastError = error instanceof Error ? error.message : "Failed to go back";
+        throw error;
+      }
+      return {
+        kind: "status",
+        ...(await manager.buildStatus(session, [])),
+      };
+    case "goForward":
+      try {
+        await session.page.goForward({ waitUntil: "domcontentloaded", timeout: 1_500 });
+        session.selectedElement = null;
+        session.lastError = null;
+        session.activeFrameId = manager.ensureFrameId(session, session.page.mainFrame());
+      } catch (error) {
+        session.lastError = error instanceof Error ? error.message : "Failed to go forward";
+        throw error;
+      }
+      return {
+        kind: "status",
+        ...(await manager.buildStatus(session, [])),
+      };
     case "selectFrame": {
       const frame = manager.resolveFrame(session, command.frameId);
       session.activeFrameId = manager.ensureFrameId(session, frame);

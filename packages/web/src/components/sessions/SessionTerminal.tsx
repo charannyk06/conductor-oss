@@ -19,6 +19,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEve
 import { Button } from "@/components/ui/Button";
 import { uploadProjectAttachments } from "@/components/sessions/attachmentUploads";
 import { withBridgeQuery } from "@/lib/bridgeQuery";
+import { cn } from "@/lib/cn";
 import { LIVE_TERMINAL_STATUSES, RESUMABLE_STATUSES } from "./terminal/terminalConstants";
 import { resolveTerminalConnection } from "./terminal/terminalApi";
 import { extractTerminalAuthToken } from "./terminal/terminalToken";
@@ -1027,6 +1028,38 @@ function SessionTerminalView(props: SessionTerminalProps) {
             ref={terminalHostRef}
             className="relative flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-[10px] bg-[#060404] pb-[env(safe-area-inset-bottom)]"
           >
+            <div className="flex items-center justify-between gap-2 border-b border-white/8 bg-[#0f0b0b]/92 px-3 py-2 text-[11px] text-[#c9c0b7]">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="rounded-[999px] border border-white/10 bg-[#181212] px-2 py-0.5 uppercase tracking-wide text-[#efe8e1]">
+                  {normalizedRuntimeMode ?? "agent"}
+                </span>
+                <span className={cn(
+                  "rounded-[999px] px-2 py-0.5 uppercase tracking-wide",
+                  resolvingConnection
+                    ? "bg-[color:color-mix(in_srgb,#f59e0b_18%,transparent)] text-[#f7c56f]"
+                    : frameLoaded
+                      ? "bg-[color:color-mix(in_srgb,#22c55e_18%,transparent)] text-[#7ce8a0]"
+                      : "bg-[color:color-mix(in_srgb,#94a3b8_16%,transparent)] text-[#c9c0b7]",
+                )}>
+                  {resolvingConnection ? "reconnecting" : frameLoaded ? "live" : "loading"}
+                </span>
+                {sessionState ? (
+                  <span className="truncate text-[#8f857d]">{sessionState}</span>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                {terminalLinkUrl ? (
+                  <a
+                    href={terminalLinkUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[#c9c0b7] underline-offset-4 hover:text-[#efe8e1] hover:underline"
+                  >
+                    Open in new tab
+                  </a>
+                ) : null}
+              </div>
+            </div>
             {!frameLoaded ? (
               <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#060404]">
                 <div className="flex items-center gap-2 rounded-full border border-white/10 bg-[#141010]/92 px-3 py-2 text-[12px] text-[#c9c0b7] backdrop-blur-sm">
@@ -1236,7 +1269,7 @@ function sessionTerminalPropsEqual(
     return false;
   }
 
-  // Lunel-style behavior: once a terminal surface is inactive, stop re-rendering it on
+  // Keep inactive terminal surfaces stable so tab switches do not thrash the embedded iframe.
   // background session-status churn. Apply the latest runtime/status only when it becomes
   // visible again.
   if (!previousPanelVisible && !nextPanelVisible) {
