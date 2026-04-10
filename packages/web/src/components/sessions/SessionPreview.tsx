@@ -219,6 +219,19 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const previewCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const imageRef = useRef<HTMLImageElement | null>(null);
   const previewSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const mountedAtRef = useRef(Date.now());
+  const firstStatusLoadedAtRef = useRef<number | null>(null);
+  const firstConnectedAtRef = useRef<number | null>(null);
+  const lastConnectedAtRef = useRef<number | null>(null);
+  const statusLoadCountRef = useRef(0);
+  const statusLoadFailureCountRef = useRef(0);
+  const statusPollCountRef = useRef(0);
+  const commandCountRef = useRef(0);
+  const commandFailureCountRef = useRef(0);
+  const domLoadCountRef = useRef(0);
+  const domLoadFailureCountRef = useRef(0);
+  const autoConnectAttemptCountRef = useRef(0);
+  const screenshotLoadCountRef = useRef(0);
   const [pageVisible, setPageVisible] = useState(true);
   const shouldRunPreview = active && pageVisible;
   const autoConnectCandidate = selectPreviewAutoConnectCandidate(status?.candidateUrls ?? []);
@@ -234,34 +247,65 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     };
   }, []);
 
-  const loadStatus = useCallback(async () => {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
-      cache: "no-store",
-    });
-    const payload = await response.json().catch(() => null) as
-      | PreviewStatusResponse
-      | { error?: string }
-      | null;
+  useEffect(() => {
+    mountedAtRef.current = Date.now();
+    firstStatusLoadedAtRef.current = null;
+    firstConnectedAtRef.current = null;
+    lastConnectedAtRef.current = null;
+    statusLoadCountRef.current = 0;
+    statusLoadFailureCountRef.current = 0;
+    statusPollCountRef.current = 0;
+    commandCountRef.current = 0;
+    commandFailureCountRef.current = 0;
+    domLoadCountRef.current = 0;
+    domLoadFailureCountRef.current = 0;
+    autoConnectAttemptCountRef.current = 0;
+    screenshotLoadCountRef.current = 0;
+  }, [sessionId]);
 
-    if (!response.ok) {
-      throw new Error(payload && "error" in payload ? payload.error ?? "Failed to load preview state" : `Failed to load preview state: ${response.status}`);
+  const loadStatus = useCallback(async (reason: "initial" | "poll" | "manual" = "manual") => {
+    statusLoadCountRef.current += 1;
+    if (reason === "poll") {
+      statusPollCountRef.current += 1;
     }
 
-    setStatus(payload as PreviewStatusResponse);
-    setCommandError(null);
-    setUrlInput((current) => {
-      const nextStatus = payload as PreviewStatusResponse;
-      if (current.trim().length > 0 && current !== nextStatus.currentUrl) {
-        return current;
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/preview`, {
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => null) as
+        | PreviewStatusResponse
+        | { error?: string }
+        | null;
+
+      if (!response.ok) {
+        throw new Error(payload && "error" in payload ? payload.error ?? "Failed to load preview state" : `Failed to load preview state: ${response.status}`);
       }
-      return nextStatus.currentUrl
-        ?? selectPreviewAutoConnectCandidate(nextStatus.candidateUrls)
-        ?? nextStatus.candidateUrls[0]
-        ?? current;
-    });
+
+      const now = Date.now();
+      if (firstStatusLoadedAtRef.current === null) {
+        firstStatusLoadedAtRef.current = now;
+      }
+      setStatus(payload as PreviewStatusResponse);
+      setCommandError(null);
+      setUrlInput((current) => {
+        const nextStatus = payload as PreviewStatusResponse;
+        if (current.trim().length > 0 && current !== nextStatus.currentUrl) {
+          return current;
+        }
+        return nextStatus.currentUrl
+          ?? selectPreviewAutoConnectCandidate(nextStatus.candidateUrls)
+          ?? nextStatus.candidateUrls[0]
+          ?? current;
+      });
+    } catch (error) {
+      statusLoadFailureCountRef.current += 1;
+      throw error;
+    }
   }, [sessionId]);
 
   const runCommand = useCallback(async (command: PreviewCommandRequest): Promise<PreviewStatusResponse> => {
+    commandCountRef.current += 1;
     setBusy(true);
     setCommandError(null);
     try {
@@ -287,6 +331,9 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       const nextStatus = payload as PreviewStatusResponse;
       setStatus(nextStatus);
       return nextStatus;
+    } catch (error) {
+      commandFailureCountRef.current += 1;
+      throw error;
     } finally {
       setBusy(false);
     }
@@ -310,6 +357,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       return;
     }
 
+    domLoadCountRef.current += 1;
     setDomLoading(true);
     try {
       const searchParams = new URLSearchParams();
@@ -327,6 +375,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
       }
       setDomNodes((payload as PreviewDomResponse).nodes);
     } catch (error) {
+      domLoadFailureCountRef.current += 1;
       setCommandError(error instanceof Error ? error.message : "Failed to inspect DOM");
       setDomNodes([]);
     } finally {
@@ -343,7 +392,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
 
     (async () => {
       try {
-        await loadStatus();
+        await loadStatus("initial");
       } catch (error) {
         if (mounted) {
           setCommandError(error instanceof Error ? error.message : "Failed to load preview");
@@ -358,7 +407,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
     const pollInterval = isMobile ? STATUS_POLL_INTERVAL_MS * 2 : STATUS_POLL_INTERVAL_MS;
     const intervalId = window.setInterval(() => {
-      void loadStatus().catch((error: unknown) => {
+      void loadStatus("poll").catch((error: unknown) => {
         if (mounted) {
           setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
         }
@@ -404,14 +453,69 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     }
 
     autoConnectRef.current = { candidate, attemptedAt: now };
+    autoConnectAttemptCountRef.current += 1;
     void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
       setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
     });
   }, [autoConnectCandidate, runCommand, shouldRunPreview, status?.connected]);
 
   useEffect(() => {
+    if (status?.connected) {
+      const now = Date.now();
+      lastConnectedAtRef.current = now;
+      if (firstConnectedAtRef.current === null) {
+        firstConnectedAtRef.current = now;
+      }
+    }
     onConnectionChange?.(Boolean(shouldRunPreview && status?.connected && status?.screenshotKey));
   }, [onConnectionChange, shouldRunPreview, status?.connected, status?.screenshotKey]);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+
+    window.__conductorSessionPreviewDebug = {
+      sessionId,
+      getState: () => ({
+        sessionId,
+        active,
+        pageVisible,
+        shouldRunPreview,
+        connected: Boolean(status?.connected),
+        screenshotReady: Boolean(status?.screenshotKey),
+        previewMode,
+        inspectorTab: previewInspectorTab,
+        domNodes: domNodes.length,
+        metrics: {
+          mountedAt: new Date(mountedAtRef.current).toISOString(),
+          mountedAgeMs: Date.now() - mountedAtRef.current,
+          firstStatusLoadLatencyMs: firstStatusLoadedAtRef.current === null
+            ? null
+            : firstStatusLoadedAtRef.current - mountedAtRef.current,
+          firstConnectedLatencyMs: firstConnectedAtRef.current === null
+            ? null
+            : firstConnectedAtRef.current - mountedAtRef.current,
+          lastConnectedAt: lastConnectedAtRef.current === null
+            ? null
+            : new Date(lastConnectedAtRef.current).toISOString(),
+          statusLoadCount: statusLoadCountRef.current,
+          statusLoadFailureCount: statusLoadFailureCountRef.current,
+          statusPollCount: statusPollCountRef.current,
+          commandCount: commandCountRef.current,
+          commandFailureCount: commandFailureCountRef.current,
+          domLoadCount: domLoadCountRef.current,
+          domLoadFailureCount: domLoadFailureCountRef.current,
+          autoConnectAttemptCount: autoConnectAttemptCountRef.current,
+          screenshotLoadCount: screenshotLoadCountRef.current,
+        },
+      }),
+    };
+
+    return () => {
+      if (window.__conductorSessionPreviewDebug?.sessionId === sessionId) {
+        delete window.__conductorSessionPreviewDebug;
+      }
+    };
+  }, [active, domNodes.length, pageVisible, previewInspectorTab, previewMode, sessionId, shouldRunPreview, status?.connected, status?.screenshotKey]);
 
   const screenshotUrl = useMemo(() => (
     status?.connected
@@ -807,7 +911,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => void loadStatus().catch((error: unknown) => {
+                onClick={() => void loadStatus("manual").catch((error: unknown) => {
                   setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
                 })}
                 disabled={loading || busy}
@@ -942,6 +1046,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                     onClick={(event) => void handleImageClick(event)}
                     onDoubleClick={(event) => void handleImageDoubleClick(event)}
                     onLoad={(event) => {
+                      screenshotLoadCountRef.current += 1;
                       const target = event.currentTarget;
                       setImageMetrics({
                         naturalWidth: target.naturalWidth,

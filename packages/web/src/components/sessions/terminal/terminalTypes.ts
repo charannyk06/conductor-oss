@@ -35,5 +35,13 @@ declare global {
       sessionId: string;
       getState: () => Record<string, unknown>;
     };
+    __conductorDispatcherDebug?: {
+      sessionId: string;
+      getState: () => Record<string, unknown>;
+    };
+    __conductorSessionPreviewDebug?: {
+      sessionId: string;
+      getState: () => Record<string, unknown>;
+    };
   }
 }

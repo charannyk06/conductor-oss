@@ -168,6 +168,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
   const frameLoadedRef = useRef(false);
   const pageHiddenAtRef = useRef<number | null>(null);
   const lastLifecycleRefreshAtRef = useRef(0);
+  const mountedAtRef = useRef(Date.now());
+  const firstFrameLoadedAtRef = useRef<number | null>(null);
+  const lastFrameLoadedAtRef = useRef<number | null>(null);
+  const iframeLoadCountRef = useRef(0);
+  const silentRefreshCountRef = useRef(0);
+  const resolvingRefreshCountRef = useRef(0);
+  const iframeRefreshRequestCountRef = useRef(0);
+  const retryCountRef = useRef(0);
 
   const normalizedSessionStatus = useMemo(
     () => sessionState.trim().toLowerCase(),
@@ -287,7 +295,10 @@ function SessionTerminalView(props: SessionTerminalProps) {
     }
 
     if (options?.resolveConnection) {
+      resolvingRefreshCountRef.current += 1;
       setConnectionRefreshTick((current) => current + 1);
+    } else {
+      silentRefreshCountRef.current += 1;
     }
   }, [expectsLiveTerminal, scheduleTerminalResizeBurst, syncTerminalAuthToken]);
 
@@ -320,6 +331,14 @@ function SessionTerminalView(props: SessionTerminalProps) {
     lastLifecycleRefreshAtRef.current = 0;
     resizeSuppressUntilRef.current = 0;
     lastPostedTerminalHostSizeRef.current = null;
+    firstFrameLoadedAtRef.current = null;
+    lastFrameLoadedAtRef.current = null;
+    iframeLoadCountRef.current = 0;
+    silentRefreshCountRef.current = 0;
+    resolvingRefreshCountRef.current = 0;
+    iframeRefreshRequestCountRef.current = 0;
+    retryCountRef.current = 0;
+    mountedAtRef.current = Date.now();
     clearBurstResizeTimers();
   }, [clearBurstResizeTimers, expectsLiveTerminal, sessionId]);
 
@@ -539,6 +558,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
         return;
       }
 
+      iframeRefreshRequestCountRef.current += 1;
       requestSilentConnectionRefresh({ force: true, resetResizeCache: true, resolveConnection: true });
     };
 
@@ -817,6 +837,21 @@ function SessionTerminalView(props: SessionTerminalProps) {
         connectionError,
         promptError,
         queuedInsertError,
+        metrics: {
+          mountedAt: new Date(mountedAtRef.current).toISOString(),
+          mountedAgeMs: Date.now() - mountedAtRef.current,
+          firstFrameLoadLatencyMs: firstFrameLoadedAtRef.current === null
+            ? null
+            : firstFrameLoadedAtRef.current - mountedAtRef.current,
+          lastFrameLoadAt: lastFrameLoadedAtRef.current === null
+            ? null
+            : new Date(lastFrameLoadedAtRef.current).toISOString(),
+          iframeLoadCount: iframeLoadCountRef.current,
+          silentRefreshCount: silentRefreshCountRef.current,
+          resolvingRefreshCount: resolvingRefreshCountRef.current,
+          iframeRequestedRefreshCount: iframeRefreshRequestCountRef.current,
+          retryCount: retryCountRef.current,
+        },
       }),
     };
 
@@ -840,6 +875,7 @@ function SessionTerminalView(props: SessionTerminalProps) {
   ]);
 
   const handleRetry = useCallback(() => {
+    retryCountRef.current += 1;
     setConnectionError(null);
     retryAttemptRef.current = 0;
     forceTerminalReloadRef.current = true;
@@ -968,6 +1004,12 @@ function SessionTerminalView(props: SessionTerminalProps) {
                 setConnectionError("Failed to load the terminal frame. Try reload or open in a new tab.");
               }}
               onLoad={() => {
+                const now = Date.now();
+                iframeLoadCountRef.current += 1;
+                lastFrameLoadedAtRef.current = now;
+                if (firstFrameLoadedAtRef.current === null) {
+                  firstFrameLoadedAtRef.current = now;
+                }
                 setFrameLoaded(true);
                 setConnectionError(null);
                 applyKeyboardAwareTerminalHeight();
