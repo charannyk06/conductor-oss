@@ -991,8 +991,10 @@ export function DispatcherSessionPane({
   const feedRef = useRef<HTMLDivElement>(null);
   const feedContentRef = useRef<HTMLDivElement>(null);
   const autoScrollEnabledRef = useRef(true);
+  const previousEntryIdsRef = useRef<string[]>([]);
   const [pageVisible, setPageVisible] = useState(true);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [newEntryCount, setNewEntryCount] = useState(0);
   const shouldRunLiveUpdates = active && pageVisible;
   const mountedAtRef = useRef(Date.now());
   const firstFeedLoadedAtRef = useRef<number | null>(null);
@@ -1032,6 +1034,8 @@ export function DispatcherSessionPane({
     deltaPatchCountRef.current = 0;
     deltaReplaceCountRef.current = 0;
     liveUpdatePauseCountRef.current = 0;
+    previousEntryIdsRef.current = [];
+    setNewEntryCount(0);
   }, [session.id]);
 
   const sessionApiPaths = useMemo(() => ({
@@ -1333,6 +1337,32 @@ export function DispatcherSessionPane({
   }, [session.id]);
 
   useEffect(() => {
+    const nextIds = payload.entries.map((entry) => entry.id);
+    const previousIds = previousEntryIdsRef.current;
+
+    if (previousIds.length > 0) {
+      const previousIdSet = new Set(previousIds);
+      let appendedCount = 0;
+      for (const id of nextIds) {
+        if (!previousIdSet.has(id)) {
+          appendedCount += 1;
+        }
+      }
+
+      if (appendedCount > 0) {
+        if (autoScrollEnabledRef.current) {
+          setNewEntryCount(0);
+        } else {
+          setNewEntryCount((current) => current + appendedCount);
+          setShowJumpToLatest(true);
+        }
+      }
+    }
+
+    previousEntryIdsRef.current = nextIds;
+  }, [payload.entries, session.id]);
+
+  useEffect(() => {
     const node = feedRef.current;
     if (!node) {
       return;
@@ -1353,6 +1383,7 @@ export function DispatcherSessionPane({
       nextNode.scrollTo({ top: nextNode.scrollHeight });
       autoScrollEnabledRef.current = isDispatcherFeedNearBottom(nextNode);
       setShowJumpToLatest(false);
+      setNewEntryCount(0);
     });
 
     return () => window.cancelAnimationFrame(frame);
@@ -1380,6 +1411,9 @@ export function DispatcherSessionPane({
     const nearBottom = isDispatcherFeedNearBottom(event.currentTarget);
     autoScrollEnabledRef.current = nearBottom;
     setShowJumpToLatest(!nearBottom);
+    if (nearBottom) {
+      setNewEntryCount(0);
+    }
   }, []);
 
   useEffect(() => {
@@ -1661,10 +1695,11 @@ export function DispatcherSessionPane({
                 node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
                 autoScrollEnabledRef.current = true;
                 setShowJumpToLatest(false);
+                setNewEntryCount(0);
               }}
               className="h-[30px] rounded-[999px] border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px]"
             >
-              Jump to latest
+              Jump to latest{newEntryCount > 0 ? ` · ${newEntryCount} new` : ""}
             </Button>
           </div>
         ) : null}

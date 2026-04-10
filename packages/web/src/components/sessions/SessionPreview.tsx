@@ -196,6 +196,130 @@ function buildLogInsert(
   };
 }
 
+type PreviewInfoField = {
+  label: string;
+  value: string;
+  copyValue?: string | null;
+  monospace?: boolean;
+};
+
+type PreviewInfoSection = {
+  id: string;
+  title: string;
+  description: string;
+  fields: PreviewInfoField[];
+};
+
+type PreviewCandidateSummary = {
+  url: string;
+  origin: string | null;
+  isLoopback: boolean;
+  isPreferred: boolean;
+  isConnected: boolean;
+  isTunnelOrigin: boolean;
+};
+
+const PREVIEW_LOOPBACK_HOST_PATTERN = /(?:127\.0\.0\.1|0\.0\.0\.0|localhost|::1|\[::1\])/i;
+
+function isLoopbackPreviewUrl(value: string): boolean {
+  try {
+    return PREVIEW_LOOPBACK_HOST_PATTERN.test(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function readPreviewOrigin(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return null;
+  }
+}
+
+function formatPreviewBoolean(value: boolean | null | undefined): string {
+  return value ? "Yes" : "No";
+}
+
+function formatPreviewValue(value: string | null | undefined, fallback = "None"): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+function PreviewStatCard({
+  label,
+  value,
+  hint,
+  monospace = false,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+  monospace?: boolean;
+}) {
+  return (
+    <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
+      <div className="text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">{label}</div>
+      <div className={cn(
+        "mt-1 text-[13px] font-medium text-[var(--vk-text-normal)]",
+        monospace ? "break-all font-mono text-[11px] leading-5" : null,
+      )}>
+        {value}
+      </div>
+      <div className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">{hint}</div>
+    </div>
+  );
+}
+
+function PreviewInfoSectionCard({
+  section,
+  onCopy,
+}: {
+  section: PreviewInfoSection;
+  onCopy: (value: string | null | undefined, successMessage: string) => Promise<void>;
+}) {
+  return (
+    <div className="overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+      <div className="border-b border-[var(--vk-border)] px-3 py-3">
+        <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">{section.title}</div>
+        <div className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">{section.description}</div>
+      </div>
+      <div className="divide-y divide-[var(--vk-border)]">
+        {section.fields.map((field) => (
+          <div key={`${section.id}-${field.label}`} className="flex items-start gap-3 px-3 py-2.5">
+            <div className="w-28 shrink-0 text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">
+              {field.label}
+            </div>
+            <div className={cn(
+              "min-w-0 flex-1 text-[12px] text-[var(--vk-text-normal)]",
+              field.monospace ? "break-all font-mono text-[11px] leading-5" : "leading-5",
+            )}>
+              {field.value}
+            </div>
+            {field.copyValue ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 shrink-0"
+                onClick={() => {
+                  void onCopy(field.copyValue, `${field.label} copied to clipboard.`);
+                }}
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onConnectionChange }: SessionPreviewProps) {
   const [status, setStatus] = useState<PreviewStatusResponse | null>(null);
   const [domNodes, setDomNodes] = useState<PreviewDomNode[]>([]);
@@ -537,6 +661,116 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     [status?.frames],
   );
 
+  const currentPreviewOrigin = useMemo(
+    () => readPreviewOrigin(status?.currentUrl),
+    [status?.currentUrl],
+  );
+
+  const previewInfoSections = useMemo<PreviewInfoSection[]>(() => {
+    const selection = status?.selectedElement;
+    return [
+      {
+        id: "page",
+        title: "Page",
+        description: "Current page identity and live preview worker state.",
+        fields: [
+          { label: "Title", value: formatPreviewValue(status?.title, "Untitled") },
+          {
+            label: "Current URL",
+            value: formatPreviewValue(status?.currentUrl),
+            copyValue: status?.currentUrl ?? null,
+            monospace: true,
+          },
+          {
+            label: "Current origin",
+            value: formatPreviewValue(currentPreviewOrigin),
+            copyValue: currentPreviewOrigin,
+            monospace: true,
+          },
+          { label: "Connected", value: formatPreviewBoolean(status?.connected) },
+          { label: "Last error", value: formatPreviewValue(status?.lastError, "None") },
+        ],
+      },
+      {
+        id: "navigation",
+        title: "Navigation",
+        description: "History state and frame orientation for the current page.",
+        fields: [
+          { label: "Can go back", value: formatPreviewBoolean(status?.canGoBack) },
+          { label: "Can go forward", value: formatPreviewBoolean(status?.canGoForward) },
+          { label: "Active frame", value: formatPreviewValue(activeFrame?.name) },
+          { label: "Main frame", value: formatPreviewValue(mainFrame?.name) },
+          { label: "Frame count", value: `${status?.frames.length ?? 0}` },
+        ],
+      },
+      {
+        id: "worker",
+        title: "Worker",
+        description: "Reported candidates, logs, and worker render metadata.",
+        fields: [
+          { label: "Candidate URLs", value: `${status?.candidateUrls.length ?? 0}` },
+          {
+            label: "Auto-connect",
+            value: formatPreviewValue(autoConnectCandidate ?? preferredUrlInputCandidate),
+            copyValue: autoConnectCandidate ?? preferredUrlInputCandidate ?? null,
+            monospace: true,
+          },
+          {
+            label: "Screenshot key",
+            value: formatPreviewValue(status?.screenshotKey, "Unavailable"),
+            monospace: true,
+          },
+          { label: "Console rows", value: `${status?.consoleLogs.length ?? 0}` },
+          { label: "Network rows", value: `${status?.networkLogs.length ?? 0}` },
+        ],
+      },
+      {
+        id: "selection",
+        title: "Selection",
+        description: "Current element context captured from inspect mode.",
+        fields: [
+          {
+            label: "Selector",
+            value: formatPreviewValue(selection?.selector),
+            copyValue: selection?.selector ?? null,
+            monospace: true,
+          },
+          { label: "Tag", value: formatPreviewValue(selection?.tag) },
+          { label: "Role", value: formatPreviewValue(selection?.role) },
+          { label: "Frame", value: formatPreviewValue(selection?.frameName) },
+          { label: "Text", value: formatPreviewValue(selection?.text) },
+        ],
+      },
+    ];
+  }, [activeFrame?.name, autoConnectCandidate, currentPreviewOrigin, mainFrame?.name, preferredUrlInputCandidate, status]);
+
+  const proxyCandidates = useMemo<PreviewCandidateSummary[]>(() => (
+    (status?.candidateUrls ?? []).map((candidate) => {
+      const origin = readPreviewOrigin(candidate);
+      return {
+        url: candidate,
+        origin,
+        isLoopback: isLoopbackPreviewUrl(candidate),
+        isPreferred: candidate === autoConnectCandidate,
+        isConnected: Boolean(
+          status?.currentUrl
+            && (status.currentUrl === candidate || (origin && currentPreviewOrigin === origin)),
+        ),
+        isTunnelOrigin: Boolean(status?.tunnelLocalOrigin && origin === status.tunnelLocalOrigin),
+      };
+    })
+  ), [autoConnectCandidate, currentPreviewOrigin, status?.candidateUrls, status?.currentUrl, status?.tunnelLocalOrigin]);
+
+  const loopbackCandidateCount = useMemo(
+    () => proxyCandidates.filter((candidate) => candidate.isLoopback).length,
+    [proxyCandidates],
+  );
+
+  const connectedProxyCandidate = useMemo(
+    () => proxyCandidates.find((candidate) => candidate.isConnected) ?? null,
+    [proxyCandidates],
+  );
+
   const sending = sendingTarget !== null;
   const canSelectByPoint = Boolean(activeFrame?.isMain);
 
@@ -559,15 +793,39 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
     };
   }, [imageMetrics, mainFrame, status?.selectedElement]);
 
-  const handleConnect = useCallback(async () => {
-    const trimmed = urlInput.trim();
-    if (!trimmed) return;
+  const handleCopyText = useCallback(async (
+    value: string | null | undefined,
+    successMessage: string,
+  ) => {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+      setSendError("Nothing to copy yet.");
+      return;
+    }
     try {
-      await runCommand({ command: "connect", url: trimmed });
+      await navigator.clipboard.writeText(trimmed);
+      setSendSuccess(successMessage);
+      setSendError(null);
+    } catch {
+      setSendError("Clipboard access is unavailable.");
+    }
+  }, []);
+
+  const connectPreviewCandidate = useCallback(async (candidate: string) => {
+    setUrlInput(candidate);
+    setCommandError(null);
+    try {
+      await runCommand({ command: "connect", url: candidate });
     } catch (error) {
       setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
     }
-  }, [runCommand, urlInput]);
+  }, [runCommand]);
+
+  const handleConnect = useCallback(async () => {
+    const trimmed = urlInput.trim();
+    if (!trimmed) return;
+    await connectPreviewCandidate(trimmed);
+  }, [connectPreviewCandidate, urlInput]);
 
   const openSelectionComposer = useCallback((anchorX: number, anchorY: number, pending = false) => {
     setSelectionComposer({ anchorX, anchorY, pending });
@@ -996,10 +1254,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                   type="button"
                   className="inline-flex max-w-full items-center gap-1 rounded-[4px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-2.5 py-1.5 text-left text-[11px] text-[var(--vk-text-muted)] hover:bg-[var(--vk-bg-hover)] hover:text-[var(--vk-text-normal)]"
                   onClick={() => {
-                    setUrlInput(candidate);
-                    void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
-                      setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
-                    });
+                    void connectPreviewCandidate(candidate);
                   }}
                 >
                   <Globe className="h-3 w-3 shrink-0" />
@@ -1387,59 +1642,200 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
           </TabsContent>
 
           <TabsContent value="info" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+              <div>
+                <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Preview info</div>
+                <div className="text-[11px] text-[var(--vk-text-muted)]">A cleaner Lunel-style snapshot of page, worker, navigation, and element state.</div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  void handleCopyText(status?.currentUrl, "Current URL copied to clipboard.");
+                }}
+                disabled={!status?.currentUrl}
+              >
+                <Copy className="h-3.5 w-3.5" />
+                Copy URL
+              </Button>
+            </div>
             <ScrollArea className="min-h-0 flex-1">
               <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
-                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Page</div>
-                  <div className="mt-2 grid gap-2">
-                    <div><span className="text-[var(--vk-text-muted)]">Title:</span> {status?.title ?? "Untitled"}</div>
-                    <div className="break-all"><span className="text-[var(--vk-text-muted)]">Current URL:</span> {status?.currentUrl ?? "None"}</div>
-                    <div><span className="text-[var(--vk-text-muted)]">Connected:</span> {status?.connected ? "Yes" : "No"}</div>
-                    <div><span className="text-[var(--vk-text-muted)]">Frames:</span> {status?.frames.length ?? 0}</div>
-                    <div><span className="text-[var(--vk-text-muted)]">Screenshot ready:</span> {status?.screenshotKey ? "Yes" : "No"}</div>
-                    <div><span className="text-[var(--vk-text-muted)]">Last error:</span> {status?.lastError ?? "None"}</div>
-                  </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <PreviewStatCard
+                    label="Connected"
+                    value={status?.connected ? "Live" : "Idle"}
+                    hint={status?.currentUrl ? truncate(status.currentUrl, 60) : "No active page yet"}
+                  />
+                  <PreviewStatCard
+                    label="Frames"
+                    value={`${status?.frames.length ?? 0}`}
+                    hint={activeFrame?.name ?? "No active frame"}
+                  />
+                  <PreviewStatCard
+                    label="Console"
+                    value={`${status?.consoleLogs.length ?? 0}`}
+                    hint="Captured browser console rows"
+                  />
+                  <PreviewStatCard
+                    label="Network"
+                    value={`${status?.networkLogs.length ?? 0}`}
+                    hint="Recent preview worker requests"
+                  />
                 </div>
-                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Navigation</div>
-                  <div className="mt-2 grid gap-2">
-                    <div><span className="text-[var(--vk-text-muted)]">Can go back:</span> {status?.canGoBack ? "Yes" : "No"}</div>
-                    <div><span className="text-[var(--vk-text-muted)]">Can go forward:</span> {status?.canGoForward ? "Yes" : "No"}</div>
-                    <div><span className="text-[var(--vk-text-muted)]">Active frame:</span> {activeFrame?.name ?? "None"}</div>
-                  </div>
-                </div>
+                {previewInfoSections.map((section) => (
+                  <PreviewInfoSectionCard
+                    key={section.id}
+                    section={section}
+                    onCopy={handleCopyText}
+                  />
+                ))}
               </div>
             </ScrollArea>
           </TabsContent>
 
           <TabsContent value="proxies" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-2 border-b border-[var(--vk-border)] px-3 py-3">
+              <div>
+                <div className="text-[12px] font-medium text-[var(--vk-text-normal)]">Proxy and tunnel routing</div>
+                <div className="text-[11px] text-[var(--vk-text-muted)]">Candidate URLs come from the session. Tunnel metadata shows how bridge-backed previews map remote loopback into the local display origin.</div>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  void handleCopyText(status?.tunnelLocalOrigin ?? status?.tunnelUrl, "Tunnel mapping copied to clipboard.");
+                }}
+                disabled={!status?.tunnelLocalOrigin && !status?.tunnelUrl}
+              >
+                <Copy className="h-3.5 w-3.5" />
+                Copy route
+              </Button>
+            </div>
             <ScrollArea className="min-h-0 flex-1">
               <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
-                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Tunnel mapping</div>
-                  <div className="mt-2 grid gap-2">
-                    <div className="break-all"><span className="text-[var(--vk-text-muted)]">Local origin:</span> {status?.tunnelLocalOrigin ?? "Not set"}</div>
-                    <div className="break-all"><span className="text-[var(--vk-text-muted)]">Tunnel URL:</span> {status?.tunnelUrl ?? "Not set"}</div>
-                  </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <PreviewStatCard
+                    label="Candidates"
+                    value={`${proxyCandidates.length}`}
+                    hint={proxyCandidates.length ? "Reported by the current session" : "No targets reported yet"}
+                  />
+                  <PreviewStatCard
+                    label="Loopback"
+                    value={`${loopbackCandidateCount}`}
+                    hint={loopbackCandidateCount ? "Local dev URLs available" : "No local loopback URLs"}
+                  />
+                  <PreviewStatCard
+                    label="Tunnel"
+                    value={status?.tunnelUrl ? "Ready" : "None"}
+                    hint={status?.tunnelLocalOrigin ?? "No bridge tunnel mapping"}
+                    monospace={Boolean(status?.tunnelLocalOrigin)}
+                  />
+                  <PreviewStatCard
+                    label="Current origin"
+                    value={currentPreviewOrigin ?? "Idle"}
+                    hint={connectedProxyCandidate ? "Matches the active preview page" : "Not connected to a candidate yet"}
+                    monospace={Boolean(currentPreviewOrigin)}
+                  />
                 </div>
-                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Candidate URLs</div>
-                  <div className="mt-2 space-y-2">
-                    {status?.candidateUrls.length ? status.candidateUrls.map((candidate) => (
-                      <button
-                        key={candidate}
-                        type="button"
-                        className="flex w-full items-center justify-between gap-3 rounded-[6px] border border-[var(--vk-border)] px-3 py-2 text-left hover:bg-[var(--vk-bg-hover)]"
-                        onClick={() => {
-                          setUrlInput(candidate);
-                          void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
-                            setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
-                          });
-                        }}
+
+                <PreviewInfoSectionCard
+                  section={{
+                    id: "tunnel-mapping",
+                    title: "Tunnel mapping",
+                    description: "Bridge previews can expose a remote tunnel while still rendering the equivalent local origin in the browser workspace.",
+                    fields: [
+                      {
+                        label: "Local origin",
+                        value: formatPreviewValue(status?.tunnelLocalOrigin, "Not set"),
+                        copyValue: status?.tunnelLocalOrigin ?? null,
+                        monospace: true,
+                      },
+                      {
+                        label: "Tunnel URL",
+                        value: formatPreviewValue(status?.tunnelUrl, "Not set"),
+                        copyValue: status?.tunnelUrl ?? null,
+                        monospace: true,
+                      },
+                      {
+                        label: "Current origin",
+                        value: formatPreviewValue(currentPreviewOrigin),
+                        copyValue: currentPreviewOrigin,
+                        monospace: true,
+                      },
+                    ],
+                  }}
+                  onCopy={handleCopyText}
+                />
+
+                <div className="overflow-hidden rounded-[10px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)]">
+                  <div className="border-b border-[var(--vk-border)] px-3 py-3">
+                    <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Candidate URLs</div>
+                    <div className="mt-1 text-[11px] leading-5 text-[var(--vk-text-muted)]">Use connect to load a reported target into the preview browser, or copy the URL or origin for terminal context.</div>
+                  </div>
+                  <div className="space-y-2 p-3">
+                    {proxyCandidates.length ? proxyCandidates.map((candidate) => (
+                      <div
+                        key={candidate.url}
+                        className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-panel)] px-3 py-3"
                       >
-                        <span className="min-w-0 truncate">{candidate}</span>
-                        <span className="text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">connect</span>
-                      </button>
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className={cn(
+                              "text-[12px] font-medium text-[var(--vk-text-normal)]",
+                              candidate.origin ? "truncate" : "break-all",
+                            )}>
+                              {candidate.origin ?? candidate.url}
+                            </div>
+                            <div className="mt-1 break-all font-mono text-[11px] text-[var(--vk-text-muted)]">
+                              {candidate.url}
+                            </div>
+                          </div>
+                          {candidate.isConnected ? <Badge variant="success">current</Badge> : null}
+                          {candidate.isPreferred ? <Badge variant="warning">auto</Badge> : null}
+                          {candidate.isTunnelOrigin ? <Badge variant="outline">tunnel origin</Badge> : null}
+                          <Badge variant="outline">{candidate.isLoopback ? "loopback" : "remote"}</Badge>
+                        </div>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            variant="primary"
+                            size="sm"
+                            onClick={() => {
+                              void connectPreviewCandidate(candidate.url);
+                            }}
+                          >
+                            <Globe className="h-3.5 w-3.5" />
+                            Connect
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              void handleCopyText(candidate.url, "Candidate URL copied to clipboard.");
+                            }}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            Copy URL
+                          </Button>
+                          {candidate.origin ? (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => {
+                                void handleCopyText(candidate.origin, "Candidate origin copied to clipboard.");
+                              }}
+                            >
+                              <Waypoints className="h-3.5 w-3.5" />
+                              Copy origin
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
                     )) : (
                       <div className="rounded-[8px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
                         No candidate URLs detected yet.
