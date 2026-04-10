@@ -380,6 +380,7 @@ export function SessionDetail({
                 thread={session}
                 projectId={session.projectId}
                 bridgeId={session.bridgeId ?? bridgeId}
+                active={active && activeTab === "dispatcher"}
                 className="h-full w-full border-0 xl:w-full"
               />
             </TabsContent>
@@ -406,17 +407,16 @@ export function SessionDetail({
           )}
           <TabsContent
             value="preview"
-            className={STANDARD_TAB_PANEL_CLASS_NAME}
+            forceMount
+            className={PRESERVE_LIVE_SURFACE_TAB_PANEL_CLASS_NAME}
           >
-            {previewTabActive ? (
-              <SessionPreview
-                key={sessionId}
-                sessionId={sessionId}
-                active={previewTabActive}
-                onQueueTerminalInsert={queueTerminalInsert}
-                onConnectionChange={handlePreviewConnectionChange}
-              />
-            ) : null}
+            <SessionPreview
+              key={sessionId}
+              sessionId={sessionId}
+              active={previewTabActive}
+              onQueueTerminalInsert={queueTerminalInsert}
+              onConnectionChange={handlePreviewConnectionChange}
+            />
           </TabsContent>
 
           <TabsContent

@@ -25,6 +25,7 @@ type DispatcherPaneProps = {
   threads?: DashboardSession[];
   projectId: string;
   bridgeId?: string | null;
+  active?: boolean;
   modelAccess?: ModelAccessPreferences;
   runtimeModelCatalogs?: Record<string, RuntimeAgentModelCatalog>;
   onSelectThread?: (threadId: string) => void;
@@ -171,6 +172,7 @@ export function DispatcherPane({
   threads = [],
   projectId,
   bridgeId,
+  active = true,
   modelAccess = {} as ModelAccessPreferences,
   runtimeModelCatalogs = {},
   onSelectThread,
@@ -441,6 +443,7 @@ export function DispatcherPane({
       <DispatcherSessionPane
         session={thread}
         bridgeId={bridgeId}
+        active={active}
         onToggleCollapse={onToggleCollapse}
         className={className}
         hideOpenSessionAction

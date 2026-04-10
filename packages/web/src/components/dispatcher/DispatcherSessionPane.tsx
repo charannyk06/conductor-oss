@@ -135,6 +135,7 @@ type FeedDeltaEvent =
 type DispatcherSessionPaneProps = {
   session: DashboardSession;
   bridgeId?: string | null;
+  active?: boolean;
   onClose?: () => void;
   onToggleCollapse?: () => void;
   className?: string;
@@ -192,7 +193,7 @@ type RepositorySettingsPayload = {
   pathHealth: RepositoryPathHealth;
 };
 
-const EMPTY_FEED_PAYLOAD: SessionFeedPayload = {
+export const EMPTY_FEED_PAYLOAD: SessionFeedPayload = {
   entries: [],
   totalEntries: 0,
   windowLimit: 120,
@@ -374,14 +375,36 @@ function normalizeFeedDelta(value: unknown): FeedDeltaEvent | null {
   return null;
 }
 
-function applyFeedDelta(current: SessionFeedPayload, delta: FeedDeltaEvent): SessionFeedPayload {
+function mergeFeedEntriesById(
+  currentEntries: SessionFeedEntry[],
+  nextEntries: SessionFeedEntry[],
+): SessionFeedEntry[] {
+  if (nextEntries.length === 0) {
+    return currentEntries;
+  }
+
+  const merged = currentEntries.slice();
+  const indexById = new Map(merged.map((entry, index) => [entry.id, index]));
+  for (const entry of nextEntries) {
+    const existingIndex = indexById.get(entry.id);
+    if (existingIndex === undefined) {
+      indexById.set(entry.id, merged.length);
+      merged.push(entry);
+      continue;
+    }
+    merged[existingIndex] = entry;
+  }
+  return merged;
+}
+
+export function applyFeedDelta(current: SessionFeedPayload, delta: FeedDeltaEvent): SessionFeedPayload {
   if (delta.type === "replace") {
     return delta.payload;
   }
 
   if (delta.type === "append") {
     return {
-      entries: [...current.entries, ...delta.entries],
+      entries: mergeFeedEntriesById(current.entries, delta.entries),
       totalEntries: delta.totalEntries,
       windowLimit: delta.windowLimit,
       truncated: delta.truncated,
@@ -1135,6 +1158,7 @@ function shouldShowDispatcherApprovalBanner(
 export function DispatcherSessionPane({
   session,
   bridgeId = null,
+  active = true,
   onClose,
   onToggleCollapse,
   className,
@@ -1160,6 +1184,19 @@ export function DispatcherSessionPane({
   const feedRef = useRef<HTMLDivElement>(null);
   const feedContentRef = useRef<HTMLDivElement>(null);
   const autoScrollEnabledRef = useRef(true);
+  const [pageVisible, setPageVisible] = useState(true);
+  const shouldRunLiveUpdates = active && pageVisible;
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setPageVisible(!document.hidden);
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
   const sessionApiPaths = useMemo(() => ({
     feed: apiPaths.feed,
     stream: apiPaths.stream,
@@ -1244,24 +1281,30 @@ export function DispatcherSessionPane({
       setPayload(nextPayload);
     } catch (error) {
       setLoadingError(error instanceof Error ? error.message : "Failed to load session feed");
-      setPayload(EMPTY_FEED_PAYLOAD);
     } finally {
       setLoading(false);
     }
   }, [bridgeId, sessionApiPaths.feed]);
 
   useEffect(() => {
+    if (!active) {
+      return;
+    }
     void loadFeed();
-  }, [loadFeed]);
+  }, [active, loadFeed]);
 
   useEffect(() => {
-    if (hideRepositoryControls) {
+    if (!active || hideRepositoryControls) {
       return;
     }
     void loadRepository();
-  }, [hideRepositoryControls, loadRepository]);
+  }, [active, hideRepositoryControls, loadRepository]);
 
   useEffect(() => {
+    if (!shouldRunLiveUpdates) {
+      return;
+    }
+
     let cancelled = false;
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
@@ -1376,7 +1419,7 @@ export function DispatcherSessionPane({
       clearReconnect();
       streamAbortRef.current?.abort();
     };
-  }, [bridgeId, loadFeed, session.projectId, sessionApiPaths.stream]);
+  }, [bridgeId, loadFeed, session.projectId, sessionApiPaths.stream, shouldRunLiveUpdates]);
 
   useEffect(() => {
     autoScrollEnabledRef.current = true;

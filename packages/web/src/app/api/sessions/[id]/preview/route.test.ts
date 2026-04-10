@@ -156,6 +156,49 @@ test("GET forwards dashboard access headers to backend preview lookups", async (
   }
 });
 
+test("GET returns disconnected preview state when the session no longer exists", async () => {
+  resetEnv();
+  process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
+
+  global.fetch = (async (input: string | URL | Request) => {
+    const url = typeof input === "string" || input instanceof URL
+      ? String(input)
+      : input.url;
+
+    if (url.endsWith("/api/sessions/session-1")) {
+      return new Response(JSON.stringify({ error: "not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+
+  try {
+    const response = await GET(
+      new NextRequest("http://127.0.0.1:3000/api/sessions/session-1/preview"),
+      { params: Promise.resolve({ id: "session-1" }) },
+    );
+
+    assert.equal(response.status, 200);
+
+    const payload = await response.json() as {
+      connected: boolean;
+      candidateUrls: string[];
+      currentUrl: string | null;
+      lastError: string | null;
+    };
+
+    assert.equal(payload.connected, false);
+    assert.deepEqual(payload.candidateUrls, []);
+    assert.equal(payload.currentUrl, null);
+    assert.equal(payload.lastError, "Session is no longer available.");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
 test("GET resolves bridge-backed preview session context via the paired device and preserves local bridge candidates", async () => {
   resetEnv();
   process.env.CONDUCTOR_BACKEND_URL = "http://127.0.0.1:4749";
