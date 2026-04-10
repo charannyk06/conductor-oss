@@ -1227,11 +1227,15 @@ impl AppState {
         max_bytes: usize,
     ) -> Option<String> {
         if let Ok(Some(bytes)) = self
-            .read_terminal_capture_tail_bytes(session_id, max_bytes.saturating_mul(4).max(max_bytes))
+            .read_terminal_capture_tail_bytes(
+                session_id,
+                max_bytes.saturating_mul(4).max(max_bytes),
+            )
             .await
         {
             let sanitized = sanitize_terminal_text(String::from_utf8_lossy(&bytes).as_ref());
-            let transcript = Self::trim_utf8_tail_string(trim_lines_tail(&sanitized, lines), max_bytes);
+            let transcript =
+                Self::trim_utf8_tail_string(trim_lines_tail(&sanitized, lines), max_bytes);
             if !transcript.trim().is_empty() {
                 return Some(transcript);
             }
