@@ -592,6 +592,7 @@ const TTYD_RESIZE_SHIM: &str = r#"
     window.addEventListener('resize', syncViewportSize);
     window.addEventListener('orientationchange', syncViewportSize);
     window.addEventListener('pageshow', scheduleResizeBurst);
+    window.addEventListener('focus', scheduleResizeBurst);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
             scheduleResizeBurst();
@@ -2568,6 +2569,7 @@ mod tests {
         assert!(injected.contains("const syncViewportSize = () => {"));
         assert!(injected.contains("new ResizeObserver(syncViewportSize)"));
         assert!(injected.contains("window.addEventListener('pageshow', scheduleResizeBurst);"));
+        assert!(injected.contains("window.addEventListener('focus', scheduleResizeBurst);"));
         assert!(
             injected.contains("window.addEventListener('orientationchange', syncViewportSize);")
         );

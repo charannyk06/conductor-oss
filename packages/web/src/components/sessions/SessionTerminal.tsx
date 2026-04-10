@@ -523,8 +523,24 @@ function SessionTerminalView(props: SessionTerminalProps) {
     // to the same terminal surface.
     if (previous === false) {
       requestSilentConnectionRefresh({ resetResizeCache: true, resolveConnection: false });
+      // Radix tabs keep inactive panels mounted (`forceMount`) with opacity/pointer-events
+      // toggles; layout can settle after the first paint. Double-rAF matches the pattern
+      // used by direct xterm hosts (e.g. Cabinet) so ttyd's FitAddon runs against the
+      // final host box, not a transient zero/collapsed size.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          lastPostedTerminalHostSizeRef.current = null;
+          scheduleTerminalResizeBurst();
+          maybePostTerminalResize();
+        });
+      });
     }
-  }, [panelVisible, requestSilentConnectionRefresh]);
+  }, [
+    maybePostTerminalResize,
+    panelVisible,
+    requestSilentConnectionRefresh,
+    scheduleTerminalResizeBurst,
+  ]);
 
   const requestLifecycleRefresh = useCallback(() => {
     if (!expectsLiveTerminal || typeof window === "undefined") {
@@ -555,15 +571,15 @@ function SessionTerminalView(props: SessionTerminalProps) {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
         pageHiddenAtRef.current = window.Date.now();
-        // Suppress resize for 250ms to avoid ResizeObserver firing with
-        // zero/intermediate heights during tab switch transitions.
-        resizeSuppressUntilRef.current = window.Date.now() + 250;
+        // Suppress resize to avoid ResizeObserver fitting while the browser/webview
+        // reports zero or intermediate sizes during tab or window transitions.
+        resizeSuppressUntilRef.current = window.Date.now() + 320;
         return;
       }
 
       if (document.visibilityState === "visible") {
-        // Briefly suppress on visible too so layout settles before we fit.
-        resizeSuppressUntilRef.current = window.Date.now() + 100;
+        // Let layout settle (Radix tabs, split view, embedded webviews) before xterm fit.
+        resizeSuppressUntilRef.current = window.Date.now() + 200;
         requestLifecycleRefresh();
       }
     };
@@ -585,6 +601,26 @@ function SessionTerminalView(props: SessionTerminalProps) {
       window.removeEventListener("online", handleOnline);
     };
   }, [requestLifecycleRefresh]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !panelVisible || !expectsLiveTerminal) {
+      return;
+    }
+
+    const handleWindowFocus = () => {
+      resizeSuppressUntilRef.current = window.Date.now() + 120;
+      lastPostedTerminalHostSizeRef.current = null;
+      scheduleTerminalResizeBurst();
+      requestAnimationFrame(() => {
+        maybePostTerminalResize();
+      });
+    };
+
+    window.addEventListener("focus", handleWindowFocus);
+    return () => {
+      window.removeEventListener("focus", handleWindowFocus);
+    };
+  }, [expectsLiveTerminal, maybePostTerminalResize, panelVisible, scheduleTerminalResizeBurst]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
