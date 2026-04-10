@@ -12,11 +12,14 @@ import {
 } from "react";
 import {
   AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
   Boxes,
   Copy,
   Eye,
   FileJson2,
   Globe,
+  Info,
   Loader2,
   MousePointerClick,
   RefreshCw,
@@ -205,7 +208,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
   const [sendSuccess, setSendSuccess] = useState<string | null>(null);
   const [sendingTarget, setSendingTarget] = useState<PreviewSendTarget | null>(null);
   const [previewMode, setPreviewMode] = useState<PreviewInteractionMode>("navigate");
-  const [previewInspectorTab, setPreviewInspectorTab] = useState<"elements" | "console" | "network">("elements");
+  const [previewInspectorTab, setPreviewInspectorTab] = useState<"elements" | "console" | "network" | "info" | "proxies">("elements");
   const [selectionComposer, setSelectionComposer] = useState<SelectionComposerState | null>(null);
   const [urlInput, setUrlInput] = useState("");
   const [imageMetrics, setImageMetrics] = useState({
@@ -911,6 +914,28 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
               <Button
                 type="button"
                 variant="outline"
+                onClick={() => void runCommand({ command: "goBack" }).catch((error: unknown) => {
+                  setCommandError(error instanceof Error ? error.message : "Failed to go back");
+                })}
+                disabled={!status?.connected || !status?.canGoBack || busy}
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                Back
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void runCommand({ command: "goForward" }).catch((error: unknown) => {
+                  setCommandError(error instanceof Error ? error.message : "Failed to go forward");
+                })}
+                disabled={!status?.connected || !status?.canGoForward || busy}
+              >
+                <ArrowRight className="h-3.5 w-3.5" />
+                Forward
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
                 onClick={() => void loadStatus("manual").catch((error: unknown) => {
                   setCommandError(error instanceof Error ? error.message : "Failed to refresh preview");
                 })}
@@ -1086,7 +1111,7 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
 
         <Tabs
           value={previewInspectorTab}
-          onValueChange={(value) => setPreviewInspectorTab(value as "elements" | "console" | "network")}
+          onValueChange={(value) => setPreviewInspectorTab(value as "elements" | "console" | "network" | "info" | "proxies")}
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:min-h-0"
         >
           <div className="border-b border-[var(--vk-border)] px-2 py-2">
@@ -1104,6 +1129,14 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                 <FileJson2 className="h-3.5 w-3.5" />
                 Network
                 <Badge variant="outline">{status?.networkLogs.length ?? 0}</Badge>
+              </TabsTrigger>
+              <TabsTrigger value="info">
+                <Info className="h-3.5 w-3.5" />
+                Info
+              </TabsTrigger>
+              <TabsTrigger value="proxies">
+                <Globe className="h-3.5 w-3.5" />
+                Proxies
               </TabsTrigger>
             </TabsList>
           </div>
@@ -1349,6 +1382,71 @@ export function SessionPreview({ sessionId, active, onQueueTerminalInsert, onCon
                     Network requests appear here after the preview loads.
                   </div>
                 )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="info" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
+                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Page</div>
+                  <div className="mt-2 grid gap-2">
+                    <div><span className="text-[var(--vk-text-muted)]">Title:</span> {status?.title ?? "Untitled"}</div>
+                    <div className="break-all"><span className="text-[var(--vk-text-muted)]">Current URL:</span> {status?.currentUrl ?? "None"}</div>
+                    <div><span className="text-[var(--vk-text-muted)]">Connected:</span> {status?.connected ? "Yes" : "No"}</div>
+                    <div><span className="text-[var(--vk-text-muted)]">Frames:</span> {status?.frames.length ?? 0}</div>
+                    <div><span className="text-[var(--vk-text-muted)]">Screenshot ready:</span> {status?.screenshotKey ? "Yes" : "No"}</div>
+                    <div><span className="text-[var(--vk-text-muted)]">Last error:</span> {status?.lastError ?? "None"}</div>
+                  </div>
+                </div>
+                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Navigation</div>
+                  <div className="mt-2 grid gap-2">
+                    <div><span className="text-[var(--vk-text-muted)]">Can go back:</span> {status?.canGoBack ? "Yes" : "No"}</div>
+                    <div><span className="text-[var(--vk-text-muted)]">Can go forward:</span> {status?.canGoForward ? "Yes" : "No"}</div>
+                    <div><span className="text-[var(--vk-text-muted)]">Active frame:</span> {activeFrame?.name ?? "None"}</div>
+                  </div>
+                </div>
+              </div>
+            </ScrollArea>
+          </TabsContent>
+
+          <TabsContent value="proxies" className="mt-0 flex min-h-0 flex-1 flex-col overflow-hidden">
+            <ScrollArea className="min-h-0 flex-1">
+              <div className="space-y-3 p-3 text-[12px] text-[var(--vk-text-normal)]">
+                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Tunnel mapping</div>
+                  <div className="mt-2 grid gap-2">
+                    <div className="break-all"><span className="text-[var(--vk-text-muted)]">Local origin:</span> {status?.tunnelLocalOrigin ?? "Not set"}</div>
+                    <div className="break-all"><span className="text-[var(--vk-text-muted)]">Tunnel URL:</span> {status?.tunnelUrl ?? "Not set"}</div>
+                  </div>
+                </div>
+                <div className="rounded-[8px] border border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-wide text-[var(--vk-text-muted)]">Candidate URLs</div>
+                  <div className="mt-2 space-y-2">
+                    {status?.candidateUrls.length ? status.candidateUrls.map((candidate) => (
+                      <button
+                        key={candidate}
+                        type="button"
+                        className="flex w-full items-center justify-between gap-3 rounded-[6px] border border-[var(--vk-border)] px-3 py-2 text-left hover:bg-[var(--vk-bg-hover)]"
+                        onClick={() => {
+                          setUrlInput(candidate);
+                          void runCommand({ command: "connect", url: candidate }).catch((error: unknown) => {
+                            setCommandError(error instanceof Error ? error.message : "Failed to connect preview");
+                          });
+                        }}
+                      >
+                        <span className="min-w-0 truncate">{candidate}</span>
+                        <span className="text-[10px] uppercase tracking-wide text-[var(--vk-text-muted)]">connect</span>
+                      </button>
+                    )) : (
+                      <div className="rounded-[8px] border border-dashed border-[var(--vk-border)] px-3 py-3 text-[12px] text-[var(--vk-text-muted)]">
+                        No candidate URLs detected yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             </ScrollArea>
           </TabsContent>

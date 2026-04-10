@@ -992,6 +992,7 @@ export function DispatcherSessionPane({
   const feedContentRef = useRef<HTMLDivElement>(null);
   const autoScrollEnabledRef = useRef(true);
   const [pageVisible, setPageVisible] = useState(true);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const shouldRunLiveUpdates = active && pageVisible;
   const mountedAtRef = useRef(Date.now());
   const firstFeedLoadedAtRef = useRef<number | null>(null);
@@ -1333,7 +1334,14 @@ export function DispatcherSessionPane({
 
   useEffect(() => {
     const node = feedRef.current;
-    if (!node || !autoScrollEnabledRef.current) {
+    if (!node) {
+      return;
+    }
+
+    if (!autoScrollEnabledRef.current) {
+      if (payload.entries.length > 0) {
+        setShowJumpToLatest(true);
+      }
       return;
     }
 
@@ -1344,10 +1352,11 @@ export function DispatcherSessionPane({
       }
       nextNode.scrollTo({ top: nextNode.scrollHeight });
       autoScrollEnabledRef.current = isDispatcherFeedNearBottom(nextNode);
+      setShowJumpToLatest(false);
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [payload]);
+  }, [payload, payload.entries.length]);
 
   useEffect(() => {
     const node = feedRef.current;
@@ -1368,7 +1377,9 @@ export function DispatcherSessionPane({
   }, [loading, loadingError, session.id]);
 
   const handleFeedScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
-    autoScrollEnabledRef.current = isDispatcherFeedNearBottom(event.currentTarget);
+    const nearBottom = isDispatcherFeedNearBottom(event.currentTarget);
+    autoScrollEnabledRef.current = nearBottom;
+    setShowJumpToLatest(!nearBottom);
   }, []);
 
   useEffect(() => {
@@ -1498,6 +1509,14 @@ export function DispatcherSessionPane({
     )}>
       <div className="flex h-[33px] items-center gap-2 border-b border-[var(--vk-border)] px-3 text-[12px] text-[var(--vk-text-muted)]">
         <span className="min-w-0 flex-1 truncate">{sessionLabel}</span>
+        <span className={cn(
+          "inline-flex items-center rounded-[999px] px-2 py-0.5 text-[10px] uppercase tracking-wide",
+          shouldRunLiveUpdates
+            ? "bg-[color:color-mix(in_srgb,var(--vk-green)_18%,transparent)] text-[var(--vk-green)]"
+            : "bg-[color:color-mix(in_srgb,var(--vk-text-muted)_12%,transparent)] text-[var(--vk-text-muted)]",
+        )}>
+          {shouldRunLiveUpdates ? "live" : "paused"}
+        </span>
         {headerActions}
         {onToggleCollapse ? (
           <button
@@ -1627,6 +1646,26 @@ export function DispatcherSessionPane({
                 <span>Stop</span>
               </Button>
             ) : null}
+          </div>
+        ) : null}
+
+        {showJumpToLatest ? (
+          <div className="mb-2 flex justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const node = feedRef.current;
+                if (!node) return;
+                node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                autoScrollEnabledRef.current = true;
+                setShowJumpToLatest(false);
+              }}
+              className="h-[30px] rounded-[999px] border-[var(--vk-border)] bg-[var(--vk-bg-main)] px-3 text-[12px]"
+            >
+              Jump to latest
+            </Button>
           </div>
         ) : null}
 
