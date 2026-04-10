@@ -1517,7 +1517,7 @@ impl RelayState {
     /// Returns the first byte for binary messages, or None for text/non-binary.
     fn extract_ttyd_command(message: &Message) -> Option<u8> {
         match message {
-            Message::Binary(data) if data.len() >= 1 => Some(data[0]),
+            Message::Binary(data) if !data.is_empty() => Some(data[0]),
             _ => None,
         }
     }
